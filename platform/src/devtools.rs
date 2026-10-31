@@ -18,7 +18,7 @@
 //!
 //! Turn them on with `--devtools` on the command line, or `MAKEPAD_DEVTOOLS=1`
 //! in the environment. `--remote` implies them: the remote control surface's
-//! `/snap` + `/click` loop drives the tweaker, so a remote-driven app has
+//! `ui find` + `ui act` loop drives the tweaker, so a remote-driven app has
 //! already opted in to being instrumented. An explicit `MAKEPAD_DEVTOOLS=0`
 //! wins over all of it, which is also how the off path stays testable under
 //! `--remote`.

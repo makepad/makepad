@@ -119,8 +119,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
         static SEQUENCE: AtomicU64 = AtomicU64::new(1);
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let mut seed = Cx::time_now().to_bits()
-            ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        // `--seed N` / `MAKEPAD_SEED` replaces the clock, so a reseed is
+        // as reproducible as the first seed.
+        let base = crate::remote::app_clock::seed().unwrap_or_else(|| Cx::time_now().to_bits());
+        let mut seed = base ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         if seed == 0 {
             seed = sequence.max(1);
         }
@@ -129,7 +131,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
     fn ensure_seeded(cx: &mut Cx) {
         if cx.script_data.random_seed == 0 {
-            cx.script_data.random_seed = fresh_seed();
+            // a flight-recorder replay starts from the recorded seed (`seed.script` event)
+            let replay = std::env::var("MAKEPAD_FLIGHT_SEED").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v != 0);
+            cx.script_data.random_seed = replay.or_else(|| crate::remote::app_clock::seed()
+                .map(|seed| next_hash(&seed.to_le_bytes()).max(1)))
+                .unwrap_or_else(fresh_seed);
+            crate::makepad_error_log::flight_mark!("seed.script", cx.script_data.random_seed, 0, "script random seed {}", cx.script_data.random_seed);
         }
     }
 
@@ -184,15 +191,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let (year, month, day) = civil_from_days(days);
             // 1970-01-01 was a Thursday (weekday 4 with Sunday = 0).
             let weekday = (days + 4).rem_euclid(7);
-            let obj = vm.bx.heap.new_object();
-            let trap = vm.bx.threads.cur().trap.pass();
-            vm.bx.heap.set_value(obj, id!(year).into(), (year as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(month).into(), (month as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(day).into(), (day as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(hour).into(), ((secs_of_day / 3600) as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(minute).into(), ((secs_of_day / 60 % 60) as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(second).into(), ((secs_of_day % 60) as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(weekday).into(), (weekday as f64).into(), trap);
+            let obj = vm.new_object();
+            vm.set_value_trap(obj, id!(year), year as f64);
+            vm.set_value_trap(obj, id!(month), month as f64);
+            vm.set_value_trap(obj, id!(day), day as f64);
+            vm.set_value_trap(obj, id!(hour), (secs_of_day / 3600) as f64);
+            vm.set_value_trap(obj, id!(minute), (secs_of_day / 60 % 60) as f64);
+            vm.set_value_trap(obj, id!(second), (secs_of_day % 60) as f64);
+            vm.set_value_trap(obj, id!(weekday), weekday as f64);
             obj.into()
         },
     );
@@ -204,7 +210,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         |vm, args| {
             let delay = script_value!(vm, args.delay);
             let callback = script_value!(vm, args.callback);
-            if !delay.is_number() || !vm.bx.heap.is_fn(callback.into()) {
+            if !delay.is_number() || !vm.is_fn(callback.into()) {
                 return script_err_type_mismatch!(vm.trap(), "invalid timer arg type");
             }
             let callback = ScriptFnRef::script_from_value(vm, callback);
@@ -231,7 +237,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let delay = script_value!(vm, args.delay);
             let callback = script_value!(vm, args.callback);
 
-            if !delay.is_number() || !ScriptFnRef::script_type_check(&vm.bx.heap, callback) {
+            if !delay.is_number() || !ScriptFnRef::script_type_check(vm.heap(), callback) {
                 return script_err_type_mismatch!(vm.trap(), "invalid timer arg type");
             }
             let callback = ScriptFnRef::script_from_value(vm, callback);

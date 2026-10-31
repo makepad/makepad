@@ -103,7 +103,7 @@ impl<T: 'static> UiRunner<T> {
         self,
         f: impl FnOnce(&mut T, &mut Cx, &mut Scope) -> R + Send + 'static,
     ) -> R {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::makepad_network::mpsc::channel();
         self.defer(move |target, cx, scope| {
             tx.send(f(target, cx, scope)).unwrap();
         });

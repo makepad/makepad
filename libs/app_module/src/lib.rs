@@ -31,13 +31,13 @@
 //! what makes one module run in every host, the web included.
 
 pub use makepad_ai_services;
-pub use makepad_widgets;
+pub use makepad_widgets_core;
 
 use makepad_ai_services::wire::{Message, ServiceCall, ServiceManifest, ToolResult};
 use makepad_strict_json as json;
-use makepad_widgets::makepad_platform::storage::StorageHandle;
-use makepad_widgets::makepad_platform::thread::SignalToUI;
-use makepad_widgets::*;
+use makepad_widgets_core::makepad_platform::storage::StorageHandle;
+use makepad_widgets_core::makepad_platform::thread::SignalToUI;
+use makepad_widgets_core::*;
 use std::fmt;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -65,19 +65,6 @@ pub trait AppModule: Sync + 'static {
     /// `location`, `clipboard`, `net`… A trusted-code declaration the
     /// host's grant checks; the isolate does not enforce it.
     fn capabilities(&self) -> &'static [&'static str];
-}
-
-/// The `dylib` entry a host `dlopen`s. App crates invoke this under
-/// `#[cfg(feature = "dynamic-module")]` so a static all-in-one that links
-/// many apps does not get a duplicate `makepad_app_module` symbol.
-#[macro_export]
-macro_rules! export_app_module {
-    ($static_name:ident) => {
-        #[no_mangle]
-        pub extern "C" fn makepad_app_module() -> &'static dyn $crate::AppModule {
-            &$static_name
-        }
-    };
 }
 
 /// The owner token of one instance. Every lease the host opens for the

@@ -14,6 +14,9 @@
 //! Windows backend takes the same code path through the same facade and is
 //! compile-gated with `cargo build --target x86_64-pc-windows-msvc`.
 
+// the clip helpers serve the macOS test; elsewhere they only compile
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use makepad_video::{
     PcmAudioTrackOptions, VideoFileCodec, VideoFileDecoder, VideoFileEncoder,
     VideoFileEncoderOptions,
@@ -101,6 +104,7 @@ fn encode_clip(path: &str, keyframe_only: bool) {
                 aac_bitrate_bps: 128_000,
             }),
             keyframe_only,
+            ..Default::default()
         },
     )
     .expect("file encoder creation");
@@ -285,6 +289,5 @@ fn seek_lands_on_the_requested_frame_on_both_clip_kinds() {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[test]
 fn seek_is_explicitly_unsupported_elsewhere() {
-    let mut decoder = VideoFileDecoder::open("nonexistent.mp4").unwrap_err();
-    let _ = &mut decoder;
+    assert!(VideoFileDecoder::open("nonexistent.mp4").is_err());
 }

@@ -44,16 +44,6 @@ impl VideoEncoder {
         self.backend.push_frame(frame);
     }
 
-    #[cfg(all(any(target_os = "macos", target_os = "ios", target_os = "tvos"), not(gpusim)))]
-    pub fn push_apple_pixel_buffer(
-        &self,
-        pixel_buffer: crate::os::apple::apple_sys::CVPixelBufferRef,
-        timestamp_ns: u64,
-    ) -> bool {
-        self.backend
-            .push_apple_pixel_buffer(pixel_buffer, timestamp_ns)
-    }
-
     pub fn request_keyframe(&self) -> Result<(), VideoEncodeError> {
         self.backend.request_keyframe()
     }

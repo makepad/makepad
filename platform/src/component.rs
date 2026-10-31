@@ -45,15 +45,6 @@ impl dyn ComponentRegistry {
 pub struct ComponentRegistries(pub Rc<RefCell<HashMap<TypeId, Box<dyn ComponentRegistry>>>>);
 
 impl ComponentRegistries {
-    pub fn find_component(&self, ty: LiveId, name: LiveId) -> Option<ComponentInfo> {
-        let reg = self.0.borrow();
-        for entry in reg.values() {
-            if entry.component_type() == ty {
-                return entry.get_component_info(name);
-            }
-        }
-        None
-    }
 
     pub fn new() -> Self {
         Self(Rc::new(RefCell::new(HashMap::new())))

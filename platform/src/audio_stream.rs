@@ -7,7 +7,7 @@
 use {
     crate::audio::*,
     std::collections::VecDeque,
-    std::sync::mpsc::{channel, Receiver, SendError, Sender},
+    crate::makepad_network::mpsc::{channel, Receiver, SendError, Sender},
     std::sync::{Arc, Mutex},
 };
 

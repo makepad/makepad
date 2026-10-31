@@ -21,7 +21,7 @@ use {
 
 // Mouse events
 
-pub use makepad_studio_protocol::{KeyModifiers, MouseButton, PinchPhase};
+pub use makepad_studio_protocol::{KeyModifiers, MouseButton, PinchPhase, ScrollPhase};
 
 #[derive(Clone, Debug)]
 pub struct MouseDownEvent {
@@ -76,45 +76,6 @@ pub struct MouseLeaveEvent {
     pub handled: Cell<Area>,
 }
 
-/// The gesture phase of a scroll event, when the OS provides one.
-///
-/// Trackpad scrolling on some platforms (macOS in particular) is a gesture: the OS reports
-/// when fingers touch the pad (`Began`), each movement while they are down (`Changed`), when
-/// they lift off (`Ended`), and then a stream of decaying momentum deltas
-/// (`Momentum`/`MomentumEnded`).
-///
-/// The scrollable widgets apply the user-driven deltas directly and, on `Ended`, start a fling
-/// that follows the OS momentum stream so the deceleration matches the OS (see
-/// `widgets::scroll_motion`). Widgets that don't track phases can apply every delta directly,
-/// which gives plain OS momentum scrolling.
-///
-/// On platforms and devices with no phase information (classic mouse wheels, X11, Windows),
-/// this is `None`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ScrollPhase {
-    /// No phase information available (classic mouse wheel, or the platform doesn't report phases).
-    #[default]
-    None,
-    /// Fingers touched the trackpad; a scroll gesture may begin (the delta is usually zero).
-    Began,
-    /// A raw finger contact on the trackpad, sent for every touch with a zero delta
-    /// (macOS only). Unlike `Began`, this fires even for single-finger contacts that never
-    /// become a scroll gesture, so widgets use it to instantly stop kinetic scrolling the
-    /// way a touch natively catches a coast. It must not disturb anything else: any
-    /// tap-to-click press or drag from the same contact arrives separately as mouse events.
-    Touched,
-    /// Fingers moved while on the trackpad: a user-driven scroll delta.
-    Changed,
-    /// Fingers lifted off the trackpad: the last event of the user-driven gesture (the delta
-    /// may be zero). Widgets start their fling here.
-    Ended,
-    /// A momentum delta arriving from the OS after the fingers lifted. Widgets follow these to
-    /// match the OS deceleration rate.
-    Momentum,
-    /// The OS momentum stream finished (the delta is zero).
-    MomentumEnded,
-}
-
 #[derive(Clone, Debug)]
 pub struct ScrollEvent {
     pub window_id: WindowId,
@@ -137,9 +98,9 @@ impl ScrollEvent {
     }
 }
 
-/// Like Chromium's 500 ms wheel transaction, phase-less wheel events form one scroll until they pause.
+/// A 500 ms wheel transaction: phase-less wheel events form one scroll until they pause.
 pub const WHEEL_LATCH_TIMEOUT: f64 = 0.5;
-/// Like Firefox, a wheel scroll lets go of an owner the pointer moves off once the wheel rested this long.
+/// A wheel scroll lets go of an owner the pointer moves off once the wheel rested this long.
 pub const WHEEL_LATCH_MOVE_DELAY: f64 = 0.1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1435,29 +1396,30 @@ impl CxFingers {
 
     pub(crate) fn test_sweep_lock(&mut self, sweep_area: Area) -> bool {
         self.clear_expired_sweep_locks();
-        if let Some(lock) = self.sweep_lock_area() {
-            if lock != sweep_area {
-                return true;
-            }
+        match self.sweep_lock_area() {
+            Some(lock) => !same_owner(lock, sweep_area),
+            None => false,
         }
-        false
     }
 
     /// Take the sweep lock for `area`, on top of any lock already held. An
-    /// owner already in the stack keeps its one entry and its level, so
-    /// taking the lock twice is not two owners.
+    /// owner already in the stack keeps its one entry and its level (the
+    /// entry takes the newest handle, so a re-assertion after a redraw is
+    /// not a second owner); a new owner goes on top and holds the lock
+    /// until it unlocks.
     pub fn sweep_lock(&mut self, area: Area) {
         self.clear_expired_sweep_locks();
-        if !self.sweep_locks.contains(&area) {
-            self.sweep_locks.push(area);
+        match self.sweep_locks.iter_mut().find(|lock| same_owner(**lock, area)) {
+            Some(lock) => *lock = area,
+            None => self.sweep_locks.push(area),
         }
     }
 
     /// Take a scoped lock above existing owners, unless this area already owns one.
     pub fn acquire_sweep_lock(&mut self, area: Area) -> Option<SweepLock> {
         self.clear_expired_sweep_locks();
-        if self.sweep_locks.contains(&area)
-            || self.scoped_sweep_locks.iter().any(|lock| lock.area == area)
+        if self.sweep_locks.iter().any(|lock| same_owner(*lock, area))
+            || self.scoped_sweep_locks.iter().any(|lock| same_owner(lock.area, area))
         {
             return None;
         }
@@ -1470,7 +1432,7 @@ impl CxFingers {
 
     fn clear_expired_sweep_locks(&mut self) {
         self.sweep_locks.retain(|area| !self.scoped_sweep_locks.iter()
-            .any(|lock| lock.area == *area && !lock.is_active()));
+            .any(|lock| same_owner(lock.area, *area) && !lock.is_active()));
         self.scoped_sweep_locks.retain(CxSweepLock::is_active);
     }
 
@@ -1482,14 +1444,14 @@ impl CxFingers {
     /// releases only its own grab.
     pub fn sweep_lock_area(&self) -> Option<Area> {
         self.sweep_locks.iter().rev().find(|area| !self.scoped_sweep_locks.iter()
-            .any(|lock| lock.area == **area && !lock.is_active())).copied()
+            .any(|lock| same_owner(lock.area, **area) && !lock.is_active())).copied()
     }
 
     /// Release `area`'s sweep lock wherever it sits in the stack. Letting go
     /// of an outer owner while an inner one is held leaves the inner one on
     /// top; an area that holds no lock is a no-op.
     pub fn sweep_unlock(&mut self, area: Area) {
-        self.sweep_locks.retain(|lock| *lock != area);
+        self.sweep_locks.retain(|lock| !same_owner(*lock, area));
     }
 
     /// Returns the excepted area in which scrolling is currently allowed:
@@ -2008,6 +1970,19 @@ impl Event {
     where
         F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     {
+        self.hits_with_options_and_test_dyn(cx, area, options, &hit_test)
+    }
+
+    /// The body of [`Self::hits_with_options_and_test`], compiled once rather
+    /// than once per hit-test closure.
+    #[inline(never)]
+    pub fn hits_with_options_and_test_dyn(
+        &self,
+        cx: &mut Cx,
+        area: Area,
+        options: HitOptions,
+        hit_test: &dyn Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
+    ) -> Hit {
         // Draw lists attach when they end, so validate only between draws.
         if !matches!(self, Event::Draw(_)) {
             cx.validate_scoped_sweep_locks();
@@ -2621,7 +2596,7 @@ impl Event {
                     });
                 }
             }
-            Event::XrLocal(e) => return e.hits_with_options_and_test(cx, area, options, hit_test),
+            Event::XrLocal(e) => return e.hits_with_options_and_test_dyn(cx, area, options, hit_test),
             _ => (),
         };
         Hit::Nothing
@@ -2629,9 +2604,205 @@ impl Event {
 }
 
 #[cfg(test)]
-mod tests {
+mod lock_nest_tests {
     use super::*;
+    use crate::area::RectArea;
+    use crate::draw_list::CxDrawListPool;
 
+    /// Three distinct, non-empty areas on one draw list.
+    fn areas() -> (Area, Area, Area) {
+        let mut pool = CxDrawListPool::default();
+        let list = pool.alloc();
+        let rect = |rect_id| {
+            Area::Rect(RectArea {
+                draw_list_id: list.id(),
+                rect_id,
+                redraw_id: 0,
+            })
+        };
+        (rect(0), rect(1), rect(2))
+    }
+
+    #[test]
+    fn a_lift_belongs_to_the_area_that_took_the_press() {
+        // A press switches the view; the lift of that same press must find no
+        // capture on the newly shown view's area (it never saw the down), so
+        // `hits` gives it no FingerUp and nothing there reacts to it.
+        let (old_view, new_view, _) = areas();
+        let digit: DigitId = live_id_num!(touch, 0).into();
+        let mut fingers = CxFingers::default();
+        fingers.capture_digit(digit, old_view, Area::Empty, 1.0, dvec2(10.0, 10.0));
+        assert!(fingers.find_digit_area_capture(digit, new_view).is_none());
+        assert!(fingers.find_digit_area_capture(digit, old_view).is_some());
+        fingers.release_digit(digit);
+        assert!(fingers.find_digit_area_capture(digit, old_view).is_none());
+    }
+
+    #[test]
+    fn a_single_owner_locks_and_unlocks() {
+        let (a, b, _) = areas();
+        let mut fingers = CxFingers::default();
+        assert_eq!(fingers.sweep_lock_area(), None);
+        assert!(!fingers.test_sweep_lock(b));
+        fingers.sweep_lock(a);
+        assert_eq!(fingers.sweep_lock_area(), Some(a));
+        assert!(!fingers.test_sweep_lock(a));
+        assert!(fingers.test_sweep_lock(b));
+        // Not the owner: nothing changes.
+        fingers.sweep_unlock(b);
+        assert_eq!(fingers.sweep_lock_area(), Some(a));
+        fingers.sweep_unlock(a);
+        assert_eq!(fingers.sweep_lock_area(), None);
+        assert!(!fingers.test_sweep_lock(b));
+    }
+
+    #[test]
+    fn an_inner_unlock_keeps_the_outer_lock() {
+        let (outer, inner, other) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(outer);
+        fingers.sweep_lock(inner);
+        assert_eq!(fingers.sweep_lock_area(), Some(inner));
+        assert!(fingers.test_sweep_lock(outer));
+        assert!(!fingers.test_sweep_lock(inner));
+        fingers.sweep_unlock(inner);
+        assert_eq!(fingers.sweep_lock_area(), Some(outer));
+        assert!(!fingers.test_sweep_lock(outer));
+        assert!(fingers.test_sweep_lock(other));
+    }
+
+    #[test]
+    fn an_outer_unlock_leaves_the_inner_lock_on_top() {
+        let (outer, inner, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(outer);
+        fingers.sweep_lock(inner);
+        fingers.sweep_unlock(outer);
+        assert_eq!(fingers.sweep_lock_area(), Some(inner));
+        assert!(fingers.test_sweep_lock(outer));
+        fingers.sweep_unlock(inner);
+        assert_eq!(fingers.sweep_lock_area(), None);
+    }
+
+    #[test]
+    fn a_repeated_lock_by_one_owner_is_one_entry() {
+        let (a, b, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(a);
+        fingers.sweep_lock(a);
+        fingers.sweep_unlock(a);
+        assert_eq!(fingers.sweep_lock_area(), None);
+        // An outer owner re-asserting under an inner one changes nothing.
+        fingers.sweep_lock(a);
+        fingers.sweep_lock(b);
+        fingers.sweep_lock(a);
+        assert_eq!(fingers.sweep_lock_area(), Some(b));
+        fingers.sweep_unlock(b);
+        assert_eq!(fingers.sweep_lock_area(), Some(a));
+        fingers.sweep_unlock(a);
+        assert_eq!(fingers.sweep_lock_area(), None);
+    }
+
+    #[test]
+    fn a_redrawn_owner_keeps_its_entry() {
+        let (a, b, c) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(a);
+        fingers.block_scrolling_within_area(Some(b));
+        fingers.update_area(a, c);
+        assert_eq!(fingers.sweep_lock_area(), Some(c));
+        fingers.update_area(b, a);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a));
+        // The re-assertion a modal makes every draw is still one entry.
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.unblock_scrolling_within_area(a);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn a_fresh_handle_after_a_redraw_is_the_same_owner() {
+        let (a, b, _) = areas();
+        let Area::Rect(rect) = a else { unreachable!() };
+        let a_redrawn = Area::Rect(RectArea { redraw_id: rect.redraw_id + 1, ..rect });
+        let mut fingers = CxFingers::default();
+        fingers.sweep_lock(a);
+        fingers.sweep_lock(a_redrawn);
+        assert_eq!(fingers.sweep_lock_area(), Some(a_redrawn));
+        assert!(!fingers.test_sweep_lock(a));
+        assert!(!fingers.test_sweep_lock(a_redrawn));
+        assert!(fingers.test_sweep_lock(b));
+        // Either handle releases the one entry.
+        fingers.sweep_unlock(a);
+        assert_eq!(fingers.sweep_lock_area(), None);
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.block_scrolling_within_area(Some(a_redrawn));
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a_redrawn));
+        fingers.unblock_scrolling_within_area(a);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn a_single_scroll_block_is_released_by_its_owner() {
+        let (a, b, _) = areas();
+        let mut fingers = CxFingers::default();
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+        fingers.block_scrolling_within_area(Some(a));
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a));
+        fingers.unblock_scrolling_within_area(b);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a));
+        fingers.unblock_scrolling_within_area(a);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn nested_scroll_blocks_unwind_from_the_inside() {
+        let (outer, inner, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.block_scrolling_within_area(Some(outer));
+        fingers.block_scrolling_within_area(Some(inner));
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(inner));
+        fingers.unblock_scrolling_within_area(inner);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(outer));
+        fingers.unblock_scrolling_within_area(outer);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn an_outer_scroll_block_released_first_leaves_the_inner_on_top() {
+        let (outer, inner, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.block_scrolling_within_area(Some(outer));
+        fingers.block_scrolling_within_area(Some(inner));
+        fingers.unblock_scrolling_within_area(outer);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(inner));
+        fingers.unblock_scrolling_within_area(inner);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn a_re_asserted_scroll_block_stays_one_entry() {
+        let (a, _, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.block_scrolling_within_area(None);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+
+    #[test]
+    fn a_plain_unblock_pops_the_innermost() {
+        let (a, b, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.block_scrolling_within_area(Some(a));
+        fingers.block_scrolling_within_area(Some(b));
+        fingers.block_scrolling_within_area(None);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), Some(a));
+        fingers.block_scrolling_within_area(None);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+        // Popping an empty stack is harmless.
+        fingers.block_scrolling_within_area(None);
+        assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
     #[test]
     fn a_drag_claim_ends_when_its_digit_is_released() {
         let mut fingers = CxFingers::default();
@@ -2643,10 +2814,7 @@ mod tests {
         assert!(!fingers.is_touch_drag_claimed(3));
     }
 
-    use crate::{
-        area::RectArea,
-        draw_list::{CxRectArea, DrawList},
-    };
+    use crate::draw_list::{CxRectArea, DrawList};
 
     const INNER: usize = 0;
     const OUTER: usize = 1;

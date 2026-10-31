@@ -10,15 +10,19 @@ use std::{
 };
 
 #[repr(C)]
-struct SSL_CTX {
+pub(crate) struct SSL_CTX {
     _private: [u8; 0],
 }
 #[repr(C)]
-struct SSL {
+pub(crate) struct SSL {
     _private: [u8; 0],
 }
 #[repr(C)]
-struct SSL_METHOD {
+pub(crate) struct SSL_METHOD {
+    _private: [u8; 0],
+}
+#[repr(C)]
+pub(crate) struct SSL_SESSION {
     _private: [u8; 0],
 }
 
@@ -34,28 +38,47 @@ const SSL_ERROR_SYSCALL: c_int = 5;
 /// bodies are read to end-of-stream, so a server that closes properly
 /// (Cloudflare does) must read as EOF here.
 const SSL_ERROR_ZERO_RETURN: c_int = 6;
+/// OpenSSL 3's `SSL_R_UNEXPECTED_EOF_WHILE_READING`: the peer closed the
+/// connection without close_notify. OpenSSL 1.1.1 reported that as a plain
+/// EOF; many CDNs and proxies close this way after a complete response.
+const SSL_R_UNEXPECTED_EOF_WHILE_READING: c_ulong = 0x0A00_0126;
 
 #[link(name = "ssl")]
 #[link(name = "crypto")]
 unsafe extern "C" {
-    fn OPENSSL_init_ssl(opts: u64, settings: *const c_void) -> c_int;
-    fn TLS_client_method() -> *const SSL_METHOD;
-    fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
-    fn SSL_CTX_free(ctx: *mut SSL_CTX);
-    fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int, verify_callback: *mut c_void);
-    fn SSL_CTX_set_default_verify_paths(ctx: *mut SSL_CTX) -> c_int;
-    fn SSL_new(ctx: *mut SSL_CTX) -> *mut SSL;
-    fn SSL_free(ssl: *mut SSL);
-    fn SSL_set_fd(ssl: *mut SSL, fd: c_int) -> c_int;
-    fn SSL_connect(ssl: *mut SSL) -> c_int;
-    fn SSL_get_error(ssl: *mut SSL, ret_code: c_int) -> c_int;
-    fn SSL_read(ssl: *mut SSL, buf: *mut c_void, num: c_int) -> c_int;
-    fn SSL_write(ssl: *mut SSL, buf: *const c_void, num: c_int) -> c_int;
-    fn SSL_shutdown(ssl: *mut SSL) -> c_int;
-    fn SSL_ctrl(ssl: *mut SSL, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
+    pub(crate) fn OPENSSL_init_ssl(opts: u64, settings: *const c_void) -> c_int;
+    pub(crate) fn TLS_client_method() -> *const SSL_METHOD;
+    pub(crate) fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
+    pub(crate) fn SSL_CTX_free(ctx: *mut SSL_CTX);
+    pub(crate) fn SSL_CTX_up_ref(ctx: *mut SSL_CTX) -> c_int;
+    pub(crate) fn SSL_get1_session(ssl: *mut SSL) -> *mut SSL_SESSION;
+    pub(crate) fn SSL_set_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int;
+    pub(crate) fn SSL_SESSION_free(session: *mut SSL_SESSION);
+    pub(crate) fn SSL_session_reused(ssl: *const SSL) -> c_int;
+    pub(crate) fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int, verify_callback: *mut c_void);
+    pub(crate) fn SSL_CTX_set_default_verify_paths(ctx: *mut SSL_CTX) -> c_int;
+    pub(crate) fn SSL_new(ctx: *mut SSL_CTX) -> *mut SSL;
+    pub(crate) fn SSL_free(ssl: *mut SSL);
+    pub(crate) fn SSL_set_fd(ssl: *mut SSL, fd: c_int) -> c_int;
+    pub(crate) fn SSL_connect(ssl: *mut SSL) -> c_int;
+    pub(crate) fn SSL_get_error(ssl: *mut SSL, ret_code: c_int) -> c_int;
+    pub(crate) fn SSL_read(ssl: *mut SSL, buf: *mut c_void, num: c_int) -> c_int;
+    pub(crate) fn SSL_write(ssl: *mut SSL, buf: *const c_void, num: c_int) -> c_int;
+    pub(crate) fn SSL_shutdown(ssl: *mut SSL) -> c_int;
+    pub(crate) fn SSL_ctrl(ssl: *mut SSL, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
 
-    fn ERR_get_error() -> c_ulong;
-    fn ERR_error_string_n(e: c_ulong, buf: *mut c_char, len: usize);
+    fn SSL_get_peer_cert_chain(ssl: *const SSL) -> *const c_void;
+    fn OPENSSL_sk_num(stack: *const c_void) -> c_int;
+    fn OPENSSL_sk_value(stack: *const c_void, index: c_int) -> *mut c_void;
+    pub(crate) fn SSL_get1_peer_certificate(ssl: *const SSL) -> *mut c_void;
+    pub(crate) fn SSL_version(ssl: *const SSL) -> c_int;
+    pub(crate) fn i2d_X509(x: *mut c_void, out: *mut *mut u8) -> c_int;
+    pub(crate) fn X509_free(x: *mut c_void);
+
+    pub(crate) fn ERR_get_error() -> c_ulong;
+    pub(crate) fn ERR_peek_error() -> c_ulong;
+    pub(crate) fn ERR_clear_error();
+    pub(crate) fn ERR_error_string_n(e: c_ulong, buf: *mut c_char, len: usize);
 }
 
 fn io_other(msg: impl Into<String>) -> io::Error {
@@ -98,13 +121,14 @@ unsafe impl Send for OpenSslStream {}
 
 impl OpenSslStream {
     fn connect(tcp_stream: TcpStream, host: &str, verify_peer: bool) -> io::Result<Self> {
-        init_openssl()?;
+        Self::connect_until(tcp_stream, host, verify_peer, None, None)
+    }
 
+    fn new_context(verify_peer: bool) -> io::Result<*mut SSL_CTX> {
         let method = unsafe { TLS_client_method() };
         if method.is_null() {
             return Err(io_other("TLS_client_method returned null"));
         }
-
         let ssl_ctx = unsafe { SSL_CTX_new(method) };
         if ssl_ctx.is_null() {
             return Err(io_other(format!(
@@ -112,7 +136,6 @@ impl OpenSslStream {
                 last_ssl_error()
             )));
         }
-
         if verify_peer {
             unsafe {
                 SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, ptr::null_mut());
@@ -131,6 +154,32 @@ impl OpenSslStream {
                 SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, ptr::null_mut());
             }
         }
+        Ok(ssl_ctx)
+    }
+
+    /// `deadline`: give up the handshake then (a peer that never answers).
+    /// `resume`: an earlier connection whose context and TLS session this
+    /// one reuses (the session is offered for an abbreviated handshake).
+    fn connect_until(
+        tcp_stream: TcpStream,
+        host: &str,
+        verify_peer: bool,
+        deadline: Option<std::time::Instant>,
+        resume: Option<&OpenSslStream>,
+    ) -> io::Result<Self> {
+        init_openssl()?;
+
+        // A resuming connection shares the earlier one's context (and so its
+        // verify settings): the session belongs to it.
+        let ssl_ctx = match resume {
+            Some(earlier) => {
+                if unsafe { SSL_CTX_up_ref(earlier.ssl_ctx) } != 1 {
+                    return Err(io_other(format!("SSL_CTX_up_ref failed: {}", last_ssl_error())));
+                }
+                earlier.ssl_ctx
+            }
+            None => Self::new_context(verify_peer)?,
+        };
 
         let ssl = unsafe { SSL_new(ssl_ctx) };
         if ssl.is_null() {
@@ -138,6 +187,21 @@ impl OpenSslStream {
                 SSL_CTX_free(ssl_ctx);
             }
             return Err(io_other(format!("SSL_new failed: {}", last_ssl_error())));
+        }
+
+        if let Some(earlier) = resume {
+            let session = unsafe { SSL_get1_session(earlier.ssl) };
+            let set = !session.is_null() && unsafe { SSL_set_session(ssl, session) } == 1;
+            if !session.is_null() {
+                unsafe { SSL_SESSION_free(session) };
+            }
+            if !set {
+                unsafe {
+                    SSL_free(ssl);
+                    SSL_CTX_free(ssl_ctx);
+                }
+                return Err(io_other("the earlier TLS connection has no session to resume"));
+            }
         }
 
         let host_cstr =
@@ -170,6 +234,13 @@ impl OpenSslStream {
             let ret = unsafe { SSL_connect(ssl) };
             if ret == 1 {
                 break;
+            }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                unsafe {
+                    SSL_free(ssl);
+                    SSL_CTX_free(ssl_ctx);
+                }
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"));
             }
             let err = unsafe { SSL_get_error(ssl, ret) };
             match err {
@@ -210,6 +281,25 @@ impl OpenSslStream {
             ssl_ctx,
             ssl,
         })
+    }
+
+    fn peer_leaf_der(&self) -> io::Result<Vec<u8>> {
+        unsafe {
+            let cert = SSL_get1_peer_certificate(self.ssl);
+            if cert.is_null() {
+                return Err(io_other("server sent no certificate"));
+            }
+            let len = i2d_X509(cert, ptr::null_mut());
+            if len <= 0 {
+                X509_free(cert);
+                return Err(io_other("cannot encode server certificate"));
+            }
+            let mut der = vec![0u8; len as usize];
+            let mut out = der.as_mut_ptr();
+            i2d_X509(cert, &mut out);
+            X509_free(cert);
+            Ok(der)
+        }
     }
 
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
@@ -272,6 +362,16 @@ impl Read for OpenSslStream {
                     Err(io_other(format!("SSL_read syscall error: {os_err}")))
                 }
             }
+            _ if unsafe { ERR_peek_error() } == SSL_R_UNEXPECTED_EOF_WHILE_READING => {
+                // Reported as its own kind so the HTTP reader can accept it
+                // once the response body is complete by its own framing,
+                // and still fail a body that was cut short.
+                unsafe { ERR_clear_error() };
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "peer closed the TLS connection without close_notify",
+                ))
+            }
             _ => Err(io_other(format!("SSL_read failed: {}", last_ssl_error()))),
         }
     }
@@ -328,7 +428,8 @@ impl SocketStream {
         use_tls: bool,
         ignore_ssl_cert: bool,
     ) -> io::Result<Self> {
-        let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
+        let port_number: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
+        let tcp_stream = crate::lan::connect_host("socket stream", host, port_number, None)?;
         let _ = tcp_stream.set_nodelay(true);
 
         if use_tls {
@@ -339,6 +440,75 @@ impl SocketStream {
             )?))
         } else {
             Ok(SocketStream::Plain(tcp_stream))
+        }
+    }
+
+    /// TLS 1.2+ without CA validation (self-signed servers); returns the
+    /// server leaf certificate DER for the caller's known-hosts record.
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
+        Self::capture(host, port, None)
+    }
+
+    /// Like [`Self::connect_capture`], resuming the TLS session of `session_of`
+    /// (an earlier captured connection; FTPS data channels need this).
+    pub fn connect_capture_resuming(host: &str, port: &str, session_of: &Self) -> io::Result<(Self, Vec<u8>)> {
+        let SocketStream::Tls(earlier) = session_of else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "no TLS session to resume"));
+        };
+        Self::capture(host, port, Some(earlier))
+    }
+
+    fn capture(host: &str, port: &str, resume: Option<&OpenSslStream>) -> io::Result<(Self, Vec<u8>)> {
+        let tcp_stream = connect_lan(host, port)?;
+        let _ = tcp_stream.set_nodelay(true);
+        let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut stream = OpenSslStream::connect_until(tcp_stream, host, false, Some(deadline), resume)?;
+        let _ = stream.set_read_timeout(None);
+        let result = (|| {
+            if unsafe { SSL_version(stream.ssl) } < 0x0303 {
+                return Err(io_other("server negotiated a TLS version below 1.2"));
+            }
+            if resume.is_some() && unsafe { SSL_session_reused(stream.ssl) } != 1 {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "the server did not resume the TLS session"));
+            }
+            stream.peer_leaf_der()
+        })();
+        match result {
+            Ok(der) => Ok((SocketStream::Tls(stream), der)),
+            Err(err) => {
+                stream.shutdown();
+                Err(err)
+            }
+        }
+    }
+
+    pub fn connect_capture_chain(host: &str, port: &str) -> io::Result<(Self, Vec<Vec<u8>>)> {
+        let (mut socket, leaf) = Self::connect_capture(host, port)?;
+        let result = (|| {
+            let Self::Tls(stream) = &socket else { return Err(io_other("TLS stream required")); };
+            let mut chain = vec![leaf];
+            // Borrowed certificates belong to SSL; do not free them.
+            unsafe {
+                let stack = SSL_get_peer_cert_chain(stream.ssl);
+                if !stack.is_null() {
+                    for i in 0..OPENSSL_sk_num(stack) {
+                        let cert = OPENSSL_sk_value(stack, i);
+                        if cert.is_null() { return Err(io_other("invalid peer certificate")); }
+                        let len = i2d_X509(cert, ptr::null_mut());
+                        if len <= 0 { return Err(io_other("cannot encode peer certificate")); }
+                        let mut der = vec![0; len as usize];
+                        let mut out = der.as_mut_ptr();
+                        if i2d_X509(cert, &mut out) != len { return Err(io_other("cannot encode peer certificate")); }
+                        if !chain.contains(&der) { chain.push(der); }
+                    }
+                }
+            }
+            Ok(chain)
+        })();
+        match result {
+            Ok(chain) => Ok((socket, chain)),
+            Err(e) => { socket.shutdown(); Err(e) }
         }
     }
 
@@ -375,6 +545,15 @@ impl SocketStream {
             SocketStream::Tls(stream) => stream.shutdown(),
         }
     }
+
+    /// A handle on the TCP socket under the stream: a reader thread waits on it (poll) for
+    /// input instead of sleeping in a timed read.
+    pub fn try_clone_tcp(&self) -> io::Result<TcpStream> {
+        match self {
+            SocketStream::Plain(stream) => stream.try_clone(),
+            SocketStream::Tls(stream) => stream.tcp_stream.try_clone(),
+        }
+    }
 }
 
 impl Read for SocketStream {
@@ -400,4 +579,11 @@ impl Write for SocketStream {
             SocketStream::Tls(stream) => stream.flush(),
         }
     }
+}
+
+/// The TCP connection of a fleet TLS stream: each address of `host` tried for at most 5 s, so an
+/// offline LAN machine fails fast instead of after the OS's minute-long connect timeout.
+fn connect_lan(host: &str, port: &str) -> io::Result<TcpStream> {
+    let port: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
+    crate::lan::connect_host("fleet tls", host, port, Some(Duration::from_secs(5)))
 }

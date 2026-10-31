@@ -15,9 +15,9 @@
 //! pub(crate) fn tts_synthesize(text: &str, options: &TtsOptions) -> Result<SpeechAudio, SpeechError>;
 //! ```
 
-#[cfg(all(any(target_os = "macos", target_os = "ios"), apple_speech))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple;
-#[cfg(all(any(target_os = "macos", target_os = "ios"), apple_speech))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) use apple::*;
 
 #[cfg(windows)]
@@ -36,14 +36,14 @@ mod linux;
 pub(crate) use linux::*;
 
 #[cfg(not(any(
-    all(any(target_os = "macos", target_os = "ios"), apple_speech),
+    any(target_os = "macos", target_os = "ios"),
     windows,
     target_os = "android",
     all(target_os = "linux", not(target_os = "android")),
 )))]
 mod none;
 #[cfg(not(any(
-    all(any(target_os = "macos", target_os = "ios"), apple_speech),
+    any(target_os = "macos", target_os = "ios"),
     windows,
     target_os = "android",
     all(target_os = "linux", not(target_os = "android")),

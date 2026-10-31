@@ -18,10 +18,20 @@ pub fn window_icon() -> WindowIcon {
         };
     }
     // Per slot: the app's own icon file (MAKEPAD_APP_ICON_*, captured by
-    // `app_main!` in the app crate) → the one found in the workspace's
-    // `resources/` when platform was built.
+    // `app_main!` in the app crate) → the app crate's own `resources/icon_1024.png`
+    // (the one its bundle is made from; it stands for every slot) → the one found in
+    // the workspace's `resources/` when platform was built.
+    let explicit = (0..6).any(|i| crate::app_meta::icon_path(i).is_some());
+    let own = if explicit {
+        Vec::new()
+    } else {
+        crate::app_meta::crate_dir()
+            .and_then(|dir| std::fs::read(std::path::Path::new(dir).join("resources/icon_1024.png")).ok())
+            .unwrap_or_default()
+    };
     let slot = |slot: usize, found: &'static [u8], scale: u32| match crate::app_meta::icon_path(slot) {
         Some(path) => decode_png(&std::fs::read(path).unwrap_or_default(), scale),
+        None if !own.is_empty() => if slot == 5 { decode_png(&own, scale) } else { None },
         None => decode_png(found, scale),
     };
     let icon32 = slot(0, CUSTOM_ICON_PNG_32, 1);

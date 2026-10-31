@@ -86,14 +86,27 @@ impl Cx {
     /// Shaders whose GPU pipelines are still compiling (0 where the
     /// backend compiles synchronously).
     pub fn pipelines_pending(&self) -> usize {
-        #[cfg(all(target_vendor = "apple", not(gpusim)))]
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.frames.pipelines_pending() }
+        #[cfg(target_arch = "wasm32")]
+        { 0 }
+    }
+
+    /// Whether a draw shader can draw now. Metal builds pipelines
+    /// asynchronously and leaves a draw out of the frame until they exist;
+    /// a caller with a fallback (another shader for the same geometry) asks
+    /// this and keeps drawing the fallback until the new one is ready, so
+    /// content never vanishes while a shader compiles. `float16` asks for
+    /// the RGBA16Float (HDR target) pipeline too, and starts building it.
+    /// True where the backend compiles synchronously.
+    pub fn draw_shader_ready(&self, shader: crate::draw_shader::DrawShaderId, float16: bool) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            self.metal_pipelines_pending()
+            let _ = float16;
+            self.is_draw_shader_window_ready(shader)
         }
-        #[cfg(any(not(target_vendor = "apple"), gpusim))]
-        {
-            0
-        }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = (shader, float16); true }
     }
 
     /// Draws left out of frames so far because they were not ready (their

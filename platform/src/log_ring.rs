@@ -121,12 +121,18 @@ mod tests {
         let _serial = serial();
         reset_for_test();
         for n in 0..(CAP + 50) {
-            push(LogLevel::Log, format!("line {n}"));
+            push(LogLevel::Log, format!("ring-test {n}"));
         }
         let (newest, all) = read_since(0, CAP * 2);
-        assert_eq!(newest as usize, CAP + 50);
+        // Other tests in this process log through the same ring while this
+        // one runs; only this test's own lines are counted.
+        let foreign = newest as usize - (CAP + 50);
         assert_eq!(all.len(), CAP);
-        assert_eq!(all[0].text, "line 50", "the oldest fifty are gone");
+        let ours: Vec<usize> = all.iter().filter_map(|l| l.text.strip_prefix("ring-test ")?.parse().ok()).collect();
+        assert!(ours.len() + foreign >= CAP, "the ring holds its newest {CAP} lines");
+        assert_eq!(ours.last(), Some(&(CAP + 49)));
+        assert!(ours.windows(2).all(|w| w[1] == w[0] + 1), "in order, none lost from the middle");
+        assert!(ours[0] >= 50, "the oldest fifty are gone");
     }
 
     #[test]

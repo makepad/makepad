@@ -1,5 +1,4 @@
 import {
-  MAKEPAD_WEBGL_PIXEL_BUDGET,
   WasmWebBrowser,
   makepad_compute_webgl_size,
   makepad_device_pixel_ratio,
@@ -7,11 +6,32 @@ import {
 
 const MAKEPAD_WEBGL_FALLBACK_DIMENSION = 2048;
 const MAKEPAD_WEBGL_FALLBACK_VERTEX_ATTRIBS = 16;
-const MAKEPAD_WEBGL_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
-const MAKEPAD_WEBGL_MAX_TEXTURE_BYTES = 64 * 1024 * 1024;
-const MAKEPAD_WEBGL_MAX_EXPANDED_TRIANGLES = 16 * 1024 * 1024;
+// WebGL's largest vertex attribute stride, in bytes.
+const MAKEPAD_WEBGL_MAX_ATTRIB_STRIDE = 255;
+// No byte or triangle caps of the runtime's own (GPU-SAFETY.md): sizes are
+// bounded by the device's reported limits and by the wasm memory a slice
+// must lie in; a driver that cannot allocate says so (GL_OUT_OF_MEMORY,
+// checked where textures and buffers are allocated).
 const MAKEPAD_WEBGL_MAX_SUBMISSION_REPORTS = 64;
+// @section video-playback
 const MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT = "video-rgba8";
+// @end video-playback
+// With checks on (see gl_checks), an allocation's GL error is read at the
+// latest this long after it: getError waits for the GPU process, so it runs
+// when no earlier frame is still on the GPU, else at most this often.
+const MAKEPAD_WEBGL_ALLOCATION_CHECK_MS = 2000;
+
+// GL error and framebuffer-completeness queries (gl.getError,
+// gl.checkFramebufferStatus) run only when the page sets
+// `window.makepad_gl_checks = true` before the runtime starts: development
+// pages and the export's instrumented safety run do; a shipped page never
+// queries. Each query waits for the GPU process to finish everything
+// queued, behind a busy GPU a stall of whole GPU frames (25-100 ms) on
+// every allocating frame. Without them a failed allocation surfaces as a
+// lost context (webglcontextlost) or draws nothing.
+function makepad_gl_checks_on() {
+  return typeof window !== "undefined" && window.makepad_gl_checks === true;
+}
 
 function makepad_webgl_limit(value) {
   const number = Number(value);
@@ -82,12 +102,10 @@ export function makepad_query_webgl_limits(gl) {
   };
 }
 
-export function makepad_render_target_size(
-  width,
-  height,
-  limits,
-  pixel_budget = MAKEPAD_WEBGL_PIXEL_BUDGET,
-) {
+// A render target is bounded by the device's limits only: the drawable's
+// pixel budget (a page author's `renderpixelbudget`) sizes the canvas, never
+// the app's own targets, which it sizes itself.
+export function makepad_render_target_size(width, height, limits) {
   if (
     !Number.isSafeInteger(width) ||
     !Number.isSafeInteger(height) ||
@@ -96,13 +114,7 @@ export function makepad_render_target_size(
   ) {
     return { ok: false, reason: "dimensions must be positive safe integers" };
   }
-  const size = makepad_compute_webgl_size(
-    width,
-    height,
-    1.0,
-    limits,
-    pixel_budget,
-  );
+  const size = makepad_compute_webgl_size(width, height, 1.0, limits);
   if (size.width <= 0 || size.height <= 0) {
     return { ok: false, reason: "dimensions cannot fit the WebGL limits" };
   }
@@ -125,6 +137,10 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     this.draw_shaders = [];
     this.array_buffers = [];
+    // Per instance buffer id: the R32UI texture a shader reads instance
+    // data from when they do not fit its vertex attributes (`mp_inst_data`,
+    // shader_glsl.rs), with the upload it mirrors.
+    this.instance_data_textures = new Map();
     this.index_buffers = [];
     this.vaos = [];
     this.textures = [];
@@ -133,6 +149,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.xr = undefined;
     this._missing_shader_ids = new Set();
     this._gl_error_reports = new Set();
+    this.gl_checks = makepad_gl_checks_on();
     this._vertex_submission_reports = new Set();
     this._texture_upload_reports = new Set();
     this._invalid_texture_upload_ids = new Set();
@@ -140,12 +157,19 @@ export class WasmWebGL extends WasmWebBrowser {
     this._sampler_fallback_texture_failures = new Set();
     this._webgl_shader_version = 0;
     this.pending_webgl_shader_count = 0;
+    // FromWasmSpreadFirstDraws: a program's first draw goes in a frame of its
+    // own (first_draw_this_frame), the others wait (first_draws_deferred).
+    this.first_draw_spread = false;
+    this.first_draw_this_frame = false;
+    this.first_draws_deferred = false;
     this.webgl_shader_poll_frame_id = 0;
     this.webgl_shader_timeline_start = undefined;
     this.webgl_shader_batch_program_count = 0;
     this.webgl_shader_batch_failed_count = 0;
     this.webgl_shader_summary_timer = undefined;
+    // @section video-playback
     this.video_players = {};
+    // @end video-playback
     this.pending_render_texture_captures = new Set();
     this.bgra_upload_scratch = new Uint32Array(0);
     if (this.init_webgl_context()) {
@@ -155,6 +179,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
   // webGL API
 
+  // @section xr
   on_xr_animation_frame(time, frame) {
     if (this.webgl_context_lost) {
       return;
@@ -326,6 +351,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmXrStopPresenting() {}
+  // @end xr
 
   get_uniform_block_binding(program, name) {
     let gl = this.gl;
@@ -387,23 +413,66 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.bindBufferBase(gl.UNIFORM_BUFFER, binding, gl_buf);
   }
 
-  assert_no_gl_error(gl, where) {
-    let err = gl.getError();
-    if (err !== gl.NO_ERROR) {
-      const key = where + ":" + err;
-      if (!this._gl_error_reports.has(key)) {
-        this._gl_error_reports.add(key);
-        const message = "WebGL2 error " + err + " at " + where;
-        console.error(message);
-        if (typeof window.makepad_report_browser_issue === "function") {
-          window.makepad_report_browser_issue("webgl.error", {
-            where: where,
-            error: err,
-            message: message,
-          });
-        }
+  // With checks on (gl_checks), allocations are checked for a GL error
+  // later, not where they happen: gl.getError() waits for the GPU process to
+  // finish everything queued, which behind a busy GPU stalls this thread for
+  // whole GPU frames (25-100 ms per allocating frame, every plate change and
+  // resize). `undo` takes back what one allocation made (delete what it
+  // created, invalidate what it re-specified) when a later check finds an
+  // error; until then the resource is used as allocated (a failed texture
+  // samples black, a failed buffer draws nothing). With checks off, nothing.
+  defer_allocation_check(undo) {
+    if (!this.gl_checks) {
+      return;
+    }
+    const pending = this.pending_allocation_checks || (this.pending_allocation_checks = []);
+    if (pending.length === 0) {
+      this.pending_allocation_since = performance.now();
+    }
+    pending.push(undo);
+  }
+
+  // One getError for every allocation since the last check: when `idle`
+  // (no earlier frame on the GPU, so it is cheap), when the oldest is
+  // MAKEPAD_WEBGL_ALLOCATION_CHECK_MS old, or when `force`d. On an error
+  // every allocation since the last clean check is undone (fail closed: the
+  // error cannot say which one failed). Returns the error read (0 if none
+  // or not checked).
+  check_allocations(force, idle) {
+    const pending = this.pending_allocation_checks;
+    if (!pending || pending.length === 0) {
+      return 0;
+    }
+    if (this.webgl_context_lost) {
+      this.pending_allocation_checks = [];
+      return 0;
+    }
+    if (!force && !idle && performance.now() - this.pending_allocation_since < MAKEPAD_WEBGL_ALLOCATION_CHECK_MS) {
+      return 0;
+    }
+    const gl = this.gl;
+    this.pending_allocation_checks = [];
+    const error = gl.getError();
+    if (error === gl.NO_ERROR) {
+      return 0;
+    }
+    const key = "allocation:" + error;
+    const reports = this._gl_error_reports || (this._gl_error_reports = new Set());
+    if (!reports.has(key)) {
+      reports.add(key);
+      const message = `WebGL2 error ${error} after ${pending.length} allocation(s): they are undone`;
+      console.error(message);
+      if (typeof window !== "undefined" && typeof window.makepad_report_browser_issue === "function") {
+        window.makepad_report_browser_issue("webgl.error", { where: "allocation", error, message });
       }
     }
+    for (const undo of pending) {
+      try {
+        undo(error);
+      } catch (_error) {
+      }
+    }
+    return error;
   }
 
   report_render_target_size_once(kind, detail) {
@@ -527,12 +596,6 @@ export class WasmWebGL extends WasmWebBrowser {
       : makepad_safe_product(slice.len, element_size);
     if (byte_length === null || byte_length % element_size !== 0) {
       return { ok: false, reason: `${label} byte length is invalid` };
-    }
-    if (byte_length > MAKEPAD_WEBGL_MAX_BUFFER_BYTES) {
-      return {
-        ok: false,
-        reason: `${label} exceeds the ${MAKEPAD_WEBGL_MAX_BUFFER_BYTES}-byte limit`,
-      };
     }
     const end = makepad_safe_sum(slice.ptr, byte_length);
     const memory = this.memory && this.memory.buffer;
@@ -676,7 +739,7 @@ export class WasmWebGL extends WasmWebBrowser {
         "texture dimensions must be positive safe integers",
       );
     }
-    if (options.faces === 6 && args.width !== args.height) {
+    if (options.faces === 6 && !options.array && args.width !== args.height) {
       return this.reject_texture_upload(
         args,
         "non-square-cube",
@@ -686,7 +749,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
     const limits = this.webgl_limits || {};
     const max_dimension = makepad_webgl_limit(
-      options.faces === 6
+      options.faces === 6 && !options.array
         ? limits.max_cube_map_texture_size
         : limits.max_texture_size,
     );
@@ -719,14 +782,6 @@ export class WasmWebGL extends WasmWebBrowser {
         args,
         "unsafe-size",
         "texture size arithmetic is unsafe",
-      );
-    }
-    if (allocation_bytes > MAKEPAD_WEBGL_MAX_TEXTURE_BYTES) {
-      return this.reject_texture_upload(
-        args,
-        "allocation-byte-limit",
-        `texture exceeds the ${MAKEPAD_WEBGL_MAX_TEXTURE_BYTES}-byte allocation limit`,
-        { allocation_bytes },
       );
     }
 
@@ -815,7 +870,8 @@ export class WasmWebGL extends WasmWebBrowser {
       if (
         !(this.bgra_upload_scratch instanceof Uint32Array) ||
         this.bgra_upload_scratch.length < admission.required_elements ||
-        this.bgra_upload_scratch.byteLength > MAKEPAD_WEBGL_MAX_TEXTURE_BYTES
+        // Not kept at more than twice what uploads need.
+        this.bgra_upload_scratch.length > admission.required_elements * 2
       ) {
         this.bgra_upload_scratch = new Uint32Array(admission.required_elements);
       }
@@ -841,6 +897,14 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
+  // The texture target a shader sampler type binds.
+  sampler_target(ty) {
+    const gl = this.gl;
+    if (ty === "samplerCube") return gl.TEXTURE_CUBE_MAP;
+    if (ty === "sampler2DArray") return gl.TEXTURE_2D_ARRAY;
+    return gl.TEXTURE_2D;
+  }
+
   configure_texture_parameters(gl, target, nearest, cube) {
     const filter = nearest ? gl.NEAREST : gl.LINEAR;
     gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);
@@ -852,19 +916,24 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
-  get_sampler_fallback_texture(target) {
+  // A 1x1 texture for a sampler the draw gave none: opaque black RGBA, or
+  // for a shadow sampler (`shadow`) a depth texture at the far plane (a
+  // shadow sampler reading a colour texture is a GL_INVALID_OPERATION that
+  // drops the whole draw), so nothing is shadowed.
+  get_sampler_fallback_texture(target, shadow = false) {
     const gl = this.gl;
     if (!gl || this.webgl_context_lost) {
       return null;
     }
+    const key = shadow ? "shadow" : target;
     const textures = this._sampler_fallback_textures ||
       (this._sampler_fallback_textures = new Map());
-    if (textures.has(target)) {
-      return textures.get(target);
+    if (textures.has(key)) {
+      return textures.get(key);
     }
     const failures = this._sampler_fallback_texture_failures ||
       (this._sampler_fallback_texture_failures = new Set());
-    if (failures.has(target)) {
+    if (failures.has(key)) {
       return null;
     }
 
@@ -888,25 +957,41 @@ export class WasmWebGL extends WasmWebBrowser {
             gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
           ]
         : [gl.TEXTURE_2D];
-      for (const face of faces) {
+      if (target === gl.TEXTURE_2D_ARRAY) {
+        gl.texImage3D(target, 0, gl.RGBA, 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      } else if (shadow) {
         gl.texImage2D(
-          face,
+          gl.TEXTURE_2D,
           0,
-          gl.RGBA,
+          gl.DEPTH_COMPONENT32F,
           1,
           1,
           0,
-          gl.RGBA,
-          gl.UNSIGNED_BYTE,
-          pixel,
+          gl.DEPTH_COMPONENT,
+          gl.FLOAT,
+          new Float32Array([1]),
         );
+      } else {
+        for (const face of faces) {
+          gl.texImage2D(
+            face,
+            0,
+            gl.RGBA,
+            1,
+            1,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            pixel,
+          );
+        }
       }
-      const allocation_error = gl.getError();
+      const allocation_error = this.gl_checks ? gl.getError() : gl.NO_ERROR;
       if (allocation_error !== gl.NO_ERROR) {
         throw new Error(`WebGL sampler fallback allocation error ${allocation_error}`);
       }
     } catch (_error) {
-      failures.add(target);
+      failures.add(key);
       if (texture) {
         try {
           gl.deleteTexture(texture);
@@ -918,16 +1003,18 @@ export class WasmWebGL extends WasmWebBrowser {
 
     texture._texture_target = target;
     texture._render_target_valid = true;
-    textures.set(target, texture);
+    textures.set(key, texture);
     return texture;
   }
 
   upload_admitted_texture(admission, upload_format, source, upload) {
     const gl = this.gl;
     const args = admission.args;
-    const target = admission.options.faces === 6
-      ? gl.TEXTURE_CUBE_MAP
-      : gl.TEXTURE_2D;
+    const target = admission.options.array
+      ? gl.TEXTURE_2D_ARRAY
+      : admission.options.faces === 6
+        ? gl.TEXTURE_CUBE_MAP
+        : gl.TEXTURE_2D;
     const old_texture = this.textures[args.texture_id];
     const replace = !!old_texture && old_texture._texture_target !== target;
     let texture = replace ? null : old_texture;
@@ -974,15 +1061,25 @@ export class WasmWebGL extends WasmWebBrowser {
           gl,
           target,
           admission.options.nearest,
-          admission.options.faces === 6,
+          admission.options.faces === 6 && !admission.options.array,
         );
       }
       upload(gl, target, allocation_changed, source, admission);
       if (allocation_changed) {
-        const allocation_error = gl.getError();
-        if (allocation_error !== gl.NO_ERROR) {
-          throw new Error(`WebGL texture allocation error ${allocation_error}`);
-        }
+        this.defer_allocation_check((allocation_error) => {
+          const current = this.textures[args.texture_id] === texture;
+          if (created && current) {
+            try {
+              gl.deleteTexture(texture);
+            } catch (_delete_error) {
+            }
+            this.textures[args.texture_id] = undefined;
+          }
+          this.invalidate_texture_dependencies(texture);
+          if (current) {
+            this.reject_texture_upload(args, "gl-upload", `WebGL texture upload failed: WebGL texture allocation error ${allocation_error}`);
+          }
+        });
       }
     } catch (error) {
       if (created) {
@@ -1039,15 +1136,34 @@ export class WasmWebGL extends WasmWebBrowser {
       }
       gl.bindBuffer(target, buffer.gl_buf);
       bound = true;
+      // Storage grows to the next power of two and shrinks below a quarter
+      // (web_gl.rs charges the upload budget the same way): data that changes
+      // size every frame (kernel geometry, animated instances) updates in place
+      // instead of re-specifying the buffer each frame. Draws read the data's
+      // own length (buffer.byte_length), never the storage's.
       const previous_byte_length = buffer.gl_buf._buffer_byte_length;
-      const allocation_changed = previous_byte_length !== array.byteLength;
-      this.upload_buffer_data(gl, target, buffer.gl_buf, array, gl.STATIC_DRAW);
-      if (allocation_changed && typeof gl.getError === "function") {
-        const error = gl.getError();
-        if (error !== gl.NO_ERROR) {
-          buffer.gl_buf._buffer_byte_length = undefined;
-          return { ok: false, reason: `WebGL buffer upload error ${error}` };
-        }
+      const needed = array.byteLength;
+      let capacity = 256;
+      while (capacity < needed) capacity *= 2;
+      const allocation_changed = previous_byte_length === undefined
+        || needed > previous_byte_length
+        || needed * 4 < previous_byte_length && capacity !== previous_byte_length;
+      if (allocation_changed) {
+        gl.bufferData(target, capacity, gl.DYNAMIC_DRAW);
+        buffer.gl_buf._buffer_byte_length = capacity;
+      }
+      if (needed !== 0) {
+        gl.bufferSubData(target, 0, array);
+      }
+      if (allocation_changed) {
+        const gl_buf = buffer.gl_buf;
+        this.defer_allocation_check((error) => {
+          gl_buf._buffer_byte_length = undefined;
+          if (buffer.gl_buf === gl_buf) {
+            buffer.valid = false;
+          }
+          this.report_vertex_submission_once(`buffer-allocation:${error}`, `WebGL buffer upload error ${error}`, {});
+        });
       }
       return { ok: true };
     } catch (error) {
@@ -1291,7 +1407,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
     this.webgl_shader_batch_failed_count++;
-    this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
+    this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 0 });
     this.schedule_webgl_shader_summary();
   }
 
@@ -1330,6 +1446,9 @@ export class WasmWebGL extends WasmWebBrowser {
       });
     }
 
+    // Instance data past the vertex attributes (shader_glsl.rs).
+    const inst_data_loc = gl.getUniformLocation(shader.program, "mp_inst_data");
+
     let pass_uniform_buf = null;
     let draw_list_uniform_buf = null;
     let live_uniform_buf = null;
@@ -1350,14 +1469,19 @@ export class WasmWebGL extends WasmWebBrowser {
               "packed_geometry_",
               shader.geometry_slots,
             ),
+      // A record wider than an attribute stride is read whole from
+      // `mp_inst_data`: no instance attributes.
       inst_attribs:
-        shader.inst_attribs && shader.inst_attribs.length
+        inst_data_loc && shader.instance_slots * 4 > MAKEPAD_WEBGL_MAX_ATTRIB_STRIDE
+          ? []
+          : shader.inst_attribs && shader.inst_attribs.length
           ? this.webgl_typed_attrib_locations(shader.program, shader.inst_attribs)
           : this.webgl_attrib_locations(
               shader.program,
               "packed_instance_",
               shader.instance_slots,
             ),
+      inst_data_loc,
       pass_uniforms_binding: this.get_uniform_block_binding(
         shader.program,
         "passUniforms",
@@ -1378,6 +1502,7 @@ export class WasmWebGL extends WasmWebBrowser {
         shader.program,
         "liveUniforms",
       ),
+      clip_y_flip_loc: gl.getUniformLocation(shader.program, "mp_clip_y_flip"),
       pass_uniform_buf,
       draw_list_uniform_buf,
       live_uniform_buf,
@@ -1395,10 +1520,17 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.deleteShader(shader.fsh);
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
-    this.assert_no_gl_error(gl, "compile_shader_end");
+    // (an error here is read with the next allocation check)
+    this.defer_allocation_check(() => {});
     // The wasm side counts queued compiles; this closes one so
     // Cx::draw_shaders_pending can tell a bake its draws are no longer dropped.
-    this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
+    // With first draws spread, it stays open until the program's first draw.
+    if (this.first_draw_spread) {
+      finished_shader.first_draw_waiting = true;
+      this.to_wasm.ToWasmWebGLShadersLinked({ count: 1 });
+    } else {
+      this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 0 });
+    }
     this.schedule_webgl_shader_summary();
     return true;
   }
@@ -1442,12 +1574,39 @@ export class WasmWebGL extends WasmWebBrowser {
       if (this.wasm == null || this.webgl_context_lost) {
         return;
       }
+      // An animation frame is coming: it takes the programs up at its start
+      // (see FromWasmRequestAnimationFrame), before its own GL work.
+      if (this.req_anim_frame_id) {
+        this.schedule_webgl_shader_poll();
+        return;
+      }
       if (this.poll_pending_webgl_shaders() != 0) {
         this.to_wasm.ToWasmRedrawAll();
         this.FromWasmRequestAnimationFrame();
       }
       this.schedule_webgl_shader_poll();
     });
+  }
+
+  // Spread programs' first draws one a frame (Cx::spread_first_draws). Off,
+  // the programs still waiting for theirs are released.
+  FromWasmSpreadFirstDraws(args) {
+    this.first_draw_spread = !!args.on;
+    if (this.first_draw_spread) {
+      return;
+    }
+    let released = 0;
+    for (const shader of this.draw_shaders) {
+      if (shader && shader.first_draw_waiting) {
+        shader.first_draw_waiting = false;
+        released++;
+      }
+    }
+    if (released != 0) {
+      this.to_wasm.ToWasmWebGLShadersDone({ count: released, waited: released });
+      this.to_wasm.ToWasmRedrawAll();
+      this.FromWasmRequestAnimationFrame();
+    }
   }
 
   FromWasmCompileWebGLShader(args) {
@@ -1641,10 +1800,14 @@ export class WasmWebGL extends WasmWebBrowser {
         let capacity = 256;
         while (capacity < checked.byte_length) capacity *= 2;
         gl.bufferData(gl.ARRAY_BUFFER, capacity, gl.STATIC_DRAW);
-        if (typeof gl.getError === "function" && gl.getError() !== gl.NO_ERROR) {
-          reject("retained buffer allocation failed");
-          return;
-        }
+        const gl_buf = buffer.gl_buf;
+        this.defer_allocation_check(() => {
+          gl_buf._buffer_byte_length = undefined;
+          if (buffer.gl_buf === gl_buf) {
+            buffer.valid = false;
+            reject("retained buffer allocation failed");
+          }
+        });
         buffer.retained_capacity = capacity;
         buffer.gl_buf._buffer_byte_length = capacity;
         first = 0;
@@ -1714,7 +1877,6 @@ export class WasmWebGL extends WasmWebBrowser {
         if (!destination) { reject("retained allocation returned null"); return; }
         gl.bindBuffer(gl.COPY_WRITE_BUFFER, destination);
         gl.bufferData(gl.COPY_WRITE_BUFFER, args.capacity_bytes, gl.STATIC_DRAW);
-        if (gl.getError() !== gl.NO_ERROR) { reject("retained allocation failed"); return; }
         if (args.copies.length) {
           gl.bindBuffer(gl.COPY_READ_BUFFER, previous.gl_buf);
           for (const copy of args.copies) {
@@ -1728,14 +1890,22 @@ export class WasmWebGL extends WasmWebBrowser {
       for (const write of writes) {
         if (write.data.length) gl.bufferSubData(gl.COPY_WRITE_BUFFER, write.offset, write.data);
       }
-      if (gl.getError() !== gl.NO_ERROR) { reject("retained delta upload failed"); return; }
       destination._buffer_byte_length = args.capacity_bytes;
-      this.array_buffers[args.buffer_id] = {
+      const installed_buffer = this.array_buffers[args.buffer_id] = {
         gl_buf: destination, valid: true, byte_length: byteLength, length: args.slot_count,
         retained_capacity: args.capacity_bytes, source_kind: "f32",
         upload_version: (previous?.upload_version || 0) + 1,
       };
       installed = true;
+      if (args.replace) {
+        // A failed allocation sends the whole list again (the page asks for it).
+        this.defer_allocation_check(() => {
+          if (this.array_buffers[args.buffer_id] === installed_buffer) {
+            installed_buffer.valid = false;
+            reject("retained allocation failed");
+          }
+        });
+      }
       // The command stream retains storage read by earlier draws and copies.
       if (args.replace && previous?.gl_buf) gl.deleteBuffer(previous.gl_buf);
     } catch (error) {
@@ -1901,7 +2071,11 @@ export class WasmWebGL extends WasmWebBrowser {
       }
     }
 
-    const instance_stride = layout.instance.stride;
+    // A shader reading instance data from `mp_inst_data` has the record's
+    // whole width as its stride, whichever part of it are attributes.
+    const instance_stride = shader.inst_data_loc
+      ? shader.instance_slots * 4
+      : layout.instance.stride;
     let instances = 0;
     if (instance_stride === 0) {
       if (instance_buffer.byte_length !== 0) {
@@ -1925,12 +2099,6 @@ export class WasmWebGL extends WasmWebBrowser {
     );
     if (expanded_triangles === null) {
       return { ok: false, reason: "expanded triangle count is unsafe" };
-    }
-    if (expanded_triangles > MAKEPAD_WEBGL_MAX_EXPANDED_TRIANGLES) {
-      return {
-        ok: false,
-        reason: `expanded triangle count exceeds ${MAKEPAD_WEBGL_MAX_EXPANDED_TRIANGLES}`,
-      };
     }
 
     const uniform_slices = [
@@ -1977,12 +2145,10 @@ export class WasmWebGL extends WasmWebBrowser {
         continue;
       }
       const texture_id = args.textures && args.textures[i];
-      const expected_target = texture_loc.ty === "samplerCube"
-        ? this.gl.TEXTURE_CUBE_MAP
-        : this.gl.TEXTURE_2D;
+      const expected_target = this.sampler_target(texture_loc.ty);
       let texture;
       if (texture_id === undefined) {
-        texture = this.get_sampler_fallback_texture(expected_target);
+        texture = this.get_sampler_fallback_texture(expected_target, texture_loc.ty === "sampler2DShadow");
       } else {
         if (!Number.isSafeInteger(texture_id) || texture_id < 0) {
           return { ok: false, reason: `texture ${i} has an invalid id` };
@@ -1995,7 +2161,7 @@ export class WasmWebGL extends WasmWebBrowser {
           ) {
             return { ok: false, reason: `texture ${texture_id} is invalid` };
           }
-          texture = this.get_sampler_fallback_texture(expected_target);
+          texture = this.get_sampler_fallback_texture(expected_target, texture_loc.ty === "sampler2DShadow");
         } else {
           if (texture._render_target_valid === false) {
             return { ok: false, reason: `texture ${texture_id} is invalid` };
@@ -2026,6 +2192,15 @@ export class WasmWebGL extends WasmWebBrowser {
       sampler_textures[i] = texture;
     }
 
+    let instance_data_texture = null;
+    if (shader.inst_data_loc) {
+      const mirrored = this.instance_data_texture(vao.inst_vb_id, instance_buffer);
+      if (!mirrored.ok) {
+        return mirrored;
+      }
+      instance_data_texture = mirrored.texture;
+    }
+
     return {
       ok: true,
       geometry_buffer,
@@ -2033,9 +2208,88 @@ export class WasmWebGL extends WasmWebBrowser {
       index_buffer,
       layout,
       sampler_textures,
+      instance_data_texture,
       indices: index_buffer.length,
       instances,
     };
+  }
+
+  // The instance buffer's words as an R32UI texture (`mp_inst_data`): row
+  // major at the device's widest texture, copied on the GPU from the buffer
+  // (PIXEL_UNPACK_BUFFER) whenever the buffer was uploaded again. Rows grow
+  // to the next power of two and shrink below a quarter, as buffers do, so
+  // instance counts that change every frame update it in place.
+  instance_data_texture(buffer_id, buffer) {
+    const gl = this.gl;
+    if (!this.instance_data_textures) {
+      this.instance_data_textures = new Map();
+    }
+    let entry = this.instance_data_textures.get(buffer_id);
+    if (
+      entry &&
+      entry.buffer === buffer &&
+      entry.upload_version === buffer.upload_version &&
+      entry.gl_buf === buffer.gl_buf &&
+      entry.byte_length === buffer.byte_length
+    ) {
+      return { ok: true, texture: entry.texture };
+    }
+    const words = buffer.byte_length / 4;
+    const max = this.webgl_limits.max_texture_size;
+    const width = max;
+    const rows = Math.max(1, Math.ceil(words / width));
+    if (rows > max) {
+      return { ok: false, reason: `instance data of ${words} words exceed a ${max}x${max} texture` };
+    }
+    let bound_unpack = false;
+    try {
+      if (!entry) {
+        const texture = gl.createTexture();
+        if (!texture) {
+          return { ok: false, reason: "instance data texture allocation returned null" };
+        }
+        entry = { texture, rows: 0 };
+        this.instance_data_textures.set(buffer_id, entry);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+      let capacity = 1;
+      while (capacity < rows) capacity *= 2;
+      capacity = Math.min(capacity, max);
+      if (entry.rows < rows || (rows * 4 < entry.rows && capacity !== entry.rows)) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, width, capacity, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        entry.rows = capacity;
+      }
+      if (words > 0) {
+        gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, buffer.gl_buf);
+        bound_unpack = true;
+        const full_rows = Math.floor(words / width);
+        if (full_rows > 0) {
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, full_rows, gl.RED_INTEGER, gl.UNSIGNED_INT, 0);
+        }
+        const rest = words - full_rows * width;
+        if (rest > 0) {
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, full_rows, rest, 1, gl.RED_INTEGER, gl.UNSIGNED_INT, full_rows * width * 4);
+        }
+      }
+    } catch (error) {
+      return { ok: false, reason: `instance data texture upload failed: ${error && error.message ? error.message : String(error)}` };
+    } finally {
+      if (bound_unpack) {
+        try {
+          gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+        } catch (_error) {
+        }
+      }
+    }
+    entry.buffer = buffer;
+    entry.upload_version = buffer.upload_version;
+    entry.gl_buf = buffer.gl_buf;
+    entry.byte_length = buffer.byte_length;
+    return { ok: true, texture: entry.texture };
   }
 
   configure_webgl_vao(vao, shader, preflight) {
@@ -2216,6 +2470,11 @@ export class WasmWebGL extends WasmWebBrowser {
       this.vaos[id] = undefined;
     }
     for (const id of array_buffer_ids) {
+      const mirror = this.instance_data_textures && this.instance_data_textures.get(id);
+      if (mirror) {
+        gl.deleteTexture(mirror.texture);
+        this.instance_data_textures.delete(id);
+      }
       const buffer = this.array_buffers[id];
       if (!buffer) continue;
       if (buffer.gl_buf) gl.deleteBuffer(buffer.gl_buf);
@@ -2259,7 +2518,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmDrawCall(args) {
-    if (this.webgl_context_lost || this.render_target_rejected) {
+    if (this.render_target_rejected) {
       return;
     }
     var gl = this.gl;
@@ -2335,6 +2594,20 @@ export class WasmWebGL extends WasmWebBrowser {
       return;
     }
 
+    // A program's first draw is where the driver builds it for this draw (on
+    // Direct3D, ANGLE compiles the shader variant then: up to seconds of the
+    // GPU process for a big one, whatever the link did). Spread, it is the
+    // frame's only first draw; another program's waits for the next frame.
+    if (shader.first_draw_waiting) {
+      if (this.first_draw_this_frame) {
+        this.first_draws_deferred = true;
+        return;
+      }
+      this.first_draw_this_frame = true;
+      shader.first_draw_waiting = false;
+      this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 1 });
+    }
+
     let vao_bound = false;
     try {
       gl.useProgram(shader.program);
@@ -2344,6 +2617,8 @@ export class WasmWebGL extends WasmWebBrowser {
       // finally block, so the default path issues no extra GL calls.
       if (!args.alpha_blend) {
         gl.disable(gl.BLEND);
+      } else if (args.blend_max) {
+        gl.blendEquationSeparate(gl.MAX, gl.MAX);
       }
       if (args.backface_culling) {
         gl.enable(gl.CULL_FACE);
@@ -2351,9 +2626,17 @@ export class WasmWebGL extends WasmWebBrowser {
       } else {
         gl.disable(gl.CULL_FACE);
       }
-      // Texture passes render with an inverted projection Y (web_gl.rs
-      // setup_render_pass), which reverses triangle winding: front faces are
-      // clockwise there and counter-clockwise on the canvas, matching Metal.
+      // A framebuffer's rows are stored bottom-up: texture passes invert
+      // every vertex shader's clip-space Y (`mp_clip_y_flip`, applied after
+      // the shader's own vertex code, see shader_glsl.rs), so the texels land
+      // in the top-left row order Metal and D3D produce and every consumer
+      // plain-samples. The inversion reverses triangle winding: front faces
+      // are clockwise there and counter-clockwise on the canvas, matching Metal.
+      const clip_y_flip = this.texture_pass_front_face_cw ? 1 : 0;
+      if (shader.clip_y_flip_loc && shader._clip_y_flip !== clip_y_flip) {
+        gl.uniform1f(shader.clip_y_flip_loc, clip_y_flip);
+        shader._clip_y_flip = clip_y_flip;
+      }
       gl.frontFace(this.texture_pass_front_face_cw ? gl.CW : gl.CCW);
       gl.bindVertexArray(vao.gl_vao);
       vao_bound = true;
@@ -2420,18 +2703,29 @@ export class WasmWebGL extends WasmWebBrowser {
         if (!tex_loc || tex_loc.loc == null) {
           continue;
         }
-        const target = tex_loc.ty === "samplerCube"
-          ? gl.TEXTURE_CUBE_MAP
-          : gl.TEXTURE_2D;
+        const target = this.sampler_target(tex_loc.ty);
         gl.activeTexture(gl.TEXTURE0 + i);
         gl.bindTexture(target, preflight.sampler_textures[i]);
+        const texture = preflight.sampler_textures[i];
         if (tex_loc.ty === "sampler2DShadow") {
           gl.texParameteri(target, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
           gl.texParameteri(target, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
           gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
           gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          texture._compare_ref = true;
+        } else if (texture._compare_ref) {
+          // A depth texture an earlier draw compared in a shadow sampler:
+          // a plain sampler reads its values, which needs comparison off.
+          gl.texParameteri(target, gl.TEXTURE_COMPARE_MODE, gl.NONE);
+          texture._compare_ref = false;
         }
         gl.uniform1i(tex_loc.loc, i);
+      }
+      if (shader.inst_data_loc) {
+        const unit = shader.texture_locs.length;
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, preflight.instance_data_texture);
+        gl.uniform1i(shader.inst_data_loc, unit);
       }
 
       const xr = this.xr;
@@ -2494,6 +2788,11 @@ export class WasmWebGL extends WasmWebBrowser {
       if (!args.alpha_blend) {
         try {
           gl.enable(gl.BLEND);
+        } catch (_error) {
+        }
+      } else if (args.blend_max) {
+        try {
+          gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
         } catch (_error) {
         }
       }
@@ -2697,10 +2996,40 @@ export class WasmWebGL extends WasmWebBrowser {
     );
   }
 
-  FromWasmBeginRenderTexture(args) {
-    if (this.webgl_context_lost) {
-      return;
+  // A 2D array's level 0 (layer-major BGRA), sampled as sampler2DArray.
+  FromWasmAllocTextureArray_BGRAu8_32(args) {
+    if (!args || !Number.isSafeInteger(args.layers) || args.layers <= 0) {
+      return this.reject_texture_upload(args, "invalid-layers", "array texture layer count must be a positive safe integer");
     }
+    const admission = this.admit_texture_upload(args, {
+      faces: args.layers,
+      array: true,
+      bytes_per_texel: 4,
+      elements_per_texel: 1,
+      element_size: 4,
+      nearest: false,
+    });
+    if (!admission) return;
+    const source = this.make_bgra_upload_view(admission);
+    if (!source) return;
+    this.upload_admitted_texture(
+      admission,
+      // the layer count is part of the allocation
+      `array-bgra8x${args.layers}`,
+      source,
+      (gl, target, allocate, data, checked) => {
+        const w = checked.args.width;
+        const h = checked.args.height;
+        if (allocate) {
+          gl.texImage3D(target, 0, gl.RGBA, w, h, args.layers, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+        } else {
+          gl.texSubImage3D(target, 0, 0, 0, 0, w, h, args.layers, gl.RGBA, gl.UNSIGNED_BYTE, data);
+        }
+      },
+    );
+  }
+
+  FromWasmBeginRenderTexture(args) {
     if (this.xr !== undefined) {
       this.xr.in_xr_pass = false;
     }
@@ -2734,7 +3063,7 @@ export class WasmWebGL extends WasmWebBrowser {
       }
     }
     const has_r32f_target = args.color_targets.some(
-      (target) => target && target.format >= 1 && target.format <= 3,
+      (target) => target && target.format >= 1 && target.format <= 4,
     );
     if (has_r32f_target && !this.ext_color_buffer_float) {
       this.reject_render_target(
@@ -2743,12 +3072,10 @@ export class WasmWebGL extends WasmWebBrowser {
       );
       return;
     }
-    const quality = this.ensure_render_quality();
     const size = makepad_render_target_size(
       args.width,
       args.height,
       this.webgl_limits,
-      quality.pixel_budget,
     );
     if (!size.ok) {
       this.reject_render_target(
@@ -2789,6 +3116,8 @@ export class WasmWebGL extends WasmWebBrowser {
     let clear_color = { r: 0, g: 0, b: 0, a: 0 };
     let allocation_changed = false;
     const color_attachments = [];
+    // Several color targets (MRT): each clears to its own color.
+    const color_clears = [];
 
     for (let i = 0; i < args.color_targets.length; i++) {
       let tgt = args.color_targets[i];
@@ -2814,6 +3143,7 @@ export class WasmWebGL extends WasmWebBrowser {
         this.clear_texture_upload_allocation(gl_tex);
 
         clear_flags |= gl.COLOR_BUFFER_BIT;
+        color_clears.push(i);
 
         gl_tex._width = render_width;
         gl_tex._height = render_height;
@@ -2821,23 +3151,29 @@ export class WasmWebGL extends WasmWebBrowser {
         gl_tex._requested_height = args.height;
         gl_tex._format = tgt.format;
         gl_tex._depth = false;
-        if (tgt.format >= 1 && tgt.format <= 3) {
-          // R32F data target (TextureFormat::RenderRf32). Color-renderable
-          // only with EXT_color_buffer_float; NEAREST because float
-          // filtering is a separate extension and consumers sample_nearest.
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        if (tgt.format >= 1 && tgt.format <= 5) {
+          // Data targets: 1 R32F (RenderRf32), 2 RGBA32F, 3 RGBA16F,
+          // 4 R16F (RenderRf16), 5 R8 (RenderRu8). Float targets are
+          // color-renderable only with EXT_color_buffer_float; 32-bit float
+          // filtering is a separate extension, so those stay NEAREST, while
+          // R16F and R8 filter natively in WebGL2.
+          const filter = tgt.format >= 4 ? gl.LINEAR : gl.NEAREST;
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          const internal = [0, gl.R32F, gl.RGBA32F, gl.RGBA16F, gl.R16F, gl.R8][tgt.format];
+          const upload = tgt.format === 1 || tgt.format >= 4 ? gl.RED : gl.RGBA;
+          const type = tgt.format === 5 ? gl.UNSIGNED_BYTE : (tgt.format === 3 || tgt.format === 4 ? gl.HALF_FLOAT : gl.FLOAT);
           gl.texImage2D(
             gl.TEXTURE_2D,
             0,
-            tgt.format === 1 ? gl.R32F : (tgt.format === 2 ? gl.RGBA32F : gl.RGBA16F),
+            internal,
             gl_tex._width,
             gl_tex._height,
             0,
-            tgt.format === 1 ? gl.RED : gl.RGBA,
-            tgt.format === 3 ? gl.HALF_FLOAT : gl.FLOAT,
+            upload,
+            type,
             null,
           );
         } else {
@@ -2859,15 +3195,26 @@ export class WasmWebGL extends WasmWebBrowser {
         }
       } else if (!tgt.init_only) {
         clear_flags |= gl.COLOR_BUFFER_BIT;
+        color_clears.push(i);
       }
 
       gl.framebufferTexture2D(
         gl.FRAMEBUFFER,
-        gl.COLOR_ATTACHMENT0,
+        gl.COLOR_ATTACHMENT0 + i,
         gl.TEXTURE_2D,
         gl_tex,
         0,
       );
+    }
+    // Attachments a previous use of this framebuffer had beyond this pass's.
+    const previous_count = Array.isArray(gl_framebuffer._color_attachments)
+      ? gl_framebuffer._color_attachments.length
+      : 0;
+    for (let i = args.color_targets.length; i < previous_count; i++) {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, null, 0);
+    }
+    if (args.color_targets.length !== 1 || previous_count > 1) {
+      gl.drawBuffers(args.color_targets.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
     }
     // Depth target: a real depth/stencil texture, so a texture pass
     // depth-tests exactly like the canvas and like Metal. Without it every
@@ -2945,13 +3292,18 @@ export class WasmWebGL extends WasmWebBrowser {
       ) ||
       gl_framebuffer._depth_attachment !== depth_attachment;
     if (allocation_changed) {
-      const allocation_error = gl.getError();
-      if (allocation_error !== gl.NO_ERROR) {
-        throw new Error(`WebGL allocation error ${allocation_error}`);
-      }
+      // A failed target allocates again on its next use.
+      const allocated = depth_attachment ? [...color_attachments, depth_attachment] : color_attachments.slice();
+      this.defer_allocation_check(() => {
+        for (const texture of allocated) {
+          this.invalidate_texture_dependencies(texture);
+        }
+        this.report_render_target_size_once("allocation failed", { width: render_width, height: render_height });
+      });
     }
     if (
       (allocation_changed || attachments_changed) &&
+      this.gl_checks &&
       gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE
     ) {
       throw new Error("WebGL framebuffer is incomplete");
@@ -2983,9 +3335,19 @@ export class WasmWebGL extends WasmWebBrowser {
       // glClear honours the depth mask; the previous draw call may have
       // left it off.
       gl.depthMask(true);
-      gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
       gl.clearDepth(clear_depth);
-      gl.clear(clear_flags);
+      if (args.color_targets.length > 1) {
+        for (const i of color_clears) {
+          const c = args.color_targets[i].clear_color;
+          gl.clearBufferfv(gl.COLOR, i, [c.r, c.g, c.b, c.a]);
+        }
+        if ((clear_flags & ~gl.COLOR_BUFFER_BIT) !== 0) {
+          gl.clear(clear_flags & ~gl.COLOR_BUFFER_BIT);
+        }
+      } else {
+        gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+        gl.clear(clear_flags);
+      }
     }
     } catch (error) {
       this.reject_render_target(
@@ -3171,9 +3533,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmBeginRenderCanvas(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     this.reset_active_render_target_textures();
     this.render_target_rejected = false;
     let gl = this.gl;
@@ -3211,10 +3570,8 @@ export class WasmWebGL extends WasmWebBrowser {
 
   // Video Playback API
 
+  // @section video-playback
   FromWasmPrepareVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let video = document.createElement("video");
     video.crossOrigin = "anonymous";
@@ -3237,10 +3594,13 @@ export class WasmWebGL extends WasmWebBrowser {
     this.video_players[key] = player;
 
     player.handlers.loadedmetadata = () => {
-      if (this.webgl_context_lost || player.disposed) {
+      if (player.disposed) {
         return;
       }
       let duration_ms = Math.round(video.duration * 1000);
+      // An audio-only source has no picture: its position is reported
+      // every frame while it plays, for a host that follows its clock.
+      player.audio_only = video.videoWidth === 0 && video.videoHeight === 0;
       this.to_wasm.ToWasmVideoPlaybackPrepared({
         video_id_lo: args.video_id_lo,
         video_id_hi: args.video_id_hi,
@@ -3253,7 +3613,7 @@ export class WasmWebGL extends WasmWebBrowser {
     };
 
     player.handlers.ended = () => {
-      if (this.webgl_context_lost || player.disposed) {
+      if (player.disposed) {
         return;
       }
       player.playing = false;
@@ -3265,7 +3625,7 @@ export class WasmWebGL extends WasmWebBrowser {
     };
 
     player.handlers.play = () => {
-      if (this.webgl_context_lost || player.disposed) {
+      if (player.disposed) {
         return;
       }
       player.playing = true;
@@ -3283,7 +3643,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
     if (args.autoplay) {
       video.play().catch(e => {
-        if (!this.webgl_context_lost && !player.disposed) {
+        if (!player.disposed) {
           console.warn("Video autoplay failed:", e);
         }
       });
@@ -3309,14 +3669,11 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmBeginVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
       player.video.play().catch(e => {
-        if (!this.webgl_context_lost && !player.disposed) {
+        if (!player.disposed) {
           console.warn("Video play failed:", e);
         }
       });
@@ -3324,9 +3681,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmPauseVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3335,14 +3689,11 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmResumeVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
       player.video.play().catch(e => {
-        if (!this.webgl_context_lost && !player.disposed) {
+        if (!player.disposed) {
           console.warn("Video resume failed:", e);
         }
       });
@@ -3350,9 +3701,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmMuteVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3361,9 +3709,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmUnmuteVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3372,9 +3717,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmSeekVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3384,9 +3726,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmCleanupVideoPlaybackResources(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3424,9 +3763,12 @@ export class WasmWebGL extends WasmWebBrowser {
 
     for (let key in this.video_players) {
       let player = this.video_players[key];
-      if (!player.playing) continue;
+      // A paused player uploads once after a context restore (needs_upload).
+      if (!player.playing && !player.needs_upload) continue;
 
-      any_playing = true;
+      if (player.playing) {
+        any_playing = true;
+      }
 
       let video = player.video;
       if (video.readyState < 2) continue;
@@ -3449,6 +3791,16 @@ export class WasmWebGL extends WasmWebBrowser {
         height >= 0 &&
         (width === 0 || height === 0)
       ) {
+        if (player.audio_only) {
+          const ms = Math.round(video.currentTime * 1000);
+          this.to_wasm.ToWasmVideoTextureUpdated({
+            video_id_lo: player.video_id_lo,
+            video_id_hi: player.video_id_hi,
+            current_position_lo: ms & 0xFFFFFFFF,
+            current_position_hi: Math.floor(ms / 0x100000000),
+          });
+          any_updated = true;
+        }
         // Metadata can become ready before the decoder exposes dimensions.
         continue;
       }
@@ -3491,15 +3843,6 @@ export class WasmWebGL extends WasmWebBrowser {
           video_args,
           "unsafe-video-size",
           "video texture size arithmetic is unsafe",
-        );
-        continue;
-      }
-      if (allocation_bytes > MAKEPAD_WEBGL_MAX_TEXTURE_BYTES) {
-        this.reject_texture_upload(
-          video_args,
-          "video-allocation-byte-limit",
-          `video texture exceeds the ${MAKEPAD_WEBGL_MAX_TEXTURE_BYTES}-byte allocation limit`,
-          { allocation_bytes },
         );
         continue;
       }
@@ -3569,10 +3912,10 @@ export class WasmWebGL extends WasmWebBrowser {
             gl.UNSIGNED_BYTE,
             video,
           );
-          const allocation_error = gl.getError();
-          if (allocation_error !== gl.NO_ERROR) {
-            throw new Error(`WebGL video texture allocation error ${allocation_error}`);
-          }
+          this.defer_allocation_check(() => {
+            this.invalidate_texture_dependencies(gl_tex);
+            player.texture_initialized = false;
+          });
         } else {
           gl.texSubImage2D(
             gl.TEXTURE_2D,
@@ -3585,6 +3928,7 @@ export class WasmWebGL extends WasmWebBrowser {
           );
         }
         player.texture_initialized = true;
+        player.needs_upload = false;
         gl_tex._texture_upload_width = width;
         gl_tex._texture_upload_height = height;
         gl_tex._texture_upload_format = MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT;
@@ -3631,6 +3975,7 @@ export class WasmWebGL extends WasmWebBrowser {
       this.ensure_video_animation_frame();
     }
   }
+  // @end video-playback
 
   handle_device_pixel_ratio_change() {
     const next = makepad_device_pixel_ratio(window.devicePixelRatio);
@@ -3641,10 +3986,7 @@ export class WasmWebGL extends WasmWebBrowser {
     // latter can intentionally differ forever and would make polling resize
     // continuously.
     this.physical_device_dpi = next;
-    if (
-      !this.webgl_context_lost &&
-      typeof this.handlers.on_screen_resize === "function"
-    ) {
+    if (typeof this.handlers.on_screen_resize === "function") {
       this.handlers.on_screen_resize();
     }
     return true;
@@ -3665,7 +4007,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   arm_device_pixel_ratio_media_query() {
-    if (this.webgl_context_lost || typeof window.matchMedia !== "function") {
+    if (typeof window.matchMedia !== "function") {
       return false;
     }
     const mq = window.matchMedia(
@@ -3705,78 +4047,14 @@ export class WasmWebGL extends WasmWebBrowser {
     }, 1000);
   }
 
-  stop_webgl_runtime() {
-    for (const field of [
-      "req_anim_frame_id",
-      "webgl_shader_poll_frame_id",
-      "video_anim_frame_id",
-      "loader_after_presented_frame_id",
-    ]) {
-      if (this[field]) {
-        window.cancelAnimationFrame(this[field]);
-        this[field] = 0;
-      }
-    }
-    if (this.loader_fallback_timer) {
-      window.clearTimeout(this.loader_fallback_timer);
-      this.loader_fallback_timer = null;
-    }
-    if (this.webgl_shader_summary_timer !== undefined) {
-      window.clearTimeout(this.webgl_shader_summary_timer);
-      this.webgl_shader_summary_timer = undefined;
-    }
-    if (this.poll_timer !== undefined && this.poll_timer !== null) {
-      window.clearInterval(this.poll_timer);
-      this.poll_timer = null;
-    }
-    if (this._dpr_poll_timer !== undefined && this._dpr_poll_timer !== null) {
-      window.clearInterval(this._dpr_poll_timer);
-      this._dpr_poll_timer = null;
-    }
-    this.release_device_pixel_ratio_media_query();
-    for (const timer of this.timers || []) {
-      try {
-        if (timer.repeats) {
-          window.clearInterval(timer.sys_id);
-        } else {
-          window.clearTimeout(timer.sys_id);
-        }
-      } catch (error) {
-        console.error(`makepad: terminal timer cleanup failed: ${error}`);
-      }
-    }
-    if (this.timers) {
-      this.timers.length = 0;
-    }
-    for (const capture of this.pending_render_texture_captures || []) {
-      if (capture.finish) {
-        capture.finish(undefined, !this.webgl_context_lost);
-        continue;
-      }
-      capture.done = true;
-      if (capture.frame_id) {
-        window.cancelAnimationFrame(capture.frame_id);
-        capture.frame_id = 0;
-      }
-    }
-    if (this.pending_render_texture_captures) {
-      this.pending_render_texture_captures.clear();
-    }
-    for (const player of Object.values(this.video_players || {})) {
-      try {
-        this.dispose_video_player(player);
-      } catch (error) {
-        console.error(`makepad: terminal video cleanup failed: ${error}`);
-      }
-    }
-    this.video_players = {};
-    try {
-      this.stop_terminal_web_runtime();
-    } catch (error) {
-      console.error(`makepad: terminal web cleanup failed: ${error}`);
-    }
-  }
-
+  // A lost context (webglcontextlost) pauses the graphics, not the app:
+  // timers, network, audio, threads and media keep running and the app keeps
+  // handling events, while its GL commands do nothing (MAKEPAD_WEBGL_COMMANDS)
+  // and no animation frame runs. The browser is asked to give the context
+  // back (preventDefault). When it does (webglcontextrestored) every table of
+  // the old context's objects is emptied and the app is told
+  // (ToWasmGpuReset): it uploads again what it keeps on the CPU side and
+  // repaints, so the picture goes on from where the app is.
   show_webgl_context_lost_message() {
     if (this._webgl_context_lost_message || typeof document === "undefined") {
       return;
@@ -3789,7 +4067,8 @@ export class WasmWebGL extends WasmWebBrowser {
       "position:absolute;inset:0;display:flex;gap:12px;align-items:center;" +
       "justify-content:center;padding:24px;background:#181818;color:white;" +
       "font:14px sans-serif;text-align:center;z-index:2147483647";
-    text.textContent = "Graphics stopped because the WebGL context was lost.";
+    text.textContent =
+      "Graphics paused: the WebGL context was lost. They come back when the browser restores it.";
     reload.type = "button";
     reload.textContent = "Reload";
     reload.addEventListener("click", () => {
@@ -3806,60 +4085,119 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
-  handle_webgl_context_lost(_event) {
+  hide_webgl_context_lost_message() {
+    const message = this._webgl_context_lost_message;
+    this._webgl_context_lost_message = null;
+    if (message && message.parentNode) {
+      message.parentNode.removeChild(message);
+    }
+  }
+
+  handle_webgl_context_lost(event) {
+    // Without preventDefault the browser never restores the context.
+    if (event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
     if (this.webgl_context_lost) {
       return;
     }
-    // There is deliberately no preventDefault(): Makepad cannot reconstruct
-    // all Rust-owned GPU resources yet, so claiming browser restoration would
-    // leave a subtly broken app. A reload only happens after the user asks.
     this.webgl_context_lost = true;
-    // Deliver terminal ticket errors before shutting down wasm scheduling.
-    // Bypass the normal pump's lost-context guard, and discard its outgoing
-    // messages: no GL calls or renders may run against the lost context.
-    if (this.readback_api_active && this.to_wasm && this.to_wasm.ToWasmRenderTextureCapture && this.wasm_process_msg) {
-      try {
-        this.to_wasm.ToWasmRenderTextureCapture({
-          texture_id: 0, ticket_lo: 0xffffffff, ticket_hi: 0xffffffff,
-          width: 0, height: 0, offset: 0, complete: true,
-          data: new Uint8Array(0), error: "device lost",
-        });
-        const message = this.to_wasm;
-        this.to_wasm = this.new_to_wasm();
-        this.wasm_process_msg(message).free();
-      } catch (error) {
-        console.error(`makepad: readback device-loss delivery failed: ${error}`);
+    for (const field of [
+      "req_anim_frame_id",
+      "webgl_shader_poll_frame_id",
+      "video_anim_frame_id",
+    ]) {
+      if (this[field]) {
+        window.cancelAnimationFrame(this[field]);
+        this[field] = 0;
       }
     }
-    try {
-      this.reset_active_render_target_textures();
-    } catch (error) {
-      console.error(`makepad: terminal render cleanup failed: ${error}`);
+    // Readbacks in flight read objects of the lost context: they end here
+    // (their objects went with it) and every ticket fails as device lost.
+    for (const capture of this.pending_render_texture_captures || []) {
+      if (capture.finish) {
+        capture.finish(undefined, false);
+        continue;
+      }
+      capture.done = true;
+      if (capture.frame_id) {
+        window.cancelAnimationFrame(capture.frame_id);
+        capture.frame_id = 0;
+      }
     }
+    if (this.pending_render_texture_captures) {
+      this.pending_render_texture_captures.clear();
+    }
+    if (this.readback_api_active && this.to_wasm && this.to_wasm.ToWasmRenderTextureCapture) {
+      this.to_wasm.ToWasmRenderTextureCapture({
+        texture_id: 0, ticket_lo: 0xffffffff, ticket_hi: 0xffffffff,
+        width: 0, height: 0, offset: 0, complete: true,
+        data: new Uint8Array(0), error: "device lost",
+      });
+      // The loss can be found inside a message batch (a GL command that
+      // threw): the app hears of it after that batch.
+      queueMicrotask(() => this.do_wasm_pump());
+    }
+    this.reset_active_render_target_textures();
     this.render_target_rejected = true;
-    try {
-      this.stop_webgl_runtime();
-    } catch (error) {
-      console.error(`makepad: terminal runtime cleanup failed: ${error}`);
-    }
-    const diagnostic = {
-      physical_dpr: this.physical_device_dpi,
-      effective_dpr: this.window_info && this.window_info.dpi_factor,
-      canvas_width: this.canvas.width,
-      canvas_height: this.canvas.height,
-      css_width: this.window_info && this.window_info.inner_width,
-      css_height: this.window_info && this.window_info.inner_height,
-    };
-    console.error(
-      "makepad: WebGL context lost; rendering stopped until an explicit reload",
-      diagnostic,
+    console.warn(
+      "makepad: WebGL context lost; graphics paused until the browser restores it",
+      {
+        physical_dpr: this.physical_device_dpi,
+        effective_dpr: this.window_info && this.window_info.dpi_factor,
+        canvas_width: this.canvas.width,
+        canvas_height: this.canvas.height,
+      },
     );
     this.show_webgl_context_lost_message();
   }
 
+  // Forgets every object of a lost context: the restored one starts empty.
+  reset_webgl_objects() {
+    this.draw_shaders = [];
+    this.array_buffers = [];
+    this.instance_data_textures = new Map();
+    this.index_buffers = [];
+    this.vaos = [];
+    this.textures = [];
+    this.framebuffers = [];
+    this.reset_active_render_target_textures();
+    this._missing_shader_ids = new Set();
+    this._invalid_texture_upload_ids = new Set();
+    this._sampler_fallback_textures = new Map();
+    this._sampler_fallback_texture_failures = new Set();
+    this.pending_webgl_shader_count = 0;
+    this.pending_allocation_checks = [];
+    this.forget_lost_gpu_state();
+  }
+
+  handle_webgl_context_restored() {
+    if (!this.webgl_context_lost) {
+      return;
+    }
+    this.reset_webgl_objects();
+    // Extensions are enabled per context: ask again.
+    this.setup_webgl_context();
+    this.webgl_context_lost = false;
+    this.render_target_rejected = false;
+    this.hide_webgl_context_lost_message();
+    console.warn("makepad: WebGL context restored; rebuilding the GPU resources");
+    // A paused video's frame is uploaded again too, not only playing ones.
+    for (const player of Object.values(this.video_players || {})) {
+      player.texture_initialized = false;
+      player.needs_upload = true;
+    }
+    // The app forgets its GPU state, redraws everything and asks for a frame.
+    this.to_wasm.ToWasmGpuReset({});
+    this.do_wasm_pump();
+    if (Object.keys(this.video_players || {}).length !== 0) {
+      this.ensure_video_animation_frame();
+    }
+  }
+
   init_webgl_context() {
     if (this._webgl_context_initialized) {
-      return !!this.gl && !this.webgl_context_lost;
+      return !!this.gl;
     }
     this._webgl_context_initialized = true;
     var canvas = this.canvas;
@@ -3895,13 +4233,30 @@ export class WasmWebGL extends WasmWebBrowser {
       (event) => this.handle_webgl_context_lost(event),
       false,
     );
-    // Query immutable hardware ceilings exactly once, immediately after the
-    // context exists, then share the cached values with canvas and targets.
+    canvas.addEventListener(
+      "webglcontextrestored",
+      () => this.handle_webgl_context_restored(),
+      false,
+    );
+    // Live GPU bytes from the first allocation on (GPU-SAFETY.md).
+    if (typeof this.install_gpu_ledger === "function") {
+      this.install_gpu_ledger(gl);
+    }
+    this.setup_webgl_context();
+    this.bind_device_pixel_ratio_change();
+    return true;
+  }
+
+  // What is read or enabled per context: once at start and again after a
+  // restore (a restored context has no extensions enabled).
+  setup_webgl_context() {
+    const gl = this.gl;
+    // Query immutable hardware ceilings once per context, then share the
+    // cached values with canvas and targets.
     this.webgl_limits = makepad_query_webgl_limits(gl);
     this.max_vertex_attribs = makepad_webgl_vertex_attrib_limit(
       gl.getParameter(gl.MAX_VERTEX_ATTRIBS),
     );
-    this.bind_device_pixel_ratio_change();
 
     // With this extension compileShader/linkProgram only enqueue driver work.
     // Querying COMPILE_STATUS or LINK_STATUS before completion would turn the
@@ -3932,19 +4287,64 @@ export class WasmWebGL extends WasmWebBrowser {
       min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       min_uniform_vectors: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       float_color_targets: !!this.ext_color_buffer_float,
-      vendor: "unknown",
-      renderer: "unknown",
+      vendor: gl.getParameter(gl.VENDOR) || "unknown",
+      renderer: gl.getParameter(gl.RENDERER) || "unknown",
     };
-    let debug_info = gl.getExtension("WEBGL_debug_renderer_info");
-
-    if (debug_info) {
-      this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
-      this.gpu_info.renderer = gl.getParameter(
-        debug_info.UNMASKED_RENDERER_WEBGL,
-      );
+    // Firefox reports the real (sanitized) GPU through RENDERER and warns
+    // that WEBGL_debug_renderer_info is deprecated, so the extension is only
+    // asked for when RENDERER is the masked "WebKit WebGL" placeholder
+    // (Chrome, Safari).
+    if (/^(webkit webgl|unknown)$/i.test(this.gpu_info.renderer)) {
+      let debug_info = gl.getExtension("WEBGL_debug_renderer_info");
+      if (debug_info) {
+        this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
+        this.gpu_info.renderer = gl.getParameter(
+          debug_info.UNMASKED_RENDERER_WEBGL,
+        );
+      }
     }
-    return true;
   }
+}
+
+// The GL commands of the from-wasm protocol. While the context is lost they
+// do nothing (after the restore the app's ToWasmGpuReset redoes what they
+// would have made), and one that throws because the context went away
+// inside a batch marks the loss instead of taking the rest of the batch
+// (the app's other commands) down with it.
+const MAKEPAD_WEBGL_COMMANDS = [
+  "FromWasmCompileWebGLShader",
+  "FromWasmAllocIndexBuffer",
+  "FromWasmRetainedArrayBuffer",
+  "FromWasmRetainedArrayUpdate",
+  "FromWasmAllocArrayBuffer",
+  "FromWasmAllocVao",
+  "FromWasmFreeWebGLResources",
+  "FromWasmDrawCall",
+  "FromWasmAllocTextureImage2D_BGRAu8_32",
+  "FromWasmAllocTextureImage2D_Ru8",
+  "FromWasmAllocTextureImage2D_RGBAf32",
+  "FromWasmAllocTextureCube_BGRAu8_32",
+  "FromWasmAllocTextureArray_BGRAu8_32",
+  "FromWasmBeginRenderTexture",
+  "FromWasmBeginRenderCanvas",
+  "FromWasmSetDefaultDepthAndBlendMode",
+];
+for (const name of MAKEPAD_WEBGL_COMMANDS) {
+  const command = WasmWebGL.prototype[name];
+  WasmWebGL.prototype[name] = function (args) {
+    if (this.webgl_context_lost) {
+      return;
+    }
+    try {
+      return command.call(this, args);
+    } catch (error) {
+      if (this.gl && typeof this.gl.isContextLost === "function" && this.gl.isContextLost()) {
+        this.handle_webgl_context_lost();
+        return;
+      }
+      throw error;
+    }
+  };
 }
 
 function add_line_numbers_to_string(code) {

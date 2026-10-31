@@ -9,7 +9,7 @@ use std::io::prelude::*;
 use std::fs::File;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, mpsc::RecvTimeoutError, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -131,8 +131,6 @@ impl Drop for BodyBudgetGuard {
     }
 }
 
-#[cfg(feature = "script")]
-use makepad_script::*;
 
 #[derive(Clone)]
 pub struct HttpServer {
@@ -162,14 +160,10 @@ pub struct HttpServer {
     pub allowed_methods: Option<fn(&str) -> Option<&'static str>>,
 }
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone)]
 pub struct HttpServerResponse {
-    #[cfg_attr(feature = "script", live)]
     pub header: String,
-    #[cfg_attr(feature = "script", live)]
     pub body: Vec<u8>,
-    #[cfg_attr(feature = "script", rust)]
     payload: HttpServerResponsePayload,
 }
 
@@ -283,13 +277,50 @@ pub enum HttpServerRequest {
     },
 }
 
-pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHandle<()>> {
+/// A running server's accept loop. [`HttpServerThread::stop`] ends it: the listening socket
+/// closes, connections already accepted run to their own end, and the request channel closes
+/// once the last of them is done (a consumer's `recv` loop then ends by itself).
+pub struct HttpServerThread {
+    thread: std::thread::JoinHandle<()>,
+    stop: Arc<AtomicBool>,
+    /// where a connection wakes the accept loop that is blocked in `accept`
+    wake: SocketAddr,
+}
+
+impl HttpServerThread {
+    /// Ends the accept loop: sets the stop flag and wakes `accept` with a connection of its own,
+    /// which the loop drops unanswered. Returns at once; [`HttpServerThread::join`] waits.
+    pub fn stop(&self) {
+        if !self.stop.swap(true, Ordering::AcqRel) {
+            let _ = TcpStream::connect(self.wake);
+        }
+    }
+
+    pub fn join(self) -> std::thread::Result<()> {
+        self.thread.join()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.thread.is_finished()
+    }
+}
+
+pub fn start_http_server(http_server: HttpServer) -> Option<HttpServerThread> {
     let listener = if let Ok(listener) = TcpListener::bind(http_server.listen_address) {
         listener
     } else {
         println!("Cannot bind http server port");
         return None;
     };
+    let mut wake = listener.local_addr().ok()?;
+    if wake.ip().is_unspecified() {
+        wake.set_ip(match wake.ip() {
+            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        });
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = stop.clone();
 
     let ip_connections = Arc::new(Mutex::new(HashMap::new()));
     let body_ip_connections = Arc::new(Mutex::new(HashMap::new()));
@@ -312,6 +343,9 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
         std::thread::spawn(move || {
             let mut connection_counter = 0u64;
             for tcp_stream in listener.incoming() {
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
                 let mut tcp_stream = if let Ok(tcp_stream) = tcp_stream {
                     tcp_stream
                 } else {
@@ -337,7 +371,10 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                     }
                 };
                 let trusted_peer = http_server.trusted_proxy.is_some_and(|trusted| trusted(peer_ip));
-                let peer_limit = if trusted_peer {
+                // A process on this machine is not a remote client: the window
+                // manager's hosted apps all reach its server over loopback, and
+                // the per-address cap of 16 shed the 17th app with a 503.
+                let peer_limit = if trusted_peer || normalize_client_ip(peer_ip).is_loopback() {
                     MAX_CONNS_PER_TRUSTED_PROXY
                 } else {
                     MAX_CONNS_PER_IP
@@ -450,7 +487,7 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
             }
         })
     };
-    Some(listen_thread)
+    Some(HttpServerThread { thread: listen_thread, stop, wake })
 }
 
 fn handle_post(
@@ -910,7 +947,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "makepad-http-file-response-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            // a test thread is named by its path (`a::b::c`): no colons in a Windows file name
+            std::thread::current().name().unwrap_or("test").replace(':', "_")
         ));
         fs::write(&path, b"fixture").unwrap();
         let response = HttpServerResponse::from_file(String::new(), File::open(&path).unwrap(), 0, 7);

@@ -2,7 +2,7 @@ use {
     self::super::{web::CxOs, web_audio::WebAudioAccess, web_midi::WebMidiAccess},
     crate::{
         audio::*, cx::Cx, event::*, media_api::CxMediaApi, midi::*,
-        thread::{lock_from_ui, SignalToUI}, video::*,
+        thread::SignalToUI, video::*,
     },
     std::sync::{Arc, Mutex},
 };
@@ -12,7 +12,7 @@ impl Cx {
         self.os.handle_web_midi_signals();
 
         if self.os.media.web_audio_change.check_and_clear() {
-            let descs = lock_from_ui(&self.os.web_audio()).get_updated_descs();
+            let descs = self.os.web_audio().lock().unwrap_or_else(|e| e.into_inner()).get_updated_descs();
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent { descs }));
         }
 
@@ -81,23 +81,23 @@ impl CxMediaApi for Cx {
     }
 
     fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
-        lock_from_ui(&self.os.web_audio()).use_audio_inputs(&mut self.os, devices);
+        self.os.web_audio().lock().unwrap_or_else(|e| e.into_inner()).use_audio_inputs(&mut self.os, devices);
     }
 
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
-        lock_from_ui(&self.os.web_audio()).use_audio_outputs(&mut self.os, devices);
+        self.os.web_audio().lock().unwrap_or_else(|e| e.into_inner()).use_audio_outputs(&mut self.os, devices);
     }
 
     fn audio_output_box_os(&mut self, index: usize, f: AudioOutputFn) {
         let web_audio = self.os.web_audio();
-        let output_cb = lock_from_ui(&web_audio).audio_output_cb[index].clone();
-        *lock_from_ui(&output_cb) = Some(f);
+        let output_cb = web_audio.lock().unwrap_or_else(|e| e.into_inner()).audio_output_cb[index].clone();
+        *output_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
     fn audio_input_box(&mut self, index: usize, f: AudioInputFn) {
         let web_audio = self.os.web_audio();
-        let input_cb = lock_from_ui(&web_audio).audio_input_cb[index].clone();
-        *lock_from_ui(&input_cb) = Some(f);
+        let input_cb = web_audio.lock().unwrap_or_else(|e| e.into_inner()).audio_input_cb[index].clone();
+        *input_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
     fn video_input_box(&mut self, _index: usize, _f: VideoInputFn) {}

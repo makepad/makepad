@@ -1,3 +1,4 @@
+use makepad_relax::relax;
 use {
     self::super::{from_wasm::*, to_wasm::*, web_media::CxWebMedia},
     crate::{
@@ -21,7 +22,7 @@ use {
             StorageError, StorageEstimate, StorageList, StorageOp, StorageRequestId,
             StorageRequestKind, StorageResult, StorageStat,
         },
-        thread::{lock_from_ui, SignalToUI},
+        thread::SignalToUI,
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::{
@@ -52,11 +53,11 @@ impl Cx {
     }
 
     pub(crate) fn web_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
-        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
+        use crate::texture::ReadbackError;
         if self.os.readback_device_lost {
             self.fail_pending_readbacks(ReadbackError::DeviceLost); return;
         }
-        let work = self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
+        let work = self.take_readback_work(pass);
         for work in work {
             if work.width * work.height * 4 > work.reserved_bytes {
                 work.completion.finish(Err(ReadbackError::Backpressure)); continue;
@@ -258,6 +259,11 @@ impl Cx {
             match block_id {
                 live_id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
+                    self.a11y.set_consumers(if tw.a11y_enabled {
+                        makepad_a11y::consumer::OS
+                    } else {
+                        0
+                    });
                     #[cfg(target_feature = "atomics")]
                     crate::web_alloc::prefill_main_thread_cache();
                     self.cpu_cores = (tw.cpu_cores as usize).max(1);
@@ -279,7 +285,9 @@ impl Cx {
                         tw.gpu_info.vendor,
                         tw.gpu_info.renderer,
                     );
-                    self.os_type = tw.browser_info.into();
+                    let mut browser_info = tw.browser_info;
+                    browser_info.search = super::web_embed::page_query(browser_info.search);
+                    self.os_type = browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     self.os.native_window_geom = new_geom.clone();
@@ -297,6 +305,36 @@ impl Cx {
                     self.redraw_all();
                 }
 
+                live_id!(ToWasmA11yState) => {
+                    let tw = ToWasmA11yState::read_to_wasm(&mut to_wasm);
+                    if self.a11y.set_consumers(if tw.enabled {
+                        makepad_a11y::consumer::OS
+                    } else {
+                        0
+                    }) {
+                        self.redraw_all();
+                    }
+                }
+                live_id!(ToWasmA11yAction) => {
+                    let tw = ToWasmA11yAction::read_to_wasm(&mut to_wasm);
+                    match makepad_a11y::wire::decode_action(tw.bytes.as_slice()) {
+                        Ok(request) => {
+                            if let Some(window) = self
+                                .windows
+                                .current_id_zero()
+                                .filter(|id| id.0 == tw.window as usize)
+                            {
+                                self.dispatch_a11y_action(window, request);
+                            } else {
+                                self.platform_ops.push_back(CxOsOp::A11yActionDone {
+                                    req: request.req,
+                                    result: makepad_a11y::ActionResult::NoSuchNode as u8,
+                                });
+                            }
+                        }
+                        Err(error) => crate::error!("web accessibility action: {error}"),
+                    }
+                }
                 live_id!(ToWasmResizeWindow) => {
                     let tw = ToWasmResizeWindow::read_to_wasm(&mut to_wasm);
                     if let Some(event) = self.windows.web_resize_window_geom(
@@ -312,6 +350,8 @@ impl Cx {
                 live_id!(ToWasmAnimationFrame) => {
                     let tw = ToWasmAnimationFrame::read_to_wasm(&mut to_wasm);
                     is_animation_frame = Some(tw.time);
+                    // A page without threads: this frame may run one deferred job.
+                    crate::thread::frame_jobs_new_frame();
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(tw.time);
                     }
@@ -388,6 +428,12 @@ impl Cx {
                     self.call_event_handler(&Event::TextInput(tw.into()));
                 }
 
+                live_id!(ToWasmGpuInventory) => {
+                    let tw = ToWasmGpuInventory::read_to_wasm(&mut to_wasm);
+                    let json = gpu_inventory_json(&self.gpu_inventory());
+                    self.os.from_wasm(FromWasmGpuInventory { request_id: tw.request_id, json });
+                }
+
                 live_id!(ToWasmTextCopy) => {
                     let response = Rc::new(RefCell::new(None));
                     self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
@@ -397,6 +443,21 @@ impl Cx {
                     if let Some(response) = response {
                         self.os.from_wasm(FromWasmTextCopyResponse { response });
                     }
+                }
+
+                live_id!(ToWasmGpuFrameTimes) => {
+                    let tw = ToWasmGpuFrameTimes::read_to_wasm(&mut to_wasm);
+                    for (start, ms) in tw.starts.iter().zip(&tw.times) {
+                        self.os.gpu_timer_frame += 1;
+                        let frame = self.os.gpu_timer_frame;
+                        crate::gpu_frame_timer::record_pass(frame, "frame", start / 1000.0, (start + ms) / 1000.0);
+                        crate::gpu_frame_timer::finish_frame(frame);
+                    }
+                }
+
+                live_id!(ToWasmModuleLinked) => {
+                    let tw = ToWasmModuleLinked::read_to_wasm(&mut to_wasm);
+                    super::wasm_link::linked(tw.request_id, tw.slots, tw.error);
                 }
 
                 live_id!(ToWasmStorageResult) => {
@@ -554,6 +615,16 @@ impl Cx {
                     self.redraw_all();
                 }
 
+                live_id!(ToWasmGpuReset) => {
+                    // Nothing of the old context survived: every resource is
+                    // rebuilt from its CPU-side description on the next
+                    // paint, and the readbacks the loss failed may run again.
+                    self.webgl_forget_gpu_resources();
+                    self.os.readback_device_lost = false;
+                    self.call_event_handler(&Event::GpuReset);
+                    self.redraw_all();
+                }
+
                 live_id!(ToWasmRetainedUploadFailed) => {
                     let failed = ToWasmRetainedUploadFailed::read_to_wasm(&mut to_wasm);
                     let lists: Vec<_> = self.draw_lists.id_iter().collect();
@@ -590,6 +661,13 @@ impl Cx {
                     let tw = ToWasmWebGLShadersDone::read_to_wasm(&mut to_wasm);
                     self.os.webgl_shaders_pending =
                         self.os.webgl_shaders_pending.saturating_sub(tw.count);
+                    self.os.webgl_shaders_waiting =
+                        self.os.webgl_shaders_waiting.saturating_sub(tw.waited);
+                }
+
+                live_id!(ToWasmWebGLShadersLinked) => {
+                    let tw = ToWasmWebGLShadersLinked::read_to_wasm(&mut to_wasm);
+                    self.os.webgl_shaders_waiting += tw.count;
                 }
 
                 live_id!(ToWasmPaintDirty) => {
@@ -904,7 +982,7 @@ impl Cx {
 
                 live_id!(ToWasmAudioDeviceList) => {
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
-                    lock_from_ui(&self.os.web_audio()).to_wasm_audio_device_list(tw);
+                    self.os.web_audio().lock().unwrap_or_else(|e| e.into_inner()).to_wasm_audio_device_list(tw);
                 }
                 live_id!(ToWasmMidiPortList) => {
                     let tw = ToWasmMidiPortList::read_to_wasm(&mut to_wasm);
@@ -948,10 +1026,32 @@ impl Cx {
             if self.need_redrawing() {
                 self.call_draw_event(time);
             }
+            // Frame completion is polled by the frame loop, not left to the
+            // application: the upload budget frees a draw item's previous
+            // buffer only once the GPU is past its last draw, so a serial
+            // that is never polled turns the budget into a count of every
+            // upload (an animated scene filled it within seconds and every
+            // draw was refused from then on). Once before the repaint, so this
+            // frame's collection sees the last completion, and once after, so
+            // this frame's fence is issued at once.
+            let timing = crate::gpu_frame_timer::enabled();
+            if timing != self.os.gpu_timer_on {
+                self.os.gpu_timer_on = timing;
+                self.os.from_wasm(FromWasmGpuFrameTimer { on: timing });
+            }
+            self.poll_texture_lifetimes();
             // Draw-event teardown may have freed passes/lists/resources. Drain
             // them before computing and encoding this frame's pass graph.
             self.retire_webgl_resources();
             self.handle_repaint(time);
+            self.poll_texture_lifetimes();
+            // The script heap's collection, once a frame when it is due, as
+            // the desktop loop runs it (the web loop never collected).
+            self.with_vm(|vm| {
+                if vm.heap().needs_gc() {
+                    vm.gc();
+                }
+            });
         }
 
         if network_responses.len() != 0 {
@@ -1025,6 +1125,7 @@ impl Cx {
     }
 
     fn handle_platform_ops(&mut self) {
+        self.native_layer_retire();
         while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -1093,6 +1194,7 @@ impl Cx {
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
                 }
                 CxOsOp::SetNativeAppearance(_) => {}
+                CxOsOp::BoostFrameRate => {}
                 CxOsOp::SetWindowVisuals(_, _) => {}
                 CxOsOp::XrStartPresenting => {
                     self.os.from_wasm(FromWasmXrStartPresenting {});
@@ -1126,7 +1228,21 @@ impl Cx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::A11yUpdate { window, bytes } => {
+                    if self.windows.current_id_zero() == Some(window) {
+                        self.os.from_wasm(FromWasmA11yUpdate {
+                            window: window.0 as u32,
+                            bytes: WasmDataU8::from_vec_u8(bytes),
+                        });
+                    }
+                }
+                CxOsOp::A11yActionDone { req, result } => {
+                    self.os.from_wasm(FromWasmA11yActionDone {
+                        req_lo: req as u32,
+                        req_hi: (req >> 32) as u32,
+                        result: result as u32,
+                    });
+                }
                 CxOsOp::StartDragging(items) => {
                     self.drag_drop.start_internal_drag(items);
                 }
@@ -1410,13 +1526,10 @@ impl Cx {
                         video_id_hi: video_id.hi(),
                     });
                 }
-                CxOsOp::UpdateVideoSurfaceTexture(_) => {
-                    // On web, texture updates happen in the JS animation frame loop
-                }
-                // New ops — no-op on Web (not yet wired to JS)
-                CxOsOp::AttachCameraNativePreview { .. }
-                | CxOsOp::UpdateCameraNativePreview { .. }
-                | CxOsOp::DetachCameraNativePreview { .. } => {}
+
+                CxOsOp::NativeLayerCreate { id, .. } => self.native_layer_event(id, crate::native_layer::NativeLayerEventKind::Realized(crate::native_layer::NativeLayerMode::Unsupported)),
+                CxOsOp::NativeLayerOp { .. } => {}
+                CxOsOp::NativeLayerDestroy { id } => self.native_layer_event(id, crate::native_layer::NativeLayerEventKind::Closed),
                 CxOsOp::SetVideoVolume(_, _) => {}
                 CxOsOp::SetVideoPlaybackRate(_, _) => {}
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
@@ -1443,6 +1556,8 @@ impl Cx {
                     self.action(FileDialogAction::FileCancelled { id: dialog.id });
                     self.handle_actions();
                 }
+                // a page has no window chrome: the app-drawn caption's hit regions name nothing
+                CxOsOp::SetWindowCaption(..) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
@@ -1484,6 +1599,8 @@ impl CxOsApi for Cx {
 
         self.os.append_to_wasm_js(&[
             ToWasmInit::to_js_code(),
+            ToWasmA11yState::to_js_code(),
+            ToWasmA11yAction::to_js_code(),
             ToWasmResizeWindow::to_js_code(),
             ToWasmAnimationFrame::to_js_code(),
             ToWasmTouchUpdate::to_js_code(),
@@ -1496,12 +1613,17 @@ impl CxOsApi for Cx {
             ToWasmTextInput::to_js_code(),
             ToWasmTextCopy::to_js_code(),
             ToWasmStorageResult::to_js_code(),
+            ToWasmModuleLinked::to_js_code(),
+            ToWasmGpuFrameTimes::to_js_code(),
+            ToWasmGpuInventory::to_js_code(),
             ToWasmRenderTextureCapture::to_js_code(),
             ToWasmGpuCompletion::to_js_code(),
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
+            ToWasmGpuReset::to_js_code(),
             ToWasmWebGLShadersDone::to_js_code(),
+            ToWasmWebGLShadersLinked::to_js_code(),
             ToWasmRetainedUploadFailed::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
@@ -1536,6 +1658,8 @@ impl CxOsApi for Cx {
 
         self.os.append_from_wasm_js(&[
             FromWasmStartTimer::to_js_code(),
+            FromWasmA11yUpdate::to_js_code(),
+            FromWasmA11yActionDone::to_js_code(),
             FromWasmStopTimer::to_js_code(),
             FromWasmFullScreen::to_js_code(),
             FromWasmNormalScreen::to_js_code(),
@@ -1544,6 +1668,10 @@ impl CxOsApi for Cx {
             FromWasmSetMouseCursor::to_js_code(),
             FromWasmTextCopyResponse::to_js_code(),
             FromWasmStorageGet::to_js_code(),
+            FromWasmLinkModule::to_js_code(),
+            FromWasmGpuFrameTimer::to_js_code(),
+            FromWasmGpuInventory::to_js_code(),
+            FromWasmUnlinkSlots::to_js_code(),
             FromWasmStorageSet::to_js_code(),
             FromWasmStorageDelete::to_js_code(),
             FromWasmStorageList::to_js_code(),
@@ -1565,6 +1693,7 @@ impl CxOsApi for Cx {
             FromWasmWebSocketSendBinary::to_js_code(),*/
             FromWasmXrStartPresenting::to_js_code(),
             FromWasmXrStopPresenting::to_js_code(),
+            FromWasmSpreadFirstDraws::to_js_code(),
             FromWasmCompileWebGLShader::to_js_code(),
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmRetainedArrayBuffer::to_js_code(),
@@ -1577,6 +1706,7 @@ impl CxOsApi for Cx {
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
             FromWasmAllocTextureCube_BGRAu8_32::to_js_code(),
+            FromWasmAllocTextureArray_BGRAu8_32::to_js_code(),
             FromWasmBeginRenderTexture::to_js_code(),
             FromWasmRequestRenderTextureCapture::to_js_code(),
             FromWasmBeginRenderCanvas::to_js_code(),
@@ -1590,6 +1720,7 @@ impl CxOsApi for Cx {
             FromWasmQueryAudioDevices::to_js_code(),
             FromWasmStartAudioOutput::to_js_code(),
             FromWasmStopAudioOutput::to_js_code(),
+            FromWasmTestClock::to_js_code(),
             FromWasmQueryMidiPorts::to_js_code(),
             FromWasmPrepareVideoPlayback::to_js_code(),
             FromWasmBeginVideoPlayback::to_js_code(),
@@ -1603,6 +1734,9 @@ impl CxOsApi for Cx {
     }
 
     fn seconds_since_app_start(&self) -> f64 {
+        if let Some(time) = crate::remote::app_clock::now() {
+            return time;
+        }
         (Self::monotonic_now() - self.os.start_time).max(0.0)
     }
 
@@ -1657,11 +1791,24 @@ impl CxOsApi for Cx {
 
 impl Cx {
     pub fn time_now() -> f64 {
+        if let Some(time) = crate::remote::app_clock::epoch_now() {
+            return time;
+        }
         unsafe { js_time_now() }
     }
 
     pub fn monotonic_now() -> f64 {
         unsafe { js_monotonic_now() }
+    }
+
+    /// A page opened with `?test=1` hands a test harness the app's media clock
+    /// (`FromWasmTestClock`: `globalThis.makepad_test_clock`); otherwise nothing.
+    pub fn web_test_clock(&mut self, film: f64, rendered: f64, speed: f64) {
+        let OsType::Web(params) = &self.os_type else { return };
+        if !params.search.trim_start_matches('?').split('&').any(|p| p == "test=1") {
+            return;
+        }
+        self.os.from_wasm(FromWasmTestClock { film, rendered, speed });
     }
 }
 
@@ -1692,6 +1839,12 @@ pub struct CxOs {
     /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
     /// on those programs are dropped by the browser side.
     pub(crate) webgl_shaders_pending: usize,
+    /// Of those, the ones linked and waiting for their first draw
+    /// (`ToWasmWebGLShadersLinked`, first draws spread).
+    pub(crate) webgl_shaders_waiting: usize,
+    /// The page measures frames' GPU time (`gpu_frame_timer` is on).
+    pub(crate) gpu_timer_on: bool,
+    pub(crate) gpu_timer_frame: u64,
     pub(crate) completion_pending: u64,
 
     pub(crate) to_wasm_js: Vec<String>,
@@ -1721,6 +1874,9 @@ impl Default for CxOs {
             index_buffers: 0,
             vaos: 0,
             webgl_shaders_pending: 0,
+            webgl_shaders_waiting: 0,
+            gpu_timer_on: false,
+            gpu_timer_frame: 0,
             completion_pending: 0,
 
             to_wasm_js: Vec::new(),
@@ -1758,6 +1914,9 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
     let mut out = String::new();
 
     out.push_str("return {\n");
+    out.push_str("a11y: ");
+    out.push_str(&makepad_a11y::wire_js::javascript());
+    out.push_str(",\n");
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
     for to_wasm in &cx.os.to_wasm_js {
         out.push_str(to_wasm);
@@ -1790,6 +1949,7 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
 }
 
 #[export_name = "wasm_init_panic_hook"]
+#[relax(keep_reachable)]
 pub unsafe extern "C" fn init_panic_hook() {
     pub fn panic_hook(info: &panic::PanicHookInfo) {
         #[cfg(target_arch = "wasm32")]
@@ -1809,3 +1969,40 @@ pub unsafe extern "C" fn init_panic_hook() {
 
 #[no_mangle]
 pub static mut BASE_ADDR: usize = 10;
+
+/// The inventory as the page's `makepad_gpu_inventory()` resolves it:
+/// `{textures: [{texture_id, kind, format, w, h, bytes, owner, dropped}], retired_texture_bytes,
+/// retained_allocation_bytes, geometry_bytes}`; `texture_id` is the page's
+/// texture slot, so its GL ledger joins on it.
+fn gpu_inventory_json(inv: &crate::gpu_inventory::GpuInventory) -> String {
+    fn esc(s: &str) -> String {
+        let mut o = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '"' => o.push_str("\\\""),
+                '\\' => o.push_str("\\\\"),
+                c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+                c => o.push(c),
+            }
+        }
+        o
+    }
+    let mut out = String::from("{\"textures\":[");
+    for (k, t) in inv.textures.iter().enumerate() {
+        if k > 0 {
+            out.push(',');
+        }
+        let kind = if t.depth { "depth" } else if t.render_target { "target" } else { "data" };
+        out.push_str(&format!(
+            "{{\"texture_id\":{},\"kind\":\"{}\",\"format\":\"{}\",\"w\":{},\"h\":{},\"bytes\":{},\"owner\":\"{}\",\"dropped\":{}}}",
+            t.slot, kind, t.format, t.width, t.height, t.bytes(), esc(&t.name()), t.state == crate::gpu_inventory::GpuTextureState::FreeSlotHeld
+        ));
+    }
+    out.push_str(&format!(
+        "],\"retired_texture_bytes\":{},\"retained_allocation_bytes\":{},\"geometry_bytes\":{}}}",
+        inv.retired_texture_bytes,
+        inv.retained_allocation_bytes,
+        inv.geometry_gpu_bytes.unwrap_or(inv.geometry_cpu_bytes)
+    ));
+    out
+}

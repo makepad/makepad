@@ -70,14 +70,20 @@ workspace.members = [
     # === mp4 sample index for range-streaming playback ===
     "libs/mp4_index",
     # === necessary tools ===
+    "platform/video",
     "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
+    "libs/remote",
     "libs/stack",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
+    "tools/run/boot",
     "tools/run/fixture/diffpkg/tables",
     "tools/run/android_exe",
     "tools/run/android_host/fixture",
+    "libs/gpu_trace",
+    "libs/prof_stream",
+    "libs/relax/compiler",
     "libs/relax/base",
     "libs/relax/backend",
     "libs/relax/codegen",
@@ -88,6 +94,7 @@ workspace.members = [
     "libs/relax/types",
     "tools/run/fixture",
     "libs/relax/lex",
+    "libs/system_speech",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
     # Relax data-structure microbenchmarks (Vec, iterators, HashMap, BTreeMap, sort, strings, bounds loops)
     "libs/relax/compiler/dsbench",
@@ -95,6 +102,7 @@ workspace.members = [
     # === tests ===
     "platform/shader",
     "platform/script/audio_aot",
+    "platform/hal",
     "platform/script/compute",
     "platform/script/imports",
     "platform/script/compute_sched",

@@ -3,14 +3,16 @@
 //! AVAssetReader based: an mp4 path in, decoded NV12 frames + 16-bit PCM
 //! audio out. AVAssetReaderTrackOutput decodes through VideoToolbox, which
 //! uses the hardware decode engine on Apple Silicon for both H.264 and
-//! H.265. Output is requested as kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-//! (NV12), matching the facade's frame type; CoreVideo hands back buffers at
+//! H.265. Output is requested as 8-bit biplanar 4:2:0 (NV12) in the stream's
+//! own range (video or full), matching the facade's frame type, with no colour
+//! conversion: the stream's colour comes from its format description and each
+//! buffer's attachments ([`crate::VideoColor`]); CoreVideo hands back buffers at
 //! display size (codec padding lives past the row stride), so the repack to a
 //! tight buffer doubles as the aperture crop.
 
 use {
     crate::{
-        DecodedAudioChunk, DecodedVideoFrame, VideoFileCodec, VideoFileError, VideoFileInfo,
+        DecodedAudioChunk, DecodedVideoFrame, VideoColor, VideoFileCodec, VideoFileError, VideoFileInfo, VideoRange,
     },
     makepad_apple_sys::*,
     std::ffi::c_void,
@@ -68,6 +70,65 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
         b = t;
     }
     a.max(1)
+}
+
+/// An H.273 code point of a CoreVideo colour string (2 = unspecified when absent).
+unsafe fn code_point(value: *const c_void, of: unsafe extern "C" fn(CFStringRef) -> i32) -> u32 {
+    if value.is_null() {
+        return 2;
+    }
+    match of(value as CFStringRef) {
+        0 => 2,
+        code => code as u32,
+    }
+}
+
+/// The colour a video format description declares.
+pub(crate) unsafe fn format_color(desc: CMFormatDescriptionRef, width: u32, height: u32) -> VideoColor {
+    if desc.is_null() {
+        return VideoColor::guess(width, height);
+    }
+    let ext = |key: CFStringRef| CMFormatDescriptionGetExtension(desc, key);
+    let full = ext(kCMFormatDescriptionExtension_FullRangeVideo) == kCFBooleanTrue as *const c_void;
+    VideoColor::from_h273(
+        code_point(ext(kCVImageBufferColorPrimariesKey), CVColorPrimariesGetIntegerCodePointForString),
+        code_point(ext(kCVImageBufferTransferFunctionKey), CVTransferFunctionGetIntegerCodePointForString),
+        code_point(ext(kCVImageBufferYCbCrMatrixKey), CVYCbCrMatrixGetIntegerCodePointForString),
+        full,
+        width,
+        height,
+    )
+}
+
+/// The colour of one decoded buffer: its attachments where it has them, else
+/// the stream's, in the range of its pixel format.
+pub(crate) unsafe fn buffer_color(image: CVPixelBufferRef, stream: VideoColor, width: u32, height: u32) -> VideoColor {
+    let attachment = |key: CFStringRef| {
+        let value = CVBufferCopyAttachment(image, key, std::ptr::null_mut());
+        value
+    };
+    let (p, t, m) = (attachment(kCVImageBufferColorPrimariesKey), attachment(kCVImageBufferTransferFunctionKey), attachment(kCVImageBufferYCbCrMatrixKey));
+    let range = if CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange { VideoRange::Full } else { VideoRange::Limited };
+    let color = if p.is_null() && t.is_null() && m.is_null() {
+        stream
+    } else {
+        let (sp, st, sm, _) = stream.h273();
+        let or = |v: u32, s: u8| if v == 2 { s as u32 } else { v };
+        VideoColor::from_h273(
+            or(code_point(p, CVColorPrimariesGetIntegerCodePointForString), sp),
+            or(code_point(t, CVTransferFunctionGetIntegerCodePointForString), st),
+            or(code_point(m, CVYCbCrMatrixGetIntegerCodePointForString), sm),
+            false,
+            width,
+            height,
+        )
+    };
+    for v in [p, t, m] {
+        if !v.is_null() {
+            CFRelease(v);
+        }
+    }
+    color.with_range(range)
 }
 
 /// AVAssetReaderStatus values.
@@ -133,6 +194,7 @@ unsafe fn build_reader(
     video_track: Option<ObjcId>,
     audio_track: Option<ObjcId>,
     start_100ns: Option<i64>,
+    full_range: bool,
 ) -> Result<ReaderSet, VideoFileError> {
     let mut error: ObjcId = nil;
     let reader: ObjcId =
@@ -157,10 +219,9 @@ unsafe fn build_reader(
     // attaches no video output at all, so nothing is demuxed for it.
     let mut video_output_obj: ObjcId = nil;
     if let Some(video_track) = video_track {
-        let nv12_number: ObjcId = msg_send![
-            class!(NSNumber),
-            numberWithUnsignedInt: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        ];
+        // The stream's own range: asking for the other one would convert it.
+        let format = if full_range { kCVPixelFormatType_420YpCbCr8BiPlanarFullRange } else { kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange };
+        let nv12_number: ObjcId = msg_send![class!(NSNumber), numberWithUnsignedInt: format];
         let keys: &[ObjcId] = &[kCVPixelBufferPixelFormatTypeKey as ObjcId];
         let values: &[ObjcId] = &[nv12_number];
         let video_settings: ObjcId = msg_send![
@@ -307,7 +368,7 @@ impl MacosVideoFileDecoder {
             }
             let duration: CMTime = msg_send![asset, duration];
             let duration_100ns = cmtime_to_100ns(duration);
-            let set = build_reader(asset, None, Some(audio_track_obj), None)?;
+            let set = build_reader(asset, None, Some(audio_track_obj), None, false)?;
             Ok(Self {
                 asset: RcObjcId::from_unowned(NonNull::new(asset).unwrap()),
                 video_track: None,
@@ -326,6 +387,7 @@ impl MacosVideoFileDecoder {
                     has_audio: true,
                     audio_sample_rate,
                     audio_channels,
+                    color: VideoColor::BT709,
                 },
                 video_eos: false,
                 audio_eos: false,
@@ -362,11 +424,13 @@ impl MacosVideoFileDecoder {
             let mut video_codec_fourcc = 0u32;
             let mut coded_width = 0u32;
             let mut coded_height = 0u32;
+            let mut video_desc: CMFormatDescriptionRef = std::ptr::null_mut();
             let format_descs: ObjcId = msg_send![video_track, formatDescriptions];
             let format_desc_count: usize = msg_send![format_descs, count];
             if format_desc_count > 0 {
                 let desc: CMFormatDescriptionRef =
                     msg_send![format_descs, objectAtIndex: 0usize];
+                video_desc = desc;
                 video_codec_fourcc = CMFormatDescriptionGetMediaSubType(desc);
                 video_codec = match video_codec_fourcc {
                     f if f == four_char_as_u32("hvc1") || f == four_char_as_u32("hev1") => {
@@ -450,11 +514,13 @@ impl MacosVideoFileDecoder {
                 audio_channels = channels;
             }
 
+            let color = format_color(video_desc, width, height);
             let set = build_reader(
                 asset,
                 Some(video_track),
                 (audio_track_obj != nil).then_some(audio_track_obj),
                 None,
+                color.range == VideoRange::Full,
             )?;
             // The track only counts as audio if the reader took its output;
             // dropping it here also stops `seek` from re-attempting it.
@@ -483,6 +549,7 @@ impl MacosVideoFileDecoder {
                     has_audio,
                     audio_sample_rate,
                     audio_channels,
+                    color,
                 },
                 video_eos: false,
                 audio_eos: false,
@@ -579,6 +646,7 @@ impl MacosVideoFileDecoder {
             }
 
             CVPixelBufferUnlockBaseAddress(image, K_CV_PIXEL_BUFFER_LOCK_READ_ONLY);
+            let color = buffer_color(image, self.info.color, self.info.width, self.info.height);
             CFRelease(sample as *const c_void);
 
             Ok(Some(DecodedVideoFrame {
@@ -586,6 +654,7 @@ impl MacosVideoFileDecoder {
                 width: self.info.width,
                 height: self.info.height,
                 nv12,
+                color,
             }))
         }
     }
@@ -670,6 +739,7 @@ impl MacosVideoFileDecoder {
                 self.video_track.as_ref().map(|t| t.as_id()),
                 self.audio_track.as_ref().map(|t| t.as_id()),
                 Some(start),
+                self.info.color.range == VideoRange::Full,
             )?;
             // Only now that the replacement is reading: a failed build leaves
             // the decoder exactly where it was.

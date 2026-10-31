@@ -11,7 +11,10 @@ pub const MIN_WINDOW_SIZE: Vec2d = Vec2d { x: 200.0, y: 120.0 };
 /// The rectangles are in the same coordinate space as the platform's window-position API,
 /// so a backend must build them from the same system calls it positions windows with:
 /// physical pixels with a top-left origin on Windows and X11, points with Cocoa's
-/// bottom-left origin on macOS.
+/// bottom-left origin on macOS. On Linux's direct backend the rectangles are window
+/// coordinates of the wide desktop — native pixels divided by the main window's effective
+/// DPI factor (which includes any DPI override) — with a top-left origin; other Linux
+/// backends return no screens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScreenGeom {
     /// The display's full extent.
@@ -21,6 +24,51 @@ pub struct ScreenGeom {
     pub work_area: Rect,
     /// Whether this is the system's primary display.
     pub is_primary: bool,
+}
+
+/// Every display attached right now, in the platform's window-position space:
+/// what an app that puts a picture on a second screen chooses from. Under the HAL the window
+/// system's last look. A HAL direct desktop reads its session's event-fed cache
+/// on the Cx thread; other backends use their host screen inventory.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn screens() -> Vec<ScreenGeom> {
+    #[cfg(target_os = "linux")]
+    if let Some(screens) = HAL_DIRECT_SCREENS.with(|s| s.borrow().as_ref().map(|s| {
+        // The shell reports native points (pixels / the shell's DPI); a DPI override on
+        // the desktop window (e.g. a saved display scale) changes the window's points.
+        let scale = HAL_DIRECT_SCALE.with(|f| f.get());
+        let at = |r: Rect| Rect { pos: r.pos * scale, size: r.size * scale };
+        s.iter().map(|(_, g)| ScreenGeom { bounds: at(g.bounds), work_area: at(g.work_area), is_primary: g.is_primary }).collect()
+    })) {
+        return screens;
+    }
+    let rect = |r: [f64; 4]| Rect { pos: dvec2(r[0], r[1]), size: dvec2(r[2], r[3]) };
+    let mut all = vec![makepad_hal::ScreenInfo::default(); 8];
+    loop {
+        let n = makepad_hal::hal_screens(&mut all) as usize;
+        if n <= all.len() {
+            all.truncate(n);
+            break;
+        }
+        all.resize(n, makepad_hal::ScreenInfo::default());
+    }
+    all.into_iter()
+        .map(|s| ScreenGeom { bounds: rect(s.bounds), work_area: rect(s.work_area), is_primary: s.is_primary })
+        .collect()
+}
+
+/// A backend with no display list to offer answers with none; a caller
+/// then keeps its window where the system put it.
+#[cfg(target_arch = "wasm32")]
+pub fn screens() -> Vec<ScreenGeom> {
+    Vec::new()
+}
+
+/// Other platforms do not expose Linux connector names.
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)] // not read inside the platform crate; a host process reads it
+pub fn linux_screen_names() -> Vec<String> {
+    Vec::new()
 }
 
 /// Area shared by two rectangles; zero when they do not overlap.
@@ -562,4 +610,30 @@ mod tests {
         );
         assert_eq!(clamp_point_to_screens(&screens, dvec2(40.0, 50.0)), dvec2(40.0, 50.0));
     }
+}
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    // Free screen APIs are called on the session's Cx thread. Each domain has
+    // its own cache, filled by DirectDisplays rather than the host's statics.
+    static HAL_DIRECT_SCREENS: std::cell::RefCell<Option<Vec<(String, ScreenGeom)>>> = const { std::cell::RefCell::new(None) };
+    /// Native DPI / effective DPI of the direct desktop's window.
+    static HAL_DIRECT_SCALE: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Set from the direct desktop window's native and effective DPI factors whenever
+/// the inventory arrives or that window's DPI override changes.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_hal_direct_scale(scale: f64) {
+    if scale.is_finite() && scale > 0.0 { HAL_DIRECT_SCALE.with(|f| f.set(scale)); }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn set_hal_direct_screens(screens: Option<Vec<(String, ScreenGeom)>>) {
+    HAL_DIRECT_SCREENS.with(|s| *s.borrow_mut() = screens);
+}
+
+#[cfg(target_os = "linux")]
+pub fn linux_screen_names() -> Vec<String> {
+    HAL_DIRECT_SCREENS.with(|s| s.borrow().as_ref().map_or_else(Vec::new, |s| s.iter().map(|(n, _)| n.clone()).collect()))
 }

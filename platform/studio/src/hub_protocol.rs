@@ -1,5 +1,4 @@
 use crate::shared_framebuf::PresentableDraw;
-use crate::studio::WidgetSnapshot;
 use makepad_error_log::LogLevel;
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
@@ -143,15 +142,14 @@ pub enum ClientToHub {
         build_id: QueryId,
         kind_id: Option<u32>,
     },
-    WidgetTreeDump {
+    A11yState {
         build_id: QueryId,
+        consumers: u32,
     },
-    WidgetQuery {
+    A11yAction {
         build_id: QueryId,
-        query: String,
-    },
-    WidgetSnapshot {
-        build_id: QueryId,
+        window: usize,
+        bytes: Vec<u8>,
     },
     RunViewInput {
         build_id: QueryId,
@@ -361,21 +359,10 @@ pub enum HubToClient {
         width: u32,
         height: u32,
     },
-    WidgetTreeDump {
-        query_id: QueryId,
+    A11yUpdate {
         build_id: QueryId,
-        dump: String,
-    },
-    WidgetQuery {
-        query_id: QueryId,
-        build_id: QueryId,
-        query: String,
-        rects: Vec<String>,
-    },
-    WidgetSnapshot {
-        query_id: QueryId,
-        build_id: QueryId,
-        widgets: Vec<WidgetSnapshot>,
+        window: usize,
+        bytes: Vec<u8>,
     },
 
     // === RunView ===

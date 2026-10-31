@@ -19,6 +19,8 @@ pub enum MacosMenu {
         shift: bool,
         key: KeyCode,
         enabled: bool,
+        /// Also in the Dock icon's menu (macOS).
+        dock: bool,
     },
     Sub {
         name: String,

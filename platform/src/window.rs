@@ -150,19 +150,18 @@ impl ScriptHook for MacosWindowConfig {
         let mut has_full_screen_auxiliary = false;
 
         if let Some(obj) = value.as_object() {
-            vm.map_mut_with(obj, |_vm, map| {
-                for (key, _) in map.iter() {
-                    match key.as_id() {
-                        Some(id!(level)) => has_level = true,
-                        Some(id!(non_activating)) => has_non_activating = true,
-                        Some(id!(miniaturizable)) => has_miniaturizable = true,
-                        Some(id!(resizable)) => has_resizable = true,
-                        Some(id!(join_all_spaces)) => has_join_all_spaces = true,
-                        Some(id!(full_screen_auxiliary)) => has_full_screen_auxiliary = true,
-                        _ => {}
-                    }
+            for entry in vm.heap().map_entries(obj) {
+                let key = entry.key;
+                match key.as_id() {
+                    Some(id!(level)) => has_level = true,
+                    Some(id!(non_activating)) => has_non_activating = true,
+                    Some(id!(miniaturizable)) => has_miniaturizable = true,
+                    Some(id!(resizable)) => has_resizable = true,
+                    Some(id!(join_all_spaces)) => has_join_all_spaces = true,
+                    Some(id!(full_screen_auxiliary)) => has_full_screen_auxiliary = true,
+                    _ => {}
                 }
-            });
+            }
         }
 
         if !has_level {
@@ -225,34 +224,6 @@ impl WindowHandle {
 #[derive(Default)]
 pub struct CxWindowPool(IdPool<CxWindow>);
 impl CxWindowPool {
-    /// A hosted (stdin-loop) window's geometry as the HOST reports it: the
-    /// host's logical size at the host's dpi. Recorded as the window's native
-    /// geometry and converted into layout points through any `dpi_override`
-    /// the app has set — exactly what a native window's geometry goes
-    /// through — so an app that lays out at its own scale (a console that
-    /// shrinks to fit a tile) still gets the host's pointer coordinates
-    /// remapped into its points (`remap_dpi_override`).
-    #[cfg(any(
-        test,
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android",
-        all(target_os = "linux", not(target_env = "ohos"), any(not(linux_direct), use_vulkan)),
-        gpusim,
-    ))]
-    pub(crate) fn stdin_apply_native_geom(
-        &mut self,
-        window_id: WindowId,
-        native_geom: WindowGeom,
-    ) -> crate::event::WindowGeomChangeEvent {
-        let window = &mut self[window_id];
-        let old_geom = window.window_geom.clone();
-        window.os_dpi_factor = Some(native_geom.dpi_factor);
-        let new_geom = window.native_window_geom_to_layout(native_geom);
-        window.window_geom = new_geom.clone();
-        crate::event::WindowGeomChangeEvent { window_id, old_geom, new_geom }
-    }
-
     fn alloc(&mut self) -> WindowHandle {
         WindowHandle(self.0.alloc())
     }
@@ -268,7 +239,9 @@ impl CxWindowPool {
     pub fn window_id_contains(&self, pos: Vec2d) -> (WindowId, Vec2d) {
         for (index, item) in self.0.pool.iter().enumerate() {
             let window = &item.item;
-            let position = window.layout_vec2d_to_native_points(window.window_geom.position);
+            // Position is already in native points; only the in-window size is scaled by
+            // native_window_geom_to_layout (including for host-supplied geometry).
+            let position = window.window_geom.position;
             let size = window.layout_vec2d_to_native_points(window.window_geom.inner_size);
             if pos.x >= position.x
                 && pos.y >= position.y
@@ -281,27 +254,7 @@ impl CxWindowPool {
         let first = &self.0.pool[0];
         return (
             WindowId(0, first.generation),
-            first.item.layout_vec2d_to_native_points(first.item.window_geom.position),
-        );
-    }
-
-    pub fn relative_to_window_id(&self, pos: Vec2d) -> (WindowId, Vec2d) {
-        for (index, item) in self.0.pool.iter().enumerate() {
-            let window = &item.item;
-            if pos.x >= window.window_geom.position.x
-                && pos.y >= window.window_geom.position.y
-                && pos.x <= window.window_geom.position.x + window.window_geom.inner_size.x
-                && pos.y <= window.window_geom.position.x + window.window_geom.inner_size.y
-            {
-                return (
-                    WindowId(index, item.generation),
-                    window.window_geom.position,
-                );
-            }
-        }
-        return (
-            WindowId(0, self.0.pool[0].generation),
-            self.0.pool[0].item.window_geom.position,
+            first.item.window_geom.position,
         );
     }
 
@@ -462,12 +415,35 @@ pub(crate) fn default_app_id() -> String {
         .unwrap_or_else(|| "Makepad".to_string())
 }
 
+/// The lane a test instance runs for (`MAKEPAD_TEST_LANE`, set by devhub for every lane run).
+pub fn test_lane() -> Option<&'static str> {
+    static LANE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LANE.get_or_init(|| {
+        let lane: String = std::env::var("MAKEPAD_TEST_LANE").ok()?.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).take(48).collect();
+        (!lane.is_empty()).then_some(lane)
+    })
+    .as_deref()
+}
+
+/// A window's title as people see it: a lane's test instance says so first (`TEST: lane <name>`,
+/// in the OS title and the app-drawn caption alike), an agent's `--remote` run says so last.
+pub fn badge_window_title(title: String) -> String {
+    let title = match test_lane() {
+        Some(lane) => {
+            let badge = format!("TEST: lane {lane} · ");
+            if title.starts_with(&badge) { title } else { format!("{badge}{title}") }
+        }
+        None => title,
+    };
+    crate::remote::tag_window_title(title)
+}
+
 impl WindowHandle {
     pub fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
-        cxwindow.create_title = crate::remote::tag_window_title("Makepad".to_string());
+        cxwindow.create_title = crate::window::badge_window_title("Makepad".to_string());
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
         cxwindow.create_app_id = default_app_id();
@@ -567,6 +543,10 @@ pub struct ScriptWindowHandle {
     pub backdrop_intensity: f32,
     #[live(MacosWindowConfig::default())]
     pub macos: MacosWindowConfig,
+    /// A tray app's dropdown (`WindowHandle::configure_dropdown`); give it `create_on_start: false`
+    /// on the `Window` and show it with `show_at_tray`.
+    #[live]
+    pub dropdown: bool,
     /// Wayland only. Server-side decorations are requested by default; set
     /// this to `ClientSide` to explicitly use Makepad's window frame.
     #[live(WaylandDecorationPreference::ServerSide)]
@@ -610,6 +590,17 @@ impl ScriptHook for ScriptWindowHandle {
             cx.windows[window_id].create_position = self.position;
         }
         cx.windows[window_id].kind_id = self.kind_id;
+        // `--window WxH@scale` sizes the first window before it exists, so its
+        // first frame is already at the capture size. The native size here
+        // assumes a display at scale 1; backends that know the display's
+        // scale before creating the window (macOS) divide it out.
+        if !cx.windows[window_id].is_created {
+            if let Some(launch) = crate::remote::app_clock::launch_window_for(window_id.id()) {
+                let (width, height) = launch.native_size(1.0);
+                cx.windows[window_id].create_inner_size = Some(dvec2(width, height));
+                self.dpi_override = Some(launch.scale);
+            }
+        }
         if self.dpi_override.is_some() {
             cx.windows[window_id].dpi_override = self.dpi_override;
         }
@@ -621,6 +612,9 @@ impl ScriptHook for ScriptWindowHandle {
         .normalized();
         let macos = self.macos.normalized();
         cx.windows[window_id].macos = macos;
+        if !cx.windows[window_id].is_created {
+            cx.windows[window_id].dropdown = self.dropdown;
+        }
         if !cx.windows[window_id].is_created {
             cx.windows[window_id].wayland_decorations = self.wayland_decorations;
         }
@@ -643,7 +637,7 @@ impl ScriptHook for ScriptWindowHandle {
 
 impl WindowHandle {
     pub fn set_title(&self, cx: &mut Cx, title: String) {
-        let title = crate::remote::tag_window_title(title);
+        let title = crate::window::badge_window_title(title);
         let window_id = self.window_id();
         if cx.windows[window_id].create_title == title {
             return;
@@ -672,11 +666,38 @@ impl WindowHandle {
         title: String,
     ) {
         let window = &mut cx.windows[self.window_id()];
-        window.create_title = crate::remote::tag_window_title(title);
+        window.create_title = crate::window::badge_window_title(title);
         window.create_position = Some(position);
         window.create_inner_size = Some(inner_size);
         window.is_fullscreen = is_fullscreen;
     }
+    /// Makes this (not yet created) window a tray app's dropdown: borderless, not resizable,
+    /// above the other windows, without a Dock / taskbar entry of its own. It is not created at
+    /// start (`create_on_start: false` on a `Window`): `show_at_tray` creates it on first use.
+    /// When it loses the focus (a click anywhere else) the app gets `Event::PopupDismissed`
+    /// for it and hides it (`set_visible(cx, false)`); Esc is the app's to handle too.
+    pub fn configure_dropdown(&mut self, cx: &mut Cx) {
+        let window = &mut cx.windows[self.window_id()];
+        if !window.is_created {
+            window.dropdown = true;
+        }
+    }
+
+    /// Shows dropdown window (`configure_dropdown`) at tray `tray`'s icon, `size` points large:
+    /// under the macOS status item, next to the Windows notification icon, fitted into that
+    /// screen's visible area, in front and with the focus. Again while it shows (a new size)
+    /// re-places it. Creates the window the first time. Where the desktop has no tray
+    /// (`Cx::has_tray` false) it shows the window where the window system puts it.
+    pub fn show_at_tray(&mut self, cx: &mut Cx, tray: LiveId, size: Vec2d) {
+        let id = self.window_id();
+        if !cx.windows[id].is_created && !cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::CreateWindow(w) if *w == id)) {
+            cx.windows[id].create_inner_size = Some(size);
+            cx.platform_ops.push_back(CxOsOp::CreateWindow(id));
+        }
+        cx.platform_ops.retain(|op| !matches!(op, CxOsOp::HideWindow(w) | CxOsOp::ShowWindow(w) | CxOsOp::ShowWindowAtTray(w, ..) if *w == id));
+        cx.platform_ops.push_back(CxOsOp::ShowWindowAtTray(id, tray, size));
+    }
+
     pub fn configure_macos_window(&mut self, cx: &mut Cx, config: MacosWindowConfig) {
         cx.windows[self.window_id()].macos = config.normalized();
     }
@@ -727,6 +748,12 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::NormalizeWindow(self.window_id()));
     }
 
+    /// A double click on the window's caption makes it fullscreen (`true`) or maximises it
+    /// (`false`, the default); see `CxWindow::double_click_fullscreen`.
+    pub fn set_double_click_fullscreen(&self, cx: &mut Cx, on: bool) {
+        cx.windows[self.window_id()].double_click_fullscreen = on;
+    }
+
     pub fn can_fullscreen(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.can_fullscreen
     }
@@ -735,7 +762,9 @@ impl WindowHandle {
         cx.windows[self.window_id()].window_geom.is_fullscreen
     }
 
-    /// Whether this Wayland window is using Makepad-drawn decorations.
+    /// Whether this window is using Makepad-drawn decorations: Wayland
+    /// client-side decorations, or an X11 window created after
+    /// `Cx::set_linux_custom_window_chrome(true)`.
     pub fn uses_wayland_client_side_decorations(&self, cx: &Cx) -> bool {
         cx.windows[self.window_id()].uses_client_side_decorations
     }
@@ -819,8 +848,38 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::RestoreWindow(self.window_id()));
     }
 
+    /// What the window's own close button does: the app is asked (`Event::WindowCloseRequested`,
+    /// a tray app hides the window there) and the window closes when it accepts. `close` closes
+    /// it without asking.
+    pub fn request_close(&mut self, cx: &mut Cx) {
+        cx.push_unique_platform_op(CxOsOp::RequestCloseWindow(self.window_id()));
+    }
+
     pub fn close(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::CloseWindow(self.window_id()));
+    }
+
+    /// Shows the window: made first when it is not yet (`create_on_start: false`), else shown
+    /// again in front like `set_visible(cx, true)`. A tray app makes its regular window this way
+    /// when the person asks for it.
+    pub fn show(&mut self, cx: &mut Cx) {
+        let id = self.window_id();
+        if !cx.windows[id].is_created {
+            if !cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::CreateWindow(w) if *w == id)) {
+                cx.platform_ops.push_back(CxOsOp::CreateWindow(id));
+            }
+            return;
+        }
+        self.set_visible(cx, true);
+    }
+
+    /// Hides the window (it keeps its state and comes back with `set_visible(cx, true)`), or
+    /// shows it again in front of the others with the app activated. A tray app hides its
+    /// window on `WindowCloseRequested` (`accept_close.set(false)`) and shows it from its menu.
+    pub fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        let id = self.window_id();
+        cx.platform_ops.retain(|op| !matches!(op, CxOsOp::HideWindow(w) | CxOsOp::ShowWindow(w) | CxOsOp::ShowWindowAtTray(w, ..) if *w == id));
+        cx.platform_ops.push_back(if visible { CxOsOp::ShowWindow(id) } else { CxOsOp::HideWindow(id) });
     }
 }
 
@@ -858,6 +917,8 @@ pub struct CxWindow {
     pub main_pass_id: Option<DrawPassId>,
     pub is_fullscreen: bool,
     pub is_popup: bool,
+    /// a tray app's dropdown (`WindowHandle::configure_dropdown`)
+    pub dropdown: bool,
     pub popup_parent: Option<WindowId>,
     pub popup_position: Option<Vec2d>,
     pub popup_size: Option<Vec2d>,
@@ -867,13 +928,20 @@ pub struct CxWindow {
     pub backdrop_intensity: f32,
     pub macos: MacosWindowConfig,
     pub wayland_decorations: WaylandDecorationPreference,
-    /// Effective Wayland decoration mode selected by the compositor.
+    /// Effective decoration mode: selected by the Wayland compositor, or set
+    /// on X11 when the app hides the WM decorations.
     pub(crate) uses_client_side_decorations: bool,
     /// True compositor fullscreen, kept separate so CSD remains visible when maximized.
     pub(crate) wayland_is_fullscreen: bool,
     /// Whether makepad draws this window's minimize/maximize/close buttons itself (Windows, Wayland CSD),
     /// so they keep their size in layout points, unlike the OS's own buttons.
     pub(crate) draws_chrome_buttons: bool,
+    /// A double click on the window's caption (or anywhere, for a drag-anywhere window)
+    /// makes it fullscreen on its screen instead of maximised; again restores it. A host
+    /// window manager reads it from the drag query's answer (`makepad_studio_protocol::HostedDragAnswer`).
+    pub double_click_fullscreen: bool,
+    /// The host window manager shows this window fullscreen (`ime::HostedFullscreen`).
+    pub(crate) hosted_fullscreen: bool,
 }
 
 impl Default for CxWindow {
@@ -892,6 +960,7 @@ impl Default for CxWindow {
             main_pass_id: None,
             is_fullscreen: false,
             is_popup: false,
+            dropdown: false,
             popup_parent: None,
             popup_position: None,
             popup_size: None,
@@ -904,6 +973,8 @@ impl Default for CxWindow {
             uses_client_side_decorations: false,
             wayland_is_fullscreen: false,
             draws_chrome_buttons: false,
+            double_click_fullscreen: false,
+            hosted_fullscreen: false,
         }
     }
 }
@@ -1408,15 +1479,7 @@ mod tests {
         let mut host = test_cx();
         let config = host.with_vm(|vm| {
             let obj = vm.heap_mut().new_object();
-            vm.map_mut_with(obj, |_vm, map| {
-                map.insert(
-                    ScriptValue::from_id(id!(kind)),
-                    ScriptMapValue {
-                        tag: Default::default(),
-                        value: NIL,
-                    },
-                );
-            });
+            vm.heap_mut().map_insert_own(obj, ScriptValue::from_id(id!(kind)), NIL);
 
             let mut config = MacosWindowConfig::default();
             config.kind = MacosWindowKind::FloatingPanel;
@@ -1475,13 +1538,14 @@ mod tests {
                 macos: MacosWindowConfig::floating_panel(),
                 wayland_decorations: WaylandDecorationPreference::ClientSide,
                 caption_bar_height_override: None,
+                dropdown: false,
             };
 
             script_window.on_after_apply(vm, &Apply::New, &mut Scope::empty(), NIL);
 
             let cx = vm.cx_mut();
             let cx_window = &cx.windows[window_id];
-            assert_eq!(cx_window.create_title, "Floating Panel");
+            assert_eq!(cx_window.create_title, badge_window_title("Floating Panel".to_string()));
             assert_eq!(cx_window.create_app_id, "floating-panel");
             assert_eq!(cx_window.create_inner_size, Some(dvec2(320.0, 80.0)));
             assert_eq!(cx_window.create_position, Some(dvec2(40.0, 50.0)));

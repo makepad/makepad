@@ -9,7 +9,7 @@
 //!
 //! | platform | STT                                | TTS                              |
 //! |----------|------------------------------------|----------------------------------|
-//! | macOS/iOS| `SpeechAnalyzer` (PCM in)          | `AVSpeechSynthesizer` → PCM      |
+//! | macOS/iOS| `SFSpeechRecognizer` (PCM in)      | `AVSpeechSynthesizer` → PCM      |
 //! | Windows  | `Windows.Media.SpeechRecognition`  | `Windows.Media.SpeechSynthesis`  |
 //! | Android  | `android.speech.SpeechRecognizer`  | `android.speech.tts.TextToSpeech`|
 //! | Linux    | none                               | `espeak-ng` when installed       |
@@ -126,6 +126,10 @@ pub struct Segment {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Transcript {
     pub segments: Vec<Segment>,
+    /// The language the engine recognised (ISO 639-1, e.g. `"zh"`), when the
+    /// request asked it to detect one (`language == "auto"`); `None` when the
+    /// language was given or the engine does not say.
+    pub language: Option<String>,
 }
 
 impl Transcript {
@@ -134,7 +138,7 @@ impl Transcript {
         if text.trim().is_empty() {
             return Self::default();
         }
-        Self { segments: vec![Segment { start_ms: 0, end_ms: 0, text }] }
+        Self { segments: vec![Segment { start_ms: 0, end_ms: 0, text }], language: None }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -245,7 +249,7 @@ pub mod stt {
     //! Speech to text through the OS engine.
     use super::*;
 
-    /// A short stable name for logs and pipe adverts, e.g. `"apple-speechanalyzer"`.
+    /// A short stable name for logs and pipe adverts, e.g. `"apple-sfspeech"`.
     pub fn engine_name() -> &'static str {
         platform::STT_ENGINE
     }
@@ -357,7 +361,7 @@ pub mod tts {
 /// Split a bare ISO 639-1 code into the platform default region, or pass a
 /// BCP-47 tag through. Shared by the platform modules.
 #[cfg(any(
-    all(any(target_os = "macos", target_os = "ios"), apple_speech),
+    any(target_os = "macos", target_os = "ios"),
     windows,
     target_os = "android",
     target_os = "linux",
@@ -398,6 +402,7 @@ mod tests {
                 Segment { start_ms: 10, end_ms: 20, text: "".into() },
                 Segment { start_ms: 20, end_ms: 30, text: "world".into() },
             ],
+            language: None,
         };
         assert_eq!(t.text(), "hello world");
         assert!(!t.is_empty());

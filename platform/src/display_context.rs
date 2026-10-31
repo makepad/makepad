@@ -19,6 +19,19 @@ pub enum SystemBarAppearance {
     LightIcons,
 }
 
+/// A screen-orientation lock, on platforms that rotate (Android and iOS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScreenOrientation {
+    /// No lock: the screen follows the device and the user's rotation
+    /// setting, within what the app's manifest / Info.plist allows.
+    #[default]
+    Auto,
+    /// Portrait, either way up where the platform allows it.
+    Portrait,
+    /// Landscape, either way round.
+    Landscape,
+}
+
 /// Whether the UI that the OS draws for the app is light or dark.
 /// See [`crate::Cx::set_native_appearance`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

@@ -1,5 +1,5 @@
 use {
-    crate::{area::Area, event::finger::KeyModifiers},
+    crate::{area::Area, event::finger::KeyModifiers, window::WindowId},
     std::cell::RefCell,
     std::rc::Rc,
 };
@@ -13,6 +13,10 @@ pub struct CxKeyboard {
     pub(crate) prev_key_focus: Area,
     pub(crate) next_key_focus: Area,
     pub(crate) key_focus: Area,
+    /// The key focus of each window that lost the keyboard, restored when it gets it back. Kept
+    /// here, not in the window widget, so a redraw while it is away moves it like the live focus
+    /// (update_area): a stale copy would never match the widget's area again.
+    pub(crate) parked_key_focus: Vec<(WindowId, Area)>,
     #[allow(dead_code)]
     pub(crate) keys_down: Vec<KeyEvent>,
     pub(crate) text_ime_dismissed: bool,
@@ -57,7 +61,25 @@ impl CxKeyboard {
         self.text_ime_dismissed = false;
     }
 
+    pub fn park_key_focus(&mut self, window: WindowId) {
+        self.parked_key_focus.retain(|(w, _)| *w != window);
+        self.parked_key_focus.push((window, self.key_focus));
+        self.set_key_focus(Area::Empty);
+    }
+
+    pub fn unpark_key_focus(&mut self, window: WindowId) {
+        if let Some(i) = self.parked_key_focus.iter().position(|(w, _)| *w == window) {
+            let (_, area) = self.parked_key_focus.remove(i);
+            self.set_key_focus(area);
+        }
+    }
+
     pub(crate) fn update_area(&mut self, old_area: Area, new_area: Area) {
+        for (_, parked) in self.parked_key_focus.iter_mut() {
+            if *parked == old_area {
+                *parked = new_area;
+            }
+        }
         if self.key_focus == old_area {
             self.key_focus = new_area
         }

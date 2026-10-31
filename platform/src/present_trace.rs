@@ -1,11 +1,11 @@
 //! Opt-in presentation timeline. Producers only publish atomics and try_send;
 //! the diagnostic worker aggregates at 1 Hz, with no paint clock of its own.
+use crate::makepad_network::mpsc::{self, SyncSender};
 use std::{
     collections::VecDeque,
     fmt::Write,
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, SyncSender},
         Arc, OnceLock,
     },
     time::{Duration, Instant},

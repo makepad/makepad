@@ -1,10 +1,12 @@
+#[cfg(target_arch = "wasm32")]
+use crate::os::web::{CxOsDrawCall, CxOsDrawList};
 use crate::recording_buffer::{CpuReservation, RecordingBudget, RecordingBuffer};
 use crate::{
     cx::Cx,
     draw_pass::DrawPassId,
     draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderId},
     draw_vars::{
-        DrawVars, DRAW_CALL_DYN_UNIFORMS, DRAW_CALL_TEXTURE_SLOTS, DRAW_CALL_UNIFORM_BUFFER_SLOTS,
+        DrawVars, DRAW_CALL_TEXTURE_SLOTS, DRAW_CALL_UNIFORM_BUFFER_SLOTS,
     },
     geometry::GeometryId,
     id_pool::*,
@@ -12,7 +14,6 @@ use crate::{
     makepad_live_id::LiveId,
     makepad_math::*,
     makepad_script::*,
-    os::{CxOsDrawCall, CxOsDrawList},
     script::vm::*,
     texture::{Texture, TextureFormat, TextureId, TextureUpdated},
     uniform_buffer::UniformBuffer,
@@ -20,7 +21,7 @@ use crate::{
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::Ordering,
     Arc,
 };
 
@@ -326,6 +327,10 @@ impl DrawList {
 impl ScriptHook for DrawList {}
 impl ScriptApply for DrawList {}
 impl ScriptNew for DrawList {
+    fn script_type_id_static() -> ScriptTypeId {
+        const ID: ScriptTypeId = ScriptTypeId::of_path(concat!(module_path!(), "::DrawList"));
+        ID
+    }
     fn script_new(vm: &mut ScriptVm) -> Self {
         Self::new(vm.cx_mut())
     }
@@ -408,10 +413,6 @@ impl Cx {
             counters_proof: counters.map(|c| c.map(|c| c.upload_pending).unwrap_or(true)),
             upload_needed: item < target.draw_items.len() && target.draw_items[item].retained_upload_needed(),
         }
-    }
-
-    pub fn instance_upload_collection_examined(&self, root: DrawListId) -> usize {
-        self.draw_lists[root].upload_collection.borrow().examined
     }
 
     pub fn recycle_instance_uploads(
@@ -818,12 +819,12 @@ struct RetirementBatches<P: Send + 'static> {
     available: Vec<Box<RetirementBatch<P>>>,
     preparing: Option<crate::thread::TaskHandle<Vec<Box<RetirementBatch<P>>>>>,
     initialized: bool,
-    returned_tx: std::sync::mpsc::SyncSender<Box<RetirementBatch<P>>>,
-    returned_rx: std::sync::mpsc::Receiver<Box<RetirementBatch<P>>>,
+    returned_tx: crate::makepad_network::mpsc::SyncSender<Box<RetirementBatch<P>>>,
+    returned_rx: crate::makepad_network::mpsc::Receiver<Box<RetirementBatch<P>>>,
 }
 impl<P: Send + 'static> RetirementBatches<P> {
     fn new() -> Self {
-        let (returned_tx, returned_rx) = std::sync::mpsc::sync_channel(16);
+        let (returned_tx, returned_rx) = crate::makepad_network::mpsc::sync_channel(16);
         Self {
             available: Vec::new(),
             preparing: None,
@@ -926,18 +927,18 @@ impl CxDrawListPool {
         &mut self,
         pool: &crate::thread::TaskPool,
         frame: u64,
-        mut take_backend: impl FnMut(&mut CxOsDrawCall) -> P,
+        mut take_backend: impl FnMut(&mut CxDrawItem) -> P,
     ) -> bool {
         self.retire_free_items_with_ids(pool, frame, |_, _, os| take_backend(os))
     }
-    /// The software queue model keeps backend allocations outside CxOsDrawCall.
+    /// The HAL keeps backend allocations outside each draw item.
     /// Give it the exact physical item being retired, under the same reserved
     /// worker service and generation checks as a native backend.
     pub fn retire_free_items_with_ids<P: Send + 'static>(
         &mut self,
         pool: &crate::thread::TaskPool,
         frame: u64,
-        mut take_backend: impl FnMut(DrawListId, usize, &mut CxOsDrawCall) -> P,
+        mut take_backend: impl FnMut(DrawListId, usize, &mut CxDrawItem) -> P,
     ) -> bool {
         self.publish_instance_retirement_pending();
         if self.1.retirement_frame == Some(frame) {
@@ -1032,7 +1033,7 @@ impl CxDrawListPool {
                 };
                 let item = &mut self.0.pool[id.0].draw_items.buffer[index];
                 batch.items[count] = Some((
-                    Some(take_backend(id, index, &mut item.os)),
+                    Some(take_backend(id, index, item)),
                     item.retained_instances.take(),
                     item.instances.take(),
                     None,
@@ -1117,7 +1118,6 @@ impl CxDrawListPool {
         // The backing lease goes now, not at the next collection: a detached
         // item may never be collected again (a suspended stream), and it
         // must not pin the block's buffer until its list retires.
-        let released = item.os.take_backing();
         // The lease goes with the adapter publication: the item becomes an
         // immediate with zero bytes, the collector serves it, and the backend
         // retires its buffer through the completed-reader path (contract §3.4).
@@ -1133,9 +1133,6 @@ impl CxDrawListPool {
         let items = &self[id].draw_items;
         items.clean_leaf.set(false);
         items.instance_counters.set(None);
-        if let Some(backing) = released {
-            self.1.backing_releases.push(backing);
-        }
         true
     }
 
@@ -1154,10 +1151,6 @@ impl CxDrawListPool {
         // again until the list re-recorded (the reclaim path resets both).
         self[id].draw_items.clean_leaf.set(false);
         self[id].draw_items.instance_counters.set(None);
-        let released = self[id].draw_items[index].os.take_backing();
-        if let Some(backing) = released {
-            self.1.backing_releases.push(backing);
-        }
         let item = &mut self[id].draw_items[index];
         item.retained_gpu_evicted = true;
         item.retained_instance_id = 0;
@@ -1173,32 +1166,6 @@ impl CxDrawListPool {
         if let Some(call) = item.kind.draw_call_mut() {
             call.instance_dirty = true;
         }
-    }
-
-    pub fn retirement_diagnostics<P: Send + 'static>(&self) -> String {
-        let batches = self
-            .4
-            .get(&std::any::TypeId::of::<P>())
-            .and_then(|b| b.downcast_ref::<RetirementBatches<P>>());
-        let cursor = self.2.map(|(id, index)| {
-            (
-                id,
-                index,
-                self.0.is_live_generation(id.0, id.1),
-                self.0.pool[id.0].generation,
-                self.0.pool[id.0].draw_items.buffer.len(),
-            )
-        });
-        format!(
-            "frame={:?} cursor={cursor:?} pending_slots={} staged={} batches={:?} workers={} allocation_pending={} published={}",
-            self.1.retirement_frame,
-            self.0.has_pending_retirements(),
-            self.3.values.borrow().len(),
-            batches.map(|b| (b.initialized, b.preparing.is_some(), b.available.len())),
-            self.1.retirements.load(Ordering::Acquire),
-            self.1.allocations.has_pending_retirements(),
-            self.1.retirement_queued.load(Ordering::Acquire)
-        )
     }
 
     /// Publish a current receipt, including after the last bounded backend
@@ -1264,11 +1231,22 @@ impl CxDrawListPool {
         self[id].draw_items.clean_leaf.set(false);
         self[id].draw_items.instance_counters.set(None);
         self[id].draw_list_uniforms = Default::default();
+        self[id].recorded = false;
+        self[id].retain_empty = false;
         self[id].zbias_hold = None;
         self[id].reset_zbias = false;
+        self[id].input_transparent = false;
         self[id].upload_priority = 2;
+        self[id].owner = crate::gpu_ledger::innermost_owner();
         self[id].gpu_eviction_distance = f64::INFINITY;
+        self[id].glyph_uses.clear();
+        #[cfg(target_arch = "wasm32")]
         self[id].reset_draw_item_uniform_caches();
+    }
+
+    /// Every live draw list.
+    pub fn iter_live(&self) -> impl Iterator<Item = &CxDrawList> + '_ {
+        self.id_iter().map(|id| &self[id])
     }
 
     /// Every live draw list id (the tweaker's colour pulse walks all
@@ -1412,7 +1390,7 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
     }
 }
 
-#[derive(Default, Clone, Script, ScriptHook)]
+#[derive(Default, Clone, Script, ScriptHook, Copy)]
 #[repr(C)]
 pub struct DrawCallUniforms {
     #[live]
@@ -1425,10 +1403,17 @@ pub struct DrawCallUniforms {
     pub pad3: f32,
 }
 
+crate::makepad_math::impl_gpu_pod!(DrawCallUniforms,
+    zbias: f32,
+    pad1: f32,
+    pad2: f32,
+    pad3: f32,
+);
+
 impl DrawCallUniforms {
     // The array length is in f32 elements, not bytes, hence the >> 2.
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>() >> 2] {
-        unsafe { std::mem::transmute(self) }
+        crate::makepad_math::bytemuck::cast_ref(self)
     }
     /*
     pub fn get_local_scroll(&self) -> Vec4f {
@@ -1471,6 +1456,13 @@ impl DrawCallUniforms {
 
 #[repr(C)]
 pub enum CxDrawKind {
+    NativeLayer {
+        id: crate::native_layer::NativeLayerId,
+        rect: Rect,
+        /// Turtle clipping in list-local coordinates, before `view_shift`.
+        clip: (Vec2d, Vec2d),
+        style: crate::native_layer::NativeLayerStyle,
+    },
     SubList(DrawListId),
     DrawCall(CxDrawCall),
     Empty,
@@ -1523,9 +1515,7 @@ pub struct CxDrawItem {
     /// a tile sheet needs without re-recording or re-uploading anything;
     /// the backends draw one call per range. Empty: every instance.
     /// Per backend: Metal draws one `drawIndexedPrimitives … baseInstance`
-    /// per range; the gpusim raster submits the ranged instances; OpenGL,
-    /// D3D11, WebGL and Vulkan draw the whole item (ranges ignored: more
-    /// work, the same pixels).
+    /// per range; other backends consume ranges from the frame packet.
     pub instance_ranges: Vec<std::ops::Range<u32>>,
     /// The residency lease of the DL-1 contract: a ready shared-instance
     /// block and the instance range this item draws from it (`attach_shared`
@@ -1533,6 +1523,7 @@ pub struct CxDrawItem {
     /// construction). Until DL-5 deletes the retained path, the attached
     /// block also drives the old fields through its adapter publication.
     pub shared: Option<(crate::shared_instances::SharedInstances, std::ops::Range<usize>)>,
+    #[cfg(target_arch = "wasm32")]
     pub os: CxOsDrawCall,
 }
 
@@ -1745,7 +1736,8 @@ pub struct CxDrawCall {
     pub append_group_id: u64,
     pub draw_call_uniforms: DrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
-    pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS], // user uniforms
+    /// The shader's dyn-uniform block (`mapping.dyn_uniforms.total_slots`).
+    pub dyn_uniforms: Vec<f32>,
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     /// Replaced with a process-wide generation whenever either uniform block
@@ -1757,6 +1749,32 @@ pub struct CxDrawCall {
     /// Stamped always (one f32 write per call creation); read only while the
     /// mode is up.
     pub turtle_depth: f32,
+    /// The pick id (`Cx::set_pick_id`) current when this call was made: a
+    /// pick variant writes it where the call covers.
+    pub pick_id: u32,
+}
+
+/// `dst` = `src` at exactly `floats` lanes (cut or padded with zeros): a
+/// draw call's block is its shader's size whatever the vars hold.
+fn sized_dyn_uniforms(dst: &mut Vec<f32>, src: &[f32], floats: usize) {
+    dst.clear();
+    dst.extend_from_slice(&src[..src.len().min(floats)]);
+    dst.resize(floats, 0.0);
+}
+
+/// `dst` takes `src`'s values, keeping at least its own length (a call's
+/// block stays its shader's size).
+pub(crate) fn copy_dyn_uniforms(dst: &mut Vec<f32>, src: &[f32]) {
+    let n = dst.len().max(src.len());
+    dst.clear();
+    dst.extend_from_slice(src);
+    dst.resize(n, 0.0);
+}
+
+/// Whether a call's block differs from the vars' (missing lanes read 0).
+fn dyn_uniforms_differ(call: &[f32], vars: &[f32]) -> bool {
+    let n = call.len().max(vars.len());
+    (0..n).any(|i| call.get(i).copied().unwrap_or(0.0).to_bits() != vars.get(i).copied().unwrap_or(0.0).to_bits())
 }
 
 impl CxDrawCall {
@@ -1774,7 +1792,7 @@ impl CxDrawCall {
         self.draw_shader_id = draw_vars.draw_shader_id.unwrap();
         self.total_instance_slots = mapping.instances.total_slots;
         self.draw_call_uniforms = DrawCallUniforms::default();
-        self.dyn_uniforms.copy_from_slice(&draw_vars.dyn_uniforms);
+        sized_dyn_uniforms(&mut self.dyn_uniforms, &draw_vars.dyn_uniforms, mapping.dyn_uniforms.total_slots);
         self.texture_slots.clone_from(&draw_vars.texture_slots);
         self.uniform_buffer_slots
             .clone_from(&draw_vars.uniform_buffer_slots);
@@ -1798,13 +1816,18 @@ impl CxDrawCall {
             draw_shader_id: draw_vars.draw_shader_id.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
             draw_call_uniforms: DrawCallUniforms::default(),
-            dyn_uniforms: draw_vars.dyn_uniforms,
+            dyn_uniforms: {
+                let mut u = Vec::new();
+                sized_dyn_uniforms(&mut u, &draw_vars.dyn_uniforms, mapping.dyn_uniforms.total_slots);
+                u
+            },
             texture_slots: draw_vars.texture_slots.clone(),
             uniform_buffer_slots: draw_vars.uniform_buffer_slots.clone(),
             instance_dirty: true,
             uniforms_dirty: true,
             uniforms_gen,
             turtle_depth,
+            pick_id: 0,
         }
     }
 
@@ -1837,7 +1860,7 @@ impl CxDrawCall {
     }
 }
 
-#[derive(Clone, Script, ScriptHook)]
+#[derive(Clone, Script, ScriptHook, Copy)]
 #[repr(C)]
 pub struct DrawListUniforms {
     #[live]
@@ -1846,11 +1869,27 @@ pub struct DrawListUniforms {
     pub view_clip: Vec4f,
     #[live]
     pub view_shift: Vec2f,
+    /// 1: `xr_clip` is on for this list (0, the default: off).
     #[live]
-    pub pad1: f32,
+    pub xr_clip_on: f32,
     #[live]
     pub pad2: f32,
+    /// An XR clip volume for this list's 3D draws: the matrix that maps a fragment's world
+    /// position (`view_transform * position`, the room in a headset) into the unit box
+    /// [-1, 1]^3. While `xr_clip_on` is 1 `depth_clip` discards the fragments outside it (one
+    /// uniform compare while it is off).
+    #[live]
+    pub xr_clip: Mat4f,
 }
+
+crate::makepad_math::impl_gpu_pod!(DrawListUniforms,
+    view_transform: Mat4f,
+    view_clip: Vec4f,
+    view_shift: Vec2f,
+    xr_clip_on: f32,
+    pad2: f32,
+    xr_clip: Mat4f,
+);
 
 impl Default for DrawListUniforms {
     fn default() -> Self {
@@ -1858,8 +1897,9 @@ impl Default for DrawListUniforms {
             view_transform: Mat4f::identity(),
             view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
             view_shift: vec2(0.0, 0.0),
-            pad1: 0.0,
+            xr_clip_on: 0.0,
             pad2: 0.0,
+            xr_clip: Mat4f::identity(),
         }
     }
 }
@@ -1867,7 +1907,7 @@ impl Default for DrawListUniforms {
 impl DrawListUniforms {
     // The array length is in f32 elements, not bytes, hence the >> 2.
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>() >> 2] {
-        unsafe { std::mem::transmute(self) }
+        crate::makepad_math::bytemuck::cast_ref(self)
     }
 }
 
@@ -1987,44 +2027,13 @@ impl CxDrawItems {
             .draw_call_mut()
             .expect("retained presentation requires a draw call");
         assert_eq!(Some(call.draw_shader_id), vars.draw_shader_id);
-        if call.dyn_uniforms != vars.dyn_uniforms
+        if dyn_uniforms_differ(&call.dyn_uniforms, &vars.dyn_uniforms)
             || call.texture_slots != vars.texture_slots
             || call.uniform_buffer_slots != vars.uniform_buffer_slots
         {
-            call.dyn_uniforms = vars.dyn_uniforms;
+            copy_dyn_uniforms(&mut call.dyn_uniforms, &vars.dyn_uniforms);
             call.texture_slots = vars.texture_slots.clone();
             call.uniform_buffer_slots = vars.uniform_buffer_slots.clone();
-            call.mark_uniforms_dirty(generation);
-        }
-    }
-    /// Patch only the given dyn-uniform ranges of a retained item's draw call
-    /// from `vars` (the shared, camera-dependent uniforms), leaving the item's
-    /// own per-owner values untouched. A camera-only frame therefore never
-    /// rebinds per-owner uniforms nor copies the whole block. The call is
-    /// marked dirty only when a value actually changed.
-    pub fn patch_retained_uniforms(
-        &mut self,
-        index: usize,
-        ranges: &[(usize, usize)],
-        vars: &DrawVars,
-        generation: u64,
-    ) {
-        let item = &mut self.buffer[index];
-        let call = item
-            .kind
-            .draw_call_mut()
-            .expect("retained presentation requires a draw call");
-        assert_eq!(Some(call.draw_shader_id), vars.draw_shader_id);
-        let mut changed = false;
-        for &(offset, slots) in ranges {
-            for i in offset..(offset + slots).min(call.dyn_uniforms.len()) {
-                if call.dyn_uniforms[i] != vars.dyn_uniforms[i] {
-                    call.dyn_uniforms[i] = vars.dyn_uniforms[i];
-                    changed = true;
-                }
-            }
-        }
-        if changed {
             call.mark_uniforms_dirty(generation);
         }
     }
@@ -2130,6 +2139,7 @@ impl CxDrawItems {
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
                 instance_ranges: Vec::new(),
+                #[cfg(target_arch = "wasm32")]
                 os: CxOsDrawCall::default(),
             }));
         }
@@ -2169,22 +2179,6 @@ impl CxDrawItems {
                 self.first_instance_spare.capacity(),
                 RecordingBuffer::capacity,
             )
-    }
-    pub fn item_capacity(&self) -> usize {
-        self.buffer.len()
-    }
-    pub fn swap_first_instance_buffer(&mut self, spare: &mut RecordingBuffer) -> bool {
-        if !spare.bind_budget(&self.recording_budget) {
-            return false;
-        }
-        if let Some(item) = self.buffer.first_mut() {
-            std::mem::swap(item.instances.as_mut().unwrap(), spare);
-        } else {
-            std::mem::swap(&mut self.first_instance_spare, spare);
-        }
-        self.clean_leaf.set(false);
-        self.instance_counters.set(None);
-        true
     }
     pub fn len(&self) -> usize {
         self.used
@@ -2246,18 +2240,6 @@ impl CxDrawItems {
         call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
         true
     }
-    /// The instances an item submits: its ranges clamped to `resident`, or
-    /// `0..resident` when it has none.
-    pub fn submitted_instances(&self, index: usize, resident: usize) -> usize {
-        let item = &self.buffer[index];
-        if item.instance_ranges.is_empty() {
-            return resident;
-        }
-        item.instance_ranges
-            .iter()
-            .map(|r| (r.end.min(resident as u32)).saturating_sub(r.start.min(resident as u32)) as usize)
-            .sum()
-    }
     /// Record backend consumption without changing the recording's topology
     /// or instance upload state.
     pub fn record_consumption(&mut self, index: usize, serial: u64) {
@@ -2298,10 +2280,7 @@ impl CxDrawItems {
     }
     /// Binding changes backend residency/uniform stamps, never instance
     /// dirtiness or child topology. Upload/recording mutations use IndexMut.
-    #[cfg(all(
-        not(gpusim),
-        any(target_os = "macos", target_os = "ios", target_os = "tvos")
-    ))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn binding_mut(&mut self, index: usize) -> &mut CxDrawItem {
         self.queue_recording_release(index);
         &mut self.buffer[index]
@@ -2354,6 +2333,7 @@ impl CxDrawItems {
                 instance_ranges: Vec::new(),
                 instance_upload_pending: false,
                 shared: None,
+                #[cfg(target_arch = "wasm32")]
                 os: CxOsDrawCall::default(),
                 kind: CxDrawKind::Empty,
             }));
@@ -2397,6 +2377,9 @@ pub struct CxDrawList {
     recording_metadata: Option<Arc<CpuReservation>>,
     upload_collection: std::cell::RefCell<InstanceUploadCollection>,
     pub debug_id: LiveId,
+    /// The innermost `gpu_owner` scope open when the list was made: the owner its draws carry to
+    /// the HAL's ledger and profiler.
+    pub owner: Option<&'static str>,
     pub debug_dump: bool,
     pub debug_dump_count: u32,
     /// Copy admission order, independent of painter order: pointer, visible,
@@ -2406,6 +2389,13 @@ pub struct CxDrawList {
     /// Owners with a custom projection update this with their demand census.
     pub gpu_eviction_distance: f64,
     pub reset_zbias: bool,
+    /// This list's draws do not occlude input to native content below them.
+    pub input_transparent: bool,
+    /// The glyphs this list's instances draw (session font, glyph, request kind), as the text
+    /// drawn into it looked them up; cleared when the list is recorded again. Under the HAL a
+    /// glyph's curves or pixels live in the host's store: while this list is alive (painted
+    /// again from its kept instances or not) its glyphs stay in use.
+    pub glyph_uses: Vec<[u32; 3]>,
 
     /// Depth floor for this draw list and everything drawn under it, in
     /// `world.z` units. `0.0` — every ordinary list — costs one compare and
@@ -2423,13 +2413,21 @@ pub struct CxDrawList {
     /// A list with a floor raises the running counter to it on entry
     /// (`raise_zbias_to_floor`), so every draw call beneath it — including
     /// nested plain draw lists, which inherit the same counter — starts above
-    /// the band the body was using. Set by `DrawList2d::begin_overlay_inner`;
+    /// the band the body was using. Set by `DrawList2d::begin_overlay_reuse / begin_popup_overlay`;
     /// see the constants there for the scheme and its headroom.
     pub overlay_z_lift: f32,
 
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
 
     pub redraw_id: u64,
+    /// The list was recorded since it was allocated.
+    pub recorded: bool,
+    /// Opt-in: a list recorded empty (its owner drew nothing) keeps that
+    /// recording like one that drew, and is not recorded again until
+    /// something asks. Off by default: a widget that drew nothing has no area
+    /// a later `redraw()` could reach, and would never draw again (a cached
+    /// HUD part sets it; its widgets always record an area).
+    pub retain_empty: bool,
     /// Replaced on every recording, including repeated recordings in one redraw.
     pub recording_gen: u64,
     pub draw_pass_id: Option<DrawPassId>,
@@ -2445,6 +2443,9 @@ pub struct CxDrawList {
     /// created rather than the order they are drawn. `Overlay::end` turns
     /// these into `draw_item_reorder`.
     pub overlay_order: u64,
+    /// The overlay tier it was begun in (0 content, 1 popup, 2 cursor);
+    /// `Overlay::end` sorts by (tier, `overlay_order`).
+    pub overlay_tier: u8,
 
     pub draw_list_uniforms: DrawListUniforms,
     /// Replaced when this list is recorded or its uniform block is changed.
@@ -2469,8 +2470,15 @@ pub struct CxDrawList {
     /// the counter.
     pub zbias_hold: Option<u32>,
 
+    #[cfg(target_arch = "wasm32")]
     pub os: CxOsDrawList,
+    /// The rect areas this list has recorded, kept across a re-record the
+    /// way instance buffers are: a new record overwrites from the front and
+    /// leaves the tail in place, so an area handed out last frame still
+    /// reads while this frame is being drawn (the overlay reads mid-frame).
+    /// `rect_area_count` is how many belong to the current record.
     pub rect_areas: Vec<CxRectArea>,
+    pub rect_area_count: usize,
     pub find_appendable_draw_shader_check: Vec<u64>,
 }
 
@@ -2480,38 +2488,6 @@ pub struct CxRectArea {
 }
 
 impl CxDrawList {
-    /// Parent inventories retain one stable pointer per known child.
-    pub fn reserve_sub_list_inventory(&mut self, count: usize) {
-        self.draw_items
-            .buffer
-            .reserve(count.saturating_sub(self.draw_items.buffer.len()));
-        self.draw_items
-            .child_inventory
-            .reserve(count.saturating_sub(self.draw_items.child_inventory.len()));
-        self.find_appendable_draw_shader_check
-            .reserve(count.saturating_sub(self.find_appendable_draw_shader_check.len()));
-    }
-
-    /// A retained scene knows its inventory before the first quad. Reserve
-    /// once at publication so aligned-instance pushes never repeatedly move a
-    /// growing multi-megabyte stream during a camera/fit frame.
-    pub fn reserve_instance_inventory(&mut self, count: usize) {
-        if count <= self.draw_items.instance_capacity_hint {
-            return;
-        }
-        self.draw_items.instance_capacity_hint = count;
-        self.draw_items.instance_counters.set(None);
-        for item in &mut self.draw_items.buffer {
-            let Some(call) = item.kind.draw_call() else {
-                continue;
-            };
-            let capacity = count.saturating_mul(call.total_instance_slots);
-            if let Some(instances) = &mut item.instances {
-                instances.reserve(capacity.saturating_sub(instances.len()));
-            }
-        }
-        self.find_appendable_draw_shader_check.reserve(16);
-    }
 
     #[inline]
     pub fn set_uniform_view_transform(&mut self, transform: &Mat4f, uniforms_gen: u64) {
@@ -2520,9 +2496,9 @@ impl CxDrawList {
         self.uniforms_gen = uniforms_gen;
     }
 
+    #[cfg(target_arch = "wasm32")]
     #[inline]
     fn reset_draw_item_uniform_caches(&mut self) {
-        #[cfg(any(target_arch = "wasm32", test))]
         for item in &mut self.draw_items.buffer {
             item.os.uniforms_recording_gen = None;
             item.os.draw_call_uniforms_gen = None;
@@ -2548,19 +2524,31 @@ impl CxDrawList {
     }
 
     fn append_trace_enabled() -> bool {
-        false
+        crate::makepad_error_log::trace_enabled("draw.append")
     }
 
+    /// `MAKEPAD_TRACE=draw.append`: why draws did not batch. Tallied by
+    /// reason and shader (the message up to its `at_draw_item`/`items`
+    /// detail) and printed every two seconds, most frequent first.
     fn append_trace_log(message: impl FnOnce() -> String) {
-        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        static TALLY: Mutex<Option<(std::time::Instant, HashMap<String, u64>)>> = Mutex::new(None);
         if !Self::append_trace_enabled() {
             return;
         }
-        let n = COUNT.fetch_add(1, Ordering::Relaxed);
-        if n < 200 {
-            log!("{}", message());
-        } else if n == 200 {
-            log!("append_trace: log limit reached, suppressing further output");
+        let message = message();
+        let key = message.split(" at_draw_item").next().unwrap_or(&message);
+        let key = key.split(" items_before").next().unwrap_or(key).to_string();
+        let Ok(mut guard) = TALLY.lock() else { return };
+        let (since, rows) = guard.get_or_insert_with(|| (std::time::Instant::now(), HashMap::new()));
+        *rows.entry(key).or_default() += 1;
+        if since.elapsed().as_secs_f64() >= 2.0 {
+            let mut sorted: Vec<_> = rows.drain().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            let lines: Vec<String> = sorted.iter().take(12).map(|(k, n)| format!("  {n:>7} {k}")).collect();
+            log!("append_trace (2 s):\n{}", lines.join("\n"));
+            *since = std::time::Instant::now();
         }
     }
 
@@ -2612,6 +2600,7 @@ impl CxDrawList {
         sh: &CxDrawShader,
         draw_vars: &DrawVars,
         depth_target: Option<f32>,
+        pick_target: Option<u32>,
     ) -> Option<usize> {
         // find our drawcall to append to the current layer
         if draw_vars.draw_shader_id.is_none() {
@@ -2650,6 +2639,15 @@ impl CxDrawList {
                     break;
                 }
             }
+            // Pick ids on: a call names one draw (`Cx::set_pick_id`).
+            if let Some(pick) = pick_target {
+                if draw_call.pick_id != pick {
+                    if can_cross {
+                        continue;
+                    }
+                    break;
+                }
+            }
 
             if self.find_appendable_draw_shader_check[i] == draw_shader_check {
                 // TODO! figure out why this can happen
@@ -2678,7 +2676,8 @@ impl CxDrawList {
                         }
                         let mut diff = false;
                         for i in 0..sh.mapping.dyn_uniforms.total_slots {
-                            if draw_call.dyn_uniforms[i] != draw_vars.dyn_uniforms[i] {
+                            let lane = |u: &[f32]| u.get(i).copied().unwrap_or(0.0);
+                            if lane(&draw_call.dyn_uniforms) != lane(&draw_vars.dyn_uniforms) {
                                 diff = true;
                                 break;
                             }
@@ -2840,13 +2839,6 @@ impl CxDrawList {
             .unwrap_or_else(|| self.draw_items.len())
     }
 
-    /// Keep painter-order capacity across both presentation and re-recording.
-    pub fn take_draw_item_reorder(&mut self) -> Vec<usize> {
-        self.draw_item_reorder
-            .take()
-            .unwrap_or_else(|| std::mem::take(&mut self.draw_item_reorder_spare))
-    }
-
     pub fn draw_item_id_at_order_index(&self, order_index: usize) -> Option<usize> {
         let draw_item_id = if let Some(reorder) = self.draw_item_reorder.as_ref() {
             *reorder.get(order_index)?
@@ -2862,16 +2854,43 @@ impl CxDrawList {
         debug_assert_ne!(recording_gen, 0);
         debug_assert_ne!(uniforms_gen, 0);
         self.redraw_id = redraw_id;
+        self.recorded = true;
         self.recording_gen = recording_gen;
         self.uniforms_gen = uniforms_gen;
+        #[cfg(target_arch = "wasm32")]
         self.reset_draw_item_uniform_caches();
         self.draw_items.clear();
         if let Some(mut order) = self.draw_item_reorder.take() {
             order.clear();
             self.draw_item_reorder_spare = order;
         }
-        self.rect_areas.clear();
+        self.rect_area_count = 0;
         self.find_appendable_draw_shader_check.clear();
+        self.glyph_uses.clear();
+    }
+
+    /// Record a rect area for the current record and return its id: the
+    /// slot from the previous record is overwritten, or a new one is added.
+    pub fn push_rect_area(&mut self, area: CxRectArea) -> usize {
+        let rect_id = self.rect_area_count;
+        if rect_id < self.rect_areas.len() {
+            self.rect_areas[rect_id] = area;
+        } else {
+            self.rect_areas.push(area);
+        }
+        self.rect_area_count = rect_id + 1;
+        rect_id
+    }
+
+    pub fn append_native_layer(&mut self, redraw_id: u64, id: crate::native_layer::NativeLayerId, rect: Rect, style: crate::native_layer::NativeLayerStyle) {
+        let extent = f32::MAX as f64;
+        self.draw_items.push_item(redraw_id, CxDrawKind::NativeLayer {
+            id,
+            rect,
+            clip: (dvec2(-extent, -extent), dvec2(extent, extent)),
+            style,
+        });
+        self.find_appendable_draw_shader_check.push(0);
     }
 
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
@@ -3177,15 +3196,6 @@ mod retained_sub_list_tests {
         drop(reused);
         let pool = cx.task_pool();
         for frame in 0..100 {
-            #[cfg(gpusim)]
-            let pending = {
-                let serial = cx.gpusim_simulated_submit();
-                cx.gpusim_simulated_complete_with_storage(serial, |id, item| {
-                    backend_slots.remove(&(id, item))
-                });
-                cx.draw_lists.has_pending_instance_retirements()
-            };
-            #[cfg(not(gpusim))]
             let pending = cx
                 .draw_lists
                 .retire_free_items_with_ids(&pool, frame, |id, item, _| {
@@ -3279,13 +3289,14 @@ mod uniform_generation_tests {
             total_instance_slots: 0,
             draw_call_uniforms: DrawCallUniforms::default(),
             geometry_id: None,
-            dyn_uniforms: [0.0; DRAW_CALL_DYN_UNIFORMS],
+            dyn_uniforms: vec![0.0; 4],
             texture_slots: Default::default(),
             uniform_buffer_slots: Default::default(),
             instance_dirty: true,
             uniforms_dirty: true,
             uniforms_gen,
             turtle_depth: 0.0,
+            pick_id: 0,
         }
     }
 
@@ -3623,7 +3634,7 @@ mod uniform_generation_tests {
             append_group_id: 0,
             draw_shader_id: Some(call.draw_shader_id),
             geometry_id: None,
-            dyn_uniforms: call.dyn_uniforms,
+            dyn_uniforms: call.dyn_uniforms.clone(),
             texture_slots: call.texture_slots.clone(),
             uniform_buffer_slots: call.uniform_buffer_slots.clone(),
             dyn_instances_pad: Default::default(),
@@ -3688,19 +3699,27 @@ mod uniform_generation_tests {
         let first_item = cx.draw_lists[first_id]
             .draw_items
             .push_item(1, CxDrawKind::DrawCall(test_draw_call(first_gen)));
+        #[cfg(target_arch = "wasm32")]
+        {
         first_item.os.uniforms_recording_gen = Some(first_gen);
         first_item.os.draw_call_uniforms_gen = Some(first_gen);
         first_item.os.user_uniforms_gen = Some(first_gen);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = first_item;
 
         drop(first_list);
         let reused_list = DrawList::new(&mut cx);
         let reused_id = reused_list.id();
         assert_eq!(first_id.index(), reused_id.index());
         assert_ne!(first_id.generation(), reused_id.generation());
+        #[cfg(target_arch = "wasm32")]
+        {
         let retained_item = &cx.draw_lists[reused_id].draw_items.buffer[0];
         assert_eq!(retained_item.os.uniforms_recording_gen, None);
         assert_eq!(retained_item.os.draw_call_uniforms_gen, None);
         assert_eq!(retained_item.os.user_uniforms_gen, None);
+        }
 
         let recording_gen = cx.next_uniform_gen();
         let list_uniforms_gen = cx.next_uniform_gen();
@@ -3725,6 +3744,7 @@ mod uniform_generation_tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn clear_draw_items_resets_uniform_upload_generations() {
         let mut draw_list = CxDrawList::default();
         let item = draw_list

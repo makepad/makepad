@@ -1,4 +1,4 @@
-//! No OS speech services here (web, Apple without the Swift bridge, OpenHarmony).
+//! No OS speech services here (web, Apple without the Swift bridge).
 //! Everything reports unavailable; nothing panics.
 
 use crate::{
