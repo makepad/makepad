@@ -1,0 +1,103 @@
+//! Relax's type layer: interned types (types), signatures and impls (tcx), type checking (typeck), layouts,
+//! constant evaluation, the borrow checker, definition-owned body queries and stable type hashes. Builds on relax-front.
+//! The layers below are re-exported, so every module of Relax is `crate::<module>` in each layer.
+
+// Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
+// log in a full tmpfs /tmp aborted a fleet Sandbox inside a lazy compile, 2026-10-23), so in this
+// crate every print is a write whose error is dropped. Test builds keep std's captured macros.
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprintln {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprint {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!($($t)+)); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! println {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! print {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
+}
+
+pub use relax_front::*;
+
+pub mod types;
+pub mod instance;
+pub mod consts;
+pub mod const_eval;
+pub mod tcx;
+pub mod type_queries;
+pub mod typeck;
+pub mod layout;
+pub mod const_fold;
+pub mod cycle;
+pub mod borrowck;
+pub mod lint;
+pub mod lint_table;
+pub mod lint_levels;
+pub mod ast_visit;
+pub mod lint_pass;
+pub mod lint_unreachable;
+pub mod lint_liveness;
+pub mod lint_early;
+pub mod lint_dead;
+pub mod lint_imports;
+pub mod lint_late;
+pub mod lint_late2;
+pub mod significant_drop;
+pub mod lint_tail_drop;
+pub mod lint_recursion;
+pub mod lint_nonlocal;
+pub mod item_checks;
+pub mod proc_macro_harness;
+pub mod privacy_types;
+pub mod gat_bounds;
+pub mod feature_gate;
+pub mod transmute;
+pub mod wfcheck;
+pub mod unsafety;
+pub mod pattern_analysis;
+pub mod stable;
+pub mod mir;
+
+/// A process-unique number for test scratch names (a clock alone collides between parallel tests).
+#[cfg(test)]
+pub(crate) fn unique_test_id() -> u128 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    (nanos << 20) | NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
+}
+
+#[cfg(test)]
+mod lang_item_tests;
+pub mod infer;
+
+#[cfg(test)]
+mod fnhdr_tests;
+
+#[cfg(test)]
+mod token_source_tests;
+pub mod expr_use;
+pub mod upvar;
+pub mod region_scope;
+
+pub mod next_solver;
+
+/// A name no two tests of this process share (pid and clock alone collide under parallel test threads).
+#[cfg(test)]
+pub(crate) fn unique_test_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+// This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
+include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));

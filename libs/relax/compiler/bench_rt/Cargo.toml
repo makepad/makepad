@@ -1,0 +1,24 @@
+[package]
+name = "relax-bench-rt"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Fixed runtime benchmark for Relax's code quality: the same source runs under
+# rustc --release and under `makepad run`; each kernel prints best-of-5 ms + checksum.
+[[bin]]
+name = "relax-bench-rt"
+path = "src/main.rs"
+
+[dependencies]
+rustybuzz = { path = "../../../../libs/rustybuzz" }
+makepad-fast-inflate = { path = "../../../../libs/fast_inflate" }
+
+[workspace]
+
+# makepad run resolves inherited deps against this workspace (micro_proc_macro's optional relax-lex)
+[workspace.dependencies]
+relax-lex = { path = "../../lex" }
+
+[profile.release]
+opt-level = 3

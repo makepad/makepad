@@ -1,0 +1,12 @@
+[package]
+name = "relax-live-invalid"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A program whose code tests/live_invalid/run.py invalidates while a thread is inside it.
+[[bin]]
+name = "relax-live-invalid"
+path = "src/main.rs"
+
+[workspace]

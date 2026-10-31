@@ -1,0 +1,12 @@
+[package]
+name = "relax-live-closure-owner-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A program tests/live_closure_owner_app/run.py patches (main.rs) while it runs (JITPATCH).
+[[bin]]
+name = "relax-live-closure-owner-app"
+path = "src/main.rs"
+
+[workspace]

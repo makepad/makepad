@@ -1,0 +1,3 @@
+[workspace]
+members = ["libs/tail"]
+resolver = "2"

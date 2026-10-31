@@ -1,0 +1,6 @@
+{"version":1,"units":[
+{"pkg_id":"path+file://@R@#dep_a@1.0.0","target":{"kind":["lib"],"name":"dep_a","src_path":"@R@/dep_a.rs","edition":"2021"},"mode":"build","features":[],"dependencies":[]},
+{"pkg_id":"path+file://@R@#dep_b@1.0.0","target":{"kind":["lib"],"name":"dep_b","src_path":"@R@/dep_b.rs","edition":"2021"},"mode":"build","features":[],"dependencies":[]},
+{"pkg_id":"path+file://@R@#user@1.0.0","target":{"kind":["lib"],"name":"user","src_path":"@R@/user.rs","edition":"2021"},"mode":"build","features":[],"dependencies":[{"index":1,"extern_crate_name":"dep_b"}]},
+{"pkg_id":"path+file://@R@#app@1.0.0","target":{"kind":["bin"],"name":"app","src_path":"@R@/@MAIN@","edition":"2021"},"mode":"build","features":[],"dependencies":@DEPS@}
+],"roots":[3]}

@@ -1,0 +1,77 @@
+//! Target math library: native platform C libm, or the Rust compiler-builtins
+//! libm implementation for web targets (see libm/ORIGIN.txt).
+
+#[cfg(not(relax_web))]
+extern "C" {
+    pub fn sin(x: f64) -> f64;
+    pub fn cos(x: f64) -> f64;
+    pub fn tan(x: f64) -> f64;
+    pub fn asin(x: f64) -> f64;
+    pub fn acos(x: f64) -> f64;
+    pub fn atan(x: f64) -> f64;
+    pub fn atan2(y: f64, x: f64) -> f64;
+    pub fn sinh(x: f64) -> f64;
+    pub fn cosh(x: f64) -> f64;
+    pub fn tanh(x: f64) -> f64;
+    pub fn exp(x: f64) -> f64;
+    pub fn exp2(x: f64) -> f64;
+    pub fn expm1(x: f64) -> f64;
+    pub fn log(x: f64) -> f64;
+    pub fn log2(x: f64) -> f64;
+    pub fn log10(x: f64) -> f64;
+    pub fn log1p(x: f64) -> f64;
+    #[cfg(not(target_os = "linux"))]
+    pub fn cbrt(x: f64) -> f64;
+    pub fn pow(x: f64, y: f64) -> f64;
+    pub fn asinh(x: f64) -> f64;
+    pub fn acosh(x: f64) -> f64;
+    #[cfg(not(windows))]
+    pub fn hypot(x: f64, y: f64) -> f64;
+    // the Universal C Runtime names them _hypot / _hypotf (real std's cmath.rs on msvc)
+    #[cfg(windows)]
+    #[link_name = "_hypot"]
+    pub fn hypot(x: f64, y: f64) -> f64;
+    pub fn round(x: f64) -> f64;
+    pub fn fma(x: f64, y: f64, z: f64) -> f64;
+    pub fn fmod(x: f64, y: f64) -> f64;
+    pub fn sinf(x: f32) -> f32;
+    pub fn cosf(x: f32) -> f32;
+    pub fn tanf(x: f32) -> f32;
+    pub fn asinf(x: f32) -> f32;
+    pub fn acosf(x: f32) -> f32;
+    pub fn atanf(x: f32) -> f32;
+    pub fn atan2f(y: f32, x: f32) -> f32;
+    pub fn sinhf(x: f32) -> f32;
+    pub fn coshf(x: f32) -> f32;
+    pub fn tanhf(x: f32) -> f32;
+    pub fn expf(x: f32) -> f32;
+    pub fn exp2f(x: f32) -> f32;
+    pub fn expm1f(x: f32) -> f32;
+    pub fn logf(x: f32) -> f32;
+    pub fn log2f(x: f32) -> f32;
+    pub fn log10f(x: f32) -> f32;
+    pub fn log1pf(x: f32) -> f32;
+    pub fn powf(x: f32, y: f32) -> f32;
+    pub fn cbrtf(x: f32) -> f32;
+    pub fn asinhf(x: f32) -> f32;
+    pub fn acoshf(x: f32) -> f32;
+    #[cfg(not(windows))]
+    pub fn hypotf(x: f32, y: f32) -> f32;
+    #[cfg(windows)]
+    #[link_name = "_hypotf"]
+    pub fn hypotf(x: f32, y: f32) -> f32;
+    pub fn roundf(x: f32) -> f32;
+    pub fn fmaf(x: f32, y: f32, z: f32) -> f32;
+    pub fn fmodf(x: f32, y: f32) -> f32;
+}
+
+#[cfg(any(relax_web, target_os = "linux"))]
+mod math;
+// a rustc build's `cbrt` on Linux is this one's bits, not glibc's (a few ulps apart, measured
+// against 1.98); on a Mac it is the platform's
+#[cfg(all(not(relax_web), target_os = "linux"))]
+pub use self::math::cbrt;
+#[cfg(relax_web)]
+pub use self::math::{
+    sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, exp2, expm1, log, log2, log10, log1p, pow, cbrt, hypot, round, fma, fmod, sinf, cosf, tanf, asinf, acosf, atanf, atan2f, sinhf, coshf, tanhf, expf, exp2f, expm1f, logf, log2f, log10f, log1pf, powf, cbrtf, hypotf, roundf, fmaf, fmodf
+};

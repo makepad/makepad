@@ -1,0 +1,8 @@
+[package]
+name = "include-spans-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+include-spans-mac = { path = "../mac" }

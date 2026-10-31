@@ -1,0 +1,76 @@
+//! The codegen identity: the key under which every stored build, code store, front store and
+//! kernel store lives (cache.rs, store.rs, kernel_store.rs; the Android host's cache wipe).
+//!
+//! It is a hash of exactly what decides the code Relax generates: the source stamp of every crate
+//! of relax-compiler's library closure (the compiler, RIR, codegen, regalloc and backends, the
+//! runtime ABI and its rt_* functions, the std image and its shims, the native macros), each with
+//! the rustc version, target, CPU features, profile and flags it was compiled with
+//! (libs/relax/self_stamp.rs; build.rs codegen_parts for the closure's non-Relax packages).
+//! Each stamp is compiled into the rlib of the crate it describes, so a crate cargo did not
+//! rebuild keeps its old stamp with its old code: the identity cannot be newer than the code.
+//! The stamps are what the build scripts wrote, so the identity also takes the compiler from the
+//! code itself ([`compiled_by`]).
+//!
+//! Front images outlive the identity on purpose: a crate's images are looked for in every store
+//! of that crate, whichever build wrote it, so a compiler change that leaves parsing alone parses
+//! nothing again. Their keys hold [`front_id`] instead: what decides a parsed tree's bytes. Without it
+//! a store of another rustc was read with this one's type layouts, and a check panicked on garbage
+//! tree ids after a rustc upgrade on a Mac node (2026-10-31).
+//!
+//! Anything else linked into the binary (devhub, platform glue, Desk Link, the loader's UI) is
+//! not in it: changing it keeps every stored build. Provided crates (provided.rs) are keyed by
+//! their binding identity (provided.rs binding_identity; cache/items.rs apply_bound), their source
+//! is checked against the loader's at bind time. Stored
+//! entries stay keyed per function by their own inputs (body, inline tree, verdicts).
+use crate::sip::Sip128;
+
+include!(concat!(env!("OUT_DIR"), "/codegen_parts.rs"));
+
+// Every part names a stamp of its own: a crate whose SRC_STAMP resolves to another crate's (a glob
+// re-export standing in for a missing include of its own stamp) would leave its source out.
+const _: () = {
+    let mut i = 0;
+    while i < CODEGEN_PARTS.len() {
+        let mut j = i + 1;
+        while j < CODEGEN_PARTS.len() {
+            assert!(CODEGEN_PARTS[i].1 != CODEGEN_PARTS[j].1, "two codegen identity parts share one stamp");
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
+/// What this code was compiled by: a type's id is derived from its crate's stable id, which holds
+/// the rustc version and cargo's metadata. Nothing a build script could have left behind.
+fn compiled_by() -> String {
+    format!("{:?}", std::any::TypeId::of::<crate::ast::FnSig>())
+}
+
+/// What decides the bytes of a front image: the compiler (its type layouts), the tree's types and
+/// the parser.
+pub fn front_id() -> u128 {
+    static ID: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        let mut h = Sip128::new();
+        h.str("relax-front-id");
+        h.str(&compiled_by());
+        h.u128(relax_base::SRC_STAMP);
+        h.u128(relax_front::SRC_STAMP);
+        h.finish128()
+    })
+}
+
+/// This build's codegen identity.
+pub fn id() -> u128 {
+    static ID: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        let mut h = Sip128::new();
+        h.str("relax-codegen-id");
+        h.str(&compiled_by());
+        for (name, stamp) in CODEGEN_PARTS {
+            h.str(name);
+            h.u128(*stamp);
+        }
+        h.finish128()
+    })
+}

@@ -1,0 +1,43 @@
+[package]
+name = "relax-compiler"
+version = "0.1.0"
+edition = "2021"
+description = "Relax: live compiler and runtime for a strict, safe Rust dialect"
+license = "MIT OR Apache-2.0"
+publish = false
+# tests/ holds Relax compiler fixtures, including intentional compile-fail programs.
+# The native library tests are in src/; fixtures run through the compiler test runners.
+autotests = false
+
+# files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)
+[package.metadata.commercial]
+include = ["../build_stamp.rs", "../self_stamp.rs", "std"]
+
+[lib]
+name = "relax_compiler"
+path = "src/lib.rs"
+
+[dependencies]
+# the git store's deflate/inflate (src/inflate), the manifests' TOML (src/toml) and the
+# proc-macro token model (makepad's libs/relax/lex) need no registry dependencies.
+relax-backend = { workspace = true }
+relax-codegen = { workspace = true }
+# the layers below the JIT, each its own crate so they compile in parallel/pipelined and are
+# reused when only a layer above changes: relax-base <- relax-front <- relax-types <- relax-compiler
+relax-types = { workspace = true }
+relax-front = { workspace = true }
+relax-session = { workspace = true }
+# direct so the codegen identity (build.rs, src/codegen_id.rs) names their source stamps
+relax-base = { workspace = true }
+relax-lex = { workspace = true }
+makepad-remote = { workspace = true }
+makepad-strict-json = { workspace = true }
+makepad-gpu-trace = { workspace = true }
+makepad-prof-stream = { workspace = true }
+# registry packages a program needs that are neither vendored nor in $CARGO_HOME (registry_net.rs)
+relax-light-http = { workspace = true }
+relax-native-macros = { workspace = true }
+
+[lints.rust]
+# `cfg(relax)`: set when makepad run (Relax) compiles the crate
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }

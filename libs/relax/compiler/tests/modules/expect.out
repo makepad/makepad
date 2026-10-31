@@ -1,0 +1,19 @@
+out a 15.25
+out wrong type refused: true
+out missing refused: true
+out edit Patched -> 30.5
+out bad edit refused at line: true -> 30.5
+out bad module refused: true
+out panic caught: true
+out a 30.5 b 25
+out unloaded handle refused: true
+out layout edit NeedsReload
+out guard panic: true
+out guard hang: true
+out guard overflow: Ok(true)
+out still running 30.5
+out text module 4.5
+out bad text refused at its path: true
+out rr module 5
+out escapes refused: 16 of 16
+out orphan impl refused: true
