@@ -20,7 +20,7 @@
 //!
 //! The cheat sheet (SUPER+K) renders the real combos for the current OS.
 
-use crate::layout::{Axis, Dir, FullscreenMode};
+use crate::layout::{Axis, Dir};
 use makepad_widgets::*;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -37,11 +37,33 @@ pub enum WmAction {
     TogglePseudo,
     ToggleFloat,
     PopOut,
-    Fullscreen(FullscreenMode),
+    /// SUPER+F / F11 / the green button: the focused window becomes a
+    /// fullscreen space of its own; again returns it to its desktop.
+    FullscreenSpace,
+    /// SUPER+ALT+F: the focused window fills the tile area ("full width").
+    FullWidth,
     /// SUPER+CTRL+F — `fullscreenstate 0 2`: report-only, no layout change.
     TiledFullscreen,
     FocusDir(Dir),
     SwapDir(Dir),
+    /// SUPER+SHIFT+ALT+Right/Left — move the focused window to the next
+    /// (or previous) screen, wrapping; focus follows it. A no-op with one
+    /// screen.
+    MoveToScreen {
+        forward: bool,
+    },
+    /// SUPER+ALT+V — VR mode on or off: the active screen's windows as
+    /// panels in 3D (see `crate::stereo`).
+    ToggleVr,
+    /// SUPER+ALT+Home — VR: the current heading becomes straight ahead and
+    /// the manual look is cleared.
+    VrRecenter,
+    /// SUPER+ALT+PageUp/PageDown — VR: the focused window nearer/farther.
+    VrDepth {
+        nearer: bool,
+    },
+    /// SUPER+SHIFT+CTRL+arrows — VR: turn the view by hand (no tracker).
+    VrLook(Dir),
     /// Move the nearest divider on `axis` by `px` (positive = right/down).
     ResizePx {
         axis: Axis,
@@ -55,13 +77,21 @@ pub enum WmAction {
     GroupNext,
     GroupPrev,
     GroupActive(usize),
-    // Workspaces.
-    Workspace(usize),
-    MoveToWorkspace(usize),
-    MoveToWorkspaceSilent(usize),
-    WorkspaceNext,
-    WorkspacePrev,
-    WorkspaceFormer,
+    // Spaces.
+    /// SUPER+Left / Right (and SUPER+Tab): slide to the neighbouring space.
+    SpaceSlide(i32),
+    /// SUPER+1..9: slide to space `n` (0-based here).
+    SpaceJump(usize),
+    /// SUPER+0: a new desktop space, shown.
+    SpaceNew,
+    /// SUPER+Up: show or hide the space strip.
+    SpaceStrip,
+    /// SUPER+SHIFT+1..9: move the focused window to space `n` and follow it.
+    MoveToSpace(usize),
+    /// SUPER+SHIFT+ALT+1..9: move it there and stay.
+    MoveToSpaceSilent(usize),
+    /// SUPER+/: the cheat sheet of every binding.
+    CheatSheet,
     ToggleScratchpad,
     MoveToScratchpad,
     /// SUPER+L — `omarchy-hyprland-workspace-layout-toggle`: flip this
@@ -78,6 +108,8 @@ pub enum WmAction {
     ToggleBar,
     ThemeMenu,
     BackgroundNext,
+    /// SUPER+CTRL+S: the next window skin (none, holo, float, facet).
+    NextSkin,
     /// Nested-mode only: arm the SUPER+ALT layer for the next key.
     ArmAltLayer,
     /// F10 — the assistant's pane slides in or out (aicontrol decision 8:
@@ -85,6 +117,31 @@ pub enum WmAction {
     /// keymap row: it carries no Omarchy layer, so `main.rs` matches the
     /// bare key before the map.
     ToggleAi,
+    /// SUPER+CTRL+A / D: park the focus window in the left / right zone.
+    SpacewarpPark {
+        right: bool,
+    },
+    /// SUPER+CTRL+`: bring the next parked window to the centre.
+    SpacewarpCycle,
+    /// SUPER+DOWN: take the focus window off its shelf, back to a normal window.
+    SpacewarpUnshelf,
+}
+
+impl WmAction {
+    /// The heading the cheat sheet files this action under.
+    pub fn group(&self) -> &'static str {
+        use WmAction::*;
+        match self {
+            SpaceSlide(_) | SpaceJump(_) | SpaceNew | SpaceStrip | MoveToSpace(_) | MoveToSpaceSilent(_)
+            | FullscreenSpace | SpacewarpPark { .. } | SpacewarpCycle | SpacewarpUnshelf => "Spaces and shelves",
+            LaunchTerminal | LaunchBrowser | Menu | AppsMenu | SystemMenu | MenuRoute(_) | Keybindings
+            | ThemeMenu | BackgroundNext | NextSkin | ToggleBar | ToggleAi | CheatSheet | ArmAltLayer => "Shell",
+            ToggleVr | VrRecenter | VrDepth { .. } | VrLook(_) => "Glasses",
+            ToggleGroup | MoveOutOfGroup | MoveIntoGroup(_) | GroupNext | GroupPrev | GroupActive(_) => "Groups",
+            CloseWindow | CloseAllWindows | PopOut | ToggleFloat | ToggleScratchpad | MoveToScratchpad => "Windows",
+            _ => "Layout and focus",
+        }
+    }
 }
 
 /// Which Omarchy modifier layer a bind lives on.
@@ -151,26 +208,40 @@ pub fn keymap() -> Vec<Bind> {
         Bind { layer: Super, key: KeyJ, action: WmAction::ToggleSplit, help: "Toggle window split" },
         Bind { layer: Super, key: KeyP, action: WmAction::TogglePseudo, help: "Pseudo window" },
         Bind { layer: Super, key: KeyT, action: WmAction::ToggleFloat, help: "Toggle window floating/tiling" },
-        Bind { layer: Super, key: KeyF, action: WmAction::Fullscreen(FullscreenMode::Fullscreen), help: "Full screen" },
+        Bind { layer: Super, key: KeyF, action: WmAction::FullscreenSpace, help: "Full screen (a space of its own)" },
         Bind { layer: SuperCtrl, key: KeyF, action: WmAction::TiledFullscreen, help: "Tiled full screen" },
-        Bind { layer: SuperAlt, key: KeyF, action: WmAction::Fullscreen(FullscreenMode::Maximized), help: "Full width" },
+        Bind { layer: SuperAlt, key: KeyF, action: WmAction::FullWidth, help: "Full width" },
         Bind { layer: Super, key: KeyO, action: WmAction::PopOut, help: "Pop window out (float & pin)" },
-        Bind { layer: Super, key: ArrowLeft, action: WmAction::FocusDir(Dir::Left), help: "Focus on left window" },
-        Bind { layer: Super, key: ArrowRight, action: WmAction::FocusDir(Dir::Right), help: "Focus on right window" },
-        Bind { layer: Super, key: ArrowUp, action: WmAction::FocusDir(Dir::Up), help: "Focus on above window" },
-        Bind { layer: Super, key: ArrowDown, action: WmAction::FocusDir(Dir::Down), help: "Focus on below window" },
+        Bind { layer: SuperCtrl, key: ArrowLeft, action: WmAction::FocusDir(Dir::Left), help: "Focus on left window" },
+        Bind { layer: SuperCtrl, key: ArrowRight, action: WmAction::FocusDir(Dir::Right), help: "Focus on right window" },
+        Bind { layer: SuperCtrl, key: ArrowUp, action: WmAction::FocusDir(Dir::Up), help: "Focus on above window" },
+        Bind { layer: SuperCtrl, key: ArrowDown, action: WmAction::FocusDir(Dir::Down), help: "Focus on below window" },
+        Bind { layer: Super, key: ArrowLeft, action: WmAction::SpaceSlide(-1), help: "Slide to the previous space" },
+        Bind { layer: Super, key: ArrowRight, action: WmAction::SpaceSlide(1), help: "Slide to the next space" },
+        Bind { layer: Super, key: ArrowUp, action: WmAction::SpaceStrip, help: "Show or hide the space strip" },
+        Bind { layer: Super, key: Slash, action: WmAction::CheatSheet, help: "Cheat sheet of all bindings" },
         Bind { layer: Super, key: KeyS, action: WmAction::ToggleScratchpad, help: "Toggle scratchpad" },
         Bind { layer: SuperAlt, key: KeyS, action: WmAction::MoveToScratchpad, help: "Move window to scratchpad" },
         Bind { layer: Super, key: KeyL, action: WmAction::ToggleWorkspaceLayout, help: "Toggle workspace layout" },
         Bind { layer: Super, key: Backtick, action: WmAction::ToggleScratchpad, help: "Toggle scratchpad" },
         Bind { layer: SuperShift, key: Backtick, action: WmAction::MoveToScratchpad, help: "Move window to scratchpad" },
-        Bind { layer: Super, key: Tab, action: WmAction::WorkspaceNext, help: "Next workspace" },
-        Bind { layer: SuperShift, key: Tab, action: WmAction::WorkspacePrev, help: "Previous workspace" },
-        Bind { layer: SuperCtrl, key: Tab, action: WmAction::WorkspaceFormer, help: "Former workspace" },
+        Bind { layer: Super, key: Tab, action: WmAction::SpaceSlide(1), help: "Slide to the next space" },
+        Bind { layer: SuperShift, key: Tab, action: WmAction::SpaceSlide(-1), help: "Slide to the previous space" },
         Bind { layer: SuperShift, key: ArrowLeft, action: WmAction::SwapDir(Dir::Left), help: "Swap window to the left" },
         Bind { layer: SuperShift, key: ArrowRight, action: WmAction::SwapDir(Dir::Right), help: "Swap window to the right" },
         Bind { layer: SuperShift, key: ArrowUp, action: WmAction::SwapDir(Dir::Up), help: "Swap window up" },
         Bind { layer: SuperShift, key: ArrowDown, action: WmAction::SwapDir(Dir::Down), help: "Swap window down" },
+        Bind { layer: SuperShiftAlt, key: ArrowRight, action: WmAction::MoveToScreen { forward: true }, help: "Move window to next screen" },
+        Bind { layer: SuperShiftAlt, key: ArrowLeft, action: WmAction::MoveToScreen { forward: false }, help: "Move window to previous screen" },
+        // ---- VR mode (crate::stereo)
+        Bind { layer: SuperAlt, key: KeyV, action: WmAction::ToggleVr, help: "VR mode on/off" },
+        Bind { layer: SuperAlt, key: Home, action: WmAction::VrRecenter, help: "VR: recenter view" },
+        Bind { layer: SuperAlt, key: PageUp, action: WmAction::VrDepth { nearer: true }, help: "VR: window nearer" },
+        Bind { layer: SuperAlt, key: PageDown, action: WmAction::VrDepth { nearer: false }, help: "VR: window farther" },
+        Bind { layer: SuperShiftCtrl, key: ArrowLeft, action: WmAction::VrLook(Dir::Left), help: "VR: look left" },
+        Bind { layer: SuperShiftCtrl, key: ArrowRight, action: WmAction::VrLook(Dir::Right), help: "VR: look right" },
+        Bind { layer: SuperShiftCtrl, key: ArrowUp, action: WmAction::VrLook(Dir::Up), help: "VR: look up" },
+        Bind { layer: SuperShiftCtrl, key: ArrowDown, action: WmAction::VrLook(Dir::Down), help: "VR: look down" },
         Bind { layer: Alt, key: Tab, action: WmAction::CycleFocus(true), help: "Focus on next window" },
         Bind { layer: AltShift, key: Tab, action: WmAction::CycleFocus(false), help: "Focus on previous window" },
         // Omarchy: SUPER+code:20/21 = minus/equals, resize({x|y = ±N}).
@@ -195,8 +266,6 @@ pub fn keymap() -> Vec<Bind> {
         Bind { layer: SuperAlt, key: ArrowDown, action: WmAction::MoveIntoGroup(Dir::Down), help: "Move window to group on bottom" },
         Bind { layer: SuperAlt, key: Tab, action: WmAction::GroupNext, help: "Next window in group" },
         Bind { layer: SuperShiftAlt, key: Tab, action: WmAction::GroupPrev, help: "Previous window in group" },
-        Bind { layer: SuperCtrl, key: ArrowLeft, action: WmAction::GroupPrev, help: "Move grouped window focus left" },
-        Bind { layer: SuperCtrl, key: ArrowRight, action: WmAction::GroupNext, help: "Move grouped window focus right" },
         // ---- utilities.lua
         Bind { layer: Super, key: Space, action: WmAction::Menu, help: "Omarchy menu" },
         Bind { layer: SuperAlt, key: Space, action: WmAction::AppsMenu, help: "Apps menu" },
@@ -207,12 +276,18 @@ pub fn keymap() -> Vec<Bind> {
         Bind { layer: SuperCtrl, key: KeyH, action: WmAction::MenuRoute("trigger.hardware"), help: "Hardware menu" },
         Bind { layer: SuperShift, key: Space, action: WmAction::ToggleBar, help: "Toggle top bar" },
         Bind { layer: SuperCtrl, key: Space, action: WmAction::BackgroundNext, help: "Background switcher" },
+        Bind { layer: SuperCtrl, key: KeyA, action: WmAction::SpacewarpPark { right: false }, help: "Park window in the left zone" },
+        Bind { layer: SuperCtrl, key: KeyD, action: WmAction::SpacewarpPark { right: true }, help: "Park window in the right zone" },
+        Bind { layer: Super, key: ArrowDown, action: WmAction::SpacewarpUnshelf, help: "Take the window off its shelf" },
+        Bind { layer: SuperCtrl, key: Backtick, action: WmAction::SpacewarpCycle, help: "Bring the next parked window to the centre" },
         Bind { layer: SuperShiftCtrl, key: Space, action: WmAction::ThemeMenu, help: "Theme menu" },
+        Bind { layer: SuperCtrl, key: KeyS, action: WmAction::NextSkin, help: "Window skin" },
         // ---- nested-mode helper (see the module note).
         Bind { layer: Super, key: KeyA, action: WmAction::ArmAltLayer, help: "Arm the SUPER+ALT layer for one key" },
     ];
-    // SUPER+1..0 workspaces; +SHIFT moves the window along, +SHIFT+ALT
-    // moves it silently. SUPER+ALT+1..5 selects the nth group member.
+    // SUPER+1..9 slide to space n (0 makes a new desktop); +SHIFT moves the
+    // window along, +SHIFT+ALT moves it silently. SUPER+ALT+1..5 selects the
+    // nth group member.
     let digits = [
         KeyCode::Key1,
         KeyCode::Key2,
@@ -226,24 +301,33 @@ pub fn keymap() -> Vec<Bind> {
         KeyCode::Key0,
     ];
     for (i, key) in digits.into_iter().enumerate() {
-        binds.push(Bind {
-            layer: Layer::Super,
-            key,
-            action: WmAction::Workspace(i),
-            help: "Switch to workspace N",
-        });
-        binds.push(Bind {
-            layer: Layer::SuperShift,
-            key,
-            action: WmAction::MoveToWorkspace(i),
-            help: "Move window to workspace N",
-        });
-        binds.push(Bind {
-            layer: Layer::SuperShiftAlt,
-            key,
-            action: WmAction::MoveToWorkspaceSilent(i),
-            help: "Move window silently to workspace N",
-        });
+        if i < 9 {
+            binds.push(Bind {
+                layer: Layer::Super,
+                key,
+                action: WmAction::SpaceJump(i),
+                help: "Slide to space N",
+            });
+            binds.push(Bind {
+                layer: Layer::SuperShift,
+                key,
+                action: WmAction::MoveToSpace(i),
+                help: "Move window to space N",
+            });
+            binds.push(Bind {
+                layer: Layer::SuperShiftAlt,
+                key,
+                action: WmAction::MoveToSpaceSilent(i),
+                help: "Move window silently to space N",
+            });
+        } else {
+            binds.push(Bind {
+                layer: Layer::Super,
+                key,
+                action: WmAction::SpaceNew,
+                help: "New desktop space",
+            });
+        }
         if i < 5 {
             binds.push(Bind {
                 layer: Layer::SuperAlt,
@@ -434,15 +518,19 @@ mod tests {
         mods(false, true, true, false)
     }
 
+    fn sup_shift_alt() -> KeyModifiers {
+        mods(true, false, true, true)
+    }
+
     #[test]
     fn the_three_fullscreen_layers_are_distinct() {
         assert_eq!(
             match_bind(KeyCode::KeyF, &sup()),
-            Some(WmAction::Fullscreen(FullscreenMode::Fullscreen))
+            Some(WmAction::FullscreenSpace)
         );
         assert_eq!(
             match_bind(KeyCode::KeyF, &sup_alt()),
-            Some(WmAction::Fullscreen(FullscreenMode::Maximized))
+            Some(WmAction::FullWidth)
         );
         assert_eq!(
             match_bind(KeyCode::KeyF, &sup_ctrl()),
@@ -460,7 +548,7 @@ mod tests {
             match_bind(KeyCode::ReturnKey, &cmd),
             Some(WmAction::LaunchTerminal)
         );
-        assert_eq!(match_bind(KeyCode::Key1, &cmd), Some(WmAction::Workspace(0)));
+        assert_eq!(match_bind(KeyCode::Key1, &cmd), Some(WmAction::SpaceJump(0)));
         assert_eq!(match_bind(KeyCode::KeyW, &cmd), Some(WmAction::CloseWindow));
         // ⌘⌥ is the ALT layer, ⌘⌃ the CTRL layer, ⌘⇧ the SHIFT layer.
         assert_eq!(
@@ -474,6 +562,10 @@ mod tests {
         assert_eq!(
             match_bind(KeyCode::Space, &mods(true, false, false, true)),
             Some(WmAction::ToggleBar)
+        );
+        assert_eq!(
+            match_bind(KeyCode::KeyS, &mods(false, true, false, true)),
+            Some(WmAction::NextSkin)
         );
         // The Ctrl+Alt spelling keeps working for the chords macOS eats.
         assert_eq!(
@@ -512,7 +604,7 @@ mod tests {
         );
         assert_eq!(
             match_bind(KeyCode::ArrowLeft, &fallback_sup()),
-            Some(WmAction::FocusDir(Dir::Left))
+            Some(WmAction::SpaceSlide(-1))
         );
     }
 
@@ -540,11 +632,23 @@ mod tests {
     }
 
     #[test]
-    fn workspace_digits_and_group_digits_do_not_collide() {
-        assert_eq!(match_bind(KeyCode::Key3, &sup()), Some(WmAction::Workspace(2)));
+    fn space_digits_and_group_digits_do_not_collide() {
+        assert_eq!(match_bind(KeyCode::Key3, &sup()), Some(WmAction::SpaceJump(2)));
         assert_eq!(
             match_bind(KeyCode::Key3, &sup_alt()),
             Some(WmAction::GroupActive(3))
+        );
+    }
+
+    #[test]
+    fn move_to_screen_binds_on_super_shift_alt_arrows() {
+        assert_eq!(
+            match_bind(KeyCode::ArrowRight, &sup_shift_alt()),
+            Some(WmAction::MoveToScreen { forward: true })
+        );
+        assert_eq!(
+            match_bind(KeyCode::ArrowLeft, &sup_shift_alt()),
+            Some(WmAction::MoveToScreen { forward: false })
         );
     }
 

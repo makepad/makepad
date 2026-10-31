@@ -1,0 +1,3 @@
+# Let members of the input group start pairing from the Makepad controller panel.
+# xone creates this interface attribute when its driver binds (also after replug).
+ACTION=="bind", SUBSYSTEM=="usb", DRIVER=="xone-dongle", ATTRS{idVendor}=="045e", RUN+="/usr/bin/chgrp input /sys%p/pairing", RUN+="/usr/bin/chmod g+w /sys%p/pairing"

@@ -2,18 +2,24 @@
 //! destroys groups, split ratios, workspace membership, or an app instance.
 use crate::layout::{ClientId, LRect};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DesktopWindow {
     pub client: ClientId,
     pub rect: LRect,
     pub minimized: bool,
     pub maximized: bool,
     pub snap: Option<crate::snap::Zone>,
+    /// Parked by spacewarp: its desk rect keeps the full size and may lie
+    /// outside the screen (only the shown, scaled rect is on it).
+    pub warped: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct DesktopWindows {
     pub enabled: bool,
     pub windows: Vec<DesktopWindow>,
+    /// Bottom of the area a maximised window leaves to a floating shelf (the
+    /// macOS dock hovers over the desk, so the area does not reserve it).
+    pub shelf_reserve: f64,
 }
 impl DesktopWindows {
     pub fn ensure(&mut self, client: ClientId, area: LRect) {
@@ -30,7 +36,21 @@ impl DesktopWindows {
             minimized: false,
             maximized: false,
             snap: None,
+            warped: false,
         });
+    }
+    /// The size the app asked for (`w` x `h`, its whole window): clamped to `area` (the
+    /// screen minus bar and dock) and centred there. A maximised, snapped or parked
+    /// window keeps its place. True when the window changed.
+    pub fn request_size(&mut self, client: ClientId, w: f64, h: f64, area: LRect) -> bool {
+        let Some(win) = self.get_mut(client) else { return false };
+        if win.maximized || win.snap.is_some() || win.warped || !(w > 0.0 && h > 0.0) {
+            return false;
+        }
+        let rect = area.centered(w.max(1.0), h.max(1.0));
+        let changed = win.rect != rect;
+        win.rect = rect;
+        changed
     }
     pub fn get(&self, client: ClientId) -> Option<&DesktopWindow> {
         self.windows.iter().find(|w| w.client == client)
@@ -47,12 +67,14 @@ impl DesktopWindows {
             self.windows.push(w);
         }
     }
-    pub fn rects(&self, clients: &[ClientId], area: LRect) -> Vec<(ClientId, LRect)> {
+    /// The drawn rects. `band` is where maximize and the snap zones apply
+    /// (the display's centre band); every other window stays inside `area`.
+    pub fn rects(&self, clients: &[ClientId], area: LRect, band: LRect) -> Vec<(ClientId, LRect)> {
         self.windows
             .iter()
             .filter(|w| clients.contains(&w.client) && !w.minimized)
             .map(|w| {
-                let r = if w.maximized { area } else if let Some(zone)=w.snap {zone.bounds(area)} else { fit(w.rect, area) };
+                let r = if w.maximized { LRect::new(band.x, band.y, band.w, (band.h - self.shelf_reserve).max(1.0)) } else if let Some(zone)=w.snap {zone.bounds(band)} else if w.warped { w.rect } else { fit(w.rect, area) };
                 (w.client, r)
             })
             .collect()
@@ -73,6 +95,27 @@ pub fn fit(mut r: LRect, area: LRect) -> LRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 149: Stage asks for 1680x1040 and opened at the default 715x606 on a 1969x1231
+    /// desk. The asked size is honoured, centred; an ask bigger than the desk is clamped
+    /// to it; a maximised window keeps its place.
+    #[test]
+    fn an_apps_requested_size_is_honoured_clamped_and_centred() {
+        let area = LRect::new(0.0, 26.0, 1969.0, 1231.0 - 26.0 - 74.0);
+        let mut d = DesktopWindows::default();
+        d.enabled = true;
+        d.ensure(1, area);
+        assert!(d.request_size(1, 1680.0, 1040.0 + 32.0, area));
+        let r = d.get(1).unwrap().rect;
+        assert_eq!((r.w, r.h), (1680.0, 1072.0));
+        assert!((r.x + r.w * 0.5 - (area.x + area.w * 0.5)).abs() < 1e-9 && (r.y + r.h * 0.5 - (area.y + area.h * 0.5)).abs() < 1e-9, "{r:?}");
+        // bigger than the desk: the desk's usable area, exactly
+        assert!(d.request_size(1, 4000.0, 3000.0, area));
+        assert_eq!(d.get(1).unwrap().rect, area);
+        // a maximised window is left alone
+        d.get_mut(1).unwrap().maximized = true;
+        assert!(!d.request_size(1, 800.0, 600.0, area));
+        assert!(!d.request_size(2, 800.0, 600.0, area), "unknown window");
+    }
     #[test]
     fn maximize_and_minimize_keep_restore_rect_and_stack() {
         let area = LRect::new(0.0, 30.0, 1200.0, 800.0);
@@ -82,13 +125,13 @@ mod tests {
         d.ensure(2, area);
         let original = d.get(1).unwrap().rect;
         d.get_mut(1).unwrap().maximized = true;
-        assert_eq!(d.rects(&[1, 2], area)[0].1, area);
+        assert_eq!(d.rects(&[1, 2], area, area)[0].1, area);
         d.get_mut(1).unwrap().minimized = true;
-        assert_eq!(d.rects(&[1, 2], area).len(), 1);
+        assert_eq!(d.rects(&[1, 2], area, area).len(), 1);
         d.get_mut(1).unwrap().minimized = false;
         d.get_mut(1).unwrap().maximized = false;
         d.raise(1);
-        assert_eq!(d.rects(&[1, 2], area).last(), Some(&(1, original)));
+        assert_eq!(d.rects(&[1, 2], area, area).last(), Some(&(1, original)));
     }
     #[test]
     fn shrinking_the_workarea_keeps_windows_reachable() {
@@ -107,11 +150,11 @@ mod tests {
         d.ensure(1,area);
         let restore=d.get(1).unwrap().rect;
         d.get_mut(1).unwrap().snap=Some(crate::snap::Zone::BottomRight);
-        assert_eq!(d.rects(&[1],area)[0].1,LRect::new(700.,439.,690.,397.));
+        assert_eq!(d.rects(&[1],area,area)[0].1,LRect::new(700.,439.,690.,397.));
         let small=LRect::new(10.,42.,800.,600.);
-        assert_eq!(d.rects(&[1],small)[0].1,LRect::new(410.,342.,400.,300.));
+        assert_eq!(d.rects(&[1],small,small)[0].1,LRect::new(410.,342.,400.,300.));
         assert_eq!(d.get(1).unwrap().rect,restore);
         d.get_mut(1).unwrap().snap=None;
-        assert_eq!(d.rects(&[1],area)[0].1,restore);
+        assert_eq!(d.rects(&[1],area,area)[0].1,restore);
     }
 }

@@ -1,0 +1,2 @@
+# BlackShark V3 Pro settings interface; audio stays with snd-usb-audio.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0577", GROUP="input", MODE="0660", TAG+="uaccess"

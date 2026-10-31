@@ -1,0 +1,18 @@
+# wm-phone -- the window manager of the phone: apps/wm in its Android skin, every app a JIT
+# domain of the same process (cargo makepad android run-host --privileged --app makepad-app-wm-phone
+# --app <each app>). Nothing of the desk lives here: this crate is the `WmBuild` (no linked
+# modules, no client processes, the Android style) around `makepad-app-wm`'s App.
+
+[package]
+name = "makepad-app-wm-phone"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "makepad-app-wm-phone"
+path = "src/main.rs"
+
+[dependencies]
+makepad-app-wm = { path = "../wm", default-features = false }
+makepad-widgets = { path = "../../widgets", default-features = false }

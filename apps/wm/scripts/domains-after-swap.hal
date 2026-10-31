@@ -1,0 +1,58 @@
+# Regression gate (memlane): new app domains launched AFTER the settle swap (generation 0 destroyed).
+# The first such launch crashed the WM ("use after compiler-zone destroy": the build-script runner's
+# process state lived in the destroyed zone). Run like domains.hal, with MAKEPAD_RUN_ZONE_CHECK=1:
+# MAKEPAD_HOME=<fresh> MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HAL_STEP_TIMEOUT_MS=180000 \
+# MAKEPAD_HAL_SCRIPT=apps/wm/scripts/domains-after-swap.hal makepad run --privileged makepad-app-wm
+# The first wait lets the WM settle and swap (the log shows "relax-zone: swap 0->1").
+wait_frame
+sleep_frames 3600
+key Space logo alt
+sleep_frames 10
+key KeyT
+key KeyE
+key KeyR
+key KeyM
+key KeyI
+key KeyN
+key KeyA
+key KeyL
+key ReturnKey
+domain makepad-app-terminal
+wait_frame
+domain -
+sleep_frames 600
+key Space logo alt
+sleep_frames 10
+key KeyF
+key KeyI
+key KeyL
+key KeyE
+key KeyS
+key ReturnKey
+domain makepad-app-files
+wait_frame
+domain -
+sleep_frames 600
+key Space logo alt
+sleep_frames 10
+key KeyN
+key KeyO
+key KeyT
+key KeyE
+key KeyS
+key ReturnKey
+domain makepad-app-notes
+wait_frame
+domain -
+sleep_frames 600
+key Space logo alt
+sleep_frames 10
+key KeyM
+key KeyA
+key KeyI
+key KeyL
+key ReturnKey
+domain makepad-app-mail
+wait_frame
+domain -
+sleep_frames 600

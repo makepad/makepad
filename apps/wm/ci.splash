@@ -5,29 +5,31 @@
 // what to send; `ci.accept(image, text)` hands it one grab and one acceptance
 // text, and it answers YES or NO with its reasons. Keep it basic: does the
 // WM come up, switch to macOS, and launch a terminal and a browser.
+// On a Mac a hidden WM never receives its hosted apps' frames (open: no client ever logs "first frame in").
+// ci os: linux
 
 use mod.std.*
 use mod.ci;
 
 // Said in every acceptance: hidden test instances draw this on every grab.
-let FRAME = "This is a screenshot of one application window taken from a Mac. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. "
+let FRAME = "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. "
 
 let VERDICT = " Write one short bullet line for each numbered point saying what you see. Then write the verdict as the last line, in exactly this form: VERDICT: YES or VERDICT: NO"
 
 ci.step("check other platforms", fn(){
-    ci.check_targets({packages: ["makepad-wm"] targets: ci.host.targets})
+    ci.check_targets({packages: ["makepad-app-wm"] targets: ci.host.targets})
 })
 
 // The WM starts its apps through cargo. Building them first makes that
 // launch instant, so the waits below measure the app, not the compiler.
 ci.step("build the apps the desk will open", fn(){
-    ci.build({package: "makepad-terminal" binary: "terminal"})
+    ci.build({package: "makepad-app-terminal" binary: "makepad-app-terminal"})
     // The terminal starts its shell through this helper, next to it.
     ci.build({package: "makepad-agents" binary: "agents"})
-    ci.build({package: "makepad-browser" binary: "browser"})
+    ci.build({package: "makepad-app-browser" binary: "makepad-app-browser"})
 })
 
-let wm = ci.launch({package: "makepad-wm" binary: "wm" cwd: "."})
+let wm = ci.launch({package: "makepad-app-wm" binary: "makepad-app-wm" cwd: "."})
 
 ci.step("desktop is up", fn(){
     ci.sleep(3.0)
@@ -59,9 +61,11 @@ ci.step("launch the terminal", fn(){
     // The menu says what Return did; a launcher that lost the keys or
     // picked nothing fails here, by name, not at the frame wait below.
     wm.wait_log("shell menu activate apps.terminal", 20.0)
-    // "launched" fires at spawn; the window is a compile placeholder until
-    // the app draws. The WM says when it has: wait for that line.
-    wm.wait_log("terminal client * first frame", 180.0)
+    // "launched" fires at spawn; the window is a compile placeholder, then the
+    // JIT's load screen, until the app draws. The WM says when it has, and when
+    // a frame of it reached the desk (either may come first).
+    wm.wait_log("terminal client * app first frame", 180.0)
+    wm.wait_log("terminal client * first frame in", 180.0)
     ci.sleep(2.0)
     let shot = wm.grab("terminal")
     ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A terminal window is a rectangular window whose content area is mostly one dark or one light flat colour with lines of monospace text starting at the left edge, usually with a prompt symbol such as $ or % or > on the last line, and a title bar above it. 1. For each window you can see, say its rough position and what its content looks like. 2. Say whether at least one of them is a terminal as described. YES means at least one terminal window is open." + VERDICT)
@@ -72,7 +76,8 @@ ci.step("launch the browser", fn(){
     wm.type_text("browser")
     wm.key("ReturnKey")
     wm.wait_log("shell menu activate apps.browser", 20.0)
-    wm.wait_log("browser client * first frame", 240.0)
+    wm.wait_log("browser client * app first frame", 240.0)
+    wm.wait_log("browser client * first frame in", 240.0)
     ci.sleep(4.0)
     let shot = wm.grab("browser")
     ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A web browser window has an address bar, a wide rounded text field near its top containing a web address or a search field, possibly a row of tabs above it, and a web page below it with headings, paragraphs, images or a search box. 1. For each window you can see, say its rough position and whether it has an address bar near its top. 2. Say whether at least one of them is a web browser as described. YES means at least one browser window is open." + VERDICT)

@@ -1,6 +1,7 @@
 //! Phone shell state and geometry. Application viewports remain stable while
 //! their compositor surfaces move between home, foreground and the task viewer.
-use crate::{desktop::DesktopStyle, hub::ClientId, mobile_tiles::{HomeOrder, HomeTiles, Slot}};
+use crate::{desktop::DesktopStyle, mobile_tiles::{HomeOrder, HomeTiles, Slot}};
+use makepad_app_host::ClientId;
 use makepad_widgets::makepad_platform::SafeAreaInsets;
 use makepad_widgets::*;
 use std::collections::HashMap;
@@ -98,6 +99,10 @@ pub const ANDROID_SHELL_STRIP: f64 = 32.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PhoneScreen { #[default] Home, App, Recents, Drawer }
 
+/// The phone's Settings: an icon on the home page and in the drawer like an app's, opening the
+/// shell's own settings page (`PhoneState::settings`). No process, no registry row, no domain.
+pub const SETTINGS_APP: &str = "settings";
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PhoneHit {
     App(String), Card(ClientId), Home, Recents, Drawer, Back,
@@ -105,8 +110,11 @@ pub enum PhoneHit {
     ClearSearch, CancelSearch,
     /// Edit mode's "Done" pill.
     Done,
-    /// The home screen's look switcher: 0 light, 1 dark, 2 the iOS skin.
+    /// The settings page's look switcher: 0 light, 1 dark, 2 the iOS skin.
     Look(u8),
+    /// The settings page's Done; its theme chips; the JIT cache's clear, its confirmation and
+    /// the restart into a new process; the page itself (taps beside its controls go nowhere).
+    SettingsClose, Theme(String), ClearCache, ConfirmClear, CancelClear, Restart, SettingsPage,
 }
 
 /// How far past its ends a paged scroller or the library follows the
@@ -507,6 +515,11 @@ pub fn bottom_swipe_target(
 
 #[derive(Clone)]
 pub struct PhoneState {
+    /// The settings page: 0 closed, 1 open, 2 asking to clear the JIT cache.
+    pub settings: u8,
+    /// The settings page's touch: where it went down, and whether in the
+    /// bottom strip (a swipe up from there goes home, as from an app).
+    pub settings_press: Option<(Vec2d, bool)>,
     pub clock: String,
     pub wallpaper_time: f64,
     /// The wallpaper's own animation clock: it runs at `wallpaper_speed`,
@@ -660,7 +673,7 @@ pub fn card_scale(screen: Rect) -> f64 {
 }
 impl Default for PhoneState {
     fn default() -> Self {
-        Self { clock: "9:41".into(), wallpaper_time: 0.0, wallpaper_phase: 0.0, wallpaper_speed: 0.0, touch_time_offset: 0.0, frame_clock_delta: 0.0, screen: PhoneScreen::Home, client: None, order: Vec::new(),
+        Self { settings: 0, settings_press: None, clock: "9:41".into(), wallpaper_time: 0.0, wallpaper_phase: 0.0, wallpaper_speed: 0.0, touch_time_offset: 0.0, frame_clock_delta: 0.0, screen: PhoneScreen::Home, client: None, order: Vec::new(),
             openness: 0.0, overview: 0.0, openness_v: 0.0, overview_v: 0.0, launch_from: None, origin: None, cards: Paging::default(), pager: Paging::default(), home_pages: 1, drawer: 0.0,
             home: HomeOrder::default(), home_order_loaded: false, edit: HomeEdit::default(), last_interaction: 0.0, dismiss_y: 0.0, gesture: None, touch: None,
             keyboard: 0.0, keyboard_target: 0.0, keyboard_sent_height: 0.0, keyboard_client: None,

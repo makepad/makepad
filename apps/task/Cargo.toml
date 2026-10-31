@@ -1,23 +1,25 @@
 [package]
-name = "makepad-task"
+name = "makepad-app-task"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "task"
+name = "makepad-app-task"
 path = "src/main.rs"
 
 [features]
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", default-features = false, features = ["charts", "color", "data"] }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["data", "charts"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-civil-time = { path = "../../libs/civil_time" }
 makepad-wm-api = { path = "../../libs/wm_api" }
+makepad-remote = { path = "../../libs/remote" }
 
 [package.metadata.makepad.desktop]
 name = "Makepad Task Manager"

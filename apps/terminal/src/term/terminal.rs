@@ -13,7 +13,7 @@ use crate::term::parser::{Action, Csi, Dcs, Esc};
 use crate::term::screen::{CursorStyle, SavedCursor, Screen};
 use crate::term::sgr::{attributes, Attribute};
 use crate::term::style::{StyleColor, StyleFlags};
-use crate::term::unicode::{char_width, grapheme_break, GraphemeState};
+use makepad_cell_width::{char_width, grapheme_break, GraphemeState};
 
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 
@@ -1882,7 +1882,10 @@ impl Terminal {
     /// RIS.
     pub fn full_reset(&mut self) {
         let (cols, rows) = (self.cols(), self.rows());
+        // The history's owner keeps listening across a reset.
+        let sink = self.primary.scrollback_sink.take();
         self.primary = Screen::new(cols, rows, DEFAULT_SCROLLBACK);
+        self.primary.scrollback_sink = sink;
         self.alternate = Screen::new(cols, rows, 0);
         self.active = ActiveScreen::Primary;
         self.modes.reset();

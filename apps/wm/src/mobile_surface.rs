@@ -228,6 +228,13 @@ impl PhoneSurface {
     pub fn icon_at(&self, p: Vec2d, app: &str) -> Option<Rect> {
         self.app_icons.iter().rev().find(|(hit, id, _)| id == app && hit.contains(p)).map(|(_, _, icon)| *icon)
     }
+    /// The phone's app list (id, label): the launcher's apps for this build, then the shell's
+    /// own Settings, which opens the settings page (`SETTINGS_APP`).
+    pub fn phone_apps(launchable: &crate::apps::Launchable) -> Vec<(String,String)> {
+        let mut ids: Vec<(String,String)>=crate::shell::launcher::apps(launchable).iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
+        ids.push((SETTINGS_APP.to_string(),"Settings".to_string()));
+        ids
+    }
     /// An app hit, with the icon drawn for it.
     fn app_hit(&mut self, hit: Rect, app: &str, icon: Rect) {
         self.hits.push((hit, PhoneHit::App(app.to_string())));
@@ -333,23 +340,6 @@ impl PhoneSurface {
             }
         }
     }
-    /// The super-app's first run: the toolchain and checkout streaming out
-    /// of the APK (dylib_host `provision`). A pill above the dock with the
-    /// newest progress line, so the minutes before a tile can compile are
-    /// not a silent desk; a failure stays up in the same place.
-    pub fn draw_provision_band(&mut self, cx: &mut Cx2d, screen: Rect, chrome: PhoneChrome, style: DesktopStyle, dark: bool, opacity: f32, text: &str) {
-        if opacity<0.01 {return;}
-        self.use_fonts(style==DesktopStyle::Ios);
-        let (face, ink)=Self::card_colors(style, dark);
-        let dock=Self::home_dock(screen, chrome);
-        let h=58.0;
-        let r=rect(dock.pos.x, dock.pos.y-h-12.0, dock.size.x, h);
-        self.rounded(cx, r, if style==DesktopStyle::Android {16.0} else {36.0}, alpha(face, 0.9*opacity));
-        let ink=alpha(ink, opacity);
-        let headline=if text.starts_with("provision failed") {"Could not set up apps"} else {"Setting up apps for the first time"};
-        self.label(cx,rect(r.pos.x+14.0,r.pos.y+9.0,r.size.x-28.0,22.0),headline,13.0,true,ink);
-        self.label(cx,rect(r.pos.x+14.0,r.pos.y+31.0,r.size.x-28.0,20.0),text,11.0,false,alpha(ink,0.7*opacity));
-    }
     /// The solid card an app zooms in on (and out of): its own ground (a
     /// module's `color_bg_app`, else the style's card face) with its icon
     /// centred, as large as the card allows up to 72 pt — at the start of
@@ -430,8 +420,7 @@ impl PhoneSurface {
         if opacity<0.01 && drawer<0.001 {return;}
         self.xf=(!ios && (home_scale-1.0).abs()>1e-4).then(||(screen.pos+screen.size*0.5,home_scale));
         let landscape=screen.size.x>screen.size.y;
-        let apps=crate::shell::launcher::apps(&state.launchable);
-        let ids: Vec<(String,String)>=apps.iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
+        let ids=Self::phone_apps(&state.launchable);
         if drawer>0.001 && ios {
             self.draw_app_library(cx,state,screen,&ids,phone.drawer as f32,backdrop.clone());
         }
@@ -544,9 +533,6 @@ impl PhoneSurface {
             self.label(cx,r,"All apps  ↑",14.0,false,alpha(ink,opacity));
             self.hits.push((rect(r.pos.x-10.0,r.pos.y-10.0,120.0,48.0),PhoneHit::Drawer));
         }
-        if home && !edit.active {
-            self.draw_look_switcher(cx,state,screen,opacity);
-        }
         if edit.active {
             // "Done" leaves edit mode; so does a tap beside the icons.
             let top=screen.pos.y+phone.chrome.top_reserve(screen)+8.0;
@@ -567,40 +553,102 @@ impl PhoneSurface {
             }
         }
     }
-    /// The home screen's look switcher: Light · Dark · iOS, a compact
-    /// segmented pill in one fixed place above the dock row, native to
-    /// each skin: Material's tonal segmented button with a
-    /// filled selection, iOS's frosted segmented control with a white
-    /// thumb. Not scaled with the home: it is chrome.
-    fn draw_look_switcher(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, opacity: f32) {
+    /// The settings page over everything: the look (Light · Dark · iOS), the WM's themes and
+    /// the JIT cache (its size, clear with a confirmation, restart into a new process).
+    pub fn draw_settings_page(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect) {
         let phone=&state.phone;
-        let style=state.style.target;
-        let ios=style==DesktopStyle::Ios;
-        let dark=state.style.dark;
-        let selected=if ios {2} else if dark {1} else {0};
-        let (seg_w,h)=(42.0,30.0);
-        let w=seg_w*3.0;
-        // One place in every skin and orientation, so switching never moves
-        // it: centred above the dock's row of page dots / "All apps", 8 pt
-        // clear of it — a band both home screens leave free.
-        let dock=Self::home_dock(screen,phone.chrome);
-        let r=rect(screen.pos.x+(screen.size.x-w)*0.5,dock.pos.y-32.0-8.0-h,w,h);
+        if phone.settings==0 {return;}
         let saved=self.xf.take();
-        let ink=if dark {rgb(255,255,255)} else {rgb(31,27,38)};
-        if ios {
-            self.rounded(cx,r,(h*0.5) as f32,alpha(if dark {rgb(60,60,67)} else {rgb(118,118,128)},0.24*opacity));
-        } else {
-            self.rounded(cx,r,(h*0.5) as f32,alpha(if dark {rgb(43,41,48)} else {rgb(243,237,247)},0.92*opacity));
-        }
+        let dark=state.style.dark;
+        let ios=state.style.target==DesktopStyle::Ios;
+        self.use_fonts(ios);
+        let (bg,card,ink,soft,accent)=if dark {(rgb(18,18,24),rgb(36,35,44),rgb(255,255,255),rgb(170,170,185),rgb(255,140,26))}
+            else {(rgb(246,244,250),rgb(255,255,255),rgb(24,22,30),rgb(100,98,112),rgb(214,100,0))};
+        self.d.solid(cx,screen,bg);
+        self.hits.push((screen,PhoneHit::SettingsPage));
+        let top=screen.pos.y+phone.chrome.top_reserve(screen)+8.0;
+        let x=screen.pos.x+20.0;
+        let w=screen.size.x-40.0;
+        self.d.label_elided(cx,rect(x,top,w-80.0,40.0),true,24.0,ink,HAlign::Left,"Settings");
+        let done=rect(screen.pos.x+screen.size.x-88.0,top+4.0,72.0,32.0);
+        self.rounded(cx,done,16.0,card);
+        self.label(cx,done,"Done",14.0,true,ink);
+        self.hits.push((done,PhoneHit::SettingsClose));
+        let mut y=top+64.0;
+        // Look
+        self.d.label_elided(cx,rect(x,y,w,20.0),false,13.0,soft,HAlign::Left,"Look");
+        y+=26.0;
+        let selected=if ios {2} else if dark {1} else {0};
+        let seg_w=w/3.0;
+        self.rounded(cx,rect(x,y,w,40.0),20.0,card);
         for (i,label) in ["Light","Dark","iOS"].iter().enumerate() {
-            let seg=rect(r.pos.x+i as f64*seg_w,r.pos.y,seg_w,h);
-            if i==selected {
-                let thumb=rect(seg.pos.x+2.0,seg.pos.y+2.0,seg_w-4.0,h-4.0);
-                let fill=if ios {if dark {rgb(99,99,102)} else {rgb(255,255,255)}} else if dark {rgb(74,68,88)} else {rgb(232,222,248)};
-                self.rounded(cx,thumb,((h-4.0)*0.5) as f32,alpha(fill,opacity));
-            }
-            self.label(cx,seg,label,12.0,i==selected,alpha(ink,opacity*if i==selected {1.0} else {0.72}));
+            let seg=rect(x+i as f64*seg_w,y,seg_w,40.0);
+            if i==selected {self.rounded(cx,rect(seg.pos.x+3.0,seg.pos.y+3.0,seg_w-6.0,34.0),17.0,alpha(accent,0.22));}
+            self.label(cx,seg,label,14.0,i==selected,ink);
             self.hits.push((seg,PhoneHit::Look(i as u8)));
+        }
+        y+=60.0;
+        // The WM's themes (the theme menu's set)
+        let themes=crate::theme::installed_themes();
+        if themes.len()>1 {
+            self.d.label_elided(cx,rect(x,y,w,20.0),false,13.0,soft,HAlign::Left,"Theme");
+            y+=26.0;
+            let mut cx0=x;
+            for name in themes.iter() {
+                let cw=(name.len() as f64*7.5+28.0).min(w);
+                if cx0+cw>x+w {cx0=x;y+=42.0;}
+                let chip=rect(cx0,y,cw,34.0);
+                let on=*name==state.theme_name;
+                self.rounded(cx,chip,17.0,if on {alpha(accent,0.22)} else {card});
+                self.label(cx,chip,name,12.0,on,ink);
+                self.hits.push((chip,PhoneHit::Theme(name.clone())));
+                cx0+=cw+8.0;
+            }
+            y+=56.0;
+        }
+        // The JIT cache
+        if crate::jit_cache::available() {
+            self.d.label_elided(cx,rect(x,y,w,20.0),false,13.0,soft,HAlign::Left,"JIT cache");
+            y+=26.0;
+            let box_r=rect(x,y,w,if phone.settings==2 {150.0} else {104.0});
+            self.rounded(cx,box_r,16.0,card);
+            let size=match crate::jit_cache::size_text() {
+                Some(size)=>size,
+                // measured on a thread: draw again until it answers
+                None=>{self.area.redraw(cx);"measuring…".to_string()}
+            };
+            let pending=crate::jit_cache::clear_pending();
+            let line=if pending {"Cleared · the next start is cold".to_string()} else {format!("Compiled code kept between starts · {size}")};
+            self.d.label_elided(cx,rect(x+16.0,y+12.0,w-32.0,22.0),false,14.0,ink,HAlign::Left,&line);
+            let b=rect(x+16.0,y+48.0,w-32.0,42.0);
+            if phone.settings==2 {
+                self.d.label_elided(cx,rect(x+16.0,y+40.0,w-32.0,40.0),false,13.0,soft,HAlign::Left,&format!("Clear {size}? The next start compiles everything again."));
+                let half=(w-40.0)*0.5;
+                let cancel=rect(x+16.0,y+92.0,half,42.0);
+                let clear=rect(x+24.0+half,y+92.0,half,42.0);
+                self.rounded(cx,cancel,21.0,alpha(soft,0.18));
+                self.label(cx,cancel,"Cancel",14.0,false,ink);
+                self.rounded(cx,clear,21.0,accent);
+                self.label(cx,clear,"Clear",14.0,true,rgb(255,255,255));
+                self.hits.push((cancel,PhoneHit::CancelClear));
+                self.hits.push((clear,PhoneHit::ConfirmClear));
+            } else if pending {
+                self.rounded(cx,b,21.0,accent);
+                self.label(cx,b,"Restart now",14.0,true,rgb(255,255,255));
+                self.hits.push((b,PhoneHit::Restart));
+            } else {
+                self.rounded(cx,b,21.0,alpha(accent,0.16));
+                self.label(cx,b,"Clear JIT cache",14.0,true,accent);
+                self.hits.push((b,PhoneHit::ClearCache));
+            }
+        }
+        // The home pill, as under an app: a tap on the strip or a swipe up from it goes home.
+        let bottom_h=phone.chrome.bottom_reserve(screen);
+        if bottom_h>0.0 {
+            let bottom=rect(screen.pos.x,screen.pos.y+screen.size.y-bottom_h,screen.size.x,bottom_h);
+            let pill=phone.chrome.shell_pill(screen).unwrap_or_else(||rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+(bottom_h-4.0)*0.5,120.0,4.0));
+            self.rounded(cx,pill,pill.size.y as f32,ink);
+            self.hits.push((bottom,PhoneHit::SettingsClose));
         }
         self.xf=saved;
     }
@@ -613,8 +661,7 @@ impl PhoneSurface {
         let phone=&state.phone;
         if state.style.target==DesktopStyle::Ios || phone.drawer<=0.001 || (phone.screen==PhoneScreen::App && phone.openness>=0.999) {return;}
         self.use_fonts(false);
-        let apps=crate::shell::launcher::apps(&state.launchable);
-        let ids: Vec<(String,String)>=apps.iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
+        let ids=Self::phone_apps(&state.launchable);
         // `drawer` past 1 is the overscroll: the grid stretches.
         self.draw_android_drawer(cx,state,screen,&ids,phone.drawer.min(1.2));
     }
