@@ -74,7 +74,7 @@ pub fn on_test_cx(f: impl FnOnce() + Send + 'static) {
         f();
         return;
     }
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = crate::makepad_platform::makepad_network::mpsc::channel();
     test_cx_jobs()
         .send(TestCxJob {
             run: Box::new(f),
@@ -90,13 +90,13 @@ pub fn on_test_cx(f: impl FnOnce() + Send + 'static) {
 
 struct TestCxJob {
     run: Box<dyn FnOnce() + Send>,
-    done: std::sync::mpsc::Sender<std::thread::Result<()>>,
+    done: crate::makepad_platform::makepad_network::mpsc::Sender<std::thread::Result<()>>,
 }
 
-fn test_cx_jobs() -> &'static std::sync::mpsc::Sender<TestCxJob> {
-    static JOBS: std::sync::OnceLock<std::sync::mpsc::Sender<TestCxJob>> = std::sync::OnceLock::new();
+fn test_cx_jobs() -> &'static crate::makepad_platform::makepad_network::mpsc::Sender<TestCxJob> {
+    static JOBS: std::sync::OnceLock<crate::makepad_platform::makepad_network::mpsc::Sender<TestCxJob>> = std::sync::OnceLock::new();
     JOBS.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<TestCxJob>();
+        let (tx, rx) = crate::makepad_platform::makepad_network::mpsc::channel::<TestCxJob>();
         let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
         for i in 0..4 {
             let rx = rx.clone();

@@ -1,6 +1,5 @@
 use {
     crate::{
-        draw_list_2d::DrawList2d,
         makepad_math::{dvec2, Vec2d},
         makepad_platform::{
             Area, Cx, CxDrawPassParent, CxDrawPassRect, DrawEvent, DrawListId, DrawPass,
@@ -59,6 +58,8 @@ impl<'a> Drop for CxDraw<'a> {
         if !self.fonts.borrow_mut().prepare_textures(self.cx) {
             self.cx.redraw_all();
         }
+        // After the first frame: index the installed fonts in the background.
+        crate::text::system_faces::start_prewarm(self.cx);
         self.pass_stack.clear();
         self.draw_list_stack.clear();
         self.cx.global::<CxDrawScratchPool>().0.push(CxDrawScratch {
@@ -73,7 +74,7 @@ impl<'a> CxDraw<'a> {
     pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
         Self::lazy_construct_fonts(cx);
         Self::lazy_construct_nav_tree(cx);
-        cx.redraw_id += 1;
+        cx.begin_draw_context();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         fonts.borrow_mut().prepare_atlases_if_needed(cx);
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
@@ -104,6 +105,8 @@ impl<'a> CxDraw<'a> {
             return false;
         }
         let mut fonts = Fonts::new(cx, layouter::Settings::default());
+        fonts.set_system_fonts_first(cx.font_set().prefers_system_fonts());
+        crate::text::scan::start(cx, &mut fonts);
         fonts.define_font_family(
             0.into(),
             FontFamilyDefinition {
@@ -113,6 +116,30 @@ impl<'a> CxDraw<'a> {
             },
         );
         cx.set_global(Rc::new(RefCell::new(fonts)));
+        // A `System` font set asks the OS before any bundled face: its font
+        // index is built from now on, in the background, so the first miss
+        // finds it ready. (Other sets start it after the first frame.)
+        if cx.font_set().prefers_system_fonts() {
+            crate::text::system_faces::start_prewarm(cx);
+        }
+        // a finished glyph upgrade (MSDF worker) raises the UI signal: redraw so the next draw
+        // applies it, instead of keeping the stand-in glyphs until unrelated input
+        cx.signal_hooks.push(|cx| {
+            // ... and a finished system font lookup (or index build) completes its families
+            let waiting = cx
+                .get_global_ref::<Rc<RefCell<Fonts>>>()
+                .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.msdf_results_waiting()))
+                .unwrap_or(false)
+                | crate::text::system_faces::has_news(cx);
+            if waiting {
+                cx.redraw_all();
+            }
+        });
+        cx.register_async_load_probe("glyph", |cx| {
+            cx.get_global_ref::<Rc<RefCell<Fonts>>>()
+                .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.pending_glyph_rasters()))
+                .unwrap_or(0)
+        });
         true
     }
 
@@ -239,6 +266,12 @@ impl<'a> CxDraw<'a> {
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::ScaledArea(area, scale));
     }   */
 
+    /// The pass being drawn (the parent of any pass a draw declares with
+    /// [`CxDraw::make_child_pass`]).
+    pub fn current_pass_id(&self) -> DrawPassId {
+        self.pass_stack.last().unwrap().pass_id
+    }
+
     pub fn current_pass_size(&self) -> Vec2d {
         self.cx
             .get_pass_rect(
@@ -275,6 +308,29 @@ impl<'a> CxDraw<'a> {
         dvec2(f64::NAN, f64::NAN)
     }
 
+    /// The density of the window the current pass draws for (`owning_window_or_root_pass_size`'s
+    /// window): what content laid out in that window's points rasterises at, whatever pass it is
+    /// nested in. A pixel-addressed target (a `RenderTarget`, dpi 1) in between does not change
+    /// it: a window's content drawn into a pass under one is still drawn at the window's dpi.
+    /// Without a window, the current pass's dpi.
+    pub fn owning_window_dpi_factor(&self) -> f64 {
+        let Some(stack_item) = self.pass_stack.last() else {
+            return 1.0;
+        };
+        let mut pass_id = stack_item.pass_id;
+        for _ in 0..25 {
+            match self.passes[pass_id].parent {
+                CxDrawPassParent::Window(window_id) => {
+                    let dpi = self.windows[window_id].window_geom.dpi_factor;
+                    return if dpi.is_finite() && dpi > 0.0 { dpi } else { self.current_dpi_factor() };
+                }
+                CxDrawPassParent::DrawPass(parent) => pass_id = parent,
+                _ => break,
+            }
+        }
+        self.current_dpi_factor()
+    }
+
     /// The paint-order depth the current pass adds per draw call: what a
     /// drawer that splits one call into several must take back off through
     /// `draw_depth` for its later calls to keep the depth of the one call.
@@ -282,10 +338,6 @@ impl<'a> CxDraw<'a> {
         self.cx.passes[self.pass_stack.last().unwrap().pass_id].zbias_step
     }
 
-    pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d) {
-        let dl = &mut self.cx.draw_lists[*self.draw_list_stack.last().unwrap()];
-        dl.append_sub_list(self.cx.redraw_id, draw_list_2d.id());
-    }
 
     /*pub fn set_sweep_lock(&mut self, lock:Area){
         *self.overlay_sweep_lock.as_ref().unwrap().borrow_mut() = lock;

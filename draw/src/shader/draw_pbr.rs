@@ -234,7 +234,7 @@ script_mod! {
             if self.u_has_base_color_texture <= 0.5 {
                 return base
             }
-            let tex_srgb = self.base_color_texture.sample_as_bgra(uv);
+            let tex_srgb = self.base_color_texture.sample(uv);
             let tex_linear = vec4(
                 pow(max(tex_srgb.x, 0.0), 2.2),
                 pow(max(tex_srgb.y, 0.0), 2.2),
@@ -251,7 +251,7 @@ script_mod! {
                     clamp(self.u_roughness_factor, 0.045, 1.0)
                 )
             }
-            let mr_tex = self.metallic_roughness_texture.sample_as_bgra(uv);
+            let mr_tex = self.metallic_roughness_texture.sample(uv);
             return vec2(
                 clamp(self.u_metallic_factor * mr_tex.z, 0.0, 1.0),
                 clamp(self.u_roughness_factor * mr_tex.y, 0.045, 1.0)
@@ -259,7 +259,7 @@ script_mod! {
         }
 
         get_normal_tangent: fn(uv: vec2) {
-            let n_tex_s = self.normal_texture.sample_as_bgra(uv);
+            let n_tex_s = self.normal_texture.sample(uv);
             return vec3(
                 n_tex_s.x * 2.0 - 1.0,
                 (n_tex_s.y * 2.0 - 1.0) * self.u_normal_scale,
@@ -271,7 +271,7 @@ script_mod! {
             if self.u_enable_occlusion <= 0.5 {
                 return 1.0
             }
-            let occlusion_tex = self.occlusion_texture.sample_as_bgra(uv);
+            let occlusion_tex = self.occlusion_texture.sample(uv);
             return mix(1.0, occlusion_tex.x, clamp(self.u_occlusion_strength, 0.0, 1.0))
         }
 
@@ -282,7 +282,7 @@ script_mod! {
             if self.u_has_emissive_texture <= 0.5 {
                 return self.u_emissive_factor
             }
-            let emissive_tex_srgb = self.emissive_texture.sample_as_bgra(uv);
+            let emissive_tex_srgb = self.emissive_texture.sample(uv);
             let emissive_tex = vec3(
                 pow(max(emissive_tex_srgb.x, 0.0), 2.2),
                 pow(max(emissive_tex_srgb.y, 0.0), 2.2),
@@ -315,7 +315,7 @@ script_mod! {
 
         sample_env_atlas: fn(dir: vec3f) -> vec3f {
             let uv = self.env_atlas_uv_from_dir(dir);
-            return self.env_atlas_texture.sample_as_bgra(uv).xyz
+            return self.env_atlas_texture.sample(uv).xyz
         }
 
         sample_env_faces: fn(dir: vec3f) -> vec3f {
@@ -326,24 +326,24 @@ script_mod! {
             if ad.x >= ad.y && ad.x >= ad.z {
                 if dir.x >= 0.0 {
                     let uv = vec2(-dir.z / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                    return self.env_pos_x_texture.sample_as_bgra(uv).xyz
+                    return self.env_pos_x_texture.sample(uv).xyz
                 }
                 let uv = vec2(dir.z / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                return self.env_neg_x_texture.sample_as_bgra(uv).xyz
+                return self.env_neg_x_texture.sample(uv).xyz
             } else if ad.y >= ad.z {
                 if dir.y >= 0.0 {
                     let uv = vec2(dir.x / safe_axis, dir.z / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                    return self.env_pos_y_texture.sample_as_bgra(uv).xyz
+                    return self.env_pos_y_texture.sample(uv).xyz
                 }
                 let uv = vec2(dir.x / safe_axis, -dir.z / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                return self.env_neg_y_texture.sample_as_bgra(uv).xyz
+                return self.env_neg_y_texture.sample(uv).xyz
             }
             if dir.z >= 0.0 {
                 let uv = vec2(dir.x / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                return self.env_pos_z_texture.sample_as_bgra(uv).xyz
+                return self.env_pos_z_texture.sample(uv).xyz
             }
             let uv = vec2(-dir.x / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
-            return self.env_neg_z_texture.sample_as_bgra(uv).xyz
+            return self.env_neg_z_texture.sample(uv).xyz
         }
 
         get_env_specular: fn(refl_dir: vec3) {
@@ -354,7 +354,7 @@ script_mod! {
                 return self.sample_env_faces(refl_dir)
             }
             if self.u_has_env_texture > 0.5 {
-                return self.env_texture.sample_as_bgra(refl_dir).xyz
+                return self.env_texture.sample(refl_dir).xyz
             }
             if self.u_has_env_atlas_texture > 0.5 {
                 return self.sample_env_atlas(refl_dir)
@@ -370,7 +370,7 @@ script_mod! {
                 return self.sample_env_faces(normal_dir)
             }
             if self.u_has_env_texture > 0.5 {
-                return self.env_texture.sample_as_bgra(normal_dir).xyz
+                return self.env_texture.sample(normal_dir).xyz
             }
             if self.u_has_env_atlas_texture > 0.5 {
                 return self.sample_env_atlas(normal_dir)

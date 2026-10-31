@@ -535,6 +535,12 @@ pub struct ChartView {
 }
 
 impl Widget for ChartView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         // Who owns this pointer? The hit below is taken with
         // `capture_overload`, so this chart co-captures EVERY press landing
@@ -631,7 +637,9 @@ impl ChartView {
     }
 
     fn zoom_at(&mut self, cx: &mut Cx, scroll: f64, abs: DVec2) {
-        let factor = if scroll > 0.0 { 0.9 } else { 1.0 / 0.9 };
+        // A wheel notch (32+ points) is one step, a touchpad's small deltas a fraction of one.
+        let step = if scroll > 0.0 { 0.9 } else { 1.0 / 0.9 };
+        let factor = f64::powf(step, (scroll.abs() / 32.0).min(1.0));
         let pr = &self.plot_rect;
         let frac_x = ((abs.x - pr.pos.x) / pr.size.x).clamp(0.0, 1.0);
         let data_x = self.viewport.x_min + frac_x * self.viewport.x_range();
@@ -1187,6 +1195,12 @@ impl CandlestickChart {
 }
 
 impl Widget for CandlestickChart {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.chart_view.handle_event(cx, event, scope);
     }
@@ -1371,6 +1385,12 @@ impl LineChart {
 }
 
 impl Widget for LineChart {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.chart_view.handle_event(cx, event, scope);
     }
@@ -1433,6 +1453,12 @@ impl BarChart {
 }
 
 impl Widget for BarChart {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.chart_view.handle_event(cx, event, scope);
     }
@@ -1495,6 +1521,12 @@ impl AreaChart {
 }
 
 impl Widget for AreaChart {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.chart_view.handle_event(cx, event, scope);
     }
@@ -1562,6 +1594,12 @@ impl ScatterChart {
 }
 
 impl Widget for ScatterChart {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.chart_view.handle_event(cx, event, scope);
     }
@@ -1617,6 +1655,12 @@ impl OhlcChart {
 }
 
 impl Widget for OhlcChart {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.chart_view.handle_event(cx, event, scope);
     }
@@ -1692,6 +1736,12 @@ impl Sparkline {
 }
 
 impl Widget for Sparkline {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -2102,6 +2152,12 @@ impl TrendChart {
 }
 
 impl Widget for TrendChart {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -2490,7 +2546,7 @@ mod tests {
         cx.with_vm(crate::script_mod);
         let chart = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let value = vm.bx.heap.value(widgets, LiveId::from_str("TrendChart").into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str("TrendChart"));
             WidgetRef::script_from_value(vm, value)
         });
         assert!(!chart.is_empty(), "TrendChart built no widget");
@@ -2501,7 +2557,7 @@ mod tests {
     fn declared_as(cx: &mut Cx, name: &str) -> WidgetRef {
         let widget = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str(name));
             WidgetRef::script_from_value(vm, value)
         });
         assert!(!widget.is_empty(), "{name} built no widget");

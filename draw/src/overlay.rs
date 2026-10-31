@@ -13,6 +13,7 @@ pub struct OverlayScope {
     overlay_pass_id: Option<DrawPassId>,
     overlay_seq: u64,
     overlay_draw_depth: usize,
+    overlay_popup_depth: usize,
 }
 
 #[derive(Debug, Script, ScriptHook)]
@@ -65,11 +66,13 @@ impl Overlay {
             overlay_pass_id: cx.overlay_pass_id,
             overlay_seq: cx.overlay_seq,
             overlay_draw_depth: cx.overlay_draw_depth,
+            overlay_popup_depth: cx.overlay_popup_depth,
         };
         cx.overlay_id = Some(self.draw_list.id());
         cx.overlay_pass_id = Some(pass_id);
         cx.overlay_seq = 0;
         cx.overlay_draw_depth = 0;
+        cx.overlay_popup_depth = 0;
         scope
     }
 
@@ -82,6 +85,7 @@ impl Overlay {
         cx.overlay_pass_id = scope.overlay_pass_id;
         cx.overlay_seq = scope.overlay_seq;
         cx.overlay_draw_depth = scope.overlay_draw_depth;
+        cx.overlay_popup_depth = scope.overlay_popup_depth;
     }
 
     pub fn end(&self, cx: &mut Cx2d) {
@@ -141,7 +145,7 @@ impl Overlay {
         // layout change, or a panel opened later, lands wherever there happens
         // to be a hole. That is why glass appeared on top of things drawn after
         // it. Each sub-list was stamped with its draw position in
-        // `begin_overlay_inner`; ordering by that stamp makes glass obey the
+        // `begin_overlay_tier`; ordering by that stamp makes glass obey the
         // same rule as everything else: later drawn, later painted.
         let list_id = self.draw_list.id();
         let len = cx.draw_lists[list_id].draw_items.len();
@@ -150,7 +154,7 @@ impl Overlay {
             let sub = cx.draw_lists[list_id].draw_items[i].sub_list();
             let order = sub
                 .and_then(|sub_id| cx.draw_lists.checked_index(sub_id))
-                .map(|sub_list| sub_list.overlay_order)
+                .map(|sub_list| (u64::from(sub_list.overlay_tier) << 56) | sub_list.overlay_order)
                 .unwrap_or(0);
             keys.push(order);
         }

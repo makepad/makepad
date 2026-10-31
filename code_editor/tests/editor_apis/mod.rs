@@ -1,5 +1,5 @@
 use super::*;
-use makepad_widgets::event::{TouchPoint, TouchState, TouchUpdateEvent};
+use makepad_widgets_core::event::{TouchPoint, TouchState, TouchUpdateEvent};
 use crate::{
     decoration::DecorationSet,
     document::{AnchorRange, CodeDocument, PreparedDocument},
@@ -50,9 +50,9 @@ fn drag_scrolling_editor() -> (Cx, CodeEditor) {
 fn editor_from(eval: impl FnOnce(&mut ScriptVm) -> ScriptValue) -> (Cx, CodeEditor) {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     let editor = cx.with_vm(|vm| {
-        makepad_widgets::script_mod(vm);
+        makepad_widgets_core::script_mod(vm);
         crate::script_mod(vm);
-        vm.bx.captured_errors = Some(Vec::new());
+        vm.capture_errors();
         let value = eval(vm);
         let editor = CodeEditor::script_from_value(vm, value);
         assert!(vm.take_errors().is_empty());
@@ -857,6 +857,97 @@ fn diff_admission_twenty_thousand_rows_off_thread() {
     assert_eq!(session.document().diff_metadata().unwrap().rows.as_ptr(), rows_ptr);
     assert_eq!(session.document().decorations().as_ptr(), decorations_ptr);
     assert_eq!(session.layout().height(), row_count as f64);
+}
+
+/// Drawing from any first visible line lands every line where the layout
+/// (and `position_rect`) puts it, block inlays included: the walk starts at
+/// the top of the blocks reserved above that line, never below them.
+#[test]
+fn block_walk_from_any_start_line_agrees_with_line_y() {
+    use crate::inlays::BlockInlay;
+    use crate::widgets::BlockWidget;
+    use crate::layout::BlockElement;
+    let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let document = doc(&text);
+    document.set_block_inlays(vec![(1, BlockInlay::Widget(BlockWidget { height: 3.5 })), (7, BlockInlay::Widget(BlockWidget { height: 1.25 })), (20, BlockInlay::Widget(BlockWidget { height: 6.0 }))]);
+    let session = CodeSession::new(document.clone());
+    session.relayout();
+    let layout = session.layout();
+    let lines = layout.as_text().as_lines().len();
+    for start in 0..lines {
+        let mut y = layout.block_y(start);
+        let mut index = start;
+        for element in layout.block_elements(start, lines) {
+            match element {
+                BlockElement::Line { line, .. } => {
+                    assert!((y - layout.line(index).y()).abs() < 1e-9, "from line {start}: line {index} walks to {y}, is at {}", layout.line(index).y());
+                    y += line.height();
+                    index += 1;
+                }
+                BlockElement::Widget(widget) => y += widget.height,
+            }
+        }
+    }
+}
+
+/// An inline inlay moves the text after it right by its columns, and an
+/// edit before it carries it along with its text.
+#[test]
+fn inline_inlays_reserve_columns_and_follow_their_text() {
+    use crate::inlays::InlineInlay;
+    use crate::widgets::InlineWidget;
+    use crate::selection::Affinity;
+    let document = doc("fill: #ff5a36\nsize: 4\n");
+    document.set_inline_inlays(vec![(0, 6, InlineInlay::Widget(InlineWidget { column_count: 2 }))]);
+    let session = CodeSession::new(document.clone());
+    session.relayout_inline();
+    {
+        let layout = session.layout();
+        let line = layout.line(0);
+        assert_eq!(line.logical_to_grid_position(5, Affinity::After), (0, 5));
+        assert_eq!(line.logical_to_grid_position(6, Affinity::After), (0, 8));
+        assert_eq!(layout.line(1).logical_to_grid_position(6, Affinity::After), (0, 6));
+    }
+    // Two bytes typed before it: the inlay stays in front of the colour.
+    edit(&document, Change::Insert(pos(0, 0), "  ".into()));
+    let layout = session.layout();
+    assert_eq!(layout.line(0).logical_to_grid_position(8, Affinity::After), (0, 10));
+}
+
+/// Every byte of every line maps to a grid position with inline inlays
+/// anywhere (a line's start, its end, two at one byte, after a tab).
+#[test]
+fn inline_inlays_every_byte_has_a_grid_position() {
+    use crate::inlays::InlineInlay;
+    use crate::widgets::InlineWidget;
+    use crate::selection::Affinity;
+    let text = "Motion{layers: [\n\tText{text: \"Make it move\" align: @center}\n    Rect{fill: #1d2a44}\n]}\n";
+    let document = doc(text);
+    let w = |n| InlineInlay::Widget(InlineWidget { column_count: n });
+    document.set_inline_inlays(vec![(1, 12, w(2)), (1, 42, w(2)), (1, 49, w(2)), (1, 49, w(3)), (2, 15, w(2)), (0, 0, w(1)), (3, 2, w(2))]);
+    let session = CodeSession::new(document.clone());
+    session.relayout_inline();
+    let layout = session.layout();
+    for (index, line_text) in text.split('\n').enumerate() {
+        let line = layout.line(index);
+        for byte in (0..=line_text.len()).filter(|b| line_text.is_char_boundary(*b)) {
+            for affinity in [Affinity::Before, Affinity::After] {
+                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| line.logical_to_grid_position(byte, affinity))).is_ok();
+                assert!(ok, "line {index} byte {byte} {affinity:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_range_replace_keeps_the_given_indentation() {
+    // An outside change put in as given: typing's autoindent would move
+    // these lines (and `}` at column 0 once took 4 from 0).
+    let document = doc("let a = {\n    x: 1\n}\nlet b = 2\n");
+    document.replace_range(pos(0, 8), pos(2, 1), "{\nx: 1,\n        y: 2\n}".into());
+    assert_eq!(document.as_text().to_string(), "let a = {\nx: 1,\n        y: 2\n}\nlet b = 2\n");
+    document.replace_range(pos(4, 8), pos(4, 9), "{\n}".into());
+    assert_eq!(document.as_text().to_string(), "let a = {\nx: 1,\n        y: 2\n}\nlet b = {\n}\n");
 }
 
 fn touch(state: TouchState, abs: Vec2d, time: f64) -> Event {

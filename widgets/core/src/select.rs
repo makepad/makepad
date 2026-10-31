@@ -82,6 +82,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Select {
+    #[rust]
+    menu_open: bool,
     #[deref]
     view: View,
     /// The values, in order.
@@ -224,6 +226,87 @@ impl Select {
 }
 
 impl Widget for Select {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        let owner = self.owner();
+        if action.action == A::EXPAND {
+            let rows = self.rows();
+            let anchor = self.view.area().rect(cx);
+            let place = self.place;
+            if self.is_multi() {
+                cx.action(MenuAction::OpenSet {
+                    owner,
+                    rows,
+                    anchor,
+                    place,
+                });
+            } else {
+                cx.action(MenuAction::Open {
+                    owner,
+                    rows,
+                    anchor,
+                    place,
+                });
+            }
+        } else if action.action == A::COLLAPSE {
+            cx.action(MenuAction::Close { owner });
+        } else if action.action == A::SELECT {
+            let ActionArg::Text(label) = &action.arg else {
+                return ActionResult::Unsupported;
+            };
+            let Some(index) = self.options.iter().position(|option| option == label) else {
+                return ActionResult::Unsupported;
+            };
+            self.set_value(cx, index);
+            if self.is_multi() {
+                cx.action(MenuAction::Update {
+                    owner,
+                    rows: self.rows(),
+                });
+            } else {
+                cx.action(MenuAction::Close { owner });
+            }
+        } else {
+            return ActionResult::Unhandled;
+        }
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+        node.states.set(a11y_tree::States::EXPANDED, self.menu_open);
+        node.states
+            .set(a11y_tree::States::COLLAPSED, !self.menu_open);
+        node.actions
+            .insert(a11y_tree::Actions::COLLAPSE | a11y_tree::Actions::SELECT);
+        node.value =
+            (|| -> Option<String> { Some(self.selected.to_string()) })().unwrap_or_default();
+        node.name =
+            (|| -> Option<String> { Some(self.chosen_labels().join(", ")) })().unwrap_or_default();
+        node.value = self.chosen_labels().join(", ");
+        node.range = Some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: self.options.len().saturating_sub(1) as f64,
+            now: self.selected as f64,
+            step: 1.0,
+        });
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.dressed {
             self.dressed = true;
@@ -253,6 +336,11 @@ impl Widget for Select {
         let owner = self.owner();
         let mut picked = None;
         for action in menu_actions(actions) {
+            match action {
+                MenuAction::Opened { owner: o } if *o == owner => { self.menu_open = true; self.redraw(cx); }
+                MenuAction::Closed { owner: o } if *o == owner => { self.menu_open = false; self.redraw(cx); }
+                _ => {}
+            }
             if let MenuAction::Picked { owner: o, id } = action {
                 if *o == owner {
                     picked = Some(id.0.saturating_sub(1) as usize);
@@ -285,14 +373,7 @@ impl Widget for Select {
         }
     }
 
-    /// The index of the current value, so a test can wait on the number.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.selected.to_string())
-    }
 
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        Some(self.chosen_labels().join(", "))
-    }
 }
 
 impl SelectRef {

@@ -475,7 +475,12 @@ impl SelectionTracker {
 
     /// Find character index from screen point.
     /// `cx` is needed to query widget areas for WidgetText segments.
-    pub fn point_to_index(&self, cx: &Cx, point: DVec2) -> Option<usize> {
+    /// `shift` is how far the flow moved since it was drawn (a parent's
+    /// alignment, a list scrolled without redrawing it): the text positions
+    /// were recorded at draw time, child widget areas are live.
+    pub fn point_to_index(&self, cx: &Cx, point: DVec2, shift: DVec2) -> Option<usize> {
+        let live = point;
+        let point = point - shift;
         for segment in &self.segments {
             match segment {
                 SelectionSegment::Text {
@@ -513,9 +518,9 @@ impl SelectionTracker {
                 } => {
                     if area.is_valid(cx) {
                         let rect = area.rect(cx);
-                        if rect.size.y > 0.0 && rect.contains(point) {
+                        if rect.size.y > 0.0 && rect.contains(live) {
                             // Linear interpolation based on y position
-                            let local_y = (point.y - rect.pos.y).max(0.0);
+                            let local_y = (live.y - rect.pos.y).max(0.0);
                             let fraction = (local_y / rect.size.y).min(1.0);
                             return Some(text_start + (fraction * *text_len as f64) as usize);
                         }
@@ -525,11 +530,11 @@ impl SelectionTracker {
         }
 
         // Find nearest segment if point outside all
-        self.nearest_index(cx, point)
+        self.nearest_index(cx, point, live)
     }
 
     /// Find the nearest character index when point is outside all segments
-    fn nearest_index(&self, cx: &Cx, point: DVec2) -> Option<usize> {
+    fn nearest_index(&self, cx: &Cx, point: DVec2, live: DVec2) -> Option<usize> {
         let mut best: Option<(usize, f64)> = None;
 
         for segment in &self.segments {
@@ -574,10 +579,10 @@ impl SelectionTracker {
                 } => {
                     if area.is_valid(cx) {
                         let rect = area.rect(cx);
-                        let dist = Self::point_to_rect_distance(point, rect);
+                        let dist = Self::point_to_rect_distance(live, rect);
                         if best.map_or(true, |(_, d)| dist < d) {
                             // Linear interpolation based on y position
-                            let local_y = (point.y - rect.pos.y).max(0.0);
+                            let local_y = (live.y - rect.pos.y).max(0.0);
                             let fraction = if rect.size.y > 0.0 {
                                 (local_y / rect.size.y).min(1.0)
                             } else {
@@ -1005,6 +1010,10 @@ pub struct TextFlow {
     #[rust]
     selection_word_anchor: Option<(usize, usize)>,
 
+    /// Where the flow's area was when it was drawn (see `shift`).
+    #[rust]
+    drawn_pos: DVec2,
+
     /// Whether currently dragging to select
     #[rust]
     is_selecting: bool,
@@ -1012,24 +1021,78 @@ pub struct TextFlow {
     // Streaming text animation fields
     #[rust]
     next_frame: NextFrame,
-    /// Whether streaming animation is active
+    /// The wipe that fades streamed text in (see `StreamWipe`).
     #[rust]
-    pub streaming_animation: bool,
-    /// Animated char count for fade effect (lags behind actual)
-    #[rust]
-    animated_chars: f32,
-    /// Actual drawn char count
-    #[rust]
-    actual_chars: f32,
-    /// Last frame time for dt calculation
-    #[rust]
-    last_rate_time: f64,
-    /// Number of chars over which to fade (default 50)
+    wipe: StreamWipe,
+    /// Number of chars over which the wipe's edge fades; match the
+    /// `get_color` of the text style that reads `total_chars`.
     #[live(50.0)]
     pub fade_chars: f32,
-    /// Minimum animation speed in chars per second
-    #[live(100.0)]
-    pub min_fade_speed: f32,
+}
+
+/// The streamed-text wipe: an edge (`front`, in chars) that the text's
+/// `get_color` fades against (`total_chars`). Driven by frame time, it always
+/// runs to its end state -- every drawn char fully shown -- and then asks for
+/// no more frames, whether or not more text is coming. New text finishes the
+/// previous wipe at once and starts its own, so a char is fully shown within
+/// `WIPE_SECS` of being drawn (or sooner, when more text follows).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StreamWipe {
+    /// A streamed text uses the wipe; a plain one is never touched.
+    active: bool,
+    front: f32,
+    drawn: f32,
+    speed: f32,
+    last: f64,
+}
+
+impl StreamWipe {
+    pub const WIPE_SECS: f32 = 0.12;
+
+    pub fn reset(&mut self) {
+        *self = StreamWipe { active: true, ..Default::default() };
+    }
+
+    pub fn start(&mut self) {
+        self.active = true;
+    }
+
+    pub fn front(&self) -> f32 {
+        self.front
+    }
+
+    pub fn done(&self, fade: f32) -> bool {
+        !self.active || self.front >= self.drawn + fade
+    }
+
+    /// The text was drawn with `chars` chars. True while the wipe needs
+    /// frames (and `front` must be applied to the drawn text).
+    pub fn drawn(&mut self, chars: f32, fade: f32) -> bool {
+        if !self.active {
+            return false;
+        }
+        if chars > self.drawn {
+            // What was there already finishes now; the new part wipes in.
+            self.front = self.front.max(self.drawn + fade);
+            self.drawn = chars;
+            self.speed = ((self.drawn + fade - self.front) / Self::WIPE_SECS).max(fade / Self::WIPE_SECS);
+        } else if chars < self.drawn {
+            self.drawn = chars;
+            self.front = self.front.min(chars + fade);
+        }
+        !self.done(fade)
+    }
+
+    /// One frame at `time` seconds. True while more frames are needed.
+    pub fn frame(&mut self, time: f64, fade: f32) -> bool {
+        let dt = if self.last > 0.0 { (time - self.last).clamp(0.0, 0.1) as f32 } else { 1.0 / 60.0 };
+        self.last = time;
+        if self.done(fade) {
+            return false;
+        }
+        self.front = (self.front + self.speed * dt).min(self.drawn + fade);
+        !self.done(fade)
+    }
 }
 
 impl TextFlow {
@@ -1042,7 +1105,7 @@ impl TextFlow {
         template_obj: ScriptObject,
     ) {
         // Root the template object
-        let template_ref = vm.bx.heap.new_object_ref(template_obj);
+        let template_ref = vm.new_object_ref(template_obj);
         self.templates.insert(id, template_ref);
         // Apply to existing items with matching template
         let template_value: ScriptValue = template_obj.into();
@@ -1447,7 +1510,7 @@ impl WidgetNode for TextFlow {
         self.text_len()
     }
     fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
-        self.selection_tracker.point_to_index(cx, abs)
+        self.selection_tracker.point_to_index(cx, abs, self.shift(cx))
     }
     fn selection_set(&mut self, anchor: usize, cursor: usize) {
         self.set_selection(anchor, cursor)
@@ -1467,6 +1530,12 @@ impl WidgetNode for TextFlow {
 }
 
 impl Widget for TextFlow {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Document;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn is_interactive(&self) -> bool {
         false
     }
@@ -1491,51 +1560,10 @@ impl Widget for TextFlow {
 
         // Handle streaming animation NextFrame
         if let Some(ev) = self.next_frame.is_event(event) {
-            let time = ev.time;
-            // Calculate time delta
-            let dt = if self.last_rate_time > 0.0 {
-                (time - self.last_rate_time).max(0.001)
-            } else {
-                1.0 / 60.0
-            };
-            self.last_rate_time = time;
-
-            // Target depends on streaming state:
-            // - While streaming: chase actual_chars (so new text fades in)
-            // - After streaming: go to actual_chars + fade_chars (complete the fade)
-            let target = if self.streaming_animation {
-                self.actual_chars
-            } else {
-                self.actual_chars + self.fade_chars
-            };
-
-            // Calculate how far behind we are
-            let distance = target - self.animated_chars;
-
-            if distance > 0.0 {
-                // Speed scales with distance - further behind = faster catch up
-                // Use a proportional approach: catch up ~20% of distance per frame at 60fps
-                // Plus a minimum speed to ensure we always make progress
-                let catch_up_factor = 0.15; // Fraction of distance to cover per frame (at 60fps baseline)
-                let frame_factor = (dt * 60.0) as f32; // Scale for actual frame rate
-                let proportional_speed = distance * catch_up_factor * frame_factor;
-                let min_speed = self.min_fade_speed * dt as f32;
-                let speed = proportional_speed.max(min_speed);
-
-                self.animated_chars += speed;
-                // Don't overshoot
-                if self.animated_chars > target {
-                    self.animated_chars = target;
-                }
-                // Update shader directly and request redraw for the area
-                self.draw_text.set_total_chars(cx, self.animated_chars);
-                self.draw_text.redraw_areas(cx);
-            }
-
-            // Keep animation alive if streaming or not done fading
-            let done = !self.streaming_animation
-                && self.animated_chars >= self.actual_chars + self.fade_chars;
-            if !done {
+            let more = self.wipe.frame(ev.time, self.fade_chars);
+            self.draw_text.set_total_chars(cx, self.wipe.front());
+            self.draw_text.redraw_areas(cx);
+            if more {
                 self.next_frame = cx.new_next_frame();
             }
         }
@@ -1562,7 +1590,7 @@ impl Widget for TextFlow {
                 if fe.device.is_touch() {
                     cx.hide_clipboard_actions();
                 }
-                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
+                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs, self.shift(cx)) {
                     self.selection_word_anchor = if fe.tap_count == 2 {
                         let (start, end) = self.selection_tracker.word_range(idx);
                         self.set_selection(start, end);
@@ -1576,7 +1604,7 @@ impl Widget for TextFlow {
                 }
             }
             Hit::FingerMove(fe) if self.is_selecting => {
-                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
+                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs, self.shift(cx)) {
                     let (anchor, cursor) = if let Some((start, end)) = self.selection_word_anchor {
                         let (word_start, word_end) = self.selection_tracker.word_range(idx);
                         if idx < start {
@@ -1666,17 +1694,9 @@ impl TextFlow {
         self.draw_text.reset_char_index();
     }
 
-    /// Check if animation is completely idle (not streaming and fade complete)
+    /// The wipe has nothing left to do (or never ran).
     pub fn is_animation_idle(&self) -> bool {
-        // Animation was never started — both counters still at their initial zero
-        // values and streaming flag is off.  Without this early-out a fresh
-        // TextFlow would be treated as "mid-animation" because 0.0 < 0.0 + fade_chars,
-        // causing set_total_chars(0.0) which overrides the shader default (1 000 000)
-        // and makes all text invisible.
-        if !self.streaming_animation && self.animated_chars == 0.0 && self.actual_chars == 0.0 {
-            return true;
-        }
-        !self.streaming_animation && self.animated_chars >= self.actual_chars + self.fade_chars
+        self.wipe.done(self.fade_chars)
     }
 
     pub fn clear_stacks(&mut self) {
@@ -1950,38 +1970,32 @@ impl TextFlow {
         self.draw_mark_rects(cx);
 
         cx.end_turtle_with_area(&mut self.area);
+        self.drawn_pos = self.area.rect(cx).pos;
         self.items.as_mut().unwrap().retain_visible();
 
-        // Update streaming animation state after drawing (also while fading out)
-        let is_idle = self.is_animation_idle();
-        if self.streaming_animation || !is_idle {
-            self.actual_chars = self.draw_text.char_index;
-            self.draw_text.set_total_chars(cx, self.animated_chars);
+        // The wipe: text drawn while it runs gets its edge, and it asks for
+        // frames until it is done. A finished wipe leaves the text alone.
+        if self.wipe.drawn(self.draw_text.char_index, self.fade_chars) {
+            self.draw_text.set_total_chars(cx, self.wipe.front());
             self.next_frame = cx.new_next_frame();
         }
     }
 
-    /// Start streaming text animation with fade-in effect on new characters.
-    /// Call this before drawing when streaming new content.
+    /// Streamed text: new chars wipe in. Call before drawing.
     pub fn start_streaming_animation(&mut self) {
-        self.streaming_animation = true;
+        self.wipe.start();
     }
 
-    /// Reset streaming animation state (for reused widgets).
-    /// Call this when starting to stream new content.
+    /// A reused widget starts a new stream.
     pub fn reset_streaming_animation(&mut self) {
-        self.streaming_animation = true;
-        self.animated_chars = 0.0;
-        self.actual_chars = 0.0;
-        self.last_rate_time = 0.0;
+        self.wipe.reset();
     }
 
-    /// Stop streaming animation. The fade will complete naturally.
-    pub fn stop_streaming_animation(&mut self) {
-        self.streaming_animation = false;
-    }
+    /// The stream ended. The wipe finishes on its own (it never waits for
+    /// this); kept so callers can say so.
+    pub fn stop_streaming_animation(&mut self) {}
 
-    /// Check if streaming animation is still running (including fade-out)
+    /// The wipe has finished (or never ran).
     pub fn is_streaming_animation_done(&self) -> bool {
         self.is_animation_idle()
     }
@@ -2116,14 +2130,27 @@ impl TextFlow {
         self.selectable && self.selection_anchor != self.selection_cursor
     }
 
+    /// How far the flow moved since it was drawn: its text positions are
+    /// recorded at draw time, before a parent aligns it or a list scrolls it
+    /// without drawing it again.
+    fn shift(&self, cx: &Cx) -> DVec2 {
+        if self.area.is_valid(cx) {
+            self.area.rect(cx).pos - self.drawn_pos
+        } else {
+            DVec2::default()
+        }
+    }
+
     /// Selection anchor rect for clipboard/action popups.
     fn selection_clipboard_rect(&self, cx: &Cx) -> Rect {
         let start = self.selection_anchor.min(self.selection_cursor);
         let end = self.selection_anchor.max(self.selection_cursor);
+        let shift = self.shift(cx);
         let rects = self.selection_tracker.selection_rects(start, end);
 
         let mut out: Option<Rect> = None;
-        for rect in rects {
+        for mut rect in rects {
+            rect.pos += shift;
             out = Some(if let Some(acc) = out {
                 let x0 = acc.pos.x.min(rect.pos.x);
                 let y0 = acc.pos.y.min(rect.pos.y);
@@ -3186,12 +3213,22 @@ impl TextFlow {
                 if let Some((_, row_end)) = &mut held_run_bounds {
                     *row_end = Self::get_row_end(cx);
                 }
+                // An underlined run (a hovered link) in code keeps its line.
+                let underline = (self.underline.value() > 0).then_some(font_color);
                 let laidout_text = self.pending_following_room.and_then(|pending| self.lay_out_run(cx, text, pending));
                 let (dt, db, areas_tracker) = (&mut self.draw_text, &mut self.draw_block, &mut self.areas_tracker);
                 let result = dt.draw_laidout_resumable_with_background(cx, text, laidout_text, |cx, mut rect, _| {
+                    let text_rect = rect;
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
+                    if let Some(ink) = underline {
+                        let kind = std::mem::replace(&mut db.block_type, FlowBlockType::Underline);
+                        let line = std::mem::replace(&mut db.line_color, ink);
+                        db.draw_abs(cx, text_rect);
+                        db.block_type = kind;
+                        db.line_color = line;
+                    }
                     areas_tracker.track_rect(cx, rect);
                 });
 
@@ -3468,9 +3505,19 @@ impl WidgetNode for TextFlowLink {
 }
 
 impl Widget for TextFlowLink {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Link;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
-            if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+            if let Some(tf) = scope.data_mut().get_mut::<TextFlow>() {
                 tf.redraw(cx);
             } else {
                 self.drawn_areas.iter().for_each(|area| area.redraw(cx));
@@ -3529,7 +3576,7 @@ impl Widget for TextFlowLink {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        let Some(tf) = scope.data.get_mut::<TextFlow>() else {
+        let Some(tf) = scope.data_mut().get_mut::<TextFlow>() else {
             return DrawStep::done();
         };
 
@@ -3642,7 +3689,7 @@ mod tests {
 
     /// Draws its text through TextFlow in a code box, like a span with a background color.
     ///
-    /// With a `reason`, it draws that in italics first, like Robrix draws a hidden spoiler.
+    /// With a `reason`, it draws that in italics first, as a chat app draws a hidden spoiler.
     #[derive(Script, ScriptHook, Widget)]
     pub struct HighlightSpan {
         #[uid]
@@ -4044,9 +4091,8 @@ mod tests {
         let width = fresh_drawer.get_x_after(CJK_IN_BRACKETS, "\u{4E2D}") - 0.5;
         // We load the fonts of these styles first, so the CJK font is the only one that arrives next.
         drawer.draw("aaaa <b>bbbb</b> cc", width);
-        // It arrives while we measure what follows `(`, so the first draw keeps too little room for it.
-        let row_starts_without_font = drawer.get_row_starts(CJK_IN_BRACKETS, width);
-        assert_ne!(drawer.get_row_starts(CJK_IN_BRACKETS, width), row_starts_without_font);
+        // It arrives while we measure what follows `(`: the text is laid out again at once, so even
+        // the first draw keeps the room a drawer that already had the font keeps.
         for width in [width].into_iter().chain((60..300).step_by(5).map(f64::from)) {
             fresh_drawer.draw("x", width);
             assert_eq!(
@@ -4091,7 +4137,10 @@ mod tests {
         set_font_data(&drawer.cx, CxScriptResourceData::Loaded(font_data.clone()));
         fresh_drawer.draw("x", width);
         let row_starts = drawer.get_row_starts(CJK_IN_BRACKETS, width);
-        assert_ne!(row_starts, row_starts_without_font);
+        // (Windows lays CJK out with its system fonts while the download is on its way)
+        if cfg!(target_os = "linux") {
+            assert_ne!(row_starts, row_starts_without_font);
+        }
         assert_eq!(row_starts, fresh_drawer.get_row_starts(CJK_IN_BRACKETS, width));
     }
 
@@ -4533,5 +4582,65 @@ mod tests {
         let text = "caf\u{e9}";
         assert_eq!(floor_char_boundary(text, 900), 5);
         assert_eq!(floor_char_boundary("", 4), 0);
+    }
+}
+
+#[cfg(test)]
+mod wipe_tests {
+    use super::StreamWipe;
+
+    /// Tokens arrive with pauses; every char must be fully shown within
+    /// 200 ms of being drawn, and the wipe must stop asking for frames.
+    #[test]
+    fn every_char_finishes_fast_and_the_wipe_idles() {
+        let fade = 24.0;
+        let mut w = StreamWipe::default();
+        w.reset();
+        let frame = 1.0 / 60.0;
+        let mut t = 1.0;
+        let mut chars = 0.0;
+        // (chars added, pause after in seconds): bursts, a token stream,
+        // a long stall, a final burst.
+        let script: Vec<(f32, f64)> = vec![(4.0, 0.05), (6.0, 0.04), (5.0, 0.6), (120.0, 0.03), (3.0, 1.5), (40.0, 0.0)];
+        let mut pending: Vec<(f32, f64)> = Vec::new(); // (char index, drawn at)
+        for (add, pause) in script {
+            chars += add;
+            let mut wants = w.drawn(chars, fade);
+            pending.push((chars, t));
+            // Frames come only while the wipe asks; the clock runs regardless.
+            let end = t + pause.max(0.3);
+            while t < end {
+                t += frame;
+                if wants {
+                    wants = w.frame(t, fade);
+                }
+                pending.retain(|(i, at)| {
+                    let full = w.front() >= i + fade;
+                    assert!(full || t - at <= 0.2, "char {i} drawn at {at} still fading after {:.3}s", t - at);
+                    !full
+                });
+                if t - (end - pause.max(0.3)) >= pause && pause > 0.0 && pause < 0.3 {
+                    break;
+                }
+            }
+            assert!(pause < 0.3 || !wants, "still animating after a {pause}s pause");
+        }
+        assert!(pending.is_empty());
+        // Run on until it says stop; it must, and quickly.
+        let mut n = 0;
+        while w.frame(t, fade) {
+            t += frame;
+            n += 1;
+            assert!(n < 30, "wipe never finished");
+        }
+        assert!(w.done(fade));
+        assert!(!w.drawn(chars, fade), "a redraw of the same text needs no frames");
+    }
+
+    #[test]
+    fn plain_text_is_never_touched() {
+        let mut w = StreamWipe::default();
+        assert!(!w.drawn(500.0, 24.0));
+        assert!(w.done(24.0));
     }
 }

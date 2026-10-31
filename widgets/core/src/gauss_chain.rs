@@ -3,7 +3,7 @@
 //! All passes are GPU work recorded by the UI thread; there is no CPU readback,
 //! worker synchronization or pixel processing here. The chain requests no frames
 //! by itself. Call `run` only when the source changes; animation samples its cached
-//! textures. Native GPU backends and the gpusim renderer use the same shaders.
+//! textures. Native GPU backends and the HAL offscreen renderer use the same shaders.
 use crate::{
     makepad_draw::*,
     window::{DrawGaussDownsample, DrawGaussUpsample},
@@ -173,9 +173,7 @@ impl GaussChain {
             self.shaders = Some((downsample, upsample));
             // The former consumer may have gone away or been a surplus level.
             // A fresh run is reattached by its new consumer below the call site.
-            let output = self.output_pass().unwrap().draw_pass_id();
-            cx.passes[output].parent = CxDrawPassParent::None;
-            cx.passes[output].attached_by = None;
+            self.output_pass().unwrap().detach(cx);
             let dependencies = self.dependencies(levels as usize);
             for pair in dependencies.windows(2) {
                 let owner = cx.passes[pair[1]].main_draw_list_id;

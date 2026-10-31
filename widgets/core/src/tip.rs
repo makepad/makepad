@@ -443,8 +443,8 @@ impl WidgetNode for Tip {
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         self.view.children(visit)
     }
-    fn skip_widget_tree_search(&self) -> bool {
-        self.view.skip_widget_tree_search()
+    fn search_scope(&self) -> bool {
+        self.view.search_scope()
     }
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
         self.view.find_widgets_from_point(cx, point, found)
@@ -529,6 +529,12 @@ impl Tip {
 }
 
 impl Widget for Tip {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tooltip;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // A hidden child leaves no walk behind, so neither does its
         // wrapper: an empty Fit box would still take the parent's spacing,
@@ -747,6 +753,12 @@ impl TipLayer {
 }
 
 impl Widget for TipLayer {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tooltip;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // The layer's own turtle gives the origin its overlay pass is
         // shifted FROM. It is not the room a tip has to fit in: a layer
@@ -765,7 +777,7 @@ impl Widget for TipLayer {
         };
         // The PROVEN popup idiom (PopupMenu): bubble as turtle content
         // at the overlay root, shifted to its clamped position.
-        draw_list.begin_overlay_reuse(cx);
+        draw_list.begin_popup_overlay(cx);
         let pass = cx.current_pass_size();
         cx.begin_root_turtle(pass, Layout::flow_down());
         let font_size = 9.0f64;
@@ -773,18 +785,29 @@ impl Widget for TipLayer {
         // under-measures wide glyphs (all-caps text most of all) and the
         // bubble then clips its own last letter. The estimate stays only as
         // the fallback for text the layout engine returns no row for.
-        let text_w = self
-            .draw_text
-            .prepare_single_line_run(cx, &text)
-            .map(|run| run.width_in_lpxs as f64)
-            .unwrap_or_else(|| text.chars().count() as f64 * font_size * 0.62);
+        // Line by line: a tip may carry its own line breaks (a key's
+        // bindings, one per line), and the bubble is as wide as the widest
+        // of them and as tall as all of them.
+        let mut text_w = 0.0f64;
+        let mut breaks = 0.0f64;
+        for line in text.lines() {
+            let line_w = self
+                .draw_text
+                .prepare_single_line_run(cx, line)
+                .map(|run| run.width_in_lpxs as f64)
+                .unwrap_or_else(|| line.chars().count() as f64 * font_size * 0.62);
+            text_w = text_w.max(line_w);
+            breaks += 1.0;
+        }
+        let breaks = breaks.max(1.0);
         // A wrapped tip is as wide as it was told and as tall as the lines
-        // it needs; an unwrapped one is one line, as it always was.
+        // it needs; an unwrapped one is as tall as its own lines, one as
+        // it always was.
         let (w, lines) = if tip.wrap_width > 0.0 && text_w + TIP_PAD_X * 2.0 > tip.wrap_width {
             let room = (tip.wrap_width - TIP_PAD_X * 2.0).max(font_size * 4.0);
-            (tip.wrap_width, (text_w / room).ceil().max(1.0))
+            (tip.wrap_width, (text_w / room).ceil().max(1.0) * breaks)
         } else {
-            (text_w + TIP_PAD_X * 2.0 + 4.0, 1.0)
+            (text_w + TIP_PAD_X * 2.0 + 4.0, breaks)
         };
         let h = font_size * 1.6 * lines + TIP_PAD_Y * 2.0;
         // The role decides the bubble's colours; Neutral keeps the chrome

@@ -30,12 +30,12 @@
 //! only when whoever launched the app says so in `MAKEPAD_FEEDBACK_EMAIL`
 //! (the Makepad Builder does); without it the feedback is anonymous.
 
-use makepad_widgets::makepad_platform::screen_capture::{
+use makepad_widgets_core::makepad_platform::screen_capture::{
     add_screen_capture, remove_screen_capture, ScreenCaptureOptions,
 };
-use makepad_widgets::makepad_platform::system_info;
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
-use makepad_widgets::*;
+use makepad_widgets_core::makepad_platform::system_info;
+use makepad_widgets_core::makepad_platform::thread::{Lane, TaskHandle};
+use makepad_widgets_core::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -251,6 +251,7 @@ pub struct InfoItem {
 enum ClipState {
     #[default]
     Off,
+    Pasteboard(u64),
     /// An image is being turned into the PNG that is sent.
     Reading(TaskHandle<Result<Screenshot, String>>),
     Text(String),
@@ -380,31 +381,40 @@ impl FeedbackPanel {
     /// Read the clipboard now (the box was checked): text as it is, an
     /// image turned into the PNG that would be sent, on a worker.
     fn read_clip(&mut self, cx: &mut Cx) {
-        use makepad_widgets::makepad_platform::clipboard_read::{read_clipboard, ClipboardContent, ClipboardImage};
-        let next = match read_clipboard() {
-            ClipboardContent::Text(text) if text.len() > MAX_CLIP_TEXT_BYTES => {
-                Err("The text on the clipboard is over 64 KB, too long to send.")
-            }
-            ClipboardContent::Text(text) => Ok(ClipState::Text(text)),
-            ClipboardContent::Image(image) => {
-                let job = move || match image {
-                    ClipboardImage::Rgba { width, height, rgba } => prepare_image(width, height, rgba),
-                    ClipboardImage::Png(png) => {
-                        let (width, height, rgba) = decode_png(&png)?;
-                        prepare_image(width, height, rgba)
-                    }
-                };
-                match cx.task_pool().submit(Lane::Heavy, job) {
-                    Ok(handle) => {
-                        cx.stop_timer(self.clip_timer);
-                        self.clip_timer = cx.start_interval(0.05);
-                        Ok(ClipState::Reading(handle))
-                    }
-                    Err(_) => Err("The clipboard's image could not be read."),
+        let request = cx.read_clipboard();
+        self.set_clip(cx, ClipState::Pasteboard(request));
+        cx.stop_timer(self.clip_timer);
+    }
+
+    fn apply_clipboard(&mut self, cx: &mut Cx, content: &makepad_widgets_core::makepad_platform::clipboard_read::ClipboardContent) {
+        use makepad_widgets_core::makepad_platform::clipboard_read::ClipboardImage;
+        let next = if let Some(image) = &content.image {
+            let image = image.clone();
+            let job = move || match image {
+                ClipboardImage::Rgba { width, height, rgba } => prepare_image(width, height, std::sync::Arc::unwrap_or_clone(rgba)),
+                ClipboardImage::Png(png) => {
+                    let (width, height, rgba) = decode_png(&png)?;
+                    prepare_image(width, height, rgba)
                 }
+            };
+            match cx.task_pool().submit(Lane::Heavy, job) {
+                Ok(handle) => {
+                    cx.stop_timer(self.clip_timer);
+                    self.clip_timer = cx.start_interval(0.05);
+                    Ok(ClipState::Reading(handle))
+                }
+                Err(_) => Err("The clipboard's image could not be read."),
             }
-            ClipboardContent::Empty => Err("The clipboard is empty."),
-            ClipboardContent::Unsupported => Err("Reading the clipboard is not available on this system yet."),
+        } else if let Some(text) = &content.text {
+            if text.len() > MAX_CLIP_TEXT_BYTES {
+                Err("The text on the clipboard is over 64 KB, too long to send.")
+            } else {
+                Ok(ClipState::Text(text.clone()))
+            }
+        } else if content.supported {
+            Err("The clipboard has no text or image to attach.")
+        } else {
+            Err("Reading the clipboard is not available on this system yet.")
         };
         match next {
             Ok(state) => self.set_clip(cx, state),
@@ -420,12 +430,12 @@ impl FeedbackPanel {
         if let ClipState::Reading(handle) = std::mem::replace(&mut self.clip, clip) {
             handle.cancel();
         }
-        if !matches!(self.clip, ClipState::Reading(_)) {
+        if !matches!(self.clip, ClipState::Reading(_) | ClipState::Pasteboard(_)) {
             cx.stop_timer(self.clip_timer);
         }
         let (note, text, thumb) = match &self.clip {
             ClipState::Off => ("Off: the clipboard is not read.".to_string(), None, None),
-            ClipState::Reading(_) => ("Reading the clipboard…".to_string(), None, None),
+            ClipState::Reading(_) | ClipState::Pasteboard(_) => ("Reading the clipboard…".to_string(), None, None),
             ClipState::Text(text) => (
                 format!("This text from the clipboard ({} characters):", text.chars().count()),
                 Some(text.lines().filter(|line| !line.trim().is_empty()).take(3).collect::<Vec<_>>().join("\n")),
@@ -573,7 +583,7 @@ impl FeedbackPanel {
                 out.push_str(&image.png_base64);
                 out.push_str("\"}");
             }
-            ClipState::Off | ClipState::Reading(_) => {}
+            ClipState::Off | ClipState::Reading(_) | ClipState::Pasteboard(_) => {}
         }
         out.push('}');
         out
@@ -593,7 +603,7 @@ impl FeedbackPanel {
             self.set_status(cx, "The message is too long (60 KB at most).");
             return;
         }
-        if matches!(self.clip, ClipState::Reading(_)) {
+        if matches!(self.clip, ClipState::Reading(_) | ClipState::Pasteboard(_)) {
             self.set_status(cx, "Still reading the clipboard…");
             return;
         }
@@ -655,6 +665,11 @@ impl FeedbackPanel {
 
 impl Widget for FeedbackPanel {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::Clipboard(reply) = event {
+            if matches!(self.clip, ClipState::Pasteboard(request) if request == reply.request) {
+                self.apply_clipboard(cx, &reply.content);
+            }
+        }
         if self.state == PanelState::Capturing && self.capture_timer.is_event(event).is_some() {
             self.poll_capture(cx);
         }
@@ -795,6 +810,7 @@ fn collect_info(cx: &Cx, app_name: &str, app_version: &str) -> Vec<InfoItem> {
     };
     let adapter = system_info::gpu_adapter_name().unwrap_or_else(|| "unknown adapter".to_string());
     push(live_id!(row_gpu), "gpu", "GPU", format!("{adapter} · {backend}"));
+    #[cfg(not(target_os = "linux"))]
     push(live_id!(row_audio), "audio", "Audio", cx.audio_stack());
     let ram = system_info::physical_memory_bytes()
         .map(|bytes| format!("{} GB", (bytes as f64 / (1u64 << 30) as f64).round() as u64))
@@ -904,8 +920,8 @@ fn prepare_image(width: u32, height: u32, rgba: Vec<u8>) -> Result<Screenshot, S
 
 /// RGBA pixels from a PNG (8-bit gray, gray+alpha, RGB or RGBA).
 fn decode_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    use makepad_widgets::makepad_zune_png::makepad_zune_core::{bytestream::ZCursor, options::DecoderOptions};
-    use makepad_widgets::makepad_zune_png::PngDecoder;
+    use makepad_widgets_core::makepad_zune_png::makepad_zune_core::{bytestream::ZCursor, options::DecoderOptions};
+    use makepad_widgets_core::makepad_zune_png::PngDecoder;
     let options = DecoderOptions::default().set_max_width(16384).set_max_height(16384);
     let mut decoder = PngDecoder::new_with_options(ZCursor::new(png), options);
     decoder.decode_headers().map_err(|e| format!("{e:?}"))?;

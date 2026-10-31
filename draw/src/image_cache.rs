@@ -100,12 +100,11 @@ fn mip_chain_max_level(width: usize, height: usize) -> usize {
     width.max(height).max(1).ilog2() as usize
 }
 
-/// True when the active render backend uploads a CPU-built mip chain level by level
-/// (Metal). OpenGL generates mips on the GPU from level 0 via `glGenerateMipmap`, and
-/// the remaining backends upload level 0 only, so building the chain for them wastes
-/// CPU time and memory.
+/// True when the render backend uploads a CPU-built mip chain level by level: the HAL,
+/// the only native path on every platform (it generates no mips for sampled images).
+/// WebGL generates them on the GPU from level 0 via `glGenerateMipmap`.
 fn backend_uploads_cpu_mip_chain() -> bool {
-    cfg!(any(target_os = "macos", target_os = "ios", target_os = "tvos"))
+    !cfg!(target_arch = "wasm32")
 }
 
 /// Halves an image's size in both directions, rounding up.
@@ -305,7 +304,46 @@ fn animation_atlas_layout_with_limit(
     Ok((total_width, total_height))
 }
 
+/// `src` (`w` x `h`, four bytes a pixel) brought down to `tw` x `th` by
+/// averaging the source pixels under each target pixel, every byte on its
+/// own (so any channel order). `tw` and `th` must not exceed `w` and `h`.
+pub fn area_downscale(src: &[u32], w: usize, h: usize, tw: usize, th: usize) -> Vec<u32> {
+    let mut data = Vec::with_capacity(tw * th);
+    for y in 0..th {
+        let (y0, y1) = (y * h / th, ((y + 1) * h / th).max(y * h / th + 1));
+        for x in 0..tw {
+            let (x0, x1) = (x * w / tw, ((x + 1) * w / tw).max(x * w / tw + 1));
+            let mut sum = [0u32; 4];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let p = src[sy * w + sx];
+                    for (c, sum) in sum.iter_mut().enumerate() {
+                        *sum += (p >> (c * 8)) & 0xff;
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            data.push((0..4).fold(0u32, |p, c| p | ((sum[c] / n) << (c * 8))));
+        }
+    }
+    data
+}
+
 impl ImageBuffer {
+    /// This image brought down to `width` x `height` (never up): see
+    /// [`area_downscale`].
+    pub fn area_downscaled(&self, width: usize, height: usize) -> ImageBuffer {
+        let (width, height) = (width.clamp(1, self.width.max(1)), height.clamp(1, self.height.max(1)));
+        let data = area_downscale(&self.data, self.width, self.height, width, height);
+        // a shrunk copy still lays out at the size of the image it came from
+        let natural_size = if (width, height) != (self.width, self.height) {
+            self.natural_size.or(Some((self.width, self.height)))
+        } else {
+            self.natural_size
+        };
+        ImageBuffer { width, height, data, animation: None, max_level: None, natural_size }
+    }
+
     pub fn new(in_data: &[u8], width: usize, height: usize) -> Result<ImageBuffer, ImageError> {
         let pixels = checked_pixel_count(width, height)?;
         if in_data.len() % pixels != 0 {
@@ -419,7 +457,7 @@ impl ImageBuffer {
     }
 
     /// Same as [`into_new_mip_texture`], with REPEAT wrap so UVs outside 0..1
-    /// tile. Pair with `sample_as_bgra_repeat` (not `fract(uv)`) so mip LOD
+    /// tile. Pair with `sample_repeat` (not `fract(uv)`) so mip LOD
     /// stays valid across wrap seams.
     pub fn into_new_mip_repeat_texture(self, cx: &mut Cx) -> Texture {
         self.into_new_mip_texture_wrap(cx, TextureWrap::Repeat)
@@ -894,6 +932,12 @@ pub struct ImageCache {
     /// lane; a re-request of the same path replaces the staged decode.
     pub decode_queue: TaskQueue<PathBuf>,
     pub pending_http_requests: HashMap<LiveId, PathBuf>,
+    /// Paths inserted during event `fresh_event`. Eviction spares them: the
+    /// widget waiting on a decode picks its texture up from the cache later
+    /// in the same event, and would find nothing if a later insert in that
+    /// event had pushed it out.
+    fresh: Vec<PathBuf>,
+    fresh_event: u64,
     /// The decode that's on its way for each image being decoded,
     /// so a request it has enough pixels for just waits for it.
     pending_decodes: HashMap<PathBuf, PendingDecode>,
@@ -909,34 +953,49 @@ impl Default for ImageCache {
 }
 
 impl ImageCache {
-    /// Max distinct cached images before eviction kicks in. Each `Loaded` entry can hold a
-    /// decoded GPU texture, so without a cap this `HashMap` grows for the process lifetime.
-    const MAX_ENTRIES: usize = 512;
+    /// Byte budget for the cached textures before eviction kicks in.
+    ///
+    /// An entry count is the wrong unit: 512 icons are about 2 MB, while 512
+    /// 1080p photos are over 5 GB and 512 24-megapixel photos over 60 GB, so a
+    /// count cap sized for icons never fires on a photo grid. 256 MB holds an
+    /// icon set or a page of thumbnails and makes a photo grid recycle.
+    pub const MAX_BYTES: usize = 256 * 1024 * 1024;
+
+    /// Entry ceiling, a backstop for thousands of tiny images, where the
+    /// byte budget alone would let the map grow without bound.
+    pub const MAX_ENTRIES: usize = 4096;
+
+    /// Bytes a decoded BGRA texture of `width * height` occupies with its mip
+    /// chain: static images are mipmapped on upload (see
+    /// [`ImageBuffer::into_new_texture`]), and the chain adds a third.
+    pub fn texture_bytes(width: usize, height: usize) -> usize {
+        width.saturating_mul(height).saturating_mul(4) / 3 * 4
+    }
 
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
             decode_queue: TaskQueue::new(Lane::Light, MAX_POOL_WORKERS, 1024),
             pending_http_requests: HashMap::new(),
+            fresh: Vec::new(),
+            fresh_event: 0,
             pending_decodes: HashMap::new(),
             evicted_while_decoding: HashSet::new(),
         }
     }
 
-    /// Insert a freshly-loaded texture, then bound the cache size if it has grown too large.
+    /// Insert a freshly-loaded texture. The cache's own load paths bound its
+    /// size after each insert; measuring the textures needs `Cx`.
     pub fn insert_loaded(&mut self, image_path: PathBuf, texture: Texture) {
         self.map.insert(image_path, ImageCacheEntry::Loaded(texture));
-        self.evict_loaded_if_oversized();
     }
 
     /// Forget one path, returning the entry it held (`None` if it held none).
     ///
-    /// The size cap below counts ENTRIES, not bytes: 512 thumbnails and 512
-    /// forty-megapixel photographs look the same to it, and the second costs
-    /// gigabytes. An app that knows it is done with an image — a viewer whose
-    /// panel just closed, say — hands it back here rather than waiting for a
-    /// cap that may never be reached. Prefer [`evict_image_from_cache`],
-    /// which also releases the pixels behind the entry.
+    /// An app that knows it is done with an image — a viewer whose panel just
+    /// closed, say — hands it back here rather than waiting for the byte
+    /// budget to push it out. Prefer [`evict_image_from_cache`], which also
+    /// releases the pixels behind the entry.
     pub fn evict(&mut self, image_path: &Path) -> Option<ImageCacheEntry> {
         if self.pending_decodes.contains_key(image_path) {
             self.evicted_while_decoding.insert(image_path.into());
@@ -944,28 +1003,72 @@ impl ImageCache {
         self.map.remove(image_path)
     }
 
-    /// Drop `Loaded` entries once the cache exceeds its cap. This is safe because widgets keep
-    /// their own clone of any texture they're currently displaying (via `set_texture`), so
-    /// eviction never affects a visible image — a later *fresh* request for an evicted path
-    /// simply re-loads it. In-flight `Loading` entries are preserved so decode work isn't
-    /// orphaned. There is no per-entry access timestamp, so eviction order is unspecified; the
-    /// cap is generous enough that this rarely triggers in practice.
-    fn evict_loaded_if_oversized(&mut self) {
-        if self.map.len() <= Self::MAX_ENTRIES {
+    /// Drop `Loaded` entries, biggest first, once the cache is over its byte
+    /// budget or entry ceiling, until it is back under three quarters of
+    /// both. `loaded` lists every `Loaded` entry with its size in bytes;
+    /// the entries inserted during the current event are never evicted.
+    ///
+    /// This is safe because widgets keep their own clone of any texture they
+    /// are displaying (via `set_texture`), so eviction never affects a
+    /// visible image; a later fresh request for an evicted path reloads it.
+    /// In-flight `Loading` entries are kept so decode work is not orphaned.
+    /// Biggest first because when memory is the problem, dropping a hundred
+    /// icons does not help while one 96 MB photo is over the budget.
+    fn evict_loaded_if_oversized(&mut self, mut loaded: Vec<(PathBuf, usize)>) {
+        let total: usize = loaded.iter().map(|(_, bytes)| bytes).sum();
+        let mut entries = self.map.len();
+        if total <= Self::MAX_BYTES && entries <= Self::MAX_ENTRIES {
             return;
         }
-        let excess = self.map.len() - (Self::MAX_ENTRIES * 3 / 4);
-        let to_remove: Vec<PathBuf> = self
-            .map
-            .iter()
-            .filter(|(_, e)| matches!(e, ImageCacheEntry::Loaded(_)))
-            .map(|(k, _)| k.clone())
-            .take(excess)
-            .collect();
-        for k in to_remove {
-            self.map.remove(&k);
+        loaded.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut remaining = total;
+        for (path, bytes) in loaded {
+            if self.fresh.contains(&path) {
+                continue;
+            }
+            if remaining <= Self::MAX_BYTES * 3 / 4 && entries <= Self::MAX_ENTRIES * 3 / 4 {
+                break;
+            }
+            self.map.remove(&path);
+            remaining -= bytes;
+            entries -= 1;
         }
     }
+}
+
+/// Bound the image cache by its byte budget and entry ceiling after
+/// inserting `inserted` (see [`ImageCache::MAX_BYTES`]). A free function
+/// because measuring a texture needs `&mut Cx`, which `cx.get_global`
+/// already borrows.
+fn evict_image_cache_if_oversized(cx: &mut Cx, inserted: &Path) {
+    let event_id = cx.event_id();
+    let cache = cx.get_global::<ImageCache>();
+    if cache.fresh_event != event_id {
+        cache.fresh.clear();
+        cache.fresh_event = event_id;
+    }
+    cache.fresh.push(inserted.to_path_buf());
+    let textures: Vec<(PathBuf, Texture)> = cx
+        .get_global::<ImageCache>()
+        .map
+        .iter()
+        .filter_map(|(path, entry)| match entry {
+            ImageCacheEntry::Loaded(texture) => Some((path.clone(), texture.clone())),
+            ImageCacheEntry::Loading(..) => None,
+        })
+        .collect();
+    let loaded = textures
+        .into_iter()
+        .map(|(path, texture)| {
+            let bytes = texture
+                .get_format(cx)
+                .vec_width_height()
+                .map_or(0, |(w, h)| ImageCache::texture_bytes(w, h));
+            (path, bytes)
+        })
+        .collect();
+    cx.get_global::<ImageCache>()
+        .evict_loaded_if_oversized(loaded);
 }
 
 #[derive(Debug)]
@@ -1030,11 +1133,11 @@ fn decode_timing_start() -> Option<f64> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn gpusim_mode_enabled() -> bool {
+fn headless_mode_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("MAKEPAD")
-            .map(|value| value.eq_ignore_ascii_case("gpusim"))
+        std::env::var("MAKEPAD_HAL_BACKEND")
+            .map(|value| value.eq_ignore_ascii_case("headless"))
             .unwrap_or(false)
     })
 }
@@ -1518,7 +1621,21 @@ pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usiz
 fn ensure_image_cache_inner(cx: &mut Cx) {
     if !cx.has_global::<ImageCache>() {
         cx.set_global(ImageCache::new());
+        cx.register_async_load_probe("image", pending_image_loads);
     }
+}
+
+/// Images still decoding on a worker or being fetched: they draw as their
+/// placeholder until the result lands (`Cx::pending_async_loads`).
+fn pending_image_loads(cx: &Cx) -> usize {
+    cx.get_global_ref::<ImageCache>().map_or(0, |cache| {
+        let loading = cache
+            .map
+            .values()
+            .filter(|entry| matches!(entry, ImageCacheEntry::Loading(..)))
+            .count();
+        loading.max(cache.pending_http_requests.len())
+    })
 }
 
 #[cfg(test)]
@@ -1526,6 +1643,19 @@ mod tests {
     use super::*;
     use makepad_gif::{Encoder, Frame};
     use std::borrow::Cow;
+
+    #[test]
+    fn area_downscaling_averages_each_channel_and_never_scales_up() {
+        // 4x2: the left half 0x80 in every byte, the right half 0.
+        let data = (0..8).map(|i| if i % 4 < 2 { 0x8080_8080 } else { 0 }).collect();
+        let image = ImageBuffer { width: 4, height: 2, data, ..Default::default() };
+        let small = image.area_downscaled(2, 1);
+        assert_eq!((small.width, small.height, small.data.clone()), (2, 1, vec![0x8080_8080, 0]));
+        // Four columns into three: unequal columns share the source pixels under them.
+        assert_eq!(image.area_downscaled(3, 2).width, 3);
+        let same = image.area_downscaled(100, 100);
+        assert_eq!((same.width, same.height, same.data), (4, 2, image.data));
+    }
 
     #[test]
     fn web_decoded_image_policy_boundaries() {
@@ -1778,23 +1908,23 @@ mod tests {
     }
 
     #[test]
-    fn the_entry_cap_still_only_bites_past_512() {
-        // The global behaviour is unchanged by eviction: nothing is shed
-        // until MAX_ENTRIES is exceeded, and then only `Loaded` entries.
+    fn the_entry_cap_only_bites_past_max_entries() {
+        // Nothing is shed until MAX_ENTRIES is exceeded, and then only
+        // `Loaded` entries.
         let mut cache = ImageCache::new();
         for i in 0..ImageCache::MAX_ENTRIES {
             cache
                 .map
                 .insert(PathBuf::from(format!("{i}.png")), ImageCacheEntry::Loading(1, 1));
         }
-        cache.evict_loaded_if_oversized();
+        cache.evict_loaded_if_oversized(Vec::new());
         assert_eq!(cache.map.len(), ImageCache::MAX_ENTRIES);
         // Over the cap, but every entry is an in-flight decode: dropping
         // those would orphan the work, so the map is left alone.
         cache
             .map
             .insert(PathBuf::from("one-too-many.png"), ImageCacheEntry::Loading(1, 1));
-        cache.evict_loaded_if_oversized();
+        cache.evict_loaded_if_oversized(Vec::new());
         assert_eq!(cache.map.len(), ImageCache::MAX_ENTRIES + 1);
     }
 
@@ -2350,6 +2480,7 @@ pub fn process_async_image_load(
         if pending_decode.is_some_and(|pending_decode| has_enough_pixels(cx, &texture, pending_decode.drawn_size)) {
             cx.get_global::<ImageCache>().pending_decodes.remove(image_path);
         }
+        evict_image_cache_if_oversized(cx, image_path);
     } else {
         if image_decode_debug_enabled() {
             log!(
@@ -2498,18 +2629,19 @@ where
     }
 
     // On wasm, decode synchronously on the UI thread since thread pools
-    // are not reliably available. Also decode synchronously for gpusim
-    // single-frame runs so textured output is available in the first emitted PNG.
+    // are not reliably available. Also decode synchronously for HAL headless
+    // logic runs so image state is ready in their first bounded turn.
     #[cfg(target_arch = "wasm32")]
     let force_sync = true;
     #[cfg(not(target_arch = "wasm32"))]
-    let force_sync = gpusim_mode_enabled();
+    let force_sync = headless_mode_enabled();
 
     if force_sync {
         let image = decode_image_buffer(image_path, bytes, drawn_size)?;
         let texture = image.into_new_texture(cx);
         cx.get_global::<ImageCache>()
             .insert_loaded(image_path.into(), texture);
+        evict_image_cache_if_oversized(cx, image_path);
         return Ok(AsyncLoadResult::Loaded);
     }
 
@@ -2838,6 +2970,7 @@ pub trait ImageCacheImpl {
         ensure_image_cache(cx);
         cx.get_global::<ImageCache>()
             .insert_loaded(image_path.into(), texture.clone());
+        evict_image_cache_if_oversized(cx, image_path);
         self.set_texture(Some(texture), id);
         Ok(())
     }

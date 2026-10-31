@@ -257,6 +257,33 @@ pub fn request_window_gauss(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
     cx.global::<GaussWindowGlobal>().request(window_id)
 }
 
+/// [`request_window_gauss`] for a shader that shows the window's scene
+/// sharp and moves it, such as glass that bends what lies under it: only a
+/// capture made in this very frame, and `None` on a frame that did not
+/// capture. A blurred backdrop can show the last capture on such a frame
+/// unnoticed; a sharp one would show a picture that is no longer there. It
+/// asks for a capture all the same, so the next frame has one.
+pub fn request_window_scene(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
+    if !cx.is_drawing_overlay() {
+        return None;
+    }
+    let redraw_id = cx.redraw_id;
+    let global = cx.global::<GaussWindowGlobal>();
+    if let Some((pass, _)) = global.scope_in(redraw_id).last().copied() {
+        let entry = global.captures.entry(pass).or_default();
+        entry.requested_this_frame = true;
+        return if entry.capture_active { entry.snapshot.clone() } else { None };
+    }
+    let window_id = cx.get_current_window_id()?;
+    let entry = cx.global::<GaussWindowGlobal>().entry_mut(window_id);
+    entry.requested_this_frame = true;
+    if entry.capture_active {
+        entry.snapshot.clone()
+    } else {
+        None
+    }
+}
+
 /// Bind a snapshot's scene and pyramid to a shader that samples the window
 /// behind it, or clear the slots so it paints its fallback face. For shaders
 /// outside the glass family that sample the window themselves, such as a
@@ -596,66 +623,66 @@ script_mod! {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 if level < 0.5 {
-                    return self.scene_texture.sample_as_bgra(safe_uv)
+                    return self.scene_texture.sample(safe_uv)
                 }
                 if level < 1.5 {
                     let size = max(self.mip0_texture.size(), vec2(1.0, 1.0))
                     let h = self.bicubic_h(safe_uv, size)
                     let g0 = self.bicubic_g0(safe_uv, size)
                     let g1 = 1.0 - g0
-                    return self.mip0_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                        + self.mip0_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                        + self.mip0_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                        + self.mip0_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                    return self.mip0_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                        + self.mip0_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                        + self.mip0_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                        + self.mip0_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                 }
                 if level < 2.5 {
                     let size = max(self.mip1_texture.size(), vec2(1.0, 1.0))
                     let h = self.bicubic_h(safe_uv, size)
                     let g0 = self.bicubic_g0(safe_uv, size)
                     let g1 = 1.0 - g0
-                    return self.mip1_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                        + self.mip1_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                        + self.mip1_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                        + self.mip1_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                    return self.mip1_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                        + self.mip1_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                        + self.mip1_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                        + self.mip1_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                 }
                 if level < 3.5 {
                     let size = max(self.mip2_texture.size(), vec2(1.0, 1.0))
                     let h = self.bicubic_h(safe_uv, size)
                     let g0 = self.bicubic_g0(safe_uv, size)
                     let g1 = 1.0 - g0
-                    return self.mip2_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                        + self.mip2_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                        + self.mip2_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                        + self.mip2_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                    return self.mip2_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                        + self.mip2_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                        + self.mip2_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                        + self.mip2_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                 }
                 if level < 4.5 {
                     let size = max(self.mip3_texture.size(), vec2(1.0, 1.0))
                     let h = self.bicubic_h(safe_uv, size)
                     let g0 = self.bicubic_g0(safe_uv, size)
                     let g1 = 1.0 - g0
-                    return self.mip3_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                        + self.mip3_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                        + self.mip3_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                        + self.mip3_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                    return self.mip3_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                        + self.mip3_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                        + self.mip3_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                        + self.mip3_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                 }
                 if level < 5.5 {
                     let size = max(self.mip4_texture.size(), vec2(1.0, 1.0))
                     let h = self.bicubic_h(safe_uv, size)
                     let g0 = self.bicubic_g0(safe_uv, size)
                     let g1 = 1.0 - g0
-                    return self.mip4_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                        + self.mip4_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                        + self.mip4_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                        + self.mip4_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                    return self.mip4_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                        + self.mip4_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                        + self.mip4_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                        + self.mip4_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                 }
                 let size = max(self.mip5_texture.size(), vec2(1.0, 1.0))
                 let h = self.bicubic_h(safe_uv, size)
                 let g0 = self.bicubic_g0(safe_uv, size)
                 let g1 = 1.0 - g0
-                return self.mip5_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                    + self.mip5_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                    + self.mip5_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                    + self.mip5_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                return self.mip5_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip5_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip5_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip5_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
             }
 
             sample_blur: fn(level: float, uv: vec2) -> vec4 {
@@ -1117,6 +1144,12 @@ pub struct GaussRoundedView {
     // view is placed in the normal (background) flow rather than inside a `glass.Layer`.
     #[rust]
     draw_list: Option<DrawList2d>,
+    // The redraw whose walk began the overlay and has not finished it: the view hands back a
+    // step when a child (a list asking for its rows) needs the caller, and the call that
+    // resumes it must not begin the overlay again, which would clear what the first part of
+    // the walk drew, background included.
+    #[rust]
+    overlay_began: Option<u64>,
 }
 
 impl ScriptHook for GaussRoundedView {
@@ -1746,6 +1779,11 @@ impl GaussRoundedViewRef {
 }
 
 impl Widget for GaussRoundedView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
     }
@@ -1763,11 +1801,19 @@ impl Widget for GaussRoundedView {
             if self.draw_list.is_none() {
                 self.draw_list = Some(DrawList2d::new(cx));
             }
-            self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+            if self.overlay_began == Some(cx.cx.redraw_id) {
+                self.draw_list.as_mut().unwrap().resume_overlay(cx);
+            } else {
+                self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+                self.overlay_began = Some(cx.cx.redraw_id);
+            }
             let snapshot = request_window_gauss(cx);
             self.bind_snapshot(cx, snapshot);
             let step = self.view.draw_walk(cx, scope, walk);
             self.draw_list.as_mut().unwrap().end(cx);
+            if step.is_done() {
+                self.overlay_began = None;
+            }
             step
         }
     }
@@ -2106,7 +2152,7 @@ mod press_tests {
             ["RippleLensRoundedView", "LensedRoundedView", "GaussRoundedView"]
                 .iter()
                 .map(|name| {
-                    let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+                    let value = vm.value(widgets, LiveId::from_str(name));
                     assert!(value.as_object().is_some(), "no template {name}");
                     WidgetRef::script_from_value(vm, value)
                 })

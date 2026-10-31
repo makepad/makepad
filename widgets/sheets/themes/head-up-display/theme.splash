@@ -1,0 +1,287 @@
+mod.theme = mod.themes.dark
+
+// Line frames of a head-up display over a dark ground.
+// Every control is drawn, not built: one-device-pixel lines in one cyan ink
+// trace frames with cut corners, brackets and tick rulers; faces are dark
+// blue-teal tints of the ground, lit from inside and never raised. Light
+// shows as line brightness, top edge brightest, and emphasis as fill.
+// Every state of a family is spelled out, because the base derived its
+// states once, from its own colours.
+//
+// The ladder, darkest first: ground #03090f, well #050d13, face #0b1a21,
+// panel #0a1a22, lifted face #10262f, disabled line #1d3a42, frame
+// #2e6570, edge #36707c, side line #3f7f8a, dim text #52868e, top line
+// #6fa9b3, accent #36c8dc, bright #6af0f5, text #b8eef5, hot #e6fdff.
+mod.theme.color_bg_app = #03090f
+mod.theme.color_fg_app = #0a1a22
+mod.theme.color_bg_container = #0a1a22
+mod.theme.color_surface_container_lowest = #02070b
+mod.theme.color_bg_even = #03090f
+mod.theme.color_bg_odd = #06111a
+
+// Faces: buttons, handles, tabs. A tint of the ground, flat within a few
+// percent; held, the gradient turns over and the face goes darker.
+mod.theme.color_outset = #0b1a21
+mod.theme.color_outset_1 = #0d1d25
+mod.theme.color_outset_2 = #0a171e
+mod.theme.color_outset_hover = #0f222b
+mod.theme.color_outset_1_hover = #11252e
+mod.theme.color_outset_2_hover = #0e1f28
+mod.theme.color_outset_down = #08161d
+mod.theme.color_outset_1_down = #06121a
+mod.theme.color_outset_2_down = #0a1d25
+mod.theme.color_outset_focus = #0b1a21
+mod.theme.color_outset_1_focus = #0d1d25
+mod.theme.color_outset_2_focus = #0a171e
+mod.theme.color_outset_active = #00384a
+mod.theme.color_outset_1_active = #001822
+mod.theme.color_outset_2_active = #004a61
+mod.theme.color_outset_drag = #0f222b
+mod.theme.color_outset_1_drag = #11252e
+mod.theme.color_outset_2_drag = #0e1f28
+mod.theme.color_outset_disabled = #07121a
+mod.theme.color_outset_1_disabled = #07121a
+mod.theme.color_outset_2_disabled = #07121a
+
+// Wells: fields, tracks, boxes. Below the ground, no inner shadow.
+mod.theme.color_inset = #050d13
+mod.theme.color_inset_1 = #050d13
+mod.theme.color_inset_2 = #050d13
+mod.theme.color_inset_hover = #06111a
+mod.theme.color_inset_1_hover = #06111a
+mod.theme.color_inset_2_hover = #06111a
+mod.theme.color_inset_focus = #06111a
+mod.theme.color_inset_1_focus = #06111a
+mod.theme.color_inset_2_focus = #06111a
+mod.theme.color_inset_active = #0e2f37
+mod.theme.color_inset_1_active = #0e2f37
+mod.theme.color_inset_2_active = #0e2f37
+mod.theme.color_inset_down = #06111a
+mod.theme.color_inset_1_down = #06111a
+mod.theme.color_inset_2_down = #06111a
+mod.theme.color_inset_drag = #06111a
+mod.theme.color_inset_1_drag = #06111a
+mod.theme.color_inset_2_drag = #06111a
+mod.theme.color_inset_empty = #050d13
+mod.theme.color_inset_1_empty = #050d13
+mod.theme.color_inset_2_empty = #050d13
+mod.theme.color_inset_disabled = #03090f
+mod.theme.color_inset_1_disabled = #03090f
+mod.theme.color_inset_2_disabled = #03090f
+
+// The line every stock face still draws: the frame cyan, one device pixel,
+// brighter under the pointer and on focus, the disabled line when off.
+mod.theme.color_bevel = #36707c
+mod.theme.color_bevel_hover = #4f8f9a
+mod.theme.color_bevel_focus = #36c8dc
+mod.theme.color_bevel_active = #36c8dc
+mod.theme.color_bevel_empty = #2e6570
+mod.theme.color_bevel_down = #4f8f9a
+mod.theme.color_bevel_drag = #36c8dc
+mod.theme.color_bevel_disabled = #1d3a42
+mod.theme.color_bevel_inset_1 = #2e6570
+mod.theme.color_bevel_inset_2 = #36707c
+mod.theme.color_bevel_outset_1 = #6fa9b3
+mod.theme.color_bevel_outset_2 = #2e6570
+mod.theme.color_bevel_inset_1_hover = #3f7f8a
+mod.theme.color_bevel_inset_2_hover = #4f8f9a
+mod.theme.color_bevel_outset_1_hover = #8fc3cc
+mod.theme.color_bevel_outset_2_hover = #3f7f8a
+mod.theme.color_bevel_inset_1_focus = #36c8dc
+mod.theme.color_bevel_inset_2_focus = #36c8dc
+mod.theme.color_bevel_outset_1_focus = #6af0f5
+mod.theme.color_bevel_outset_2_focus = #36c8dc
+mod.theme.color_bevel_inset_1_disabled = #1d3a42
+mod.theme.color_bevel_inset_2_disabled = #1d3a42
+mod.theme.color_bevel_outset_1_disabled = #1d3a42
+mod.theme.color_bevel_outset_2_disabled = #1d3a42
+// One device pixel on a stock shader, which strokes twice what it is given.
+mod.theme.beveling = 0.34
+
+// Inks. Pale cyan text a little under full at rest, full under the pointer,
+// the hot white-cyan when lit; a dim teal for captions and data units.
+mod.theme.color_text = #b8eef5
+mod.theme.color_text_hover = #d4f7fb
+mod.theme.color_text_focus = #b8eef5
+mod.theme.color_text_active = #e6fdff
+mod.theme.color_text_down = #d4f7fb
+mod.theme.color_text_disabled = #33545b
+mod.theme.color_text_placeholder = #52868e
+mod.theme.color_text_placeholder_hover = #5f949c
+mod.theme.color_text_val = #36c8dc
+mod.theme.color_text_hl = #e6fdff
+mod.theme.color_text_meta = #52868e
+mod.theme.color_text_on_accent = #03090f
+mod.theme.color_label = #a6d9e0
+mod.theme.color_label_hover = #d4f7fb
+mod.theme.color_label_focus = #b8eef5
+mod.theme.color_label_active = #e6fdff
+mod.theme.color_label_down = #d4f7fb
+mod.theme.color_label_disabled = #33545b
+mod.theme.color_label_inner = #a6d9e0
+mod.theme.color_label_inner_hover = #d4f7fb
+mod.theme.color_label_inner_focus = #b8eef5
+mod.theme.color_label_inner_active = #e6fdff
+mod.theme.color_label_inner_down = #d4f7fb
+mod.theme.color_label_inner_inactive = #52868e
+mod.theme.color_label_inner_disabled = #33545b
+mod.theme.color_label_outer = #a6d9e0
+mod.theme.color_label_outer_off = #52868e
+mod.theme.color_label_outer_hover = #d4f7fb
+mod.theme.color_label_outer_focus = #b8eef5
+mod.theme.color_label_outer_active = #e6fdff
+mod.theme.color_label_outer_down = #d4f7fb
+mod.theme.color_label_outer_drag = #d4f7fb
+mod.theme.color_label_outer_disabled = #33545b
+mod.theme.color_icon = #a6d9e0
+mod.theme.color_icon_hover = #d4f7fb
+mod.theme.color_icon_active = #6af0f5
+mod.theme.color_icon_disabled = #33545b
+
+// Marks, values, handles: the accent, the bright ink when touched.
+mod.theme.color_mark = #36c8dc
+mod.theme.color_mark_active = #36c8dc
+mod.theme.color_mark_active_hover = #6af0f5
+mod.theme.color_mark_hover = #36c8dc
+mod.theme.color_mark_focus = #36c8dc
+mod.theme.color_mark_down = #6af0f5
+mod.theme.color_mark_disabled = #1d3a42
+mod.theme.color_val = #36c8dc
+mod.theme.color_val_hover = #36c8dc
+mod.theme.color_val_focus = #36c8dc
+mod.theme.color_val_drag = #6af0f5
+mod.theme.color_val_disabled = #1d3a42
+mod.theme.color_handle = #6af0f5
+mod.theme.color_handle_hover = #a8f7fa
+mod.theme.color_handle_focus = #6af0f5
+mod.theme.color_handle_drag = #a8f7fa
+mod.theme.color_handle_disabled = #1d3a42
+
+// Selection is the accent at a quarter behind the text; the caret is the
+// bright ink.
+mod.theme.color_selection = #0f3a44
+mod.theme.color_selection_hover = #12434e
+mod.theme.color_selection_down = #154c58
+mod.theme.color_selection_focus = #154c58
+mod.theme.color_bg_highlight = #0e2f37
+mod.theme.color_bg_highlight_inline = #0e2f37
+mod.theme.color_highlight = #0e2f37
+mod.theme.color_cursor = #6af0f5
+mod.theme.color_cursor_focus = #6af0f5
+mod.theme.color_cursor_empty = #6af0f5
+mod.theme.color_cursor_border = #6af0f5
+mod.theme.color_text_cursor = #6af0f5
+
+// The accent seed: the primary, secondary and tertiary families are grown
+// from `color_ctrl_selected`. One cyan ink; red only means danger, caution
+// yellow only a warning.
+mod.theme.color_ctrl_selected = #36c8dc
+mod.theme.color_focus = #36c8dc
+mod.theme.color_ctrl_active = #36c8dc
+mod.theme.color_success = #5fe0a0
+mod.theme.color_warning = #f1ef3a
+mod.theme.color_error = #ff6068
+mod.theme.color_info = #36c8dc
+
+mod.theme.color_terminal_bg = #02070b
+mod.theme.color_terminal_text = #b8eef5
+
+// The surface ladder in blue-teal, so every widget built on the roles stays
+// in the family: grounds, containers, their ink and outlines.
+mod.theme.color_surface = #03090f
+mod.theme.color_surface_dim = #02070b
+mod.theme.color_surface_bright = #163440
+mod.theme.color_surface_container_low = #07131a
+mod.theme.color_surface_container = #0a1a22
+mod.theme.color_surface_container_high = #0d2029
+mod.theme.color_surface_container_highest = #10262f
+mod.theme.color_on_surface = #b8eef5
+mod.theme.color_on_surface_variant = #7fb3bc
+mod.theme.color_outline = #36707c
+mod.theme.color_outline_variant = #1d3a42
+mod.theme.color_inverse_surface = #b8eef5
+mod.theme.color_inverse_on_surface = #03090f
+
+// Slim: a 26 point row, 6 point gaps, square and cut corners only.
+mod.theme.space_factor = 6.0
+mod.theme.space_1 = 3.0
+mod.theme.space_2 = 6.0
+mod.theme.space_3 = 9.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 3.0 right: 3.0 bottom: 3.0 left: 3.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 3.0 bottom: 0.0 left: 3.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 3.0 right: 0.0 bottom: 3.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 6.0 right: 6.0 bottom: 6.0 left: 6.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 6.0 bottom: 0.0 left: 6.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 6.0 right: 0.0 bottom: 6.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 10.0 right: 10.0 bottom: 10.0 left: 10.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 10.0 bottom: 0.0 left: 10.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 10.0 right: 0.0 bottom: 10.0 left: 0.0}
+// The rungs the base froze at its own spacing, restated for this row.
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 24.0
+mod.theme.size_control_s = 22.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 32.0
+mod.theme.data_item_height = 22.0
+mod.theme.size_border = 0.67
+mod.theme.size_divider = 0.67
+mod.theme.size_focus_ring = 0.67
+mod.theme.corner_radius = 0.0
+mod.theme.container_corner_radius = 0.0
+mod.theme.textselection_corner_radius = 0.0
+mod.theme.radius_xs = 0.0
+mod.theme.radius_s = 1.0
+mod.theme.radius_m = 1.0
+mod.theme.radius_l = 1.0
+mod.theme.radius_xl = 1.0
+
+// No cast shadows in this family: depth is line brightness, not relief.
+mod.theme.elevation_1_radius = 0.0
+mod.theme.elevation_1_offset_y = 0.0
+mod.theme.elevation_2_radius = 0.0
+mod.theme.elevation_2_offset_y = 0.0
+mod.theme.elevation_3_radius = 0.0
+mod.theme.elevation_3_offset_y = 0.0
+mod.theme.color_elevation_1 = #00000000
+mod.theme.color_elevation_2 = #00000000
+mod.theme.color_elevation_3 = #00000000
+
+// The base's grotesque, small: control labels at 8.25 points (11 layout
+// points, a cap of about 0.3 of the 26 point row), data at 6.5, titles at 9.
+mod.theme.font_size_base = 8.25
+mod.theme.font_size_p = 8.25
+mod.theme.font_size_code = 7.75
+mod.theme.font_code = mod.theme.font_code{font_size: 7.75}
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.25}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 8.25}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.25}
+mod.theme.font_italic = mod.theme.font_italic{font_size: 8.25}
+mod.theme.font_bold_italic = mod.theme.font_bold_italic{font_size: 8.25}
+// The body, label and title rungs the base froze from its own sizes.
+mod.theme.type_title_l_size = 12.0
+mod.theme.type_title_m_size = 10.5
+mod.theme.type_title_s_size = 9.0
+// The heading ladder, small: a card title is a panel title, 12 layout
+// points at the bold weight.
+mod.theme.font_size_1 = 18.0
+mod.theme.font_size_2 = 14.0
+mod.theme.font_size_3 = 11.0
+mod.theme.font_size_4 = 9.0
+mod.theme.font_size_5 = 8.25
+mod.theme.font_size_6 = 7.5
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 12.0 line_spacing: 1.2}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 10.5 line_spacing: 1.2}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 9.0 line_spacing: 1.2}
+mod.theme.type_body_l_size = 9.0
+mod.theme.type_body_m_size = 8.25
+mod.theme.type_body_s_size = 7.5
+mod.theme.type_label_l_size = 8.25
+mod.theme.type_label_m_size = 7.5
+mod.theme.type_label_s_size = 6.5
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 9.0 line_spacing: 1.35}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 8.25 line_spacing: 1.35}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 7.5 line_spacing: 1.35}
+mod.theme.font_label_l = mod.theme.font_bold{font_size: 8.25 line_spacing: 1.2}
+mod.theme.font_label_m = mod.theme.font_bold{font_size: 7.5 line_spacing: 1.2}
+mod.theme.font_label_s = mod.theme.font_bold{font_size: 6.5 line_spacing: 1.2}
+true

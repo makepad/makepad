@@ -111,6 +111,13 @@ impl ScriptHook for Tooltip {
 }
 
 impl Widget for Tooltip {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tooltip;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::HIDDEN, !self.opened);
+    }
+
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         self.opened && self.cancel_children_impl(visit)
     }
@@ -152,7 +159,7 @@ impl Widget for Tooltip {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         // The overlay list has to begin every frame, even while hidden, or the window drops it.
-        self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+        self.draw_list.as_mut().unwrap().begin_popup_overlay(cx);
 
         let pass_size = cx.current_pass_size();
         cx.begin_root_turtle(pass_size, Layout::default());

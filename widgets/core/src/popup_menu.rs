@@ -1,8 +1,9 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     overlay_place::span_inboard,
+    scroll_bars::ScrollBars,
     widget::*,
     widget_async::CxSplashVmExt,
     widget_tree::CxWidgetExt,
@@ -280,6 +281,10 @@ script_mod! {
 
         menu_item: mod.widgets.PopupMenuItem{}
 
+        /** The scroll area of a menu whose owner caps its height (the
+        dropdown's `popup_max_height`). A menu without a cap never draws it. */
+        scroll_bars: mod.widgets.ScrollBars{show_scroll_x: false show_scroll_y: true}
+
         draw_bg +: {
             border_size: uniform(theme.beveling)
             gradient_border_horizontal: uniform(0.0)
@@ -391,6 +396,8 @@ pub struct PopupMenuItem {
     /// The label the menu hands in before each draw.
     #[rust]
     pub label: String,
+    #[rust]
+    disabled: bool,
 
     #[redraw]
     #[live]
@@ -429,8 +436,12 @@ pub struct PopupMenuItem {
     active: f32,
 }
 
-#[derive(Script)]
+#[derive(Script, Widget)]
 pub struct PopupMenu {
+    #[uid]
+    uid: WidgetUid,
+    #[rust]
+    semantic_token: Option<u32>,
     #[source]
     source: ScriptObjectRef,
 
@@ -440,6 +451,7 @@ pub struct PopupMenu {
     menu_item: ScriptValue,
 
     #[live]
+    #[redraw]
     draw_bg: DrawQuad,
     #[layout]
     layout: Layout,
@@ -465,10 +477,43 @@ pub struct PopupMenu {
     /// every dropdown on the same template and only some of them have icons.
     #[rust]
     pub icon_column: bool,
+    /// The tallest the menu may be, in points; 0 is no cap, and a menu
+    /// without one draws every item exactly as it always did. Past the cap
+    /// the items scroll inside the menu. Set per open by whoever fills the
+    /// menu, alongside `icon_column`, for the same reason: one menu instance
+    /// serves every dropdown on the same template.
+    #[rust]
+    pub max_height: f64,
+    /// The scroll area a capped menu holds its items in.
+    #[live]
+    scroll_bars: ScrollBars,
+    /// Whether the last draw put the items in the scroll area, for the
+    /// event side.
+    #[rust]
+    scrolling: bool,
+    /// While a capped menu draws: where its items begin in the align list,
+    /// so the end of the draw can move them as one.
+    #[rust]
+    scroll_content_start: Option<usize>,
+    /// The item to bring into view on the next draw: the chosen one, as the
+    /// menu opens.
+    #[rust]
+    reveal: Option<PopupMenuItemId>,
+    /// That item's rect this draw, from the top of the scrolled content.
+    #[rust]
+    reveal_rect: Option<Rect>,
+    /// The offset the menu opened at. A menu placed by one of its items
+    /// (`end_at_item`) is placed as if still at this offset, so it stays
+    /// where it opened while its items scroll.
+    #[rust]
+    opened_scroll: f64,
 
     #[rust]
     count: usize,
 }
+
+/// The least a menu keeps clear of the pass's edges.
+const MENU_MARGIN: f64 = 4.0;
 
 impl ScriptHook for PopupMenu {
     fn on_after_apply(
@@ -546,11 +591,16 @@ impl PopupMenuItem {
             self.draw_bg.area().redraw(cx);
         }
 
-        match event.hits_with_options(
+        let hit = event.hits_with_options(
             cx,
             self.draw_bg.area(),
             HitOptions::new().with_sweep_area(sweep_area),
-        ) {
+        );
+        // Consume hits on an unavailable row without selecting or hovering it.
+        if self.disabled {
+            return;
+        }
+        match hit {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
             }
@@ -576,6 +626,20 @@ impl PopupMenuItem {
 }
 
 impl Widget for PopupMenuItem {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::MenuItem;
+        makepad_platform::a11y::set_string(&mut node.name, &self.label);
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
+    fn disabled(&self, _cx: &Cx) -> bool {
+        self.disabled
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
         // Driven by `PopupMenu::handle_event_with`, which needs the menu's
         // sweep area and action sink; nothing to do on the plain seam.
@@ -586,6 +650,14 @@ impl Widget for PopupMenuItem {
         self.draw_item(cx, &label);
         self.label = label;
         DrawStep::done()
+    }
+}
+
+impl Widget for PopupMenu {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Menu;
+        node.states.remove(a11y_tree::States::HIDDEN);
+        node.set_size = self.count as u32;
     }
 }
 
@@ -610,26 +682,155 @@ impl PopupMenu {
         self.draw_bg.area().clipped_rect(cx).contains(pos)
     }
 
+    #[cfg(test)]
+    pub(crate) fn area(&self) -> Area {
+        self.draw_bg.area()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scroll_bars(&self) -> &ScrollBars {
+        &self.scroll_bars
+    }
+
     pub fn begin(&mut self, cx: &mut Cx2d) {
-        self.draw_list.begin_overlay_reuse(cx);
+        let list = cx.draw_list_stack.last().copied();
+        self.semantic_token = cx.a11y.on.then(|| cx.a11y.begin_node(self.uid.0, list));
+        self.draw_list.begin_popup_overlay(cx);
 
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
 
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.count = 0;
+
+        // A capped menu holds its items in a scroll area no taller than the
+        // cap, nor than the pass: a menu taller than the window would leave
+        // its last rows past an edge no scroll could bring them over.
+        self.scrolling = self.max_height > 0.0;
+        self.reveal_rect = None;
+        if self.scrolling {
+            let room = self.max_height.min(size.y - MENU_MARGIN * 2.0);
+            let padding = self.layout.padding;
+            let walk = Walk::new(
+                if self.walk.width.is_fit() { Size::fit() } else { Size::fill() },
+                Size::Fit {
+                    min: None,
+                    max: Some(FitBound::Abs((room - padding.top - padding.bottom).max(0.0))),
+                },
+            );
+            let layout = Layout {
+                flow: self.layout.flow,
+                spacing: self.layout.spacing,
+                align: self.layout.align,
+                ..Layout::default()
+            };
+            self.scroll_bars.begin(cx, walk, layout);
+            self.scroll_content_start = Some(cx.align_list_len());
+        }
+    }
+
+    /// Close a capped menu's scroll area. The items were laid out at the
+    /// offset the last draw left, before this draw's total was known; now it
+    /// is, so the offset is settled here (kept inside the new total, and
+    /// moved just far enough to show the item asked for, if one was) and the
+    /// items already drawn are moved to it within this same draw, so the menu
+    /// never shows a frame at the old offset. Returns how far the offset the
+    /// items were laid out at lies past the one the menu opened at, which is
+    /// what `end_at_item` corrects the item's place by.
+    fn end_scroll(&mut self, cx: &mut Cx2d) -> f64 {
+        let Some(start) = self.scroll_content_start.take() else {
+            return 0.0;
+        };
+        let total = cx.turtle().used().y;
+        let visible = cx.current_turtle_max_height().map_or(total, |max| total.min(max));
+        let end = (total - visible).max(0.0);
+        let was = cx.turtle().scroll().y;
+        let mut to = was.min(end).max(0.0);
+        if let Some(rect) = self.reveal_rect.take() {
+            if rect.pos.y < to {
+                to = rect.pos.y;
+            } else if rect.pos.y + rect.size.y > to + visible {
+                to = rect.pos.y + rect.size.y - visible;
+            }
+            to = to.min(end).max(0.0);
+        }
+        if to != was {
+            let items = TurtleAlignRange { start, end: cx.align_list_len() };
+            cx.shift_align_range(&items, dvec2(0.0, was - to));
+            self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, to));
+        }
+        self.scroll_bars.end(cx);
+        // The draw after `init_select_item` is the opening one.
+        if self.reveal.is_some() {
+            self.opened_scroll = to;
+        }
+        was - self.opened_scroll
+    }
+
+    /// Seed a Fit menu's content width before its Fill rows are drawn, so
+    /// every row has the width of the widest label, padding and icon included.
+    /// Fixed-width menus keep their declared size.
+    pub fn fit_width_to_items<'a>(
+        &mut self,
+        cx: &mut Cx2d,
+        items: impl Iterator<Item = (PopupMenuItemId, &'a str, Option<&'a ScriptHandleRef>)>,
+    ) {
+        if !self.walk.width.is_fit() {
+            return;
+        }
+        let mut widest = 0.0_f64;
+        for (item_id, label, icon) in items {
+            let item = self.item(cx, item_id);
+            let Some(mut item) = item.borrow_mut::<PopupMenuItem>() else { continue };
+            let text = item.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), label);
+            let mut width = (text.size_in_lpxs.width * item.draw_text.font_scale) as f64;
+            if self.icon_column || icon.is_some() {
+                item.set_icon(icon);
+                let walk = item.icon_walk;
+                let icon_width = item.draw_icon.measure(cx, walk)
+                    .map(|size| size.x)
+                    .unwrap_or_else(|| walk.width.to_fixed().unwrap_or(0.0))
+                    + walk.margin.width();
+                width = match item.layout.flow {
+                    Flow::Right { .. } => width + icon_width + item.layout.spacing,
+                    Flow::Down | Flow::Overlay => width.max(icon_width),
+                };
+            }
+            widest = widest.max(width.ceil() + item.layout.padding.width() + item.walk.margin.width());
+        }
+        let height = cx.turtle().used_height();
+        cx.turtle_mut().set_used(widest + self.layout.padding.left, height);
     }
 
     pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d) {
+        self.end_placed(cx, shift_area, shift, None)
+    }
+
+    /// As `end`, for a menu placed by one of its own items: `item_pos` is
+    /// where the turtle stood as that item began, and the menu moves by
+    /// `shift - item_pos`, which puts that item at `shift`. A capped menu is
+    /// placed by where the item stood at the offset the menu opened at (the
+    /// one that brought the chosen item into view), so the menu stays put
+    /// while its items scroll.
+    pub fn end_at_item(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d, item_pos: Vec2d) {
+        self.end_placed(cx, shift_area, shift, Some(item_pos))
+    }
+
+    fn end_placed(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d, item_pos: Option<Vec2d>) {
+        let past_opened = self.end_scroll(cx);
         self.draw_bg.end(cx);
+        self.reveal = None;
+        let shift = match item_pos {
+            Some(item_pos) => shift - item_pos - dvec2(0.0, past_opened),
+            None => shift,
+        };
 
         // The caller's shift is a WANT, not an answer. The turtle translates
         // the menu by trigger.pos + shift and never asks whether the result
         // is still on screen, so a dropdown low in a window opened a menu
         // whose last rows fell past the bottom edge — not merely clipped,
-        // unreachable, since this menu has no scroll and never flips.
-        // Pull the span back inside the pass on both axes first.
-        const MENU_MARGIN: f64 = 4.0;
+        // unreachable, since a menu without a cap has no scroll and never
+        // flips. Pull the span back inside the pass on both axes first.
         let menu = self.draw_bg.area().rect(cx);
         let trigger = shift_area.rect(cx);
         let pass = cx.current_pass_size();
@@ -646,6 +847,12 @@ impl PopupMenu {
         if let Some(init_select_item) = self.init_select_item.take() {
             self.select_item_state(cx, init_select_item);
         }
+        if let Some(token) = self.semantic_token.take() {
+            let mut node = cx.a11y.take_node(token);
+            self.semantics(cx, &mut node);
+            crate::semantics::apply_overrides(self, None, cx, &mut node);
+            cx.a11y.end_node(token, node, self.draw_bg.area());
+        }
     }
 
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -653,7 +860,7 @@ impl PopupMenu {
     }
 
     pub fn draw_item(&mut self, cx: &mut Cx2d, item_id: PopupMenuItemId, label: &str) {
-        self.draw_item_full(cx, item_id, label, None, false)
+        self.draw_item_full(cx, item_id, label, None, false, false)
     }
 
     /// As `draw_item`, plus the icon to draw in front of the label.
@@ -664,7 +871,7 @@ impl PopupMenu {
         label: &str,
         icon: Option<&ScriptHandleRef>,
     ) {
-        self.draw_item_full(cx, item_id, label, icon, false)
+        self.draw_item_full(cx, item_id, label, icon, false, false)
     }
 
     /// Draw a selectable item using the disabled palette. This is visual
@@ -676,11 +883,11 @@ impl PopupMenu {
         label: &str,
         dimmed: bool,
     ) {
-        self.draw_item_full(cx, item_id, label, None, dimmed)
+        self.draw_item_full(cx, item_id, label, None, dimmed, false)
     }
 
-    /// Both at once: an icon in front of the label, and the disabled
-    /// palette over the whole row.
+    /// An optional icon, dimmed palette, and an independent input-disabled
+    /// state. Disabled rows always use the disabled palette.
     ///
     /// The three above are kept as their own entry points so no caller had
     /// to change: each names the one thing it cares about and takes the
@@ -692,22 +899,28 @@ impl PopupMenu {
         label: &str,
         icon: Option<&ScriptHandleRef>,
         dimmed: bool,
+        disabled: bool,
     ) {
         self.count += 1;
 
         let item = self.item(cx, item_id);
         if let Some(mut menu_item) = item.borrow_mut::<PopupMenuItem>() {
             menu_item.label = label.to_string();
+            menu_item.disabled = disabled;
             menu_item.set_icon(icon);
             menu_item.reserve_icon = self.icon_column;
             menu_item.animator_cut(
                 cx,
-                if dimmed {
+                if dimmed || disabled {
                     ids!(disabled.on)
                 } else {
                     ids!(disabled.off)
                 },
             );
+            if disabled {
+                menu_item.animator_cut(cx, ids!(active.off));
+                menu_item.animator_cut(cx, ids!(hover.off));
+            }
         }
         // Re-seat on every draw: one menu instance is shared by every dropdown
         // that uses the same template, so the items belong to whichever
@@ -716,6 +929,11 @@ impl PopupMenu {
         // Through the widget seam, so the item counts as its own nesting level
         // and the design tweaker's plane pick lands on it.
         item.draw_all(cx, &mut Scope::empty());
+        if self.scroll_content_start.is_some() && self.reveal == Some(item_id) {
+            let rect = item.area().rect(cx);
+            let origin = cx.turtle().origin();
+            self.reveal_rect = Some(Rect { pos: rect.pos - origin, size: rect.size });
+        }
     }
 
     /// The items as widgets, for whoever enumerates children (the DropDown).
@@ -727,6 +945,7 @@ impl PopupMenu {
 
     pub fn init_select_item(&mut self, which_id: PopupMenuItemId) {
         self.init_select_item = Some(which_id);
+        self.reveal = Some(which_id);
         self.first_tap = true;
     }
 
@@ -735,7 +954,7 @@ impl PopupMenu {
             let Some(mut item) = item.borrow_mut::<PopupMenuItem>() else {
                 continue;
             };
-            if *id == which_id {
+            if *id == which_id && !item.disabled {
                 item.animator_cut(cx, ids!(active.on));
                 item.animator_cut(cx, ids!(hover.on));
             } else {
@@ -752,6 +971,23 @@ impl PopupMenu {
         sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuAction),
     ) {
+        if self.scrolling {
+            // The bar hit-tests with plain `hits`, which the owner's lock on
+            // `sweep_area` (held while the menu is open) turns away, so it is
+            // lifted around the bar, as a Popover lifts its own around its
+            // content. Only a lock on top is the owner's to lift; the stored
+            // handle follows the owner's area through every redraw. The bar
+            // goes first so a press on it is the bar's, not the row it lies
+            // over.
+            let lifted = cx.sweep_lock_area() == Some(sweep_area);
+            if lifted {
+                cx.sweep_unlock(sweep_area);
+            }
+            self.scroll_bars.handle_event(cx, event, &mut Scope::empty());
+            if lifted {
+                cx.sweep_lock(sweep_area);
+            }
+        }
         let mut actions = Vec::new();
         for (item_id, node) in self.menu_items.iter_mut() {
             let Some(mut node) = node.borrow_mut::<PopupMenuItem>() else {

@@ -10,7 +10,7 @@
 
 use crate::library::{display_frame, ItemId, Library};
 use crate::tape::{full_frame, read_frame, FullFrame, Planes};
-use makepad_widgets::makepad_platform::thread::{
+use makepad_widgets_core::makepad_platform::thread::{
     CancellationToken, Lane, TaskHandle, TaskPool, ToUIReceiver, ToUISender,
 };
 use std::collections::HashMap;

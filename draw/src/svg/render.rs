@@ -1,4 +1,4 @@
-use crate::shader::draw_vector::DrawVector;
+use crate::shader::draw_vector::{DrawVector, FeatherSide};
 /// SVG renderer: walks an SvgDocument and emits DrawVector calls.
 use makepad_svg::animate::{
     eval_color_animation, eval_float_animation, eval_path_animation, eval_transform_animation,
@@ -533,6 +533,15 @@ fn emit_shape(
                         let sblur = std_dev * scale;
 
                         let saved_paint = dv.cur_paint.clone();
+                        let saved_feather = dv.cur_feather;
+                        let saved_shape_id = dv.cur_shape_id;
+                        let saved_effect_bbox = dv.cur_effect_bbox;
+                        let saved_gradient_row = dv.cur_gradient_row_v;
+                        // A shadow has solid paint; do not inherit the previous
+                        // SVG element's effect identifier or gradient row.
+                        dv.set_shape_id(0.0);
+                        dv.cur_effect_bbox = None;
+                        dv.cur_gradient_row_v = -1.0;
                         let a = color.3 * style.opacity;
                         dv.set_color(color.0, color.1, color.2, a); // VectorPaint::solid() will premultiply
 
@@ -560,7 +569,13 @@ fn emit_shape(
                                 _ => {}
                             }
                         }
-                        dv.shape_shadow(sblur.max(0.5));
+                        dv.set_feather(sblur, FeatherSide::Both);
+                        dv.fill();
+                        dv.clear_feather();
+                        dv.cur_feather = saved_feather;
+                        dv.cur_shape_id = saved_shape_id;
+                        dv.cur_effect_bbox = saved_effect_bbox;
+                        dv.cur_gradient_row_v = saved_gradient_row;
                         dv.cur_paint = saved_paint;
                     }
                 }

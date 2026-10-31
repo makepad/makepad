@@ -1,10 +1,9 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     image_cache::*,
     image_slice::*,
     makepad_derive_widget::*,
     makepad_draw::*,
-    makepad_script::ScriptArrayStorage,
     widget::*,
     widget_async::ScriptAsyncResult,
 };
@@ -46,7 +45,7 @@ script_mod! {
         // Whole texels are had by snapping to the texel's centre and reading
         // with the ordinary filter: at the magnification where it matters
         // every tap then lands on that one texel. Snapping rather than asking
-        // the sampler for nearest keeps the read on `sample_as_bgra`, the one
+        // the sampler for nearest keeps the read on `sample`, the one
         // form whose channel order the web backend corrects; a nearest read
         // there comes back with red and blue swapped. `scale` is the share of
         // the texture the quad spans, so a cropped picture measures its texels
@@ -55,7 +54,7 @@ script_mod! {
             // Nobody asked: the filtered read, and none of the arithmetic
             // below is reached to arrive at it.
             if self.sample_mode == 0.0 {
-                return self.image_texture.sample_as_bgra(uv)
+                return self.image_texture.sample(uv)
             }
             let size = self.image_texture.size()
             let texels_x = max(size.x, 1.0)
@@ -66,9 +65,9 @@ script_mod! {
                     (floor(uv.x * texels_x) + 0.5) / texels_x,
                     (floor(uv.y * texels_y) + 0.5) / texels_y
                 )
-                return self.image_texture.sample_as_bgra(snapped)
+                return self.image_texture.sample(snapped)
             }
-            return self.image_texture.sample_as_bgra(uv)
+            return self.image_texture.sample(uv)
         }
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
@@ -624,6 +623,12 @@ impl Image {
 }
 
 impl Widget for Image {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -632,8 +637,7 @@ impl Widget for Image {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_src) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
                     if value.is_nil() {
                         vm.with_cx_mut(|cx| {
@@ -645,7 +649,7 @@ impl Widget for Image {
                             self.redraw(cx);
                         });
                     } else if let Some(handle) = value.as_handle() {
-                        let handle_ref = vm.bx.heap.new_handle_ref(handle);
+                        let handle_ref = vm.heap_mut().new_handle_ref(handle);
                         vm.with_cx_mut(|cx| {
                             self.src = Some(handle_ref);
                             self.src_loaded = false;
@@ -661,16 +665,15 @@ impl Widget for Image {
         }
         if method == live_id!(load_image_from_data_async) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
                     if let Some(data_array) = value.as_array() {
-                        if let ScriptArrayStorage::U8(data) = vm.bx.heap.array_storage(data_array) {
+                        if let Some(data) = vm.heap().array_u8(data_array) {
                             let path = PathBuf::from(format!(
                                 "script_image_data://{}",
                                 LiveId::unique().0
                             ));
-                            let bytes = Arc::new(data.clone());
+                            let bytes = Arc::new(data.to_vec());
                             vm.with_cx_mut(|cx| {
                                 let _ = self.load_image_from_data_async(cx, &path, bytes);
                             });
@@ -1228,6 +1231,8 @@ impl Image {
                 }
             }
             ImageFit::Stretch => {}
+            // (the window on a bitmap: a vector source is drawn whole, by its own call)
+            ImageFit::CropToFill if self.draw_svg.is_some() => {}
             ImageFit::CropToFill => {
                 self.set_crop_to_fill_transform(
                     width,
@@ -1876,9 +1881,7 @@ mod flattened_walk_collision_tests {
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             Image::script_proto(vm);
-            let props = &vm
-                .bx
-                .heap
+            let props = &vm.heap()
                 .registered_type(Image::script_type_id_static())
                 .unwrap()
                 .props
@@ -2369,18 +2372,14 @@ mod shader_tests {
     fn fragment_source(cx: &mut Cx) -> String {
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            let shader = vm
-                .bx
-                .heap
+            let shader = vm.heap()
                 .type_default_for_id(DrawImage::script_type_id_static())
                 .expect("the picture's draw shader is registered");
             let source = script! {
                 mod.shader.test_compile_draw_source(#(ScriptValue::from(shader)), "glsl", false)
             };
             let value = vm.eval(source);
-            let text = vm
-                .bx
-                .heap
+            let text = vm.heap()
                 .string_with(value, |_heap, text| text.to_string())
                 .expect("the compiler answers with source");
             assert!(
@@ -2388,8 +2387,33 @@ mod shader_tests {
                 "the picture's shader did not compile: {text}"
             );
             assert!(!text.is_empty(), "the picture's shader compiled to nothing");
-            text
+            plain_locals(&text)
         })
+    }
+
+    /// The printer numbers its locals (`l3_sdf`) so two of one name never
+    /// clash; the needles below name them as written (`l_sdf`).
+    fn plain_locals(src: &str) -> String {
+        let b = src.as_bytes();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < b.len() {
+            let prev_ident = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+            if b[i] == b'l' && !prev_ident {
+                let mut j = i + 1;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1 && j < b.len() && b[j] == b'_' {
+                    out.push_str("l_");
+                    i = j + 1;
+                    continue;
+                }
+            }
+            out.push(b[i] as char);
+            i += 1;
+        }
+        out
     }
 
     /// The one emitted line that mentions `needle`, so a call can be pinned
@@ -2471,9 +2495,13 @@ mod shader_tests {
         for call in ["fract(", "floor(", "clamp("] {
             assert!(axis.contains(call), "the slice axis has no {call}: {axis}");
         }
-        assert!(
-            !source.contains("sample2d("),
-            "a read in the picture's shader skips the channel-order correction"
+        // `sample2d` is the corrected read on every backend (the `_bgra`
+        // twin is gone), so what is pinned is that only `sample_at` takes it.
+        let helper = function_body(&source, "vec4 io_sample_at(");
+        assert_eq!(
+            source.matches("sample2d(").count(),
+            helper.matches("sample2d(").count(),
+            "a read in the picture's shader skips sample_at: {source}"
         );
         });
     }
@@ -2534,19 +2562,20 @@ mod shader_tests {
         let mut cx = test_cx();
         let source = fragment_source(&mut cx);
         assert!(
-            source.contains("sample2d_bgra("),
+            source.contains("sample2d("),
             "the picture does not read its texture through the corrected helper"
         );
-        assert!(
-            !source.contains("sample2d("),
-            "a read in the picture's shader skips the channel-order correction"
+        assert_eq!(
+            source.matches("sample2d(").count(),
+            function_body(&source, "vec4 io_sample_at(").matches("sample2d(").count(),
+            "a read in the picture's shader skips sample_at"
         );
         // A whole texel is had by snapping, and the snapped coordinate is
         // what gets read.
         let snap = line_with(&source, "l_snapped =");
         assert!(snap.contains("floor("), "the snapped read does not snap: {snap}");
         assert!(
-            source.contains("sample2d_bgra(tex_image_texture, l_snapped)"),
+            source.contains("sample2d(tex_image_texture, l_snapped)"),
             "the snapped coordinate is worked out and then not read"
         );
         // Below zero every read is snapped; above zero the number is the
@@ -2621,7 +2650,7 @@ mod shader_tests {
         crate::on_test_cx(|| {
         let mut cx = test_cx();
         cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             crate::script_mod(vm);
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "{errors:#?}");

@@ -11,7 +11,9 @@ pub mod geometry;
 pub mod image_cache;
 pub mod match_event;
 pub mod nav;
+pub mod native_layer;
 pub mod overlay;
+pub mod render_target;
 pub mod scene_3d;
 pub mod scene_sun;
 pub mod size_expr;
@@ -20,6 +22,7 @@ pub mod svg;
 pub mod text;
 pub mod turtle;
 pub mod vector;
+pub mod xr_sink;
 
 pub use crate::{
     cx_2d::Cx2d,
@@ -36,7 +39,9 @@ pub use crate::{
     },
     match_event::MatchEvent,
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
+    native_layer::NativeLayerDraw,
     overlay::Overlay,
+    render_target::{RenderTarget, RenderTargetFormat, RenderTargetPool},
     scene_3d::{SceneDrawCallAnchor, SceneScope3D, SceneState3D},
     vector::{pack_pair_f16, pack_unorm8x4},
     scene_sun::{
@@ -47,10 +52,11 @@ pub use crate::{
     shader::{
         draw_cube::DrawCube, draw_glyph::DrawGlyph, draw_pbr::DrawPbr,
         draw_pbr::DrawPbrMaterialState, draw_pbr::DrawPbrRefractive, draw_pbr::DrawPbrTextureSet,
-        draw_quad::DrawColor, draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
+        draw_nv12::DrawNv12, draw_quad::DrawAffineQuad, draw_quad::DrawCachedQuad, draw_quad::DrawColor, draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
         draw_rotated_text::PathGlyphInstance, draw_rotated_text::PathTextPlacement,
         draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::PreparedTextRun,
-        draw_text::TextStyle, draw_text_3d::DrawText3d, draw_vector::DrawVector,
+        draw_text::TextStyle, draw_text_3d::DrawText3d,
+        draw_vector::{DrawVector, FeatherSide},
     },
     /*
     geometry::{
@@ -70,9 +76,15 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::turtle::script_mod(vm);
     crate::shader::sdf::script_mod(vm);
     crate::shader::surface::script_mod(vm);
+    crate::shader::finish::script_mod(vm);
     crate::geometry::script_mod(vm);
     crate::shader::draw_quad::script_mod(vm);
+    crate::shader::video_color::script_mod(vm);
+    crate::shader::draw_nv12::script_mod(vm);
+    crate::shader::draw_nv12_pack::script_mod(vm);
+    crate::shader::draw_fxaa::script_mod(vm);
     crate::shader::draw_cube::script_mod(vm);
+    makepad_script::glyph_coverage::script_mod(vm);
     crate::shader::draw_glyph::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
     crate::shader::draw_rotated_text::script_mod(vm);

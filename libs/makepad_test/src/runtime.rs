@@ -2,8 +2,8 @@ use crate::app_process::{self, LaunchSpec, OwnedApp, ShutdownOutcome};
 use crate::error::{IntoTestResult, TestError, TestResult};
 use crate::remote::{KeyKind, MouseInput, MouseKind};
 use crate::selector::Selector;
-use makepad_micro_serde::SerJson;
-use makepad_studio_protocol::{KeyCode, KeyModifiers, StudioToApp, WidgetSnapshot};
+use crate::remote::{NodeMatch, UiSnapshot};
+use makepad_studio_protocol::{KeyCode, KeyModifiers, StudioToApp};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -25,41 +25,6 @@ const RECENT_LOG_LINES: usize = 200;
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WidgetMatch {
-    pub raw: String,
-    pub id: String,
-    pub widget_type: String,
-    pub x: i64,
-    pub y: i64,
-    pub width: i64,
-    pub height: i64,
-}
-
-impl WidgetMatch {
-    #[allow(dead_code)]
-    fn parse(line: &str) -> Option<Self> {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() != 7 {
-            return None;
-        }
-        Some(Self {
-            raw: line.to_string(),
-            id: tokens[1].to_string(),
-            widget_type: tokens[2].to_string(),
-            x: tokens[3].parse().ok()?,
-            y: tokens[4].parse().ok()?,
-            width: tokens[5].parse().ok()?,
-            height: tokens[6].parse().ok()?,
-        })
-    }
-
-    #[allow(dead_code)]
-    fn center(&self) -> (i64, i64) {
-        (self.x + self.width / 2, self.y + self.height / 2)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct TestConfig {
     pub package_name: String,
@@ -69,7 +34,7 @@ pub struct TestConfig {
     pub test_name: String,
     pub artifacts_dir: PathBuf,
     /// Extra environment for the app process. `CARGO_TARGET_DIR`, when set,
-    /// also applies to the build. `MAKEPAD_GPUSIM_DPI=N` scales screenshots
+    /// also applies to the build. `MAKEPAD_TEST_DPI=N` scales screenshots
     /// to N pixels per layout point.
     pub env: HashMap<String, String>,
     /// Extra arguments appended after `--remote`.
@@ -140,12 +105,12 @@ impl TestConfig {
         }
     }
 
-    /// Screenshot scale that honours `MAKEPAD_GPUSIM_DPI` from `env`: the
-    /// old software backend rendered at that dpi, so a suite that asked for
-    /// `1` expects layout points to equal PNG pixels.
+    /// Screenshot scale that honours `MAKEPAD_TEST_DPI` from `env`: the
+    /// screenshot is rescaled by the native remote capture path; a suite that
+    /// asks for `1` expects layout points to equal PNG pixels.
     fn requested_screenshot_dpi(&self) -> Option<f64> {
         self.env
-            .get("MAKEPAD_GPUSIM_DPI")
+            .get("MAKEPAD_TEST_DPI")
             .and_then(|value| value.trim().parse::<f64>().ok())
             .filter(|dpi| *dpi > 0.0)
     }
@@ -205,12 +170,12 @@ impl TestApp {
         self.inner.borrow().app.pid
     }
 
-    /// `host:port` of the owned app's remote surface, for diagnostics.
+    /// The Unix socket path of the owned app's remote endpoint, for diagnostics.
     pub fn remote_endpoint(&self) -> String {
-        self.inner.borrow().app.client.endpoint()
+        self.inner.borrow().app.client.socket()
     }
 
-    /// The directory the app writes its own grabs into (`/g`).
+    /// The directory `grab` and `gq` write PNG files into (client side).
     pub fn grab_dir(&self) -> PathBuf {
         self.inner.borrow().app.grab_dir.clone()
     }
@@ -301,16 +266,22 @@ impl TestApp {
         self.client().dump()
     }
 
-    pub fn widget_snapshot(&self) -> Vec<WidgetSnapshot> {
+    pub fn widget_snapshot(&self) -> UiSnapshot {
         match self.try_widget_snapshot() {
             Ok(widgets) => widgets,
             Err(err) => panic_for_error(err),
         }
     }
 
-    pub fn try_widget_snapshot(&self) -> TestResult<Vec<WidgetSnapshot>> {
+    pub fn try_widget_snapshot(&self) -> TestResult<UiSnapshot> {
         self.ensure_running()?;
         self.client().snapshot()
+    }
+
+    /// Draw and worker diagnostics after a sequence number, without forcing a frame.
+    pub fn log_since(&self, since: u64) -> TestResult<crate::LogTail> {
+        self.ensure_running()?;
+        self.client().log_since(since)
     }
 
     pub fn wait_for_log_contains(&self, needle: &str) {
@@ -411,17 +382,6 @@ impl TestApp {
         Ok(())
     }
 
-    fn try_click_center(&self, target: &WidgetSnapshot) -> TestResult<()> {
-        self.ensure_running()?;
-        let (x, y) = snapshot_center_f64(target);
-        let window = Some(target.window_index);
-        self.client()
-            .mouse(&MouseInput::at(MouseKind::Click, window, x, y))?;
-        self.inner.borrow_mut().focus_window = window;
-        self.pace_after_action();
-        Ok(())
-    }
-
     /// Scrolls at a point in the focused window: a mouse wheel when `phase` is `None`, else one step of
     /// a trackpad gesture (`"began"`, `"changed"`, `"ended"`, `"momentum"`, `"momentum_ended"`, `"touched"`).
     pub fn scroll_at(&self, x: f64, y: f64, sx: f64, sy: f64, phase: Option<&'static str>) {
@@ -449,28 +409,16 @@ impl TestApp {
         Ok(())
     }
 
-    fn try_scroll_center(&self, target: &WidgetSnapshot, sx: f64, sy: f64) -> TestResult<()> {
-        self.ensure_running()?;
-        let (x, y) = snapshot_center_f64(target);
-        self.client().mouse(&MouseInput {
-            dx: sx,
-            dy: sy,
-            ..MouseInput::at(MouseKind::Scroll, Some(target.window_index), x, y)
-        })?;
-        self.pace_after_action();
-        Ok(())
-    }
-
     /// Drags one finger from the target's center through each offset in `path` in turn.
     fn try_touch_drag_from(
         &self,
-        target: &WidgetSnapshot,
+        target: &NodeMatch,
         path: &[(f64, f64)],
         is_held: bool,
     ) -> TestResult<()> {
         self.ensure_running()?;
         let (start_x, start_y) = snapshot_center_f64(target);
-        let window = Some(target.window_index);
+        let window = Some(target.window_index());
         let client = self.client();
         let touch = |phase, (dx, dy): (f64, f64)| MouseInput {
             phase: Some(phase),
@@ -498,14 +446,14 @@ impl TestApp {
 
     fn try_drag_from(
         &self,
-        target: &WidgetSnapshot,
+        target: &NodeMatch,
         dx: f64,
         dy: f64,
         is_held: bool,
     ) -> TestResult<()> {
         self.ensure_running()?;
         let (start_x, start_y) = snapshot_center_f64(target);
-        let window = Some(target.window_index);
+        let window = Some(target.window_index());
         let client = self.client();
         client.mouse(&MouseInput::at(MouseKind::Down, window, start_x, start_y))?;
         for step in 1..=DRAG_STEPS {
@@ -536,21 +484,9 @@ impl TestApp {
         &self,
         selector: &Selector,
         visible_only: bool,
-    ) -> TestResult<Vec<WidgetSnapshot>> {
-        let widgets = self.try_widget_snapshot()?;
-        let (primary_window_id, primary_window_index) = primary_window_scope(&widgets);
-        let mut matches: Vec<_> = widgets
-            .into_iter()
-            .filter(|widget| selector.matches(widget, &primary_window_id, primary_window_index))
-            .collect();
-        if visible_only {
-            matches.retain(snapshot_is_visible);
-        }
-        matches.sort_by(|left, right| snapshot_sort_key(left).cmp(&snapshot_sort_key(right)));
-        if let Some(index) = selector.nth_index() {
-            return Ok(matches.into_iter().nth(index).into_iter().collect());
-        }
-        Ok(matches)
+    ) -> TestResult<Vec<NodeMatch>> {
+        self.ensure_running()?;
+        self.client().find(selector, if visible_only { "state=visible" } else { "" })
     }
 
     fn collect_logs_text(&self) -> TestResult<String> {
@@ -644,17 +580,7 @@ impl Locator {
     }
 
     pub fn try_wait_visible(&self) -> TestResult<()> {
-        let query = self.selector.describe();
-        let deadline = Instant::now() + self.app.action_timeout();
-        while Instant::now() < deadline {
-            if !self.app.query_widgets(&self.selector, true)?.is_empty() {
-                return Ok(());
-            }
-            thread::sleep(self.app.poll_interval());
-        }
-        Err(TestError::new(format!(
-            "timed out waiting for selector `{query}` to become visible"
-        )))
+        self.wait_query("state=visible", &[])
     }
 
     pub fn wait_hidden(self) -> Self {
@@ -665,17 +591,7 @@ impl Locator {
     }
 
     pub fn try_wait_hidden(&self) -> TestResult<()> {
-        let query = self.selector.describe();
-        let deadline = Instant::now() + self.app.action_timeout();
-        while Instant::now() < deadline {
-            if self.app.query_widgets(&self.selector, true)?.is_empty() {
-                return Ok(());
-            }
-            thread::sleep(self.app.poll_interval());
-        }
-        Err(TestError::new(format!(
-            "timed out waiting for selector `{query}` to become hidden"
-        )))
+        self.wait_query("state=visible", &[("gone", "1")])
     }
 
     pub fn wait_count(self, expected: usize) -> Self {
@@ -686,18 +602,7 @@ impl Locator {
     }
 
     pub fn try_wait_count(&self, expected: usize) -> TestResult<()> {
-        let query = self.selector.describe();
-        let deadline = Instant::now() + self.app.action_timeout();
-        while Instant::now() < deadline {
-            let count = self.app.query_widgets(&self.selector, true)?.len();
-            if count == expected {
-                return Ok(());
-            }
-            thread::sleep(self.app.poll_interval());
-        }
-        Err(TestError::new(format!(
-            "timed out waiting for selector `{query}` to match {expected} visible widgets"
-        )))
+        self.wait_query("state=visible", &[("count", &expected.to_string())])
     }
 
     pub fn assert_text(self, expected: impl AsRef<str>) -> Self {
@@ -708,19 +613,9 @@ impl Locator {
     }
 
     pub fn try_assert_text(&self, expected: impl AsRef<str>) -> TestResult<()> {
-        let expected = expected.as_ref();
         let widget = self.resolve_unique_readable()?;
-        match widget.text.as_deref() {
-            Some(actual) if actual == expected => Ok(()),
-            Some(actual) => Err(TestError::new(format!(
-                "selector `{}` expected text `{expected}`, found `{actual}`",
-                self.selector.describe()
-            ))),
-            None => Err(TestError::new(format!(
-                "selector `{}` does not expose text state",
-                self.selector.describe()
-            ))),
-        }
+        if widget.name == expected.as_ref() { Ok(()) }
+        else { Err(TestError::new(format!("expected text {:?}, found {:?}", expected.as_ref(), widget.name))) }
     }
 
     pub fn wait_text(self, expected: impl AsRef<str>) -> Self {
@@ -731,7 +626,7 @@ impl Locator {
     }
 
     pub fn try_wait_text(&self, expected: impl AsRef<str>) -> TestResult<()> {
-        self.wait_for_state("text", expected.as_ref(), |widget| widget.text.as_deref())
+        self.wait_query(&format!("name={}", makepad_a11y::query::quote(expected.as_ref())), &[])
     }
 
     pub fn assert_value(self, expected: impl AsRef<str>) -> Self {
@@ -742,19 +637,9 @@ impl Locator {
     }
 
     pub fn try_assert_value(&self, expected: impl AsRef<str>) -> TestResult<()> {
-        let expected = expected.as_ref();
         let widget = self.resolve_unique_readable()?;
-        match widget.value.as_deref() {
-            Some(actual) if actual == expected => Ok(()),
-            Some(actual) => Err(TestError::new(format!(
-                "selector `{}` expected value `{expected}`, found `{actual}`",
-                self.selector.describe()
-            ))),
-            None => Err(TestError::new(format!(
-                "selector `{}` does not expose value state",
-                self.selector.describe()
-            ))),
-        }
+        if widget.value == expected.as_ref() { Ok(()) }
+        else { Err(TestError::new(format!("expected value {:?}, found {:?}", expected.as_ref(), widget.value))) }
     }
 
     pub fn wait_value(self, expected: impl AsRef<str>) -> Self {
@@ -765,7 +650,7 @@ impl Locator {
     }
 
     pub fn try_wait_value(&self, expected: impl AsRef<str>) -> TestResult<()> {
-        self.wait_for_state("value", expected.as_ref(), |widget| widget.value.as_deref())
+        self.wait_query(&format!("value={}", makepad_a11y::query::quote(expected.as_ref())), &[])
     }
 
     pub fn assert_checked(self, expected: bool) -> Self {
@@ -777,17 +662,8 @@ impl Locator {
 
     pub fn try_assert_checked(&self, expected: bool) -> TestResult<()> {
         let widget = self.resolve_unique_readable()?;
-        match widget.checked {
-            Some(actual) if actual == expected => Ok(()),
-            Some(actual) => Err(TestError::new(format!(
-                "selector `{}` expected checked state `{expected}`, found `{actual}`",
-                self.selector.describe()
-            ))),
-            None => Err(TestError::new(format!(
-                "selector `{}` does not expose checked state",
-                self.selector.describe()
-            ))),
-        }
+        if widget.checked() == Some(expected) { Ok(()) }
+        else { Err(TestError::new(format!("expected checked={expected}, found {:?}", widget.toggle))) }
     }
 
     pub fn wait_checked(self, expected: bool) -> Self {
@@ -798,7 +674,7 @@ impl Locator {
     }
 
     pub fn try_wait_checked(&self, expected: bool) -> TestResult<()> {
-        self.wait_for_bool_state("checked", expected, |widget| widget.checked)
+        self.wait_query(if expected { "state=checked" } else { "state=!checked,!mixed" }, &[])
     }
 
     pub fn assert_enabled(self, expected: bool) -> Self {
@@ -810,14 +686,8 @@ impl Locator {
 
     pub fn try_assert_enabled(&self, expected: bool) -> TestResult<()> {
         let widget = self.resolve_unique_readable()?;
-        if widget.enabled == expected {
-            Ok(())
-        } else {
-            Err(TestError::new(format!(
-                "selector `{}` expected enabled state `{expected}`, found `{}`",
-                self.selector.describe(), widget.enabled
-            )))
-        }
+        if widget.enabled() == expected { Ok(()) }
+        else { Err(TestError::new(format!("expected enabled={expected}, found {}", widget.enabled()))) }
     }
 
     pub fn wait_enabled(self, expected: bool) -> Self {
@@ -828,7 +698,7 @@ impl Locator {
     }
 
     pub fn try_wait_enabled(&self, expected: bool) -> TestResult<()> {
-        self.wait_for_bool_state("enabled", expected, |widget| Some(widget.enabled))
+        self.wait_query(if expected { "state=enabled" } else { "state=disabled" }, &[])
     }
 
     pub fn click(self) -> Self {
@@ -839,8 +709,33 @@ impl Locator {
     }
 
     pub fn try_click(&self) -> TestResult<()> {
+        self.act("press", &[])
+    }
+
+    /// Raw pointer input for hit-testing tests, located by semantic bounds.
+    pub fn click_at_center(self) -> Self {
+        if let Err(err) = self.raw_pointer(MouseKind::Click, 0.0, 0.0) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    /// Raw wheel input for containment, clipping and gesture tests.
+    pub fn wheel(self, dx: f64, dy: f64) -> Self {
+        if let Err(err) = self.raw_pointer(MouseKind::Scroll, dx, dy) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    fn raw_pointer(&self, kind: MouseKind, dx: f64, dy: f64) -> TestResult<()> {
         let target = self.resolve_unique_visible()?;
-        self.app.try_click_center(&target)
+        let (x, y) = snapshot_center_f64(&target);
+        self.app.client().mouse(&MouseInput {
+            dx,
+            dy,
+            ..MouseInput::at(kind, Some(target.window_index()), x, y)
+        })
     }
 
     pub fn type_text(self, text: impl AsRef<str>) -> Self {
@@ -851,8 +746,7 @@ impl Locator {
     }
 
     pub fn try_type_text(&self, text: impl AsRef<str>) -> TestResult<()> {
-        self.try_click()?;
-        self.app.try_type_text(text)
+        self.command("ui type", &[("t",text.as_ref())])
     }
 
     pub fn clear(self) -> Self {
@@ -863,17 +757,7 @@ impl Locator {
     }
 
     pub fn try_clear(&self) -> TestResult<()> {
-        let widget = self.resolve_unique_visible()?;
-        if widget.value.is_none() {
-            return Err(TestError::new(format!(
-                "selector `{}` is not a text input",
-                self.selector.describe()
-            )));
-        }
-        self.app.try_click_center(&widget)?;
-        self.app
-            .try_press_key_with_modifiers(KeyCode::KeyA, primary_shortcut_modifiers())?;
-        self.app.try_press_key(KeyCode::Backspace)
+        self.try_fill("")
     }
 
     pub fn fill(self, text: impl AsRef<str>) -> Self {
@@ -884,8 +768,9 @@ impl Locator {
     }
 
     pub fn try_fill(&self, text: impl AsRef<str>) -> TestResult<()> {
-        self.try_clear()?;
-        self.app.try_type_text(text)
+        let node = self.resolve_unique_readable()?;
+        let len = node.text.as_ref().map_or(node.value.len(), |t| t.content.len());
+        self.command("ui type", &[("t",text.as_ref()),("from","0"),("to",&len.to_string())])
     }
 
     pub fn press_key(self, key_code: KeyCode) -> Self {
@@ -896,7 +781,7 @@ impl Locator {
     }
 
     pub fn try_press_key(&self, key_code: KeyCode) -> TestResult<()> {
-        self.try_click()?;
+        self.act("focus", &[])?;
         self.app.try_press_key(key_code)
     }
 
@@ -912,7 +797,7 @@ impl Locator {
         key_code: KeyCode,
         modifiers: KeyModifiers,
     ) -> TestResult<()> {
-        self.try_click()?;
+        self.act("focus", &[])?;
         self.app.try_press_key_with_modifiers(key_code, modifiers)
     }
 
@@ -924,8 +809,7 @@ impl Locator {
     }
 
     pub fn try_scroll(&self, sx: f64, sy: f64) -> TestResult<()> {
-        let target = self.resolve_unique_visible()?;
-        self.app.try_scroll_center(&target, sx, sy)
+        self.act("scroll", &[("dx",&sx.to_string()),("dy",&sy.to_string())])
     }
 
     pub fn drag_by(self, dx: f64, dy: f64) -> Self {
@@ -992,14 +876,14 @@ impl Locator {
         self.app.try_touch_drag_from(&target, path, true)
     }
 
-    pub fn snapshot(&self) -> WidgetSnapshot {
+    pub fn snapshot(&self) -> NodeMatch {
         match self.try_snapshot() {
             Ok(widget) => widget,
             Err(err) => panic_for_error(err),
         }
     }
 
-    pub fn try_snapshot(&self) -> TestResult<WidgetSnapshot> {
+    pub fn try_snapshot(&self) -> TestResult<NodeMatch> {
         self.resolve_unique_visible()
     }
 
@@ -1014,88 +898,54 @@ impl Locator {
         Ok(self.app.query_widgets(&self.selector, true)?.len())
     }
 
-    fn wait_for_state<F>(&self, field_name: &str, expected: &str, accessor: F) -> TestResult<()>
-    where
-        F: Fn(&WidgetSnapshot) -> Option<&str>,
-    {
-        let deadline = Instant::now() + self.app.action_timeout();
-        let mut last_seen = None::<String>;
-        while Instant::now() < deadline {
-            let widget = match self.resolve_unique_readable() {
-                Ok(widget) => widget,
-                Err(err) if selector_resolution_error(err.message()) => {
-                    thread::sleep(self.app.poll_interval());
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            match accessor(&widget) {
-                Some(actual) if actual == expected => return Ok(()),
-                Some(actual) => {
-                    last_seen = Some(actual.to_string());
-                    thread::sleep(self.app.poll_interval());
-                }
-                None => {
-                    thread::sleep(self.app.poll_interval());
-                }
-            }
+    fn command(&self, command: &str, extra: &[(&str,&str)]) -> TestResult<()> {
+        self.app.ensure_running()?;
+        let q = self.selector.as_query();
+        let mut args = vec![("q",q.as_str()),("json","1"),("wait","1")];
+        if let Some(w) = self.selector.window_arg() { args.push(("w",w)); }
+        args.extend_from_slice(extra);
+        self.app.client().get_json(command, &args)?;
+        if let Some(node) = self.app.query_widgets(&self.selector, false)?.first() {
+            self.app.inner.borrow_mut().focus_window = Some(node.window_index());
         }
-        let detail = last_seen
-            .map(|value| format!(" last seen `{value}`"))
-            .unwrap_or_default();
-        Err(TestError::new(format!(
-            "timed out waiting for selector `{}` {} to equal `{expected}`{}",
-            self.selector.describe(),
-            field_name,
-            detail
-        )))
+        self.app.pace_after_action();
+        Ok(())
+    }
+    fn act(&self, action: &str, extra: &[(&str,&str)]) -> TestResult<()> {
+        self.command(&format!("ui act {action}"), extra)
+    }
+    fn wait_query(&self, extra: &str, options: &[(&str,&str)]) -> TestResult<()> {
+        self.app.ensure_running()?;
+        let q = format!("{} {extra}", self.selector.as_query());
+        let timeout = self.app.action_timeout().as_millis().to_string();
+        let mut args = vec![("q",q.as_str()),("json","1"),("timeout_ms",timeout.as_str())];
+        if let Some(w) = self.selector.window_arg() { args.push(("w",w)); }
+        args.extend_from_slice(options);
+        self.app.client().get_json("ui wait", &args).map(|_| ())
+    }
+    pub fn press(self) -> Self { self.click() }
+    pub fn focus(self) -> Self { if let Err(e) = self.act("focus", &[]) { panic_for_error(e); } self }
+    pub fn toggle(self) -> Self { if let Err(e) = self.act("toggle", &[]) { panic_for_error(e); } self }
+    pub fn check(self, checked: bool) -> Self {
+        let result = self.resolve_unique_readable().and_then(|node| {
+            if node.checked() == Some(checked) { Ok(()) } else { self.act("toggle", &[])?; self.try_wait_checked(checked) }
+        });
+        if let Err(e) = result { panic_for_error(e); } self
+    }
+    pub fn select(self) -> Self { if let Err(e) = self.act("select", &[]) { panic_for_error(e); } self }
+    pub fn select_option(self, value: impl AsRef<str>) -> Self {
+        if let Err(e) = self.act("select", &[("v",value.as_ref())]) { panic_for_error(e); } self
+    }
+    pub fn scroll_into_view(self) -> Self {
+        if let Err(e) = self.act("scroll_into_view", &[]) { panic_for_error(e); } self
+    }
+    pub fn set_value(self, value: impl ToString) -> Self {
+        if let Err(e) = self.act("set_value", &[("v", &value.to_string())]) { panic_for_error(e); } self
     }
 
-    fn wait_for_bool_state<F>(
-        &self,
-        field_name: &str,
-        expected: bool,
-        accessor: F,
-    ) -> TestResult<()>
-    where
-        F: Fn(&WidgetSnapshot) -> Option<bool>,
-    {
-        let deadline = Instant::now() + self.app.action_timeout();
-        let mut last_seen = None::<bool>;
-        while Instant::now() < deadline {
-            let widget = match self.resolve_unique_readable() {
-                Ok(widget) => widget,
-                Err(err) if selector_resolution_error(err.message()) => {
-                    thread::sleep(self.app.poll_interval());
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            match accessor(&widget) {
-                Some(actual) if actual == expected => return Ok(()),
-                Some(actual) => {
-                    last_seen = Some(actual);
-                    thread::sleep(self.app.poll_interval());
-                }
-                None => {
-                    thread::sleep(self.app.poll_interval());
-                }
-            }
-        }
-        let detail = last_seen
-            .map(|value| format!(" last seen `{value}`"))
-            .unwrap_or_default();
-        Err(TestError::new(format!(
-            "timed out waiting for selector `{}` {} to equal `{expected}`{}",
-            self.selector.describe(),
-            field_name,
-            detail
-        )))
-    }
-
-    fn resolve_unique_visible(&self) -> TestResult<WidgetSnapshot> {
+    fn resolve_unique_visible(&self) -> TestResult<NodeMatch> {
         let query = self.selector.describe();
-        let matches = self.app.query_widgets(&self.selector, true)?;
+        let matches = self.app.query_widgets(&self.selector, true)?.into_iter().filter(snapshot_is_visible).collect();
         Self::unique(query, matches, "matched no visible widgets")
     }
 
@@ -1109,7 +959,7 @@ impl Locator {
     /// a normal thing for a test to want. So prefer a visible match (identical
     /// behaviour whenever one exists) and fall back to an off-screen one only
     /// when nothing visible matches.
-    fn resolve_unique_readable(&self) -> TestResult<WidgetSnapshot> {
+    fn resolve_unique_readable(&self) -> TestResult<NodeMatch> {
         let query = self.selector.describe();
         let visible = self.app.query_widgets(&self.selector, true)?;
         if !visible.is_empty() {
@@ -1121,9 +971,9 @@ impl Locator {
 
     fn unique(
         query: String,
-        matches: Vec<WidgetSnapshot>,
+        matches: Vec<NodeMatch>,
         empty_message: &str,
-    ) -> TestResult<WidgetSnapshot> {
+    ) -> TestResult<NodeMatch> {
         match matches.as_slice() {
             [] => Err(TestError::new(format!("selector `{query}` {empty_message}"))),
             [single] => Ok(single.clone()),
@@ -1234,11 +1084,11 @@ fn capture_failure_artifacts(app: &TestApp, failure_message: &str) {
         }
     }
 
-    match app.try_widget_snapshot() {
+    match app.client().get_text("ui", &[("json", "1")]) {
         Ok(snapshot) => {
             let _ = fs::write(
                 artifact_dir.join("widget-snapshot.json"),
-                snapshot.serialize_json(),
+                snapshot,
             );
         }
         Err(err) => {
@@ -1267,13 +1117,15 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
     match msg {
         StudioToApp::Screenshot(_) => "Screenshot",
         StudioToApp::RunViewFrameRequest(_) => "RunViewFrameRequest",
-        StudioToApp::WidgetTreeDump(_) => "WidgetTreeDump",
-        StudioToApp::WidgetQuery(_) => "WidgetQuery",
-        StudioToApp::WidgetSnapshot(_) => "WidgetSnapshot",
+        StudioToApp::A11yState { .. } => "A11yState",
+        StudioToApp::A11yAction { .. } => "A11yAction",
+        StudioToApp::A11yRead { .. } => "A11yRead",
+        StudioToApp::A11yType { .. } => "A11yType",
         StudioToApp::KeepAlive => "KeepAlive",
         StudioToApp::LiveChange { .. } => "LiveChange",
         StudioToApp::Swapchain(_) => "Swapchain",
         StudioToApp::WindowGeomChange { .. } => "WindowGeomChange",
+        StudioToApp::WindowFocus { .. } => "WindowFocus",
         StudioToApp::Tick => "Tick",
         StudioToApp::MouseDown(_) => "MouseDown",
         StudioToApp::MouseUp(_) => "MouseUp",
@@ -1283,15 +1135,16 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::KeyDown(_) => "KeyDown",
         StudioToApp::KeyUp(_) => "KeyUp",
         StudioToApp::TextInput(_) => "TextInput",
+        StudioToApp::NativeApp(_) => "NativeApp",
         StudioToApp::TextCopy => "TextCopy",
         StudioToApp::TextCut => "TextCut",
+        StudioToApp::DropFiles(_) => "DropFiles",
         StudioToApp::Scroll(_) => "Scroll",
         StudioToApp::Pinch(_) => "Pinch",
         StudioToApp::GameInput(_) => "GameInput",
         StudioToApp::Custom(_) => "Custom",
         StudioToApp::None => "None",
         StudioToApp::Kill => "Kill",
-        StudioToApp::Gpu(_) => "Gpu",
         StudioToApp::Relay(_) => "Relay",
     }
 }
@@ -1317,74 +1170,15 @@ fn sanitize_path_component(value: &str) -> String {
     sanitized.trim_matches('_').to_string()
 }
 
-fn selector_resolution_error(message: &str) -> bool {
-    message.contains("matched no visible widgets") || message.contains("matched multiple widgets")
+fn snapshot_is_visible(widget: &NodeMatch) -> bool { widget.visible() }
+fn snapshot_center_f64(widget: &NodeMatch) -> (f64, f64) {
+    let (x,y) = widget.bounds.center(); (x as f64, y as f64)
+}
+fn snapshot_summary(widget: &NodeMatch) -> String {
+    format!("w={} {}", widget.window_arg(), makepad_a11y::render::node_line(&widget.node))
 }
 
-fn primary_window_scope(widgets: &[WidgetSnapshot]) -> (String, usize) {
-    if let Some(widget) = widgets
-        .iter()
-        .filter(|widget| !widget.window_id.is_empty())
-        .min_by(|left, right| snapshot_sort_key(left).cmp(&snapshot_sort_key(right)))
-    {
-        return (widget.window_id.clone(), widget.window_index);
-    }
-    (String::new(), 0)
-}
-
-fn snapshot_is_visible(widget: &WidgetSnapshot) -> bool {
-    widget.visible && widget.width > 0 && widget.height > 0
-}
-
-fn snapshot_sort_key(widget: &WidgetSnapshot) -> (usize, i64, i64, String, String) {
-    (
-        widget.window_index,
-        widget.y,
-        widget.x,
-        widget.id.clone(),
-        widget.widget_type.clone(),
-    )
-}
-
-fn snapshot_center(widget: &WidgetSnapshot) -> (i64, i64) {
-    (widget.x + widget.width / 2, widget.y + widget.height / 2)
-}
-
-fn snapshot_center_f64(widget: &WidgetSnapshot) -> (f64, f64) {
-    let (x, y) = snapshot_center(widget);
-    (x as f64, y as f64)
-}
-
-fn snapshot_summary(widget: &WidgetSnapshot) -> String {
-    let mut fields = Vec::new();
-    fields.push(format!(
-        "{} {} @{} {} {} {} {}",
-        widget.id,
-        widget.widget_type,
-        widget.window_id,
-        widget.x,
-        widget.y,
-        widget.width,
-        widget.height
-    ));
-    if let Some(text) = &widget.text {
-        fields.push(format!("text={text:?}"));
-    }
-    if let Some(value) = &widget.value {
-        fields.push(format!("value={value:?}"));
-    }
-    if let Some(checked) = widget.checked {
-        fields.push(format!("checked={checked}"));
-    }
-    if let Some(selected) = &widget.selected {
-        fields.push(format!("selected={selected:?}"));
-    }
-    fields.join(" ")
-}
-
-fn parallel_tests_enabled() -> bool {
-    env_truthy("MAKEPAD_TEST_PARALLEL")
-}
+fn parallel_tests_enabled() -> bool { env_truthy("MAKEPAD_TEST_PARALLEL") }
 
 fn visible_mode_enabled() -> bool {
     env_truthy("MAKEPAD_TEST_VISIBLE")
@@ -1407,32 +1201,16 @@ fn env_duration_ms(name: &str) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
-fn primary_shortcut_modifiers() -> KeyModifiers {
-    #[cfg(target_vendor = "apple")]
-    {
-        KeyModifiers {
-            logo: true,
-            ..Default::default()
-        }
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        KeyModifiers {
-            control: true,
-            ..Default::default()
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        button_index, env_duration_ms, primary_window_scope, sanitize_path_component,
-        snapshot_is_visible, snapshot_sort_key, visible_mode_enabled, TestError, TestResult,
-        WidgetMatch,
+        button_index, env_duration_ms, sanitize_path_component,
+        snapshot_is_visible, visible_mode_enabled, TestError, TestResult, NodeMatch,
     };
     use crate::{Selector, TestConfig};
-    use makepad_studio_protocol::{MouseButton, WidgetSnapshot};
+    use makepad_studio_protocol::MouseButton;
+    use makepad_a11y::{Node, Role, Rect};
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
@@ -1447,38 +1225,20 @@ mod tests {
         }
     }
 
-    fn snapshot(id: &str) -> WidgetSnapshot {
-        WidgetSnapshot {
-            id: id.to_string(),
-            widget_type: "Button".to_string(),
-            window_id: "main_window".to_string(),
-            window_index: 0,
-            visible: true,
-            enabled: true,
-            x: 10,
-            y: 20,
-            width: 30,
-            height: 40,
-            text: Some(id.to_string()),
-            value: None,
-            checked: None,
-            selected: None,
-        }
+    fn snapshot(id: &str) -> NodeMatch {
+        NodeMatch { window: 0, node: Node { path: id.into(), name: id.into(), role: Role::Button, bounds: Rect { x:10.0, y:20.0, w:30.0, h:40.0 }, ..Default::default() } }
     }
-
     #[test]
-    fn widget_match_parse_accepts_widget_rects() {
-        let parsed = WidgetMatch::parse("12 input_singleline TextInput 10 20 30 40").unwrap();
-        assert_eq!(parsed.id, "input_singleline");
-        assert_eq!(parsed.widget_type, "TextInput");
-        assert_eq!(parsed.center(), (25, 40));
+    fn semantic_node_bounds_locate_widget_centres() {
+        let node = snapshot("input_singleline");
+        assert_eq!(node.path, "input_singleline");
+        assert_eq!(node.bounds.center(), (25.0,40.0));
     }
-
     #[test]
-    fn widget_match_parse_accepts_dock_rects() {
-        let parsed = WidgetMatch::parse("DT math_tab DockTab 10 20 30 40").unwrap();
-        assert_eq!(parsed.id, "math_tab");
-        assert_eq!(parsed.widget_type, "DockTab");
+    fn semantic_queries_locate_dock_parts() {
+        let mut node = snapshot("dock.math_tab"); node.node.role = Role::Tab;
+        assert!(Selector::role(Role::Tab).query().unwrap().matches(&node));
+        assert!(Selector::path("math_tab").query().unwrap().matches(&node));
     }
 
     #[test]
@@ -1522,12 +1282,12 @@ mod tests {
     }
 
     #[test]
-    fn gpusim_dpi_env_scales_screenshots() {
+    fn requested_dpi_env_scales_screenshots() {
         let mut config =
             TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
         config
             .env
-            .insert("MAKEPAD_GPUSIM_DPI".to_string(), "1".to_string());
+            .insert("MAKEPAD_TEST_DPI".to_string(), "1".to_string());
         assert_eq!(config.requested_screenshot_dpi(), Some(1.0));
     }
 
@@ -1562,39 +1322,23 @@ mod tests {
 
     #[test]
     fn selector_queries_remain_publicly_compatible() {
-        assert_eq!(Selector::id("foo").as_query(), "id:foo");
+        assert_eq!(Selector::id("foo").as_query(), "path=\"foo\"");
     }
 
     #[test]
     fn window_scope_defaults_to_primary_window() {
-        let widgets = vec![
-            WidgetSnapshot {
-                window_id: "panel_window".to_string(),
-                window_index: 1,
-                ..snapshot("secondary")
-            },
-            snapshot("primary"),
-        ];
-        assert_eq!(
-            primary_window_scope(&widgets),
-            ("main_window".to_string(), 0)
-        );
+        assert_eq!(Selector::all().window_arg(), Some("0"));
+        assert_eq!(Selector::all().window_index(1).window_arg(), Some("1"));
     }
-
     #[test]
     fn snapshot_visibility_requires_geometry() {
-        let mut widget = snapshot("hidden");
-        widget.width = 0;
+        let mut widget = snapshot("hidden"); widget.node.bounds.w = 0.0;
         assert!(!snapshot_is_visible(&widget));
     }
-
     #[test]
-    fn snapshot_sort_prefers_window_then_position() {
-        let mut left = snapshot("left");
-        let mut right = snapshot("right");
-        left.x = 10;
-        right.x = 20;
-        assert!(snapshot_sort_key(&left) < snapshot_sort_key(&right));
+    fn semantic_order_keeps_nth_in_tree_order() {
+        let selector = Selector::all().nth(1);
+        assert_eq!(selector.query().unwrap().nth, Some(1));
     }
 
     #[test]

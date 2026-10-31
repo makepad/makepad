@@ -538,6 +538,11 @@ impl HamburgerMotion {
 }
 
 impl Widget for HamburgerMotion {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let Some(mut list) = self.list.take() else {
             self.view.draw_walk_all(cx, scope, walk);
@@ -1273,7 +1278,9 @@ impl HamburgerMenu {
     }
 
     /// The width the breakpoint is compared with.
-    fn measure_width(&self, cx: &Cx2d, walk: Walk) -> f64 {
+    /// How much room this menu has to fill -- not how wide it would like to
+    /// be, which is what `Widget::measure_width` answers.
+    fn available_width(&self, cx: &Cx2d, walk: Walk) -> f64 {
         match self.measure {
             HamburgerMeasure::Window => cx.current_pass_size().x,
             HamburgerMeasure::Parent => cx
@@ -1325,9 +1332,20 @@ impl HamburgerMenu {
 }
 
 impl Widget for HamburgerMenu {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Menu;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(format_snapshot(self.is_collapsed(), self.open_surface).to_string())
+        })()
+        .unwrap_or_default();
+        node.name = (|| -> Option<String> { self.selected_label() })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.ensure_seeded(cx.cx.cx);
-        let width = self.measure_width(cx, walk);
+        let width = self.available_width(cx, walk);
         self.decide(cx.cx.cx, width);
         let visible = self.view.visible;
         // A panel left out over a menu that has unfolded, or been switched
@@ -1480,13 +1498,9 @@ impl Widget for HamburgerMenu {
         self.selected_label().unwrap_or_default()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format_snapshot(self.is_collapsed(), self.open_surface).to_string())
-    }
 
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        self.selected_label()
-    }
+
+
 }
 
 impl HamburgerMenuRef {
@@ -1574,7 +1588,6 @@ impl HamburgerMenuRef {
 mod tests {
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
-    use crate::makepad_script::trap::NoTrap;
     use crate::makepad_script::{script, ScriptMod};
     use crate::nav_list::{NavAction, NavList};
     use std::{cell::Cell, collections::HashSet};
@@ -1597,7 +1610,7 @@ mod tests {
     fn theme_ease(cx: &mut Cx, token: &str) -> Ease {
         cx.with_vm(|vm| {
             let theme = vm.module(id!(theme));
-            let value = vm.bx.heap.value(theme, LiveId::from_str(token).into(), NoTrap);
+            let value = vm.value(theme, LiveId::from_str(token));
             Ease::script_from_value(vm, value)
         })
     }
@@ -1605,9 +1618,7 @@ mod tests {
     fn theme_number(cx: &mut Cx, token: &str) -> f64 {
         cx.with_vm(|vm| {
             let theme = vm.module(id!(theme));
-            vm.bx
-                .heap
-                .value(theme, LiveId::from_str(token).into(), NoTrap)
+            vm.value(theme, LiveId::from_str(token))
                 .as_f64()
                 .unwrap_or_else(|| panic!("the theme has no number {token}"))
         })
@@ -1992,7 +2003,7 @@ mod tests {
                 assert_eq!(list.as_nav_list().selected(), Some(LiveId(1)));
             }
             assert_eq!(inner.text(), "Home");
-            assert_eq!(inner.snapshot_value(&cx).as_deref(), Some("inline"));
+            assert_eq!(semantic_value(&*inner, &cx).as_deref(), Some("inline"));
         }
 
         let actions = cx.capture_actions(|cx| target.draw(cx, &root, dvec2(500.0, 400.0)));
@@ -2002,7 +2013,7 @@ mod tests {
         let burger = inner.burger(&cx).area();
         assert!(burger.is_valid(&cx) && burger.rect(&cx).size.x > 0.0, "the button is drawn");
         assert!(!inner.part(live_id!(inline_nav)).area().is_valid(&cx), "the row is not");
-        assert_eq!(inner.snapshot_value(&cx).as_deref(), Some("collapsed"));
+        assert_eq!(semantic_value(&*inner, &cx).as_deref(), Some("collapsed"));
         });
     }
 
@@ -2056,7 +2067,7 @@ mod tests {
             let inner = root.borrow::<HamburgerMenu>().unwrap();
             assert!(inner.part(live_id!(drawer)).as_dialog().is_open());
             assert!(inner.burger(&cx).as_button().open(), "the bars are a cross");
-            assert_eq!(inner.snapshot_value(&cx).as_deref(), Some("collapsed open drawer"));
+            assert_eq!(semantic_value(&*inner, &cx).as_deref(), Some("collapsed open drawer"));
             // The drawer's own slide is cut to its floor: the menu moves the panel.
             assert_eq!(inner.part(live_id!(drawer)).borrow::<Dialog>().unwrap().slide_secs, DRAWER_SLIDE_FLOOR_SECS);
         }
@@ -2079,7 +2090,7 @@ mod tests {
         assert_eq!(reports(&actions), vec![HamburgerAction::Opened]);
         let inner = root.borrow::<HamburgerMenu>().unwrap();
         assert!(inner.part(live_id!(burger_pop)).as_popover().is_open());
-        assert_eq!(inner.snapshot_value(&cx).as_deref(), Some("collapsed open drop"));
+        assert_eq!(semantic_value(&*inner, &cx).as_deref(), Some("collapsed open drop"));
         assert!(!inner.part(live_id!(drawer)).as_dialog().is_open(), "the drawer stayed shut");
         });
     }
@@ -2796,4 +2807,11 @@ mod tests {
         }
         });
     }
+}
+
+#[cfg(test)]
+fn semantic_value(widget: &dyn Widget, cx: &Cx) -> Option<String> {
+    let mut node = a11y_tree::Node::default();
+    widget.semantics(cx, &mut node);
+    Some(node.value)
 }

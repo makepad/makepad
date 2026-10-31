@@ -160,6 +160,10 @@ script_mod! {
             old_shape: float
             blur: float
             aa: float
+            // The coverage of a pixel whose centre is on the edge: 0 (the
+            // default) puts the whole ramp outside of it, 0.5 centres the
+            // ramp on it (viewport_px).
+            edge: float
             scale_factor: float
             dist: float
 
@@ -179,6 +183,34 @@ script_mod! {
                     old_shape: 1e+20
                     blur: 0.00001
                     aa: antialias(pos)
+                    edge: 0.0
+                    scale_factor: 1.0
+                    dist: 0.0
+                );
+            }
+
+            // A viewport whose edges are centred on the pixel: coverage is
+            // 0.5 - d * px, so a pixel straddling the edge is half covered
+            // and a box on whole pixels fills exactly its pixels. `px` is
+            // pixels per unit of `pos` (0: read from the screen-space
+            // derivatives, for a host under a view transform it does not know).
+            viewport_px: fn(pos: vec2, px: float) -> Self {
+                var aa = px;
+                if px <= 0.0 {
+                    aa = antialias(pos);
+                }
+                return self (
+                    pos: pos
+                    result: vec4(0.)
+                    last_pos: vec2(0.)
+                    start_pos: vec2(0.)
+                    shape: 1e+20
+                    clip: -1e+20
+                    has_clip: 0.0
+                    old_shape: 1e+20
+                    blur: 0.00001
+                    aa: aa
+                    edge: 0.5
                     scale_factor: 1.0
                     dist: 0.0
                 );
@@ -206,7 +238,7 @@ script_mod! {
             }
 
             calc_blur: fn(w: float) -> float {
-                let wa = clamp(-w * self.aa, 0.0, 1.0);
+                let wa = clamp(self.edge - w * self.aa, 0.0, 1.0);
                 var wb = 1.0;
                 if self.blur > 0.001 {
                     wb = clamp(-w / self.blur, 0.0, 1.0);
@@ -512,6 +544,39 @@ script_mod! {
                 self.shape = min(self.shape, self.dist);
             }
 
+
+            // A box at (x, y) of w by h with each corner cut on the chamfer:
+            // the cut of the left-top, right-top, right-bottom and
+            // left-bottom corner along each side (clamped to the half size).
+            chamfer_box: fn(x: float, y: float, w: float, h: float, c_lt: float, c_rt: float, c_rb: float, c_lb: float) {
+                let half = vec2(0.5 * w, 0.5 * h);
+                let p = self.pos - vec2(x, y) - half;
+                let q = abs(p) - half;
+                var k = c_lt;
+                if p.x >= 0.0 && p.y < 0.0 {
+                    k = c_rt;
+                }
+                if p.x >= 0.0 && p.y >= 0.0 {
+                    k = c_rb;
+                }
+                if p.x < 0.0 && p.y >= 0.0 {
+                    k = c_lb;
+                }
+                k = min(k, min(half.x, half.y));
+                self.dist = max(max(q.x, q.y), (q.x + q.y + k) * 0.70710678) / self.scale_factor;
+                self.old_shape = self.shape;
+                self.shape = min(self.shape, self.dist);
+            }
+
+            // An ellipse centred on (x, y) with radii rx, ry. The distance is
+            // the scaled unit-circle one (exact on the axes, close elsewhere).
+            ellipse: fn(x: float, y: float, rx: float, ry: float) {
+                let r = max(vec2(rx, ry), vec2(0.0001, 0.0001));
+                let k = (self.pos - vec2(x, y)) / r;
+                self.dist = (length(k) - 1.0) * min(r.x, r.y) / self.scale_factor;
+                self.old_shape = self.shape;
+                self.shape = min(self.shape, self.dist);
+            }
 
             rect: fn(x: float, y: float, w: float, h: float) {
                 let s = vec2(w, h) * 0.5;

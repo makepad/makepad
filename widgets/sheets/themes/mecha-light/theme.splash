@@ -1,0 +1,260 @@
+mod.theme = mod.themes.light
+
+// Mecha light. The cockpit of a mobile suit in white armour: pale grey
+// plates with their corners cut at 45 degrees and screws in them, each part
+// a plate with a bevel lit from the upper left. Ink is a near-black navy.
+// Fields, lists and screens are navy glass in a steel frame with pale words.
+// The suit's colour code marks what matters: the default action a red cap,
+// blue for a value, a mark that is set and the chosen answer, lit from
+// within; yellow, green and purple for the other values. Knobs are machined
+// steel with a red index in a dark ring. The faces are drawn in
+// widgets.splash; this file holds the tokens every face and every stock
+// widget reads.
+mod.theme.color_bg_app = #cdd1d7
+mod.theme.color_fg_app = #e2e5e9
+mod.theme.color_bg_container = #cdd1d7
+mod.theme.color_surface_container = #dfe2e6
+mod.theme.color_surface_container_lowest = #f2f3f5
+mod.theme.color_bg_even = #00000000
+mod.theme.color_bg_odd = #ffffff10
+mod.theme.color_highlight = #2a7dff
+mod.theme.color_bg_highlight = #d5d9df
+mod.theme.color_bg_highlight_inline = #2a7dff40
+
+// Raised faces the sheet does not redraw: a pale plate, its top lighter.
+mod.theme.color_outset = #dfe2e6
+mod.theme.color_outset_1 = #e9ebee
+mod.theme.color_outset_2 = #cfd3da
+mod.theme.color_outset_hover = #e6e8eb
+mod.theme.color_outset_1_hover = #f0f1f3
+mod.theme.color_outset_2_hover = #d6d9df
+mod.theme.color_outset_focus = #dfe2e6
+mod.theme.color_outset_1_focus = #e9ebee
+mod.theme.color_outset_2_focus = #cfd3da
+mod.theme.color_outset_active = #c8ccd3
+mod.theme.color_outset_1_active = #c2c7ce
+mod.theme.color_outset_2_active = #cfd3da
+mod.theme.color_outset_down = #c8ccd3
+mod.theme.color_outset_1_down = #c2c7ce
+mod.theme.color_outset_2_down = #cfd3da
+mod.theme.color_outset_drag = #c8ccd3
+mod.theme.color_outset_1_drag = #c2c7ce
+mod.theme.color_outset_2_drag = #cfd3da
+mod.theme.color_outset_disabled = #d3d6db
+mod.theme.color_outset_1_disabled = #d3d6db
+mod.theme.color_outset_2_disabled = #d3d6db
+
+// Wells: navy glass, as the fields are.
+mod.theme.color_inset = #2a3647
+mod.theme.color_inset_1 = #253142
+mod.theme.color_inset_2 = #2f3b4e
+mod.theme.color_inset_hover = #2e3a4c
+mod.theme.color_inset_1_hover = #293547
+mod.theme.color_inset_2_hover = #334053
+mod.theme.color_inset_focus = #2e3a4c
+mod.theme.color_inset_1_focus = #293547
+mod.theme.color_inset_2_focus = #334053
+mod.theme.color_inset_active = #2a3647
+mod.theme.color_inset_1_active = #253142
+mod.theme.color_inset_2_active = #2f3b4e
+mod.theme.color_inset_down = #253142
+mod.theme.color_inset_1_down = #212c3c
+mod.theme.color_inset_2_down = #2a3647
+mod.theme.color_inset_drag = #253142
+mod.theme.color_inset_1_drag = #212c3c
+mod.theme.color_inset_2_drag = #2a3647
+mod.theme.color_inset_empty = #2a3647
+mod.theme.color_inset_1_empty = #253142
+mod.theme.color_inset_2_empty = #2f3b4e
+mod.theme.color_inset_disabled = #3a4555
+mod.theme.color_inset_1_disabled = #3a4555
+mod.theme.color_inset_2_disabled = #3a4555
+
+// The device pixel edges of a stock face: white on the top of a plate,
+// slate under it; the outline a dark slate.
+mod.theme.beveling = 0.5
+mod.theme.color_bevel = #4a525f
+mod.theme.color_bevel_hover = #4a525f
+mod.theme.color_bevel_focus = #2a7dff
+mod.theme.color_bevel_active = #4a525f
+mod.theme.color_bevel_empty = #4a525f
+mod.theme.color_bevel_down = #4a525f
+mod.theme.color_bevel_drag = #4a525f
+mod.theme.color_bevel_disabled = #8a919c
+mod.theme.color_bevel_inset_1 = #4a525f
+mod.theme.color_bevel_inset_2 = #ffffff
+mod.theme.color_bevel_outset_1 = #ffffff
+mod.theme.color_bevel_outset_2 = #7f8794
+mod.theme.color_bevel_inset_1_hover = #4a525f
+mod.theme.color_bevel_inset_2_hover = #ffffff
+mod.theme.color_bevel_outset_1_hover = #ffffff
+mod.theme.color_bevel_outset_2_hover = #7f8794
+mod.theme.color_bevel_inset_1_focus = #2a7dff
+mod.theme.color_bevel_inset_2_focus = #2a7dff
+mod.theme.color_bevel_outset_1_focus = #2a7dff
+mod.theme.color_bevel_outset_2_focus = #2a7dff
+mod.theme.color_bevel_inset_1_down = #4a525f
+mod.theme.color_bevel_inset_2_down = #ffffff
+mod.theme.color_bevel_outset_1_down = #7f8794
+mod.theme.color_bevel_outset_2_down = #ffffff
+mod.theme.color_bevel_inset_1_disabled = #8a919c
+mod.theme.color_bevel_inset_2_disabled = #8a919c
+mod.theme.color_bevel_outset_1_disabled = #8a919c
+mod.theme.color_bevel_outset_2_disabled = #8a919c
+
+// Ink: a near-black navy, about 11:1 on the plates. The second voice a
+// slate navy at 7:1; disabled words a mid slate.
+mod.theme.color_text = #141b2b
+mod.theme.color_text_hover = #0d1322
+mod.theme.color_text_focus = #0d1322
+mod.theme.color_text_active = #0d1322
+mod.theme.color_text_down = #0d1322
+mod.theme.color_text_val = #28334a
+mod.theme.color_text_hl = #0d1322
+mod.theme.color_text_disabled = #6c7483
+mod.theme.color_text_placeholder = #4f5869
+mod.theme.color_text_placeholder_hover = #464f60
+mod.theme.color_text_meta = #3a4456
+mod.theme.color_text_cursor = #141b2b
+mod.theme.color_cursor = #141b2b
+mod.theme.color_cursor_focus = #141b2b
+mod.theme.color_label = #141b2b
+mod.theme.color_label_hover = #0d1322
+mod.theme.color_label_focus = #0d1322
+mod.theme.color_label_active = #0d1322
+mod.theme.color_label_down = #0d1322
+mod.theme.color_label_disabled = #6c7483
+mod.theme.color_label_inner = #141b2b
+mod.theme.color_label_inner_hover = #0d1322
+mod.theme.color_label_inner_focus = #141b2b
+mod.theme.color_label_inner_active = #ffffff
+mod.theme.color_label_inner_down = #0d1322
+mod.theme.color_label_inner_drag = #0d1322
+mod.theme.color_label_inner_inactive = #3a4456
+mod.theme.color_label_inner_disabled = #6c7483
+mod.theme.color_label_outer = #141b2b
+mod.theme.color_label_outer_off = #28334a
+mod.theme.color_label_outer_hover = #0d1322
+mod.theme.color_label_outer_focus = #0d1322
+mod.theme.color_label_outer_active = #0d1322
+mod.theme.color_label_outer_active_focus = #0d1322
+mod.theme.color_label_outer_down = #0d1322
+mod.theme.color_label_outer_drag = #0d1322
+mod.theme.color_label_outer_disabled = #6c7483
+mod.theme.color_icon = #1c2436
+mod.theme.color_icon_hover = #0d1322
+mod.theme.color_icon_focus = #1c2436
+mod.theme.color_icon_active = #ffffff
+mod.theme.color_icon_down = #0d1322
+mod.theme.color_icon_disabled = #6c7483
+mod.theme.color_on_surface = #141b2b
+mod.theme.color_on_surface_variant = #141b2b
+
+// The light: the suit's blue fills a value, sets a mark and draws focus.
+mod.theme.color_focus = #2a7dff
+mod.theme.color_ctrl_active = #1f6fff
+mod.theme.color_val = #1f6fff
+mod.theme.color_val_hover = #3a86ff
+mod.theme.color_val_focus = #3a86ff
+mod.theme.color_val_drag = #3a86ff
+mod.theme.color_val_disabled = #9aa1ab
+mod.theme.color_mark = #141b2b
+mod.theme.color_mark_active = #1f6fff
+mod.theme.color_mark_active_hover = #3a86ff
+mod.theme.color_mark_focus = #1f6fff
+mod.theme.color_mark_disabled = #8a919c
+// The accent seed: the primary, secondary and tertiary families are grown
+// from its hue. A deep blue, so the grown primary carries white ink.
+mod.theme.color_ctrl_selected = #1a5fd8
+mod.theme.color_text_on_accent = #ffffff
+mod.theme.color_selection = #00000000
+mod.theme.color_selection_hover = #2a7dff38
+mod.theme.color_selection_down = #2a7dff66
+mod.theme.color_selection_focus = #2a7dff66
+mod.theme.color_handle = #eceef1
+mod.theme.color_handle_hover = #f6f7f9
+mod.theme.color_handle_1 = #f6f7f9
+mod.theme.color_handle_2 = #c9cdd4
+
+// Screens: navy glass with pale figures, as the fields are.
+mod.theme.color_screen = #1e293a
+mod.theme.color_screen_ink = #eef4ff
+mod.theme.screen_ghost = 0.08
+mod.theme.color_lamp_plain = #eef3ff
+mod.theme.color_lamp_off = #2a3039
+mod.theme.color_terminal_bg = #1e293a
+mod.theme.color_terminal_text = #eef2f7
+
+// SPACING. Rows of 26 points, gaps of 8 between controls, panels padded
+// 12. The base froze what it derived from the factor, so every rung this
+// sheet depends on is stated again.
+mod.theme.space_factor = 8.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 24.0
+mod.theme.space_6 = 32.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 22.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 30.0
+mod.theme.tab_height = 28.0
+mod.theme.tab_flat_height = 26.0
+mod.theme.data_item_height = 22.0
+// Stock shaders draw a corner twice the number written: 2 is the 4 point
+// corner of a cap, 4 the 8 point corner of a panel. The sheet's own faces
+// cut their corners at 45 degrees instead.
+mod.theme.corner_radius = 2.0
+mod.theme.container_corner_radius = 4.0
+mod.theme.textselection_corner_radius = 1.0
+mod.theme.radius_s = 3.0
+mod.theme.radius_m = 4.0
+mod.theme.radius_l = 8.0
+
+// TYPE. The library's own grotesque, Inter, in three weights: regular for
+// working text, medium on the caps, a heavy bold for the captions, as the
+// cockpit stencils its panel names. Labels at 8.5 points, so the cap height
+// is about a third of the 26 point row.
+mod.theme.font_size_p = 8.5
+mod.theme.font_size_base = 8.5
+mod.theme.type_title_l_size = 12.0
+mod.theme.type_title_m_size = 10.5
+mod.theme.type_title_s_size = 9.5
+mod.theme.type_body_l_size = 9.0
+mod.theme.type_body_m_size = 8.5
+mod.theme.type_body_s_size = 8.0
+mod.theme.type_label_l_size = 8.5
+mod.theme.type_label_m_size = 8.0
+mod.theme.type_label_s_size = 7.5
+mod.theme.font_size_4 = 10.5
+use mod.res.*
+use mod.text.*
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 420.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.5 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 560.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 9.5 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 760.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 12.0 line_spacing: 1.2}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 10.5 line_spacing: 1.2}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 9.5 line_spacing: 1.2}
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 9.0 line_spacing: 1.35}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 8.5 line_spacing: 1.35}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 8.0 line_spacing: 1.35}
+mod.theme.font_label_l = mod.theme.font_bold{font_size: 8.5 line_spacing: 1.2}
+mod.theme.font_label_m = mod.theme.font_bold{font_size: 8.0 line_spacing: 1.2}
+mod.theme.font_label_s = mod.theme.font_bold{font_size: 7.5 line_spacing: 1.2}
+
+// No surface material: every face that matters is drawn by the sheet.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+mod.theme.color_material_glow = #2a7dff
+true

@@ -1,19 +1,19 @@
-//! Client side of the app's `--remote` HTTP surface (`platform/src/remote.rs`).
+//! Client side of the app's `--remote` endpoint (`platform/src/remote_core.rs`).
 //!
-//! One connection per request, hand-rolled HTTP/1.1 on loopback, JSON decoded
-//! with `makepad-micro-serde`. Every `{"err":...}` answer becomes a
-//! [`TestError`] so callers never see a fake success.
+//! Every call is one `cmd` request over the app's makepad-remote Unix socket;
+//! the answer lines are JSON decoded with `makepad-micro-serde`. Every
+//! `{"err":...}` line becomes a [`TestError`] so callers never see a fake
+//! success. Images are written by this client (`makepad_remote::app`), never by
+//! the app.
 
 use crate::error::{TestError, TestResult};
 use makepad_micro_serde::{DeJson, JsonValue};
-use makepad_studio_protocol::{KeyCode, KeyModifiers, WidgetSnapshot};
-use std::fmt::Write as _;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use makepad_studio_protocol::{KeyCode, KeyModifiers};
+use makepad_remote::conn::Event;
+use makepad_remote::Client;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longer than every internal `ask` timeout in the app's remote thread (grabs
 /// wait up to 10 s for the GPU), so a wedged app still answers with its own
 /// diagnostic instead of a bare socket timeout.
@@ -108,45 +108,62 @@ impl MouseInput {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RemoteClient {
-    host: String,
-    port: u16,
+    socket: PathBuf,
+    client: Client,
+}
+
+impl std::fmt::Debug for RemoteClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteClient").field("socket", &self.socket).finish()
+    }
 }
 
 impl RemoteClient {
-    pub fn new(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            host: host.into(),
-            port,
-        }
+    /// Dials the app's makepad-remote Unix socket (the path of its startup line).
+    pub fn connect(socket: impl AsRef<Path>) -> TestResult<Self> {
+        let socket = socket.as_ref().to_path_buf();
+        let client = Client::connect(&socket.display().to_string()).map_err(|err| {
+            TestError::new(format!(
+                "connect to app remote {} failed: {err}",
+                socket.display()
+            ))
+        })?;
+        Ok(Self { socket, client })
     }
 
-    pub fn endpoint(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+    /// The socket path this client dials, for diagnostics.
+    pub fn socket(&self) -> String {
+        self.socket.display().to_string()
     }
 
-    /// `GET /` — the running binary's own protocol sheet.
+    /// `help` -- the running binary's own command sheet.
     pub fn help(&self) -> TestResult<String> {
-        self.get_text("/", &[])
+        self.get_text("help", &[])
     }
 
     pub fn windows(&self) -> TestResult<Vec<WindowInfo>> {
-        let json = self.get_json("/s", &[])?;
+        let json = self.get_json("status", &[])?;
         parse_windows(&json)
     }
 
-    /// Every widget, including invisible ones; callers filter.
-    pub fn snapshot(&self) -> TestResult<Vec<WidgetSnapshot>> {
-        let json = self.get_json("/snap", &[("all", "1")])?;
+    pub fn snapshot(&self) -> TestResult<UiSnapshot> {
+        let json = self.get_json("ui", &[("json", "1")])?;
         parse_snapshot(&json)
     }
-
-    pub fn dump(&self) -> TestResult<String> {
-        self.get_text("/d", &[])
+    pub fn find(&self, selector: &crate::Selector, extra: &str) -> TestResult<Vec<NodeMatch>> {
+        let q = format!("{} {extra}", selector.as_query());
+        makepad_a11y::query::Query::parse(&q).map_err(TestError::new)?;
+        let mut params = vec![("q",q.as_str()), ("json","1")];
+        if let Some(w) = selector.window_arg() { params.push(("w",w)); }
+        let json = self.get_json("ui find", &params)?;
+        parse_nodes(&json)
     }
+    pub fn dump(&self) -> TestResult<String> { self.get_text("ui", &[]) }
 
-    /// Grab one window to a PNG on disk and return its absolute path.
+    /// Grab one window to a PNG on disk (written by this client) and return
+    /// its absolute path.
     pub fn grab(&self, window: Option<usize>, scale: f64) -> TestResult<PathBuf> {
         let window = window.map(|w| w.to_string());
         let scale = format_num(scale);
@@ -154,7 +171,8 @@ impl RemoteClient {
         if let Some(window) = &window {
             params.push(("w", window.as_str()));
         }
-        let json = self.get_json("/g", &params)?;
+        let lines = self.run_client_side("grab", &params)?;
+        let json = parse_json(lines.first().map(String::as_str).unwrap_or_default())?;
         let path = json
             .key("png")
             .and_then(JsonValue::string)
@@ -166,15 +184,15 @@ impl RemoteClient {
     /// the ring still holds).
     pub fn log_since(&self, since: u64) -> TestResult<LogTail> {
         let since = since.to_string();
-        let json = self.get_json("/log", &[("since", since.as_str())])?;
+        let json = self.get_json("log", &[("since", since.as_str())])?;
         parse_log(&json)
     }
 
     pub fn mouse(&self, input: &MouseInput) -> TestResult<()> {
-        let route = if input.kind == MouseKind::Click {
-            "/click"
+        let command = if input.kind == MouseKind::Click {
+            "click"
         } else {
-            "/m"
+            "mouse"
         };
         let (x, y, dx, dy, button) = (
             format_num(input.x),
@@ -184,12 +202,13 @@ impl RemoteClient {
             input.button.to_string(),
         );
         let window = input.window.map(|w| w.to_string());
-        let mut params: Vec<(&str, &str)> = vec![
-            ("k", input.kind.as_str()),
-            ("x", x.as_str()),
-            ("y", y.as_str()),
-            ("b", button.as_str()),
-        ];
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if input.kind != MouseKind::Click {
+            params.push(("k", input.kind.as_str()));
+        }
+        params.push(("x", x.as_str()));
+        params.push(("y", y.as_str()));
+        params.push(("b", button.as_str()));
         if input.kind == MouseKind::Scroll {
             params.push(("dx", dx.as_str()));
             params.push(("dy", dy.as_str()));
@@ -204,7 +223,7 @@ impl RemoteClient {
         if input.wait {
             params.push(("wait", "1"));
         }
-        self.get_json(route, &params).map(|_| ())
+        self.get_json(command, &params).map(|_| ())
     }
 
     pub fn key(
@@ -225,7 +244,7 @@ impl RemoteClient {
         if wait {
             params.push(("wait", "1"));
         }
-        self.get_json("/k", &params).map(|_| ())
+        self.get_json("key", &params).map(|_| ())
     }
 
     pub fn text(&self, window: Option<usize>, text: &str, wait: bool) -> TestResult<()> {
@@ -237,113 +256,120 @@ impl RemoteClient {
         if wait {
             params.push(("wait", "1"));
         }
-        self.get_json("/t", &params).map(|_| ())
+        self.get_json("text", &params).map(|_| ())
     }
 
-    /// Graceful shutdown; the caller confirms the process actually exits.
+    /// Graceful shutdown (`gq`: a frame of every window, written by this
+    /// client, then `quit`); the caller confirms the process actually exits.
     pub fn grab_and_quit(&self) -> TestResult<()> {
-        self.get_json("/gq", &[]).map(|_| ())
+        self.run_client_side("gq", &[]).map(|_| ())
     }
 
     /// Graceful shutdown without a grab, for backends without capture support.
     pub fn quit(&self) -> TestResult<()> {
-        self.get_json("/quit", &[]).map(|_| ())
+        self.get_json("quit", &[]).map(|_| ())
     }
 
-    pub fn get_json(&self, path: &str, params: &[(&str, &str)]) -> TestResult<JsonValue> {
-        let body = self.get_text(path, params)?;
-        parse_json(&body)
+    /// One command; the first answer line decoded as JSON.
+    pub fn get_json(&self, command: &str, params: &[(&str, &str)]) -> TestResult<JsonValue> {
+        let lines = self.command_lines(command, params)?;
+        parse_json(lines.first().map(String::as_str).unwrap_or_default())
     }
 
-    /// Raw GET. A non-200 status or an `{"err":..}` body is an error.
-    pub fn get_text(&self, path: &str, params: &[(&str, &str)]) -> TestResult<String> {
-        let target = build_target(path, params);
-        let response = self.request(&target)?;
-        let err = response_error(&response.body);
-        if response.status != 200 {
-            return Err(TestError::new(format!(
-                "{} {target}: {}",
-                response.status,
-                err.unwrap_or_else(|| response.body.trim().to_string())
-            )));
+    /// One command; every answer line, newline-terminated. An `{"err":..}`
+    /// line is an error.
+    pub fn get_text(&self, command: &str, params: &[(&str, &str)]) -> TestResult<String> {
+        let lines = self.command_lines(command, params)?;
+        let mut text = String::new();
+        for line in &lines {
+            text.push_str(line);
+            text.push('\n');
         }
-        if let Some(err) = err {
-            return Err(TestError::new(format!("{target}: {err}")));
-        }
-        Ok(response.body)
+        Ok(text)
     }
 
-    fn request(&self, target: &str) -> TestResult<HttpResponse> {
-        let addr = self.socket_addr()?;
-        let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|err| {
-            TestError::new(format!("connect to app remote {addr} failed: {err}"))
-        })?;
-        let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(Some(RESPONSE_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(CONNECT_TIMEOUT));
-        let head = format!(
-            "GET {target} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            self.endpoint()
-        );
-        stream
-            .write_all(head.as_bytes())
-            .map_err(|err| TestError::new(format!("write to app remote {addr} failed: {err}")))?;
-        let mut raw = Vec::new();
-        stream
-            .read_to_end(&mut raw)
-            .map_err(|err| TestError::new(format!("read from app remote {addr} failed: {err}")))?;
-        parse_response(&raw)
-    }
-
-    fn socket_addr(&self) -> TestResult<SocketAddr> {
-        (self.host.as_str(), self.port)
-            .to_socket_addrs()
-            .map_err(|err| TestError::new(format!("resolve {}: {err}", self.endpoint())))?
-            .next()
-            .ok_or_else(|| TestError::new(format!("resolve {}: no address", self.endpoint())))
-    }
-}
-
-pub struct HttpResponse {
-    pub status: u16,
-    pub body: String,
-}
-
-pub fn parse_response(raw: &[u8]) -> TestResult<HttpResponse> {
-    let head_end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| TestError::new("malformed HTTP reply from app remote (no header end)"))?;
-    let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
-    let mut lines = head.split("\r\n");
-    let status_line = lines.next().unwrap_or_default();
-    let status = status_line
-        .split(' ')
-        .nth(1)
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| TestError::new(format!("malformed HTTP status line: {status_line:?}")))?;
-    let mut content_length = None;
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse::<usize>().ok();
+    /// The answer lines of one `cmd` request, with the response timeout. The
+    /// answer must end with its `end` line; an `{"err":..}` line is an error.
+    fn command_lines(&self, command: &str, params: &[(&str, &str)]) -> TestResult<Vec<String>> {
+        let fail = |what: String| TestError::new(format!("app remote {command}: {what}"));
+        let words = [command.to_string()];
+        let kv: Vec<(String, String)> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let line = makepad_remote::app::request_line(&words, &kv);
+        let channel = self.client.open("cmd", "").map_err(|err| fail(err.to_string()))?;
+        channel
+            .send(line.into_bytes())
+            .map_err(|err| fail(format!("link lost: {err}")))?;
+        let mut pending = String::new();
+        let mut lines = Vec::new();
+        loop {
+            match channel.recv_timeout(RESPONSE_TIMEOUT) {
+                Ok(Event::Data(data)) => {
+                    pending.push_str(&String::from_utf8_lossy(&data));
+                    let mut ended = false;
+                    while let Some(newline) = pending.find('\n') {
+                        let answer: String = pending.drain(..=newline).collect();
+                        let answer = answer.trim_end();
+                        if answer.starts_with("{\"end\":") {
+                            ended = true;
+                            break;
+                        }
+                        if !answer.is_empty() {
+                            lines.push(answer.to_string());
+                        }
+                    }
+                    if ended {
+                        break;
+                    }
+                }
+                Ok(Event::Closed(code, why)) => {
+                    return Err(fail(format!("connection closed without an answer ({code}: {why})")));
+                }
+                Ok(Event::Opened(_)) => {}
+                Err(true) => {
+                    return Err(fail(format!(
+                        "no answer within {} s (app busy or not running its event loop)",
+                        RESPONSE_TIMEOUT.as_secs()
+                    )));
+                }
+                Err(false) => return Err(fail("link lost: channel closed".to_string())),
             }
         }
+        check_answer(command, lines)
     }
-    let mut body = raw[head_end + 4..].to_vec();
-    if let Some(len) = content_length {
-        body.truncate(len);
+
+    /// A command answered client side (`grab`, `gq`): `makepad_remote::app`
+    /// opens the `frames` service and writes the PNG files. Returns the
+    /// answer lines; an `{"err":..}` first line is an error.
+    fn run_client_side(&self, command: &str, params: &[(&str, &str)]) -> TestResult<Vec<String>> {
+        let argv: Vec<String> = std::iter::once(command.to_string())
+            .chain(params.iter().map(|(k, v)| format!("{k}={v}")))
+            .collect();
+        let mut lines = Vec::new();
+        makepad_remote::app::run(&self.client, &argv, &mut |line| {
+            lines.push(line.to_string());
+            true
+        })
+        .map_err(|err| TestError::new(format!("app remote {command}: {err}")))?;
+        check_answer(command, lines)
     }
-    Ok(HttpResponse {
-        status,
-        body: String::from_utf8_lossy(&body).to_string(),
-    })
 }
 
-/// The `err` field of a JSON object body, if the body is one.
-fn response_error(body: &str) -> Option<String> {
-    let trimmed = body.trim_start();
-    if !trimmed.starts_with('{') || !trimmed.contains("\"err\"") {
+fn check_answer(command: &str, lines: Vec<String>) -> TestResult<Vec<String>> {
+    for line in &lines {
+        if let Some(err) = response_error(line) {
+            return Err(TestError::new(format!("app remote {command}: {err}")));
+        }
+    }
+    Ok(lines)
+}
+
+/// The `err` field of a JSON object line, if the line is an error answer.
+fn response_error(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("{\"err\":") {
         return None;
     }
     let json = JsonValue::deserialize_json(trimmed).ok()?;
@@ -368,13 +394,6 @@ fn json_f64(value: Option<&JsonValue>) -> Option<f64> {
 
 fn json_str(value: Option<&JsonValue>) -> Option<String> {
     value.and_then(JsonValue::string).cloned()
-}
-
-fn json_bool(value: Option<&JsonValue>) -> Option<bool> {
-    match value? {
-        JsonValue::Bool(value) => Some(*value),
-        _ => None,
-    }
 }
 
 fn json_array(value: Option<&JsonValue>) -> Option<&Vec<JsonValue>> {
@@ -405,45 +424,56 @@ pub fn parse_windows(json: &JsonValue) -> TestResult<Vec<WindowInfo>> {
     Ok(windows)
 }
 
-/// `/snap` rows carry window-local layout points and the widget's actual
-/// window identity and state. Missing required state is a protocol error.
-pub fn parse_snapshot(json: &JsonValue) -> TestResult<Vec<WidgetSnapshot>> {
-    let items = json_array(json.key("s"))
-        .ok_or_else(|| TestError::new(format!("snap reply carries no widget list: {json:?}")))?;
-    let mut widgets = Vec::with_capacity(items.len());
-    for item in items {
-        let id = json_str(item.key("i"));
-        let widget_type = json_str(item.key("ty"));
-        let rect = json_array(item.key("r"));
-        let window_id = json_str(item.key("window_id"));
-        let enabled = json_bool(item.key("enabled"));
-        let (Some(id), Some(widget_type), Some(rect), Some(window_id), Some(enabled)) =
-            (id, widget_type, rect, window_id, enabled)
-        else {
-            return Err(TestError::new(format!("malformed snapshot entry: {item:?}")));
-        };
-        if rect.len() != 4 {
-            return Err(TestError::new(format!("malformed snapshot rect: {item:?}")));
-        }
-        let coord = |index: usize| json_f64(rect.get(index)).unwrap_or(0.0).round() as i64;
-        widgets.push(WidgetSnapshot {
-            id,
-            widget_type,
-            window_id,
-            window_index: json_f64(item.key("w")).unwrap_or(0.0) as usize,
-            visible: json_f64(item.key("v")).map_or(true, |v| v != 0.0),
-            enabled,
-            x: coord(0),
-            y: coord(1),
-            width: coord(2),
-            height: coord(3),
-            text: json_str(item.key("t")),
-            value: json_str(item.key("val")),
-            checked: json_f64(item.key("c")).map(|c| c != 0.0),
-            selected: json_str(item.key("selected")),
-        });
+/// A semantic node and its owning window/session. No flattened widget-state schema.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeMatch {
+    pub window: u64,
+    pub node: makepad_a11y::Node,
+}
+impl std::ops::Deref for NodeMatch {
+    type Target = makepad_a11y::Node;
+    fn deref(&self) -> &Self::Target { &self.node }
+}
+impl NodeMatch {
+    pub fn window_index(&self) -> usize { self.window as u32 as usize }
+    pub fn window_arg(&self) -> String { format!("{}:{}", self.window >> 32, self.window as u32) }
+    pub fn visible(&self) -> bool { !self.states.intersects(makepad_a11y::States::HIDDEN | makepad_a11y::States::OFFSCREEN) && !self.bounds.is_empty() }
+    pub fn enabled(&self) -> bool { !self.states.contains(makepad_a11y::States::DISABLED) }
+    pub fn checked(&self) -> Option<bool> { match self.toggle { makepad_a11y::Toggle::On => Some(true), makepad_a11y::Toggle::Off => Some(false), _ => None } }
+    pub fn x(&self) -> i64 { self.bounds.x.round() as i64 }
+    pub fn y(&self) -> i64 { self.bounds.y.round() as i64 }
+    pub fn width(&self) -> i64 { self.bounds.w.round() as i64 }
+    pub fn height(&self) -> i64 { self.bounds.h.round() as i64 }
+}
+#[derive(Clone, Debug, Default)]
+pub struct UiSnapshot { pub windows: Vec<(u64, makepad_a11y::mirror::Tree)> }
+impl UiSnapshot {
+    pub fn nodes(&self) -> Vec<NodeMatch> {
+        let mut nodes = Vec::new();
+        for (window,tree) in &self.windows { tree.walk(|node,_| nodes.push(NodeMatch { window: *window, node: node.clone() })); }
+        nodes
     }
-    Ok(widgets)
+}
+fn updates(json: &JsonValue) -> TestResult<Vec<(u64, makepad_a11y::TreeUpdate)>> {
+    let trees = json_array(json.key("trees")).ok_or_else(|| TestError::new("ui reply carries no trees"))?;
+    trees.iter().map(|tree| {
+        let key = json_str(tree.key("window")).ok_or_else(|| TestError::new("ui tree missing window"))?;
+        let (s,w) = key.split_once(':').ok_or_else(|| TestError::new("ui window wants session:index"))?;
+        let key = ((s.parse::<u32>().map_err(|_| TestError::new("invalid session"))? as u64) << 32) | w.parse::<u32>().map_err(|_| TestError::new("invalid window"))? as u64;
+        let hex = json_str(tree.key("wire")).ok_or_else(|| TestError::new("ui tree missing canonical wire payload"))?;
+        if !hex.is_ascii() || hex.len() % 2 != 0 { return Err(TestError::new("invalid semantic wire hex")); }
+        let bytes: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i+2],16).map_err(|_| TestError::new("invalid semantic wire hex"))).collect::<TestResult<_>>()?;
+        let update = makepad_a11y::wire::decode_update(&bytes).map_err(|e| TestError::new(e.to_string()))?;
+        Ok((key,update))
+    }).collect()
+}
+pub fn parse_nodes(json: &JsonValue) -> TestResult<Vec<NodeMatch>> {
+    Ok(updates(json)?.into_iter().flat_map(|(window,update)| update.nodes.into_iter().map(move |node| NodeMatch {window,node})).collect())
+}
+pub fn parse_snapshot(json: &JsonValue) -> TestResult<UiSnapshot> {
+    Ok(UiSnapshot { windows: updates(json)?.into_iter().map(|(k,u)| {
+        let mut tree = makepad_a11y::mirror::Tree::new(); tree.apply(u); (k,tree)
+    }).collect() })
 }
 
 pub fn parse_log(json: &JsonValue) -> TestResult<LogTail> {
@@ -475,35 +505,11 @@ fn push_modifier_params<'a>(params: &mut Vec<(&'a str, &'a str)>, modifiers: &Ke
         params.push(("alt", "1"));
     }
     if modifiers.logo {
-        params.push(("cmd", "1"));
+        // Not `cmd`: a JSON request line already uses that key for the command.
+        params.push(("logo", "1"));
     }
 }
 
-pub fn build_target(path: &str, params: &[(&str, &str)]) -> String {
-    let mut target = String::from(path);
-    for (index, (key, value)) in params.iter().enumerate() {
-        target.push(if index == 0 { '?' } else { '&' });
-        target.push_str(&percent_encode(key));
-        target.push('=');
-        target.push_str(&percent_encode(value));
-    }
-    target
-}
-
-pub fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => {
-                let _ = write!(&mut out, "%{byte:02X}");
-            }
-        }
-    }
-    out
-}
 
 fn format_num(value: f64) -> String {
     if value.fract() == 0.0 && value.abs() < 1.0e15 {
@@ -518,15 +524,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn targets_are_percent_encoded() {
-        assert_eq!(
-            build_target("/t", &[("t", "hello world & \"x\""), ("wait", "1")]),
-            "/t?t=hello%20world%20%26%20%22x%22&wait=1"
-        );
-        assert_eq!(build_target("/d", &[]), "/d");
-    }
-
-    #[test]
     fn key_names_match_the_remote_spelling() {
         assert_eq!(key_code_name(KeyCode::KeyA), "KeyA");
         assert_eq!(key_code_name(KeyCode::ReturnKey), "ReturnKey");
@@ -534,41 +531,38 @@ mod tests {
         assert_eq!(key_code_name(KeyCode::Backspace), "Backspace");
     }
 
-    #[test]
-    fn snapshot_rows_become_widget_snapshots_with_window_names() {
-        let json = parse_json(
-            r#"{"s":[{"i":"window_widget","ty":"Window","r":[0,0,800,600],"w":0,"window_id":"main_window","enabled":true},
-                    {"i":"counter_label","ty":"Label","r":[10.5,20,100,30],"w":0,"window_id":"main_window","enabled":true,"t":"Count: 1"},
-                    {"i":"input","ty":"TextInput","r":[0,0,50,20],"w":0,"window_id":"main_window","enabled":false,"val":""},
-                    {"i":"hidden","ty":"View","r":[0,0,0,0],"w":0,"window_id":"main_window","enabled":true,"v":0},
-                    {"i":"toggle","ty":"CheckBox","r":[1,2,3,4],"w":1,"window_id":"panel_window","enabled":true,"c":1,"selected":"second"}]}"#,
-        )
-        .unwrap();
-        let widgets = parse_snapshot(&json).unwrap();
-        assert_eq!(widgets.len(), 5);
-        let label = &widgets[1];
-        assert_eq!(label.window_id, "main_window");
-        assert_eq!((label.x, label.y, label.width, label.height), (11, 20, 100, 30));
-        assert_eq!(label.text.as_deref(), Some("Count: 1"));
-        assert!(label.visible);
-        assert_eq!(widgets[2].value.as_deref(), Some(""));
-        assert!(!widgets[2].enabled);
-        assert!(!widgets[3].visible);
-        assert_eq!(widgets[4].checked, Some(true));
-        assert_eq!(widgets[4].window_index, 1);
-        assert_eq!(widgets[4].window_id, "panel_window");
-        assert_eq!(widgets[4].selected.as_deref(), Some("second"));
+    fn semantic_reply() -> String {
+        use makepad_a11y::*;
+        let root = Node { id: NodeId(1), role: Role::Window, path: "main_window".into(), children: vec![NodeId(2),NodeId(3),NodeId(4),NodeId(5)], ..Default::default() };
+        let label = Node { id: NodeId(2), role: Role::StaticText, name: "Count: 1".into(), bounds: Rect { x:10.5, y:20.0, w:100.0, h:30.0 }, ..Default::default() };
+        let input = Node { id: NodeId(3), role: Role::TextField, states: States::DISABLED, text: Some(TextInfo::default()), ..Default::default() };
+        let hidden = Node { id: NodeId(4), states: States::HIDDEN, ..Default::default() };
+        let toggle = Node { id: NodeId(5), role: Role::CheckBox, toggle: Toggle::On,  name: "Go".into(), ..Default::default() };
+        let update = TreeUpdate { full:true, root: root.id, nodes:vec![root,label,input,hidden,toggle], ..Default::default() };
+        let mut bytes = Vec::new(); wire::encode_update(&update, &mut bytes);
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        format!("{{\"trees\":[{{\"window\":\"7:0\",\"wire\":\"{hex}\"}}],\"count\":5}}")
     }
-
     #[test]
-    fn snapshots_reject_missing_or_fabricated_required_state() {
-        for row in [
-            r#"{"i":"button","ty":"Button","r":[0,0,10,10],"w":0,"window_id":"main"}"#,
-            r#"{"i":"button","ty":"Button","r":[0,0,10,10],"w":0,"enabled":true}"#,
-            r#"{"i":"button","ty":"Button","r":[0,0,10,10],"w":0,"window_id":"main","enabled":1}"#,
-        ] {
-            let json = parse_json(&format!("{{\"s\":[{row}]}}")).unwrap();
-            assert!(parse_snapshot(&json).is_err(), "accepted {row}");
+    fn semantic_wire_becomes_typed_tree_with_window_identity() {
+        let json = parse_json(&semantic_reply()).unwrap();
+        let snapshot = parse_snapshot(&json).unwrap();
+        let widgets = snapshot.nodes();
+        assert_eq!(widgets.len(),5);
+        assert_eq!(widgets[1].window,7 << 32);
+        assert_eq!((widgets[1].x(),widgets[1].y(),widgets[1].width(),widgets[1].height()),(11,20,100,30));
+        assert_eq!(widgets[1].name,"Count: 1");
+        assert!(widgets[1].visible());
+        assert_eq!(widgets[2].text.as_ref().unwrap().content, "");
+        assert!(!widgets[2].enabled());
+        assert!(!widgets[3].visible());
+        assert_eq!(widgets[4].checked(),Some(true));
+        assert_eq!(snapshot.windows[0].1.children(makepad_a11y::NodeId(1)).count(),4);
+    }
+    #[test]
+    fn snapshots_reject_missing_or_corrupt_canonical_data() {
+        for row in [r#"{}"#, r#"{"window":"7:0"}"#, r#"{"window":"bad","wire":"00"}"#, r#"{"window":"7:0","wire":"00"}"#, r#"{"window":"7:0","wire":"zz"}"#] {
+            assert!(parse_snapshot(&parse_json(&format!("{{\"trees\":[{row}]}}")).unwrap()).is_err(), "accepted {row}");
         }
     }
 
@@ -596,49 +590,43 @@ mod tests {
     }
 
     #[test]
-    fn http_replies_split_status_and_body() {
-        let raw = b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{\"err\":\"nope\"}extra";
-        let response = parse_response(raw).unwrap();
-        assert_eq!(response.status, 404);
-        assert_eq!(response.body, "{\"err\":\"nope\"}");
-        assert_eq!(response_error(&response.body).as_deref(), Some("nope"));
+    fn error_lines_are_recognised_and_other_lines_are_not() {
+        assert_eq!(
+            response_error("{\"err\":\"nope\"}").as_deref(),
+            Some("nope")
+        );
         assert!(response_error("{\"ok\":1}").is_none());
-        assert!(parse_response(b"garbage").is_err());
+        assert!(response_error("{\"s\":[{\"t\":\"{\\\"err\\\":1}\"}]}").is_none());
+        assert!(response_error("root View 0 0 640 480").is_none());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn client_drives_the_remote_routes_over_loopback() {
+    fn client_drives_the_remote_commands_over_the_socket() {
         let server = crate::fixture::FixtureServer::start();
-        server.route("/", 200, "makepad-remote  app=fake pid=1\n/ this sheet");
+        server.route("help", "makepad-remote  app=fake pid=1\nstatus  this sheet");
         server.route(
-            "/s",
-            200,
+            "status",
             r#"{"app":"fake","pid":1,"w":[{"i":0,"t":"Fake [remote]","sz":[640,480],"px":[1280,960],"dpi":2,"pos":[0,0]}]}"#,
         );
-        server.route(
-            "/snap",
-            200,
-            r#"{"s":[{"i":"main_window","ty":"Window","r":[0,0,640,480],"w":0,"window_id":"main_window","enabled":true},{"i":"go","ty":"Button","r":[10,10,80,24],"w":0,"window_id":"main_window","enabled":false,"t":"Go","selected":"item"}]}"#,
-        );
-        server.route("/click", 200, r#"{"ok":1,"f":12}"#);
-        server.route("/k", 200, r#"{"ok":1,"f":13}"#);
-        server.route("/t", 200, r#"{"ok":1,"f":14}"#);
-        server.route("/m", 200, r#"{"ok":1}"#);
-        server.route("/d", 200, "root View 0 0 640 480\n  go Button 10 10 80 24\n");
-        server.route("/g", 200, r#"{"png":"/tmp/grab-w0-00001.png","w":0,"sz":[320,240]}"#);
-        server.route("/log", 200, r#"{"n":3,"pool":"","l":["a","Count: 1"]}"#);
-        server.route("/quit", 200, r#"{"ok":1}"#);
-        server.route("/gq", 200, r#"{"quit":1,"png":[]}"#);
+        server.route("ui", &semantic_reply());
+        server.route("click", r#"{"ok":1,"f":12}"#);
+        server.route("key", r#"{"ok":1,"f":13}"#);
+        server.route("text", r#"{"ok":1,"f":14}"#);
+        server.route("mouse", r#"{"ok":1}"#);
+        server.route("log", r#"{"n":3,"pool":"","l":["a","Count: 1"]}"#);
+        server.route("quit", r#"{"ok":1}"#);
 
-        let client = RemoteClient::new("127.0.0.1", server.port());
+        let client = RemoteClient::connect(server.socket()).unwrap();
+        assert_eq!(client.socket(), server.socket().display().to_string());
         assert!(client.help().unwrap().contains("this sheet"));
         let windows = client.windows().unwrap();
         assert_eq!(windows[0].dpi, 2.0);
-        let widgets = client.snapshot().unwrap();
-        assert_eq!(widgets[1].window_id, "main_window");
-        assert_eq!(widgets[1].text.as_deref(), Some("Go"));
-        assert!(!widgets[1].enabled);
-        assert_eq!(widgets[1].selected.as_deref(), Some("item"));
+        let widgets = client.snapshot().unwrap().nodes();
+        assert_eq!(widgets[1].window, 7 << 32);
+        assert_eq!(widgets[1].name, "Count: 1");
+        assert!(!widgets[2].enabled());
+        assert_eq!(widgets[4].checked(), Some(true));
 
         client
             .mouse(&MouseInput::at(MouseKind::Click, Some(0), 50.0, 22.0))
@@ -664,11 +652,15 @@ mod tests {
                 ..MouseInput::at(MouseKind::Scroll, Some(1), 5.0, 6.0)
             })
             .unwrap();
-        assert!(client.dump().unwrap().contains("go Button"));
-        assert_eq!(
-            client.grab(Some(0), 0.5).unwrap(),
-            PathBuf::from("/tmp/grab-w0-00001.png")
-        );
+        server.route("ui", "#1 window\n  #2 button \"Go\"");
+        assert_eq!(client.dump().unwrap(), "#1 window\n  #2 button \"Go\"\n");
+
+        // Images never come from the app as files: this client writes the PNG.
+        let png = client.grab(Some(0), 0.5).unwrap();
+        assert!(png.starts_with(std::env::temp_dir().join("makepad-remote")));
+        assert_eq!(std::fs::read(&png).unwrap(), b"PNG0-0");
+        assert!(png.file_name().unwrap().to_string_lossy().starts_with("grab-w0-"));
+
         let tail = client.log_since(0).unwrap();
         assert_eq!(tail.last_seq, 3);
         assert!(tail.lines.iter().any(|line| line == "Count: 1"));
@@ -676,41 +668,59 @@ mod tests {
         client.quit().unwrap();
 
         let requests = server.requests();
-        assert_eq!(requests[0], "/");
-        assert_eq!(requests[1], "/s");
-        assert_eq!(requests[2], "/snap?all=1");
-        assert_eq!(requests[3], "/click?k=click&x=50&y=22&b=0&w=0&wait=1");
-        assert_eq!(requests[4], "/k?k=press&c=KeyA&cmd=1&w=0&wait=1");
-        assert_eq!(requests[5], "/t?t=hello%20world&wait=1");
-        assert_eq!(requests[6], "/m?k=scroll&x=5&y=6&b=0&dx=0&dy=-3.5&w=1");
-        assert_eq!(requests[7], "/d");
-        assert_eq!(requests[8], "/g?scale=0.5&w=0");
-        assert_eq!(requests[9], "/log?since=0");
-        assert_eq!(requests[10], "/gq");
-        assert_eq!(requests[11], "/quit");
+        assert_eq!(requests[0], "help");
+        assert_eq!(requests[1], "status");
+        assert_eq!(requests[2], "ui json=1");
+        assert_eq!(requests[3], "click x=50 y=22 b=0 w=0 wait=1");
+        assert_eq!(requests[4], "key k=press c=KeyA logo=1 w=0 wait=1");
+        assert_eq!(requests[5], "text t=hello world wait=1");
+        assert_eq!(requests[6], "mouse k=scroll x=5 y=6 b=0 dx=0 dy=-3.5 w=1");
+        assert_eq!(requests[7], "ui");
+        assert_eq!(requests[8], "frames window=0 scale=0.5 codec=png once=1");
+        assert_eq!(requests[9], "ping");
+        assert_eq!(requests[10], "log since=0");
+        // gq: the window list, a frame of each window (client side), then quit.
+        assert_eq!(requests[11], "status");
+        assert_eq!(requests[12], "frames window=0 scale=1 codec=png once=1");
+        assert_eq!(requests[13], "ping");
+        assert_eq!(requests[14], "quit");
+        assert_eq!(requests[15], "quit");
+        assert_eq!(requests.len(), 16);
+        let _ = std::fs::remove_file(png);
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_errors_surface_as_test_errors() {
         let server = crate::fixture::FixtureServer::start();
-        server.route("/s", 404, r#"{"err":"window 3 closed by user"}"#);
-        server.route("/snap", 200, r#"{"err":"timeout (app busy or not running its event loop)"}"#);
-        server.route("/d", 200, "not json");
-        let client = RemoteClient::new("127.0.0.1", server.port());
+        server.route("status", r#"{"err":"window 3 closed by user"}"#);
+        server.route("ui", r#"{"err":"timeout (app busy or not running its event loop)"}"#);
+        server.disconnect("log");
+        let client = RemoteClient::connect(server.socket()).unwrap();
 
         let err = client.windows().unwrap_err();
-        assert!(err.message().contains("404"), "{}", err.message());
         assert!(err.message().contains("closed by user"), "{}", err.message());
         let err = client.snapshot().unwrap_err();
         assert!(err.message().contains("app busy"), "{}", err.message());
-        assert_eq!(client.dump().unwrap(), "not json");
-        let err = client.get_json("/d", &[]).unwrap_err();
+        server.route("ui", "not json");
+        assert_eq!(client.dump().unwrap(), "not json\n");
+        let err = client.get_json("ui", &[]).unwrap_err();
         assert!(err.message().contains("bad JSON"), "{}", err.message());
-        let err = client.grab(None, 1.0).unwrap_err();
-        assert!(err.message().contains("no route"), "{}", err.message());
+        let err = client.get_json("nope", &[]).unwrap_err();
+        assert!(err.message().contains("unknown command"), "{}", err.message());
+        // A command cut off without its end line is an error, never a result.
+        let err = client.log_since(0).unwrap_err();
+        assert!(err.message().contains("without an answer"), "{}", err.message());
+        // The link survives a command that was cut off.
+        server.route("ui", "not json");
+        assert_eq!(client.dump().unwrap(), "not json\n");
 
         drop(server);
         let err = client.help().unwrap_err();
-        assert!(err.message().contains("connect"), "{}", err.message());
+        assert!(err.message().contains("link lost"), "{}", err.message());
+        assert!(RemoteClient::connect("/nonexistent/makepad-remote.sock")
+            .unwrap_err()
+            .message()
+            .contains("connect"));
     }
 }

@@ -4,7 +4,7 @@
 //! included.
 
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     image::Image,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -92,6 +92,12 @@ impl ImageCacheImpl for ImageBlend {
 }
 
 impl Widget for ImageBlend {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_walk_blend(cx, walk)
     }

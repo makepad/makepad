@@ -61,7 +61,7 @@ pub struct CellPlacement {
 }
 
 #[derive(Clone, Debug)]
-struct DeferredFill {
+pub(crate) struct DeferredFill {
     grow: f64,
     shrink: f64,
     unclamped_basis: f64,
@@ -76,6 +76,10 @@ struct DeferredFill {
 pub enum AlignEntry {
     Unset,
     Area(Area),
+    NativeLayer {
+        draw_list_id: DrawListId,
+        draw_item_id: usize,
+    },
     ShiftTurtle {
         area: Area,
         shift: Vec2d,
@@ -561,7 +565,7 @@ mod tests {
         let root_pass = DrawPass::new(&mut cx);
         window.set_pass(&mut cx, &root_pass);
         let child_pass = DrawPass::new(&mut cx);
-        child_pass.set_pass_parent(&mut cx, &root_pass);
+        child_pass.set_pass_parent(&mut cx, root_pass.draw_pass_id());
         child_pass.set_size(&mut cx, dvec2(64.0, 48.0));
 
         let event = DrawEvent::default();
@@ -795,7 +799,7 @@ mod tests {
         let root_pass = DrawPass::new(&mut cx);
         root_pass.set_size(&mut cx, dvec2(500.0, 400.0));
         let child_pass = DrawPass::new(&mut cx);
-        child_pass.set_pass_parent(&mut cx, &root_pass);
+        child_pass.set_pass_parent(&mut cx, root_pass.draw_pass_id());
         child_pass.set_size(&mut cx, dvec2(64.0, 48.0));
         let event = DrawEvent::default();
         let mut draw = CxDraw::new(&mut cx, &event);
@@ -1302,27 +1306,27 @@ mod tests {
             size.script_apply(vm, &Apply::New, &mut Scope::empty(), inline);
             assert!(matches!(size, Size::Rel { base: Base::Parent, factor } if factor == 0.5));
 
-            let heap = vm.bx.heap.new_string_from_str("calc(10px + 25vw)");
+            let heap = vm.new_string("calc(10px + 25vw)");
             size.script_apply(vm, &Apply::New, &mut Scope::empty(), heap);
             let Size::Expr(id) = size else { panic!("heap string did not compile to Expr") };
             assert_eq!(vm.cx().get_global_ref::<SizeExprStore>().unwrap().source(id), Some("calc(10px + 25vw)"));
             let emitted = size.script_to_value(vm);
-            let round_trip = vm.bx.heap.string_with(emitted, |_, source| source.to_string());
+            let round_trip = vm.heap().string_with(emitted, |_, source| source.to_string());
             assert_eq!(round_trip.as_deref(), Some("calc(10px + 25vw)"));
 
             let old = size;
-            let invalid = vm.bx.heap.new_string_from_str("10px + 2");
+            let invalid = vm.new_string("10px + 2");
             size.script_apply(vm, &Apply::New, &mut Scope::empty(), invalid);
             assert!(matches!((old, size), (Size::Expr(a), Size::Expr(b)) if a == b));
 
             let mut bound = FitBound::Abs(1.0);
-            let bound_value = vm.bx.heap.new_string_from_str("max(10px, 5vw)");
+            let bound_value = vm.new_string("max(10px, 5vw)");
             bound.script_apply(vm, &Apply::New, &mut Scope::empty(), bound_value);
             assert!(matches!(bound, FitBound::Expr(_)));
 
             let mut direct = SizeExprId::default();
             assert!(!SizeExprId::on_type_check(
-                &vm.bx.heap,
+                vm.heap(),
                 ScriptValue::from_f64(0.0)
             ));
             direct.script_apply(
@@ -1344,9 +1348,7 @@ mod tests {
                 Some("50%")
             );
             let emitted = direct.script_to_value(vm);
-            let emitted = vm
-                .bx
-                .heap
+            let emitted = vm.heap()
                 .string_with(emitted, |_, source| source.to_string());
             assert_eq!(emitted.as_deref(), Some("50%"));
 
@@ -1360,7 +1362,7 @@ mod tests {
                 Some("10px")
             );
 
-            let compound = vm.bx.heap.new_string_from_str("10px + 25vw");
+            let compound = vm.new_string("10px + 25vw");
             direct.script_apply(vm, &Apply::New, &mut Scope::empty(), compound);
             assert_eq!(
                 vm.cx()
@@ -1370,7 +1372,7 @@ mod tests {
                 Some("10px + 25vw")
             );
             let old = direct;
-            let invalid = vm.bx.heap.new_string_from_str("10px + 2");
+            let invalid = vm.new_string("10px + 2");
             direct.script_apply(vm, &Apply::New, &mut Scope::empty(), invalid);
             assert_eq!(direct, old);
         });
@@ -2911,8 +2913,7 @@ impl From<SizeExprUnit> for Base {
 }
 
 fn script_string(vm: &mut ScriptVm, value: ScriptValue) -> Option<String> {
-    vm.bx
-        .heap
+    vm.heap()
         .string_with(value, |_, source| source.to_string())
 }
 
@@ -2929,7 +2930,7 @@ fn size_expr_source_to_value(vm: &mut ScriptVm, id: SizeExprId) -> Option<Script
         .get_global_ref::<SizeExprStore>()?
         .source(id)?
         .to_string();
-    Some(vm.bx.heap.new_string_from_str(&source))
+    Some(vm.new_string(&source))
 }
 
 impl ScriptHook for SizeExprId {
@@ -2968,7 +2969,7 @@ impl ScriptApply for SizeExprId {
             .get_global_ref::<SizeExprStore>()
             .and_then(|store| store.source(*self))
             .map(str::to_string);
-        source.map_or(NIL, |source| vm.bx.heap.new_string_from_str(&source))
+        source.map_or(NIL, |source| vm.new_string(&source))
     }
 }
 
@@ -4666,6 +4667,17 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         None
     }
 
+    /// A finished turtle's deferred-fill list goes back to the pool a new
+    /// turtle takes it from, so a frame that defers fills allocates none once
+    /// the pool has warmed.
+    fn recycle_fills(&mut self, turtle: &mut Turtle) {
+        let mut fills = std::mem::take(&mut turtle.deferred_fills);
+        if fills.capacity() > 0 && self.fill_pool.len() < 256 {
+            fills.clear();
+            self.fill_pool.push(fills);
+        }
+    }
+
     /// Starts a root turtle.
     pub fn begin_root_turtle(&mut self, size: Vec2d, layout: Layout) {
         self.align_list
@@ -4677,7 +4689,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             align_start: self.align_list.len() - 1,
             finished_rows_start: self.finished_rows.len(),
             finished_walks_start: self.finished_walks.len(),
-            deferred_fills: Vec::new(),
+            deferred_fills: self.fill_pool.pop().unwrap_or_default(),
             flex_resolved: false,
             next_flow_index: 0,
             baseline_walk: None,
@@ -4783,7 +4795,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             align_start: self.align_list.len() - 1,
             finished_rows_start: self.finished_rows.len(),
             finished_walks_start: self.finished_walks.len(),
-            deferred_fills: Vec::new(),
+            deferred_fills: self.fill_pool.pop().unwrap_or_default(),
             flex_resolved: false,
             next_flow_index: 0,
             baseline_walk: None,
@@ -5082,7 +5094,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.align_list.push(AlignEntry::EndClip);
         self.finished_rows.truncate(turtle_rows_start);
         self.finished_walks.truncate(turtle_walks_start);
-        let turtle = self.turtles.pop().unwrap();
+        let mut turtle = self.turtles.pop().unwrap();
+        self.recycle_fills(&mut turtle);
 
         if self.turtles.is_empty() {
             Rect {
@@ -5535,7 +5548,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     }
 
     pub fn end_pass_sized_turtle_no_clip(&mut self) {
-        let turtle = self.turtles.pop().unwrap();
+        let mut turtle = self.turtles.pop().unwrap();
+        self.recycle_fills(&mut turtle);
 
         self.clip_and_shift_align_list(turtle.align_start, self.align_list.len());
         //log!("{:?}", self.align_list[turtle.align_start]);
@@ -5546,7 +5560,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     }
 
     pub fn end_pass_sized_turtle(&mut self) {
-        let turtle = self.turtles.pop().unwrap();
+        let mut turtle = self.turtles.pop().unwrap();
+        self.recycle_fills(&mut turtle);
         // lets perform clipping on our alignlist.
         self.align_list.push(AlignEntry::EndClip);
 
@@ -5559,7 +5574,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     }
 
     pub fn end_pass_sized_turtle_with_shift(&mut self, area: Area, shift: Vec2d) {
-        let turtle = self.turtles.pop().unwrap();
+        let mut turtle = self.turtles.pop().unwrap();
+        self.recycle_fills(&mut turtle);
         // lets perform clipping on our alignlist.
         self.align_list.push(AlignEntry::EndClip);
 
@@ -6231,6 +6247,17 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                         }
                     }
                 }
+                AlignEntry::NativeLayer { draw_list_id, draw_item_id } => {
+                    if let CxDrawKind::NativeLayer { rect, clip, .. } =
+                        &mut self.cx.draw_lists[*draw_list_id].draw_items[*draw_item_id].kind
+                    {
+                        rect.pos += d;
+                        if shift_clip {
+                            clip.0 += d;
+                            clip.1 += d;
+                        }
+                    }
+                }
                 AlignEntry::BeginClip(clip0, clip1) => {
                     *clip0 += d;
                     *clip1 += d;
@@ -6319,6 +6346,16 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                         }
                     }
                 }
+                AlignEntry::NativeLayer { draw_list_id, draw_item_id } => {
+                    if let Some((clip0, clip1)) = self.turtle_clips.last() {
+                        if let CxDrawKind::NativeLayer { clip, .. } =
+                            &mut self.cx.draw_lists[*draw_list_id].draw_items[*draw_item_id].kind
+                        {
+                            clip.0 = dvec2(clip.0.x.max(clip0.x), clip.0.y.max(clip0.y));
+                            clip.1 = dvec2(clip.1.x.min(clip1.x), clip.1.y.min(clip1.y));
+                        }
+                    }
+                }
                 AlignEntry::Unset => {}
                 AlignEntry::Area(_) => {}
             }
@@ -6335,6 +6372,40 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
     pub fn shift_align_range(&mut self, range: &TurtleAlignRange, shift: Vec2d) {
         self.move_align_list(range.start, range.end, shift.x, shift.y, true);
+    }
+
+    /// Raise a range of ink already drawn this pass out of the paint order:
+    /// `depth` is added to every instance's own depth, so it beats ink
+    /// painted after it at the same depth.
+    ///
+    /// A 2D pass has one depth buffer and a vertex lands at
+    /// `world.z = draw_depth + draw_call.zbias`, so painting later buys only
+    /// a `zbias_step` and a widget that wants one of its own rows in front of
+    /// the rest cannot get there by drawing it last. This is how it gets
+    /// there. Only z moves: x, y and the clips are untouched, so hit testing
+    /// is exactly as it was. Keep `depth` well under
+    /// [`OVERLAY_Z_BASE`](crate::draw_list_2d::OVERLAY_Z_BASE), or the lifted
+    /// ink climbs into the band the overlays live in.
+    pub fn lift_align_range(&mut self, range: &TurtleAlignRange, depth: f32) {
+        let mut c = range.start;
+        while c < range.end {
+            if let AlignEntry::Area(Area::Instance(inst)) = &self.align_list[c] {
+                let draw_list = &mut self.cx.cx.draw_lists[inst.draw_list_id];
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                if let Some(draw_call) = draw_item.draw_call() {
+                    let sh = &self.cx.cx.draw_shaders[draw_call.draw_shader_id.index];
+                    if let (Some(draw_depth), Some(inst_buf)) =
+                        (sh.mapping.draw_depth, draw_item.instances.as_mut())
+                    {
+                        let slots = sh.mapping.instances.total_slots;
+                        for i in 0..inst.instance_count {
+                            inst_buf[inst.instance_offset + draw_depth + i * slots] += depth;
+                        }
+                    }
+                }
+            }
+            c += 1;
+        }
     }
 
     pub fn add_rect_area(&mut self, area: &mut Area, rect: Rect) {

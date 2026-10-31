@@ -7,6 +7,7 @@ use crate::{
     splitter::{Splitter, SplitterAction, SplitterAlign, SplitterAxis},
     tab::Tab,
     tab_bar::{TabBar, TabBarAction},
+    tip::TipAction,
     widget::*,
     widget_tree::CxWidgetExt,
 };
@@ -272,7 +273,7 @@ impl ScriptHook for Dock {
                         if let Some(id) = kv.key.as_id() {
                             // Check type and parse accordingly
                             if let Some(val_obj) = kv.value.as_object() {
-                                if vm.bx.heap.type_matches_id(
+                                if vm.heap().type_matches_id(
                                     val_obj,
                                     DockItemSplitter::script_type_id_static(),
                                 ) {
@@ -283,9 +284,7 @@ impl ScriptHook for Dock {
                                             DockItemSplitter::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, splitter.to_dock_item());
                                     }
-                                } else if vm
-                                    .bx
-                                    .heap
+                                } else if vm.heap()
                                     .type_matches_id(val_obj, DockItemTabs::script_type_id_static())
                                 {
                                     if collect_layout
@@ -294,9 +293,7 @@ impl ScriptHook for Dock {
                                         let tabs = DockItemTabs::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, tabs.to_dock_item());
                                     }
-                                } else if vm
-                                    .bx
-                                    .heap
+                                } else if vm.heap()
                                     .type_matches_id(val_obj, DockItemTab::script_type_id_static())
                                 {
                                     if collect_layout
@@ -308,7 +305,7 @@ impl ScriptHook for Dock {
                                 } else {
                                     // Not a dock item, treat as content template - root it
                                     self.templates
-                                        .insert(id, vm.bx.heap.new_object_ref(val_obj));
+                                        .insert(id, vm.new_object_ref(val_obj));
                                 }
                             }
                             // Non-object values can't be rooted, skip them for templates
@@ -629,7 +626,6 @@ impl DockItemTab {
 }
 
 #[derive(Clone, Debug, SerRon, DeRon)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DockItem {
     Splitter {
         axis: SplitterAxis,
@@ -641,7 +637,6 @@ pub enum DockItem {
         tabs: Vec<LiveId>,
         selected: usize,
         closable: bool,
-        #[cfg_attr(feature = "serde", serde(default))]
         hide_tab_bar: bool,
     },
     Tab {
@@ -703,20 +698,6 @@ fn preserve_item_for_layout(
 /// With no current tab, every tab bar draws its active tab as current.
 fn is_current_tab_bar(current_tab: Option<LiveId>, tabs: &[LiveId]) -> bool {
     current_tab.is_none_or(|tab| tabs.contains(&tab))
-}
-
-/// The dump types live in the core, which prints them without naming the
-/// dock ([`crate::widget_hooks::WidgetHooks::dock_dump`]).
-pub use crate::widget_hooks::{DockCompactDump, DockCompactTabInfo, DockCompactTabsInfo};
-
-/// Let the widget tree's dumps print a dock's tabs. Run by the family's
-/// registration.
-pub fn install_dock_hooks(cx: &mut Cx) {
-    crate::widget_hooks::WidgetHooks::of(cx).dock_dump = Some(dock_dump);
-}
-
-fn dock_dump(widget: &WidgetRef, cx: &Cx) -> Option<DockCompactDump> {
-    widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx))
 }
 
 /// The share of a panel, along each of its edges, that splits it rather
@@ -936,69 +917,7 @@ impl Dock {
         id
     }
 
-    pub fn compact_dump(&self, cx: &Cx) -> DockCompactDump {
-        let mut tabs = Vec::new();
-        let mut tab_headers = Vec::new();
-        let mut tabs_ids = Vec::new();
-        tabs_ids.extend(self.tab_bars.keys().copied());
-        tabs_ids.sort_by_key(|id| id.0);
 
-        for tabs_id in tabs_ids {
-            let Some(DockItem::Tabs {
-                tabs: tab_ids,
-                selected,
-                ..
-            }) = self.dock_items.get(&tabs_id)
-            else {
-                continue;
-            };
-            let Some(tab_bar) = self.tab_bars.get(&tabs_id) else {
-                continue;
-            };
-
-            let bar_rect = tab_bar.tab_bar.bar_rect(cx);
-            tabs.push(DockCompactTabsInfo {
-                tabs_id,
-                selected_tab_id: tab_ids.get(*selected).copied(),
-                tab_count: tab_ids.len(),
-                rect: bar_rect,
-            });
-
-            for (index, tab_id) in tab_ids.iter().enumerate() {
-                let Some(tab_rect) = tab_bar.tab_bar.tab_rect(cx, *tab_id) else {
-                    continue;
-                };
-                // A tab bar with more tabs than room scrolls them sideways,
-                // and a tab past its edge is drawn clipped (or not at all).
-                // What is reported is the part a person could click: a tab
-                // half out of view has a rect whose centre is still ON it,
-                // not on whatever the neighbouring panel shows there, and a
-                // tab wholly out of view is not reported as present. Only the
-                // scroll axis is clipped: a tab's own height is its own, and
-                // the bar's box does not say where the label sits in it.
-                let tab_rect = tab_rect.clip((
-                    dvec2(bar_rect.pos.x, tab_rect.pos.y),
-                    dvec2(bar_rect.pos.x + bar_rect.size.x, tab_rect.pos.y + tab_rect.size.y),
-                ));
-                if tab_rect.size.x < 1.0 {
-                    continue;
-                }
-                let title = match self.dock_items.get(tab_id) {
-                    Some(DockItem::Tab { name, .. }) => name.clone(),
-                    _ => String::new(),
-                };
-                tab_headers.push(DockCompactTabInfo {
-                    tabs_id,
-                    tab_id: *tab_id,
-                    is_active: index == *selected,
-                    title,
-                    rect: tab_rect,
-                });
-            }
-        }
-
-        DockCompactDump { tabs, tab_headers }
-    }
 
     fn create_all_items(&mut self, cx: &mut Cx) {
         let mut items = Vec::new();
@@ -2454,6 +2373,10 @@ impl Dock {
                         cx.widget_action(uid, DockAction::TabCloseWasPressed(tab_id));
                         self.needs_save = true;
                     }
+                    // A compact tab's name, for the window's tip layer.
+                    TabBarAction::None if !matches!(action.as_widget_action().cast(), TipAction::None) => {
+                        cx.extend_actions(vec![action])
+                    }
                     TabBarAction::None => (),
                 }
             }
@@ -2640,6 +2563,32 @@ impl Dock {
 }
 
 impl Widget for Dock {
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        for (id, (_, widget)) in self.items.iter() {
+            if !widget.area().is_valid(cx) {
+                continue;
+            }
+            if let Some(DockItem::Tab { name, .. }) = self.dock_items.get(id) {
+                out.push((
+                    id.0,
+                    None,
+                    a11y_tree::Node {
+                        id: a11y_tree::NodeId::widget(widget.widget_uid().0),
+                        role: a11y_tree::Role::TabPanel,
+                        name: name.clone(),
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TabList;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.handle_event_with_bodies(cx, event, scope, BodyDispatch::Existing)
     }
@@ -3597,7 +3546,27 @@ mod tests {
     fn invalid_identity_moves_leave_layout_and_dirty_state_unchanged() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (dock, bodies) = dock_with_tabs(&mut cx);
-        let layout = format!("{:?}", dock.borrow().unwrap().dock_items);
+        // by raw ids: a LiveId's Debug prints its name only while a parallel test does not hold
+        // the names' table
+        let items_of = |dock: &DockRef| {
+            let mut items: Vec<(u64, String)> = dock
+                .borrow()
+                .unwrap()
+                .dock_items
+                .iter()
+                .map(|(id, item)| {
+                    let text = match item {
+                        DockItem::Splitter { a, b, .. } => format!("split {} {}", a.0, b.0),
+                        DockItem::Tabs { tabs, selected, .. } => format!("tabs {:?} {selected}", tabs.iter().map(|t| t.0).collect::<Vec<_>>()),
+                        DockItem::Tab { name, template, kind } => format!("tab {name} {} {}", template.0, kind.0),
+                    };
+                    (id.0, text)
+                })
+                .collect();
+            items.sort();
+            items
+        };
+        let layout = items_of(&dock);
         for part in [
             DropPart::Left,
             DropPart::Right,
@@ -3615,7 +3584,7 @@ mod tests {
                 (id!(first), id!(root)),
             ] {
                 assert!(!dock.move_tab(&mut cx, item, target, part));
-                assert_eq!(format!("{:?}", dock.borrow().unwrap().dock_items), layout);
+                assert_eq!(items_of(&dock), layout);
                 assert!(!dock.check_and_clear_need_save());
                 assert_intact(&dock, &bodies, id!(first));
             }
@@ -3796,7 +3765,7 @@ mod tests {
             // A rebake re-runs the same DSL, like an Android rotation does.
             for (apply, kind) in [(Apply::ScriptReapply, "reapply"), (Apply::Rebake, "rebake")] {
                 cx.with_vm(|vm| {
-                    install(vm, StyleSheet::load_with_appearance(style, dark));
+                    install(vm, StyleSheet::load(style.sheet(dark)));
                     vm.with_reload(crate::script_mod);
                     let value = initial_style_test_dock(vm);
                     dock.borrow_mut().unwrap().script_apply(

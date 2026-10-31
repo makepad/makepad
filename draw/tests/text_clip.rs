@@ -1,21 +1,18 @@
-//! PNG regression for retained text and quad clipping. Run with:
-//! MAKEPAD=gpusim RUSTFLAGS='--cfg gpusim' cargo test --release
-//! -p makepad-draw --test text_clip -- --ignored --nocapture
-//! MAKEPAD_GPUSIM_OUT_DIR optionally retains the reference and clipped PNGs.
+//! PNG regression for retained text and quad clipping on the native HAL GPU backend.
+//! Run with MAKEPAD_HAL_BACKEND=offscreen and the existing ignored test selection.
+//! MAKEPAD_TEST_OUT_DIR optionally retains the compared PNGs.
+#![cfg(not(target_arch = "wasm32"))]
 
 use makepad_draw::makepad_script::{
-    shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
     shader_backend::ShaderBackend,
-    trap::NoTrap,
+    shader_ir_draw::{compile_draw_shader_ir_with, IrCompileOptions},
 };
 use makepad_draw::text::{
-    geom::{Point, Rect as TextRect},
-    image::Image,
-    msdfer::Msdfer,
-    rasterizer::{AtlasKind, CompletedMsdfJob, OutlineRasterizationMode},
+    geom::Point,
+    rasterizer::{AtlasKind, OutlineRasterizationMode},
 };
 use makepad_draw::*;
-use std::{cell::RefCell, path::Path, rc::Rc};
+use std::{cell::{Cell, RefCell}, path::Path, rc::Rc};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
@@ -40,11 +37,9 @@ struct Scene {
 
 fn render(scene: Scene, directory: &Path) -> Vec<u8> {
     std::fs::create_dir_all(directory).unwrap();
-    std::env::set_var("MAKEPAD_GPUSIM_OUT_DIR", directory);
-    // Another explicit renderer gate in the same test binary may disable PNGs.
-    std::env::set_var("MAKEPAD_GPUSIM_FRAMES", "on");
-    std::env::set_var("MAKEPAD_GPUSIM_DPI", "1");
     let mut state = None;
+    let glyphs_ready = Rc::new(Cell::new(false));
+    let draw_glyphs_ready = glyphs_ready.clone();
     let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
         if matches!(event, Event::Startup) {
             let (text, quad) = cx.with_vm(|vm| {
@@ -79,34 +74,15 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
                         ShaderBackend::Wgsl,
                         ShaderBackend::Rust,
                     ] {
-                        let mut output = ShaderOutput::default();
-                        output.backend = backend;
-                        output.const_table = false;
-                        output.pre_collect_rust_instance_io(vm, io_self);
-                        output.pre_collect_shader_io(vm, io_self);
-                        let vertex = vm
-                            .bx
-                            .heap
-                            .object_method(io_self, live_id!(vertex).into(), NoTrap)
-                            .as_object()
-                            .unwrap();
-                        output.mode = ShaderMode::Vertex;
-                        ShaderFnCompiler::compile_shader_def(
-                            vm,
-                            &mut output,
-                            NoTrap,
-                            live_id!(vertex),
-                            vertex,
-                            ShaderType::IoSelf(io_self),
-                            vec![],
-                        );
+                        let opts = IrCompileOptions { backend, ..Default::default() };
+                        let output = compile_draw_shader_ir_with(vm, io_self, &opts);
                         assert!(
                             !output.has_errors,
-                            "text vertex compilation failed for {backend:?}"
+                            "text shader compilation failed for {backend:?}"
                         );
                     }
                     println!(
-                        "{:?} text vertex backends: Metal GL/WebGL D3D11 WGSL gpusim OK",
+                        "{:?} text vertex backends: Metal GL/WebGL D3D11 WGSL Rust OK",
                         scene.glyph_path
                     );
                 }
@@ -137,6 +113,7 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
             cx.redraw_all();
         }
         if let Event::Draw(event) = event {
+            draw_glyphs_ready.set(true);
             let (_, pass, root, list, text, quad) = state.as_mut().unwrap();
             let mut draw = CxDraw::new(cx, event);
             let mut cx = Cx2d::new(&mut draw);
@@ -180,44 +157,27 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
                     let mut glyphs = Vec::new();
                     for row in &layout.rows {
                         for glyph in &row.glyphs {
-                            let mut raster = glyph.rasterize(glyph.font_size_in_lpxs).unwrap();
-                            if matches!(scene.glyph_path, GlyphPath::Msdf) {
-                                let rasterizer = cx.fonts.borrow().rasterizer().clone();
-                                let request_size = glyph.font_size_in_lpxs.max(
-                                    rasterizer
-                                        .borrow()
-                                        .msdf_resolution()
-                                        .min_request_dpxs_per_em
-                                        + 1.0,
-                                );
-                                glyph.rasterize(request_size).unwrap();
-                                // Finish queued MSDF work deterministically before the
-                                // single capture, using the production rasterizer.
-                                let mut rasterizer = rasterizer.borrow_mut();
-                                let mut msdfer = Msdfer::new(rasterizer.msdfer().settings());
-                                for job in rasterizer.take_queued_msdf_jobs() {
-                                    let mut image = Image::new(job.key.size);
-                                    msdfer.outline_to_msdf(
-                                        &job.outline,
-                                        job.dpxs_per_em,
-                                        &mut image.subimage_mut(TextRect::from(job.key.size)),
-                                    );
-                                    rasterizer.apply_completed_msdf_job(CompletedMsdfJob {
-                                        key: job.key,
-                                        pixels: image.into_pixels(),
-                                        epoch: job.epoch,
-                                    });
-                                }
-                                drop(rasterizer);
-                                raster = glyph.rasterize(request_size).unwrap();
-                            }
+                            let request_size = if matches!(scene.glyph_path, GlyphPath::Msdf) {
+                                glyph.font_size_in_lpxs.max(
+                                    cx.fonts.borrow().rasterizer().borrow().msdf_resolution()
+                                        .min_request_dpxs_per_em + 1.0,
+                                )
+                            } else { glyph.font_size_in_lpxs };
+                            let raster = glyph.rasterize(request_size).unwrap();
                             let expected = match scene.glyph_path {
                                 GlyphPath::Sdf => AtlasKind::Grayscale,
                                 GlyphPath::Msdf => AtlasKind::Msdf,
                                 GlyphPath::Emoji => AtlasKind::Color,
                                 GlyphPath::Slug => unreachable!(),
                             };
-                            assert_eq!(raster.atlas_kind, expected);
+                            if raster.atlas_kind != expected {
+                                // HAL rasterisation is asynchronous; AUTO first returns SDF
+                                // while its MSDF upgrade runs. Capture only the requested kind.
+                                assert!(raster.atlas_kind == AtlasKind::Unresolved
+                                    || (matches!(scene.glyph_path, GlyphPath::Msdf)
+                                        && raster.atlas_kind == AtlasKind::Grayscale));
+                                draw_glyphs_ready.set(false);
+                            }
                             glyphs.push((
                                 Point::new(
                                     24.0 + row.origin_in_lpxs.x + glyph.origin_in_lpxs.x,
@@ -259,9 +219,7 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
         }
     }))));
     cx.borrow_mut().init_cx_os();
-    // The ordinary gpusim loop captures this app's drawable and returns
-    // after one frame; no visible window or persistent process is launched.
-    Cx::event_loop(cx);
+    capture(&cx, &directory.join("window_0_frame_000000.png"), &glyphs_ready);
     let bytes = std::fs::read(directory.join("window_0_frame_000000.png")).unwrap();
     let mut png = makepad_zune_png::PngDecoder::new(
         makepad_zune_png::makepad_zune_core::bytestream::ZCursor::new(bytes),
@@ -280,13 +238,9 @@ fn diff(a: &[u8], b: &[u8]) -> usize {
 }
 
 #[test]
-#[ignore = "requires a MAKEPAD=gpusim release build"]
+#[ignore = "requires a native HAL GPU release build"]
 fn text_clips_like_quads_after_view_transform() {
-    assert!(std::env::var("MAKEPAD")
-        .unwrap_or_default()
-        .contains("gpusim"));
-    std::env::set_var("MAKEPAD_GPUSIM_DPI", "1");
-    let keep = std::env::var_os("MAKEPAD_GPUSIM_OUT_DIR");
+    let keep = std::env::var_os("MAKEPAD_TEST_OUT_DIR");
     let directory = keep
         .as_ref()
         .map(std::path::PathBuf::from)
@@ -391,4 +345,28 @@ fn text_clips_like_quads_after_view_transform() {
     if keep.is_none() {
         std::fs::remove_dir_all(directory).unwrap();
     }
+}
+
+fn capture(cx: &Rc<RefCell<Cx>>, path: &Path, glyphs_ready: &Cell<bool>) {
+    use makepad_draw::makepad_platform::makepad_hal::{self as hal_api, Hal, OpenReq, open_flags};
+    let hal = Hal::global();
+    let mut req = OpenReq::from_env(0, open_flags::OFFSCREEN_WINDOWS, 1.0);
+    req.flags |= open_flags::OFFSCREEN_WINDOWS | open_flags::RETAIN_WINDOWS;
+    let info = hal.open(&req);
+    assert_ne!(info.backend, hal_api::backend_id::HEADLESS, "pixel comparisons require a GPU");
+    cx.borrow_mut().hal_attach_session(info);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let pixels = loop {
+        assert!(std::time::Instant::now() < deadline, "HAL capture timed out waiting for the requested glyph kinds");
+        let mut cx = cx.borrow_mut();
+        assert!(cx.hal_session_turn(1_000_000, true));
+        let submitted = cx.frame_submission_serial();
+        if submitted != 0 && cx.frame_completion_serial() == submitted
+            && cx.pipelines_pending() == 0 && cx.pending_async_loads().is_empty()
+            && glyphs_ready.get() {
+            if let Some(pixels) = hal.window_pixels(info.session, None) { break pixels; }
+        }
+    };
+    hal.close(info.session);
+    std::fs::write(path, hal_api::automation::png_rgba(pixels.w, pixels.h, &pixels.rgba)).unwrap();
 }

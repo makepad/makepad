@@ -1,7 +1,7 @@
 //! Themes the person saved, and the rule that a shipped one is permanent.
 //!
 //! The library ships three base themes ([`Scheme`]) and a style sheet per
-//! desktop ([`DesktopStyle`]). Those are BUILT-IN: they live in the binary,
+//! desktop (the sheet catalogue, [`crate::desktop_style::catalogue`]). Those are BUILT-IN: they live in the binary,
 //! the picker always offers them, and nothing here can remove or overwrite
 //! one. Everything else is a SAVED theme -- a snapshot of whatever was in
 //! force when the person pressed "save as", written to a file under
@@ -64,7 +64,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::desktop_style::DesktopStyle;
 use crate::makepad_platform::home::makepad_home;
 use crate::theme_tokens::{theme_module_script, Scheme, TokenValue};
 use crate::Cx;
@@ -254,9 +253,9 @@ fn fold(name: &str) -> String {
 /// theme the person already saved into a collision.
 pub fn builtin_names() -> Vec<String> {
     let mut out: Vec<String> = Scheme::ALL.iter().map(|s| s.theme_name().to_string()).collect();
-    for style in DesktopStyle::ALL {
-        out.push(style.id().to_string());
-        out.push(format!("{}-dark", style.id()));
+    for entry in crate::desktop_style::catalogue() {
+        out.push(entry.id.to_string());
+        out.push(format!("{}-dark", entry.id));
     }
     out.extend(RESERVED_NAMES.iter().map(|s| s.to_string()));
     out.extend(RESERVED_KEYWORDS.iter().map(|s| s.to_string()));
@@ -299,7 +298,7 @@ pub struct SavedTheme {
     /// its appearance, or `None` for a bare base theme. Install this before
     /// running [`SavedTheme::script`]: the sheet brings the fonts and the
     /// widget re-skins, and the script then pins the tokens over it.
-    pub sheet: Option<(DesktopStyle, bool)>,
+    pub sheet: Option<&'static str>,
     /// Every token the theme pins, sorted by name.
     pub overrides: Vec<(String, TokenValue)>,
 }
@@ -316,21 +315,30 @@ impl SavedTheme {
     /// evaluates [`crate::theme_tokens::ThemeBlend::script`] -- with the
     /// sheet from [`SavedTheme::sheet`] installed first -- and follow it with
     /// `cx.request_script_reapply()`.
+    ///
+    /// A theme whose DIMENSIONS moved -- its spacing, its roundness, its type
+    /// size -- and that has no sheet under it derives from the base built
+    /// again with those numbers in place, rather than from the base object:
+    /// the insets and the text styles are objects the base file derives, a
+    /// pin cannot carry one, and without this a theme saved roomy came back
+    /// with the library's margins. See
+    /// [`crate::theme_builder::rederived_pin_script`].
     pub fn script(&self) -> String {
+        if self.sheet.is_none() {
+            if let Some(script) =
+                crate::theme_builder::rederived_pin_script(&self.name, self.base, &self.overrides)
+            {
+                return script;
+            }
+        }
         theme_module_script(&self.name, self.base.theme_name(), &self.overrides)
     }
 
     /// The sheet's name as [`crate::desktop_style::current_name`] reports it
-    /// and [`crate::desktop_style::DesktopStyle::parse`] reads it back:
-    /// `macos`, `macos-dark`.
+    /// and [`crate::desktop_style::find`] reads it back: `macos`,
+    /// `macos-dark`.
     pub fn sheet_name(&self) -> Option<String> {
-        self.sheet.map(|(style, dark)| {
-            if dark {
-                format!("{}-dark", style.id())
-            } else {
-                style.id().to_string()
-            }
-        })
+        self.sheet.map(str::to_string)
     }
 
     /// The file's whole text, as [`SavedTheme::parse`] reads it: the header,
@@ -378,7 +386,7 @@ impl SavedTheme {
         }
         let mut name: Option<String> = None;
         let mut base: Option<Scheme> = None;
-        let mut sheet: Option<(DesktopStyle, bool)> = None;
+        let mut sheet: Option<&'static str> = None;
         let mut overrides: Vec<(String, TokenValue)> = Vec::new();
         for line in lines {
             if line.trim().is_empty() {
@@ -400,7 +408,7 @@ impl SavedTheme {
                     // A sheet this build does not know is not an error: the
                     // theme's own tokens are all still there, and dropping
                     // the sheet loses only the re-skin.
-                    sheet = DesktopStyle::parse(id).map(|style| (style, id.ends_with("-dark")));
+                    sheet = crate::desktop_style::find(id).map(|entry| entry.id);
                 }
                 "token" => {
                     let Some((token, value)) = rest.split_once('\t') else {
@@ -547,15 +555,35 @@ pub fn path_of(name: &str) -> Result<PathBuf, StoreError> {
 // Listing, loading, saving, deleting
 // ---------------------------------------------------------------------------
 
-/// Every saved theme in `dir`, by name, in order. A directory that is not
-/// there, or cannot be read, is no themes rather than an error: an empty
-/// picker is the truth, and the first save creates the folder.
-pub fn list_in(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+/// Every saved theme in `dir`, by name, in order.
+///
+/// `Ok` of nothing means there are no saved themes, and a folder that is not
+/// there is one of those: it is where every workspace starts, and the first
+/// save creates it. Every other failure is an `Err`, because it does not mean
+/// the themes are gone, it means the store could not TELL -- a sync client
+/// renaming the folder out from under it, a scanner holding a handle, a share
+/// that blipped. On Windows those are a handle away and this runs on every
+/// entry into the Theme tab.
+///
+/// The two used to be one answer, an empty `Vec` for both, and the caller
+/// that drops the theme it is wearing when the wearer's name is not in the
+/// list took "I could not tell" for "it is gone" and stripped a saved theme,
+/// name and pins, off the screen with no undo. A `Result` is the smallest
+/// thing that cannot be read the wrong way round: a caller that truly wants
+/// an empty list out of a failure has to write `unwrap_or_default` and say so
+/// where the next reader can see it.
+pub fn list_in(dir: &Path) -> Result<Vec<String>, StoreError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(StoreError::Io(error.to_string())),
     };
     let mut out: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        // An entry that cannot be read is the same "could not tell" one file
+        // further in: skipping it would hand back a list that is short by one
+        // and looks exactly like a list somebody deleted from.
+        let entry = entry.map_err(|error| StoreError::Io(error.to_string()))?;
         let path = entry.path();
         // Case-insensitively, because `exists_in` asks the FILESYSTEM and
         // Windows and macOS answer that `sunset.THEME` is `sunset.theme`.
@@ -581,12 +609,12 @@ pub fn list_in(dir: &Path) -> Vec<String> {
     }
     out.sort();
     out.dedup();
-    out
+    Ok(out)
 }
 
 /// Every saved theme, by name, in order. What the picker lists under the
-/// built-ins.
-pub fn list() -> Vec<String> {
+/// built-ins. [`list_in`] has what an `Err` means and why it is not a list.
+pub fn list() -> Result<Vec<String>, StoreError> {
     list_in(&themes_dir())
 }
 
@@ -765,6 +793,99 @@ pub fn delete(name: &str) -> Result<(), StoreError> {
 }
 
 // ---------------------------------------------------------------------------
+// A person's own colour schemes
+// ---------------------------------------------------------------------------
+
+/// The file a person's own colour schemes go in, beside their saved themes.
+///
+/// A plain text file and not a theme file, because it holds none of a theme:
+/// a line is two, three or four colours that somebody liked together, and
+/// what the builder does with them is grow a palette from whichever of them
+/// is nearest the colour that was picked. Plain text so that a list copied
+/// out of a notebook, a screenshot or somebody else's page can be pasted
+/// straight in.
+pub const PALETTES_FILE: &str = "palettes.txt";
+
+/// The schemes written in `dir`'s palettes file, and how many lines were
+/// meant to be schemes and were not.
+///
+/// One scheme to a line: two to four colours as hex, separated by spaces or
+/// commas, with or without a leading `#`. Three, six and eight hex digits are
+/// all read; an alpha is dropped, because a palette colour is a hue and a
+/// strength and a theme draws its accents solid. A blank line is nothing, and
+/// a line opening `# ` or `//` is a note to the reader -- `#` before a hex
+/// digit is a colour, which is why the comment form needs its space.
+///
+/// Nothing here is an error. A file that is not there is a person who has not
+/// written one, and hands back no schemes; a line that does not parse is
+/// skipped and counted, so a panel can say "three lines were not colours"
+/// without the other forty being lost behind the first typo. That is the
+/// whole reason this returns a count rather than a `Result`: the schemes are
+/// what the caller wants and one bad line must never cost them.
+pub fn read_palettes_in(dir: &Path) -> (Vec<Vec<u32>>, usize) {
+    let Ok(text) = std::fs::read_to_string(dir.join(PALETTES_FILE)) else {
+        return (Vec::new(), 0);
+    };
+    let mut schemes = Vec::new();
+    let mut skipped = 0;
+    // The byte order mark an editor may have put at the head of the file,
+    // off before anything looks at a line. It is not whitespace by Rust's
+    // reckoning, so a trim leaves it welded to the first word, and the first
+    // scheme in the file would be read as a line that is not colours -- the
+    // one line in forty that fails, which looks like nothing so much as a
+    // typo the person cannot find.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "#" || line.starts_with("# ") || line.starts_with("//") {
+            continue;
+        }
+        match parse_palette(line) {
+            Some(scheme) => schemes.push(scheme),
+            None => skipped += 1,
+        }
+    }
+    (schemes, skipped)
+}
+
+/// [`read_palettes_in`] in [`themes_dir`], which `MAKEPAD_THEME_DIR`
+/// redirects like everything else in the folder.
+pub fn read_palettes() -> (Vec<Vec<u32>>, usize) {
+    read_palettes_in(&themes_dir())
+}
+
+/// One line of the palettes file. `None` for a line that is not two to four
+/// colours, whether because one word was not a colour or because there were
+/// too few or too many of them.
+fn parse_palette(line: &str) -> Option<Vec<u32>> {
+    let mut out: Vec<u32> = Vec::new();
+    for word in line.split([' ', '\t', ',', ';']).filter(|word| !word.is_empty()) {
+        out.push(parse_hex_color(word)?);
+    }
+    (2..=4).contains(&out.len()).then_some(out)
+}
+
+/// One colour as somebody writes one: `#1e90ff`, `1e90ff`, `#1EF`, or eight
+/// digits with an alpha that is dropped.
+fn parse_hex_color(word: &str) -> Option<u32> {
+    let digits = word.strip_prefix('#').unwrap_or(word);
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    match digits.len() {
+        // Each digit doubled, the way every short hex colour is read.
+        3 => {
+            let wide = |shift: u32| ((value >> shift) & 0xF) * 0x11;
+            Some((wide(8) << 24) | (wide(4) << 16) | (wide(0) << 8) | 0xFF)
+        }
+        6 => Some((value << 8) | 0xFF),
+        8 => Some(value | 0xFF),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Taking a snapshot of what is in force
 // ---------------------------------------------------------------------------
 
@@ -789,9 +910,9 @@ pub fn delete(name: &str) -> Result<(), StoreError> {
 /// sheets' own first lines by `the_sheet_table_is_what_the_sheets_say`. With
 /// no sheet installed, `mod.theme` is whatever `theme_mod` last emitted, so
 /// the app's base theme is the honest answer and is the one taken.
-pub fn snapshot_base(sheet: Option<(DesktopStyle, bool)>, app_base: Scheme) -> Scheme {
+pub fn snapshot_base(sheet: Option<&'static str>, app_base: Scheme) -> Scheme {
     match sheet {
-        Some((style, dark)) => crate::theme_tokens::BlendTheme::Sheet(style, dark).base(),
+        Some(id) => crate::theme_tokens::BlendTheme::Sheet(id).base(),
         None => app_base,
     }
 }
@@ -819,7 +940,7 @@ pub fn snapshot(cx: &mut Cx, name: &str) -> Result<SavedTheme, StoreError> {
     }
     let sheet = cx
         .with_vm(|vm| crate::desktop_style::current_name(vm))
-        .and_then(|id| DesktopStyle::parse(&id).map(|style| (style, id.ends_with("-dark"))));
+        .and_then(|id| crate::desktop_style::find(&id).map(|entry| entry.id));
     let app_base = match crate::base_theme(cx) {
         crate::BaseTheme::Dark => Scheme::Dark,
         crate::BaseTheme::Light => Scheme::Light,
@@ -852,7 +973,7 @@ mod tests {
     /// A directory of this test's own, so the tests need no environment
     /// variable, cannot tread on each other under a parallel runner, and
     /// never go near the person's own theme folder.
-    fn scratch(tag: &str) -> PathBuf {
+    pub(super) fn scratch(tag: &str) -> PathBuf {
         static COUNT: AtomicUsize = AtomicUsize::new(0);
         let n = COUNT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("makepad-theme-store-{tag}-{}-{n}", std::process::id()));
@@ -864,7 +985,7 @@ mod tests {
         SavedTheme {
             name: name.to_string(),
             base: Scheme::Dark,
-            sheet: Some((DesktopStyle::Macos, true)),
+            sheet: Some("macos-dark"),
             overrides: vec![
                 ("color_text".to_string(), TokenValue::Color(0xFF_EE_DD_CC)),
                 ("space_factor".to_string(), TokenValue::Num(1.25)),
@@ -920,9 +1041,9 @@ mod tests {
         for scheme in Scheme::ALL {
             assert!(is_builtin(scheme.theme_name()), "{:?}", scheme);
         }
-        for style in DesktopStyle::ALL {
-            assert!(is_builtin(style.id()), "{:?}", style);
-            assert!(is_builtin(&format!("{}-dark", style.id())), "{:?} dark", style);
+        for entry in crate::desktop_style::catalogue() {
+            assert!(is_builtin(entry.id), "{}", entry.id);
+            assert!(is_builtin(&format!("{}-dark", entry.id)), "{} dark", entry.id);
         }
         for reserved in RESERVED_NAMES {
             assert!(is_builtin(reserved), "{reserved:?}");
@@ -948,7 +1069,7 @@ mod tests {
             assert_eq!(load_in(&dir, name), Err(StoreError::Builtin(name.to_string())));
             assert!(!exists_in(&dir, name));
         }
-        assert!(list_in(&dir).is_empty());
+        assert!(list_in(&dir).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -963,7 +1084,7 @@ mod tests {
         theme.overrides = vec![("color_text".to_string(), TokenValue::Color(0x11_22_33_44))];
         assert!(save_replacing_in(&dir, &theme).is_ok());
         assert_eq!(load_in(&dir, "sunset").unwrap().overrides, theme.overrides);
-        assert_eq!(list_in(&dir), vec!["sunset".to_string()]);
+        assert_eq!(list_in(&dir).unwrap(), vec!["sunset".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -982,7 +1103,7 @@ mod tests {
     #[test]
     fn saving_loading_and_deleting_one() {
         let dir = scratch("round");
-        assert!(list_in(&dir).is_empty());
+        assert!(list_in(&dir).unwrap().is_empty());
         assert_eq!(load_in(&dir, "sunset"), Err(StoreError::NotFound("sunset".to_string())));
         assert_eq!(delete_in(&dir, "sunset"), Err(StoreError::NotFound("sunset".to_string())));
         let theme = sample("sunset");
@@ -993,7 +1114,32 @@ mod tests {
         assert_eq!(load_in(&dir, "sunset").unwrap(), theme);
         assert_eq!(delete_in(&dir, "sunset"), Ok(()));
         assert!(!exists_in(&dir, "sunset"));
-        assert!(list_in(&dir).is_empty());
+        assert!(list_in(&dir).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder that is not there is no saved themes. A folder the store
+    /// cannot read is not an answer at all, and must not arrive looking like
+    /// the first one: the panel drops the theme it is wearing, and its pins,
+    /// when the name it wears is missing from the list.
+    ///
+    /// The unreadable case is a path that is a FILE, which is the one
+    /// `read_dir` failure a test can make happen on every platform without a
+    /// sync client or a scanner. It is the same `read_dir` call and the same
+    /// arm as the handle that really does this.
+    #[test]
+    fn a_folder_that_cannot_be_read_is_not_a_folder_with_nothing_in_it() {
+        let dir = scratch("unreadable");
+        assert_eq!(list_in(&dir), Ok(Vec::new()), "a folder nobody has saved into yet");
+
+        std::fs::create_dir_all(&dir).unwrap();
+        let not_a_dir = dir.join("sunset.theme");
+        std::fs::write(&not_a_dir, sample("sunset").to_text()).unwrap();
+        assert_eq!(list_in(&dir), Ok(vec!["sunset".to_string()]), "and one that has");
+        match list_in(&not_a_dir) {
+            Err(StoreError::Io(why)) => assert!(!why.is_empty(), "the reason is what the panel shows"),
+            other => panic!("a file read as a folder answered {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1008,7 +1154,7 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "not a theme").unwrap();
         std::fs::write(dir.join("Sunset.theme"), sample("sunset").to_text()).unwrap();
         std::fs::write(dir.join("dark.theme"), sample("mike").to_text()).unwrap();
-        assert_eq!(list_in(&dir), vec!["alpha".to_string(), "mike".to_string(), "zulu".to_string()]);
+        assert_eq!(list_in(&dir).unwrap(), vec!["alpha".to_string(), "mike".to_string(), "zulu".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1080,13 +1226,17 @@ mod tests {
         assert_eq!(theme.sheet, None);
     }
 
+    /// The trailing `true` is part of the script and not decoration. The
+    /// panel evaluates this text as it stands, and the VM drops the last
+    /// statement of a body it parsed from text -- see `theme_module_script`,
+    /// whose own test drives a VM over both shapes.
     #[test]
     fn the_script_is_the_sanctioned_override_path() {
         let theme = sample("sunset");
         let script = theme.script();
         assert_eq!(
             script,
-            "mod.themes.sunset = mod.themes.dark{ color_text: #xFFEEDDCC space_factor: 1.25 }\nmod.theme = mod.themes.sunset\n"
+            "mod.themes.sunset = mod.themes.dark{ color_text: #xFFEEDDCC space_factor: 1.25 }\nmod.theme = mod.themes.sunset\ntrue\n"
         );
         assert_eq!(theme.sheet_name(), Some("macos-dark".to_string()));
         assert_eq!(SavedTheme::new("bare", Scheme::Light).sheet_name(), None);
@@ -1202,7 +1352,7 @@ mod tests {
             .collect();
         assert_eq!(files, vec![format!("sunset.{FILE_EXTENSION}")]);
         assert_eq!(load_in(&dir, "sunset").unwrap(), replaced);
-        assert_eq!(list_in(&dir), vec!["sunset".to_string()]);
+        assert_eq!(list_in(&dir).unwrap(), vec!["sunset".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1217,7 +1367,7 @@ mod tests {
         let theme = SavedTheme::parse(&text).unwrap();
         assert_eq!(theme.name, "sunset");
         assert_eq!(theme.base, Scheme::Dark);
-        assert_eq!(theme.sheet, Some((DesktopStyle::Macos, true)));
+        assert_eq!(theme.sheet, Some("macos-dark"));
         assert_eq!(theme.overrides, vec![("color_text".to_string(), TokenValue::Color(0xFF_EE_DD_CC))]);
     }
 
@@ -1321,7 +1471,7 @@ mod tests {
     fn a_folder_that_is_not_there_is_no_themes_rather_than_an_error() {
         let dir = scratch("absent");
         assert!(!dir.exists());
-        assert!(list_in(&dir).is_empty());
+        assert!(list_in(&dir).unwrap().is_empty());
         assert!(!exists_in(&dir, "sunset"));
         assert_eq!(load_in(&dir, "sunset"), Err(StoreError::NotFound("sunset".to_string())));
         assert_eq!(delete_in(&dir, "sunset"), Err(StoreError::NotFound("sunset".to_string())));
@@ -1343,7 +1493,7 @@ mod tests {
         let dir = scratch("light-sheet");
         // macOS in its light appearance, while the panel has the app on the
         // dark base -- which is exactly what `apply_theme_preset` leaves.
-        let sheet = Some((DesktopStyle::Macos, false));
+        let sheet = Some("macos");
         let base = snapshot_base(sheet, Scheme::Dark);
         assert_eq!(base, Scheme::Light, "a light sheet derives from light");
         let theme = SavedTheme {
@@ -1369,23 +1519,11 @@ mod tests {
     /// from, so a sheet that changes its first line moves both together.
     #[test]
     fn a_snapshot_takes_the_sheets_base_and_not_the_apps() {
-        for style in DesktopStyle::ALL {
-            for dark in [false, true] {
-                if dark && !style.supports_dark() {
-                    continue;
-                }
-                let sheet = Some((style, dark));
-                let wanted = crate::theme_tokens::BlendTheme::Sheet(style, dark).base();
-                // Whatever the app's own base is, the sheet's wins.
-                for app in Scheme::ALL {
-                    assert_eq!(
-                        snapshot_base(sheet, app),
-                        wanted,
-                        "{}{}",
-                        style.id(),
-                        if dark { "-dark" } else { "" }
-                    );
-                }
+        for entry in crate::desktop_style::catalogue() {
+            let wanted = crate::theme_tokens::BlendTheme::Sheet(entry.id).base();
+            // Whatever the app's own base is, the sheet's wins.
+            for app in Scheme::ALL {
+                assert_eq!(snapshot_base(Some(entry.id), app), wanted, "{}", entry.id);
             }
         }
         // ...and with no sheet on, the app's base is the only answer there
@@ -1423,10 +1561,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let theme = sample("sunset");
         std::fs::write(dir.join("sunset.THEME"), theme.to_text()).unwrap();
-        assert_eq!(list_in(&dir), vec!["sunset".to_string()]);
+        assert_eq!(list_in(&dir).unwrap(), vec!["sunset".to_string()]);
         // A different extension is still not a theme.
         std::fs::write(dir.join("notes.txt"), "hello").unwrap();
-        assert_eq!(list_in(&dir), vec!["sunset".to_string()]);
+        assert_eq!(list_in(&dir).unwrap(), vec!["sunset".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -1467,5 +1605,97 @@ token	space_factor	1.25
         for bad in ["theme.color_text", "#xZZZZZZZZ", "#xFFF", "inf", "NaN", "", "1.0 } x"] {
             assert!(parse_value(bad).is_none(), "{bad:?} should not parse");
         }
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::tests::scratch;
+    use super::*;
+
+    /// A person's own schemes, written the several ways a person writes
+    /// them: hashes or not, commas or spaces, three digits or six or eight.
+    /// The lines that are not schemes are counted and stepped over, and the
+    /// forty that are do not go down with them.
+    #[test]
+    fn palettes_are_read_a_line_at_a_time() {
+        let dir = scratch("palettes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(PALETTES_FILE),
+            "# my own, from the notebook\r\n\
+             \r\n\
+             #1e90ff #ffa500 #2f4f4f\r\n\
+             1E90FF, FFA500\r\n\
+             #f0a, 0b3, 39c, ccc\r\n\
+             // the next one has an alpha on it\r\n\
+             #1e90ff80 #ffa50040\r\n\
+             #\r\n\
+             not a colour at all\r\n\
+             #1e90ff\r\n\
+             112233 445566 778899 aabbcc ddeeff\r\n\
+             #1e90ff #gggggg\r\n",
+        )
+        .unwrap();
+        let (schemes, skipped) = read_palettes_in(&dir);
+        assert_eq!(
+            schemes,
+            vec![
+                vec![0x1E90FFFF, 0xFFA500FF, 0x2F4F4FFF],
+                vec![0x1E90FFFF, 0xFFA500FF],
+                vec![0xFF00AAFF, 0x00BB33FF, 0x3399CCFF, 0xCCCCCCFF],
+                // An alpha is dropped: a palette colour is a hue and a
+                // strength, and a theme draws its accents solid.
+                vec![0x1E90FFFF, 0xFFA500FF],
+            ]
+        );
+        // One colour, five colours, a word, a bad digit -- four lines that
+        // were meant to be schemes; the comments and the blank were not.
+        assert_eq!(skipped, 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No file is no schemes and no complaint: it is where everybody starts,
+    /// and a builder that offered nothing of its own would be right.
+    #[test]
+    fn no_palettes_file_is_no_schemes() {
+        let dir = scratch("no-palettes");
+        assert_eq!(read_palettes_in(&dir), (Vec::new(), 0));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(read_palettes_in(&dir), (Vec::new(), 0));
+        std::fs::write(dir.join(PALETTES_FILE), "# nothing but a note\r\n\r\n").unwrap();
+        assert_eq!(read_palettes_in(&dir), (Vec::new(), 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file an editor put a byte order mark on is still a palettes file,
+    /// and the first line of it is still a scheme.
+    ///
+    /// The mark is not whitespace, so a trim leaves it welded to the first
+    /// word; the word is then not a comment and not hex, and the scheme goes
+    /// down as a line that is not colours. It is the FIRST line every time,
+    /// which makes the loss look arbitrary to somebody whose other forty
+    /// lines read perfectly.
+    #[test]
+    fn a_byte_order_mark_does_not_cost_the_first_scheme() {
+        let dir = scratch("bom-palettes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(PALETTES_FILE),
+            "\u{FEFF}#1e90ff #ffa500 #2f4f4f\r\n#f0a #0b3\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_palettes_in(&dir),
+            (
+                vec![vec![0x1E90FFFF, 0xFFA500FF, 0x2F4F4FFF], vec![0xFF00AAFF, 0x00BB33FF]],
+                0
+            )
+        );
+        // And a mark over a file whose first line is a note leaves the note
+        // a note rather than making it the one line that is not colours.
+        std::fs::write(dir.join(PALETTES_FILE), "\u{FEFF}// from the notebook\r\n#f0a #0b3\r\n").unwrap();
+        assert_eq!(read_palettes_in(&dir), (vec![vec![0xFF00AAFF, 0x00BB33FF]], 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

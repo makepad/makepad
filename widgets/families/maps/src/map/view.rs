@@ -378,6 +378,19 @@ fn overlay_fetch_key(key: TileKey, zoom_range: (u32, u32)) -> Option<TileKey> {
     })
 }
 
+/// New archive tile requests allowed this frame: the free slots, and
+/// during a camera flight the flight's per-frame and in-flight caps.
+fn archive_request_budget(slot_cap: usize, in_flight: usize, flying: bool) -> usize {
+    if flying {
+        FLY_TILES_IN_FLIGHT
+            .min(slot_cap)
+            .saturating_sub(in_flight)
+            .min(FLY_TILE_REQUESTS_PER_FRAME)
+    } else {
+        slot_cap.saturating_sub(in_flight)
+    }
+}
+
 fn want_fringe_for_tilt(tilt: f64, currently_baked: bool) -> bool {
     if tilt < 30.0 {
         true
@@ -2576,7 +2589,7 @@ script_mod! {
         }
 
         pixel: fn() {
-            let color = self.tex.sample_as_bgra(self.uv)
+            let color = self.tex.sample(self.uv)
             let a = min(color.w * self.opacity_boost, 1.0)
             return vec4(color.xyz * a, a)
         }
@@ -2613,7 +2626,7 @@ script_mod! {
             // The texture stores the CONTINUOUS interpolated radar value
             // (0..255 in .x, coverage in .w); band the field HERE so the
             // isolines are screen-resolution crisp at any zoom.
-            let sampled = self.tex.sample_as_bgra(self.uv)
+            let sampled = self.tex.sample(self.uv)
             if sampled.w < 0.5 {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
@@ -2878,6 +2891,13 @@ script_mod! {
 /// Frames after the last zoom change before stale-bucket tiles restyle
 /// (~0.3s at 60fps).
 const ZOOM_SETTLE_SECONDS: f64 = 0.08;
+/// During a `fly_to` the camera sweeps across tiles it only shows for a
+/// few frames (Amsterdam to Shenzhen passed hundreds of z13-14 tiles):
+/// at most this many new archive tile requests per frame, and this many
+/// in flight. Requests leaving the view are cancelled as always; the
+/// destination's tiles load at the normal rate once the flight lands.
+const FLY_TILE_REQUESTS_PER_FRAME: usize = 1;
+const FLY_TILES_IN_FLIGHT: usize = 4;
 /// Frames before an archive-absent tile is probed again (~30 s at 60 fps).
 const MISSING_RECHECK_FRAMES: u64 = 1800;
 const ARCHIVE_REQUEST_TIMEOUT_SECONDS: f64 = 10.0;
@@ -3464,7 +3484,9 @@ impl UniformSlot {
         }
         let offset = self.offset as usize;
         for (i, v) in value.iter().take(self.slots as usize).enumerate() {
-            buf[offset + i] = *v;
+            if let Some(lane) = buf.get_mut(offset + i) {
+                *lane = *v;
+            }
         }
     }
 }
@@ -4467,6 +4489,10 @@ pub struct MapView {
     use_network: bool,
     #[live(true)]
     use_local_mbtiles: bool,
+    /// Offline: hosted archives answer only from their disk cache; tiles it
+    /// does not hold show as no data, with no request, retry or wait.
+    #[rust]
+    cache_only: bool,
     /// Overrides the built-in LOCAL_MBTILES_PATH when non-empty, so each app
     /// can point its MapView at its own tile archive.
     #[live]
@@ -4776,7 +4802,7 @@ pub struct MapView {
     // Shaped text runs keyed by (text hash, len, quantized font_scale bits);
     // shaping dominates label placement cost.
     #[rust]
-    shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun>>,
+    shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun<crate::makepad_draw::text::rasterizer::RasterizedGlyph>>>,
     // Finished tile buffers waiting for GPU upload; drained within per-frame
     // count and byte budgets so a rebuild burst cannot monopolize a frame.
     #[rust]
@@ -4843,10 +4869,14 @@ pub struct MapView {
     fly_timer: Timer,
     #[rust]
     gesture_panned: bool,
-    /// Right-button / Option-drag camera gesture: (start abs, start
+    /// Right-button / Option-drag (or Ctrl/Shift-drag) camera gesture: (start abs, start
     /// rotation, start tilt).
     #[rust]
     rotate_drag: Option<(Vec2d, f64, f64)>,
+    /// A Ctrl/Shift+left press: the camera gesture once it drags past 6
+    /// points (touchpads have no right drag); a click stays a click.
+    #[rust]
+    rotate_on_drag: bool,
     #[rust]
     last_tap_count: u32,
     #[rust]
@@ -5087,7 +5117,19 @@ slack={:.1} tiles={}/{} baked={:.1} lists={} geoms={} budget={:.0} big=[{big}]",
 }
 
 impl Widget for MapView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::GpuReset = event {
+            // The tiles' geometry was GPU-only (its CPU copy is released after upload,
+            // `release_uploaded_staging`): every tile bakes again from the archive, as after a
+            // theme change.
+            self.apply_theme_change();
+            self.redraw(cx);
+        }
         if self.use_local_mbtiles {
             self.ensure_archive_source(cx);
             self.handle_archive_events(cx, event);
@@ -5227,6 +5269,7 @@ impl Widget for MapView {
                     self.gesture_panned = false;
                     self.drag_start_abs = Some(fe.abs);
                     self.drag_start_center_norm = self.center_norm;
+                    self.rotate_on_drag = fe.modifiers.control || fe.modifiers.shift;
                     self.last_tap_count = fe.tap_count;
                     cx.set_cursor(MouseCursor::Grabbing);
                 }
@@ -5244,6 +5287,12 @@ impl Widget for MapView {
                     self.tilt = if raw_tilt < 6.0 { 0.0 } else { raw_tilt };
                     cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: self.tilt });
                     self.redraw(cx);
+                } else if let Some(start_abs) = self.drag_start_abs.filter(|_| self.rotate_on_drag) {
+                    if (fe.abs - start_abs).length() > 6.0 {
+                        self.drag_start_abs = None;
+                        self.rotate_drag = Some((start_abs, self.rotation, self.tilt));
+                        cx.set_cursor(MouseCursor::Default);
+                    }
                 } else if let Some(start_abs) = self.drag_start_abs {
                     let delta = fe.abs - start_abs;
                     if delta.length() > 6.0 {
@@ -7639,6 +7688,38 @@ impl MapView {
         }
     }
 
+    fn apply_archive_cache_only(&mut self) {
+        let on = self.cache_only;
+        for archive in self
+            .base_archive
+            .iter_mut()
+            .chain(self.detail_archive.iter_mut())
+            .chain(self.overlay_archives.iter_mut().filter_map(|overlay| overlay.archive.as_mut()))
+        {
+            archive.set_cache_only(on);
+        }
+    }
+
+    /// Cache-only (offline) on or off. Turning it off forgets the tiles
+    /// the cache did not hold so they are fetched again.
+    pub fn set_cache_only(&mut self, cx: &mut Cx, on: bool) {
+        if self.cache_only == on {
+            return;
+        }
+        self.cache_only = on;
+        self.apply_archive_cache_only();
+        if !on {
+            self.local_missing_tiles.clear();
+            self.tiles
+                .retain(|_, entry| !matches!(entry.state, TileLoadState::Failed { .. }));
+        }
+        self.redraw(cx);
+    }
+
+    pub fn is_cache_only(&self) -> bool {
+        self.cache_only
+    }
+
     fn install_overlay_sources(&mut self, cx: &mut Cx) {
         let workers = self.ensure_archive_worker_pool(cx);
         self.overlay_archives = self
@@ -7676,6 +7757,7 @@ impl MapView {
             })
             .collect();
         self.apply_archive_cache_budgets(cx);
+        self.apply_archive_cache_only();
     }
 
     fn install_archive_source(&mut self, cx: &mut Cx, config: TileSourceConfig) {
@@ -7722,6 +7804,7 @@ impl MapView {
         }
         self.tile_source_config = Some(config);
         self.apply_archive_cache_budgets(cx);
+        self.apply_archive_cache_only();
         self.archive_pending_tiles.clear();
         self.pending_ready_tiles.clear();
         self.local_source_zoom_range = None;
@@ -8329,7 +8412,9 @@ impl MapView {
         } else {
             12usize
         };
-        let max_in_flight = slot_cap.saturating_sub(self.local_requested_tiles.len());
+        let flying = self.fly.is_some_and(|fly| fly.anchor.is_none());
+        let max_in_flight =
+            archive_request_budget(slot_cap, self.local_requested_tiles.len(), flying);
         if missing.len() > max_in_flight {
             missing.truncate(max_in_flight);
         }
@@ -9502,7 +9587,7 @@ impl MapView {
             }
         }
 
-        if !allow_network || !self.use_network {
+        if !allow_network || !self.use_network || self.cache_only {
             return false;
         }
 
@@ -10629,7 +10714,7 @@ impl MapView {
             let shaped = self
                 .draw_label
                 .draw_super
-                .prepare_single_line_run(cx, candidate.text.as_str())
+                .prepare_single_line_raster_run(cx, candidate.text.as_str())
                 .filter(|run| !run.glyphs.is_empty());
             self.shaped_runs.insert(run_key, shaped);
         }
@@ -12289,6 +12374,13 @@ impl MapViewRef {
         }
     }
 
+    /// See [`MapView::set_cache_only`].
+    pub fn set_cache_only(&self, cx: &mut Cx, on: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_cache_only(cx, on);
+        }
+    }
+
     pub fn set_source_paths(&self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_source_paths(cx, base, detail, bridge_dz);
@@ -13643,5 +13735,48 @@ mod tests {
         assert!(map.archive_request_watchdog_handle.is_none());
         assert!(map.local_requested_tiles.contains_key(&key));
         assert!(map.archive_pending_tiles.contains_key(&key));
+    }
+
+    #[test]
+    fn a_camera_flight_requests_few_archive_tiles_and_the_landing_requests_the_rest() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://never.invalid/world.mkmap"),
+        );
+        // The keys sit at the zoom the view requests, so none is obsolete.
+        let z = map.request_zoom_level();
+        map.visible_tiles = (0..4)
+            .flat_map(|x| (0..4).map(move |y| TileKey { z, x, y }))
+            .collect();
+        map.fly = Some(FlyTo {
+            started: 0.0,
+            duration: 2.0,
+            from_center: map.center_norm,
+            to_center: map.center_norm,
+            from_zoom: map.zoom,
+            to_zoom: map.zoom,
+            arc: 4.0,
+            anchor: None,
+        });
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert_eq!(map.local_requested_tiles.len(), FLY_TILE_REQUESTS_PER_FRAME);
+        for _ in 0..10 {
+            map.request_visible_tiles_from_local_source(&mut cx);
+        }
+        assert_eq!(map.local_requested_tiles.len(), FLY_TILES_IN_FLIGHT);
+        map.fly = None;
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert_eq!(map.local_requested_tiles.len(), 16);
+    }
+
+    #[test]
+    fn archive_request_budget_caps_only_flights() {
+        assert_eq!(archive_request_budget(64, 10, false), 54);
+        assert_eq!(archive_request_budget(64, 70, false), 0);
+        assert_eq!(archive_request_budget(64, 0, true), FLY_TILE_REQUESTS_PER_FRAME);
+        assert_eq!(archive_request_budget(64, FLY_TILES_IN_FLIGHT, true), 0);
+        assert_eq!(archive_request_budget(0, 0, true), 0);
     }
 }

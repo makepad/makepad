@@ -87,6 +87,17 @@ pub fn pack_icon_vertices(verts: &[VVertex]) -> Vec<f32> {
 }
 
 /// Pack a whole 19-stride vertex buffer for GPU upload.
+/// [`pack_vector_vertices`], `None` when the allocator refuses the room.
+pub fn try_pack_vector_vertices(vertices: &[f32]) -> Option<Vec<f32>> {
+    let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut out = Vec::new();
+    out.try_reserve_exact(count * VECTOR_PACKED_FLOATS_PER_VERTEX).ok()?;
+    for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+        out.extend_from_slice(&pack_vector_record(record));
+    }
+    Some(out)
+}
+
 pub fn pack_vector_vertices(vertices: &[f32]) -> Vec<f32> {
     let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
     let mut out = Vec::with_capacity(count * VECTOR_PACKED_FLOATS_PER_VERTEX);
@@ -1927,13 +1938,44 @@ pub fn append_expanded_stroke_geometry(
     acc_indices.extend(indices.iter().map(|&idx| base + idx));
 }
 
+/// A mesh that would not fit: what it would have held (the vertices and
+/// indices of everything asked for), past what memory gave or what one GPU
+/// buffer holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeometryFull {
+    pub vertices: usize,
+    pub indices: usize,
+}
+
+/// Whether a vector mesh of `vertices` and `indices` can be drawn: its
+/// indices address it (32-bit), each of its GPU buffers fits the largest
+/// one the device allocates, and all it holds at once on the way (the
+/// session's records, their packed copy and the GPU buffers, each with its
+/// indices) fits the memory the device works in. An unknown limit limits
+/// nothing.
+pub fn vector_mesh_fits(vertices: usize, indices: usize) -> bool {
+    let (v, i) = (vertices as u128, indices as u128);
+    let max = crate::makepad_platform::max_gpu_buffer_bytes() as u128;
+    let set = crate::makepad_platform::gpu_working_set_bytes() as u128;
+    let packed = v * VECTOR_PACKED_FLOATS_PER_VERTEX as u128 * 4;
+    let held = v * VECTOR_FLOATS_PER_VERTEX as u128 * 4 + 2 * packed + 3 * i * 4;
+    v <= u32::MAX as u128 + 1
+        && (max == 0 || (packed <= max && i * 4 <= max))
+        && (set == 0 || held <= set)
+}
+
+/// Room for `extra` more items; false when the allocator refuses it.
+fn try_grow<T>(v: &mut Vec<T>, extra: usize) -> bool {
+    v.try_reserve(extra).is_ok()
+}
+
 pub fn append_tessellated_geometry(
     verts: &[VVertex],
     indices: &[u32],
     acc_verts: &mut Vec<f32>,
     acc_indices: &mut Vec<u32>,
     params: VectorRenderParams,
-) {
+) -> Result<(), GeometryFull> {
     append_tessellated_geometry_decked(verts, indices, acc_verts, acc_indices, params, None)
 }
 
@@ -1948,13 +1990,22 @@ pub fn append_tessellated_geometry_decked(
     acc_indices: &mut Vec<u32>,
     params: VectorRenderParams,
     deck_override: Option<&[f32]>,
-) {
+) -> Result<(), GeometryFull> {
     if verts.is_empty() || indices.is_empty() {
-        return;
+        return Ok(());
+    }
+    // The mesh with these added must be drawable and its memory given:
+    // past either, nothing of them is added (the mesh so far stays whole).
+    let had = acc_verts.len() / VECTOR_FLOATS_PER_VERTEX;
+    let full = GeometryFull { vertices: had + verts.len(), indices: acc_indices.len() + indices.len() };
+    if !vector_mesh_fits(full.vertices, full.indices)
+        || !try_grow(acc_verts, verts.len() * VECTOR_FLOATS_PER_VERTEX)
+        || !try_grow(acc_indices, indices.len())
+    {
+        return Err(full);
     }
 
-    let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    acc_verts.reserve(verts.len() * VECTOR_FLOATS_PER_VERTEX);
+    let base = had as u32;
     for (vi, v) in verts.iter().enumerate() {
         let deck_v = match deck_override {
             Some(decks) => decks.get(vi).copied().unwrap_or(0.0),
@@ -1989,4 +2040,42 @@ pub fn append_tessellated_geometry_decked(
     }
 
     acc_indices.extend(indices.iter().map(|&idx| base + idx));
+    Ok(())
+}
+
+#[cfg(test)]
+mod mesh_capacity_tests {
+    use super::*;
+
+    /// A mesh past the memory the device works in stops whole at the last
+    /// shape that fit, and says how much was asked for; nothing aborts.
+    #[test]
+    fn a_mesh_past_the_device_stops_at_the_last_shape_that_fit() {
+        let verts: Vec<VVertex> = (0..4).map(|k| VVertex { x: k as f32, y: 1.0, ..Default::default() }).collect();
+        let indices = [0u32, 1, 2, 0, 2, 3];
+        let params = VectorRenderParams { color: [1.0; 4], stroke_mult: 1e6, shape_id: 0.0, params: [0.0; 6], zbias: 0.0 };
+        // A device that holds 10 such quads at once.
+        let per_quad = (4 * VECTOR_FLOATS_PER_VERTEX * 4 + 2 * 4 * VECTOR_PACKED_FLOATS_PER_VERTEX * 4 + 3 * 6 * 4) as u64;
+        let was = crate::makepad_platform::gpu_working_set_bytes();
+        crate::makepad_platform::set_gpu_working_set_bytes(per_quad * 10);
+        let (mut acc_v, mut acc_i) = (Vec::new(), Vec::new());
+        let mut fitted = 0;
+        let mut refused = None;
+        for _ in 0..1000 {
+            match append_tessellated_geometry(&verts, &indices, &mut acc_v, &mut acc_i, params) {
+                Ok(()) => fitted += 1,
+                Err(full) => {
+                    refused = Some(full);
+                    break;
+                }
+            }
+        }
+        crate::makepad_platform::set_gpu_working_set_bytes(was);
+        assert_eq!(fitted, 10);
+        assert_eq!(refused, Some(GeometryFull { vertices: 44, indices: 66 }));
+        assert_eq!((acc_v.len(), acc_i.len()), (40 * VECTOR_FLOATS_PER_VERTEX, 60));
+        // And a refused reservation (more than memory gives) is a refusal too.
+        let mut huge: Vec<f32> = Vec::new();
+        assert!(!try_grow(&mut huge, usize::MAX / 2));
+    }
 }

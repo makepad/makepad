@@ -3,7 +3,6 @@ use crate::{
     widget_async::{CxSplashVmExt, SplashVmId},
 };
 use makepad_math::Vec4f;
-use std::f64::consts::PI;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     let animator = vm.new_module(id!(animator));
@@ -24,10 +23,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_args!(value = NIL),
         move |vm, args| {
             let value = script_value!(vm, args.value);
-            let snap_obj = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(snap_obj, id!(value).into(), value);
-            vm.bx
-                .heap
+            let snap_obj = vm.new_object();
+            vm.set_value_def(snap_obj, id!(value), value);
+            vm.heap_mut()
                 .set_object_apply_transform(snap_obj, snap_transform_id);
             snap_obj.into()
         },
@@ -45,7 +43,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     // Times should be in range 0-1 (representing animation progress)
     vm.add_method(animator, id!(timeline), script_args!(), move |vm, args| {
         // Get positional args from the vec part
-        let len = vm.bx.heap.vec_len(args);
+        let len = vm.heap().vec_len(args);
 
         // Error if not mod 2 (must be pairs of time/value)
         if len % 2 != 0 {
@@ -62,25 +60,20 @@ pub fn script_mod(vm: &mut ScriptVm) {
         }
 
         // Create timeline object
-        let timeline_obj = vm.bx.heap.new_object();
+        let timeline_obj = vm.new_object();
 
         // Create a keyframes array to store the time/value pairs
-        let keyframes = vm.bx.heap.new_object();
+        let keyframes = vm.new_object();
 
         // Copy keyframes from args
         for i in 0..len {
-            let value = vm.bx.heap.vec_value(args, i, NoTrap);
-            vm.bx
-                .heap
-                .vec_push(keyframes, ScriptValue::NIL, value, NoTrap);
+            let value = vm.vec_value(args, i);
+            vm.vec_push(keyframes, ScriptValue::NIL, value);
         }
 
         // Store keyframes on timeline object
-        vm.bx
-            .heap
-            .set_value_def(timeline_obj, id!(keyframes).into(), keyframes.into());
-        vm.bx
-            .heap
+        vm.set_value_def(timeline_obj, id!(keyframes), keyframes);
+        vm.heap_mut()
             .set_object_apply_transform(timeline_obj, timeline_transform_id);
 
         timeline_obj.into()
@@ -98,7 +91,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     script_mod(vm);
 }
 
-pub trait AnimatorImpl {
+pub trait AnimatorImpl: ScriptApply + Sized {
     fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
         self.animator_cut_scoped(cx, state, &mut Scope::empty())
     }
@@ -148,22 +141,63 @@ pub trait AnimatorImpl {
         self.animator_handle_event_scoped(cx, event, &mut Scope::empty())
     }
 
-    // implemented by proc macro
-    fn animator_cut_scoped(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope: &mut Scope);
+    // implemented by `#[derive(Animator)]`: the `animator` field
+    fn animator_field(&self) -> &Animator;
+    fn animator_field_mut(&mut self) -> &mut Animator;
+
+    fn animator_cut_scoped(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope: &mut Scope) {
+        // If the VM is already held (we're inside an apply walk's cx.with_vm),
+        // cut() -> cx.with_vm would re-enter and panic; defer instead.
+        if cx.is_script_vm_held() {
+            self.animator_field_mut().defer_cut(cx, state);
+            return;
+        }
+        if let Some(value) = self.animator_field_mut().cut(cx, state) {
+            // The value lives on the animator's heap, which for a widget inside
+            // a Splash is an isolate VM, not the app VM. Apply it there.
+            let vm_id = self.animator_field().vm_id();
+            Animator::apply_value(cx, vm_id, self, scope, value);
+        }
+    }
     fn animator_play_scoped(
         &mut self,
         cx: &mut Cx,
         state: &[LiveId; 2],
         play: Option<Play>,
         scope: &mut Scope,
-    );
-    fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
+    ) {
+        if cx.is_script_vm_held() {
+            self.animator_field_mut().defer_play(cx, state, play);
+            return;
+        }
+        if let Some(value) = self.animator_field_mut().play(cx, state, play) {
+            let vm_id = self.animator_field().vm_id();
+            Animator::apply_value(cx, vm_id, self, scope, value);
+        }
+    }
+    fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool {
+        self.animator_field().in_state(cx, check_state_pair)
+    }
     fn animator_handle_event_scoped(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         scope: &mut Scope,
-    ) -> AnimatorAction;
+    ) -> AnimatorAction {
+        let mut act = AnimatorAction::None;
+        // Replay any cut/play deferred while the VM was held (it's free during event handling).
+        if self.animator_field().has_deferred() {
+            let vm_id = self.animator_field().vm_id();
+            for value in self.animator_field_mut().flush_deferred(cx) {
+                Animator::apply_value(cx, vm_id, self, scope, value);
+            }
+        }
+        if let Some(value) = self.animator_field_mut().handle_event(cx, event, &mut act) {
+            let vm_id = self.animator_field().vm_id();
+            Animator::apply_value(cx, vm_id, self, scope, value);
+        }
+        act
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -193,8 +227,9 @@ impl ScriptHook for AnimatorGroup {
             return false;
         };
 
-        let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
-            for (key, map_value) in map.iter() {
+        let mut process_map = |vm: &mut ScriptVm, entries: &[ScriptMapEntry]| {
+            for map_value in entries {
+                let key = map_value.key;
                 if let Some(key_id) = key.as_id() {
                     if key_id == id!(default) {
                         if let Some(default_id) = map_value.value.as_id() {
@@ -215,10 +250,12 @@ impl ScriptHook for AnimatorGroup {
 
         if apply.is_eval() {
             // For eval, only process the object's own map (no prototype chain)
-            vm.map_mut_with(obj, &mut process_map);
+            let entries = vm.heap().map_entries(obj);
+            process_map(vm, &entries);
         } else {
             // Walk prototype chain from root to leaf, so child properties override parent
-            vm.proto_map_iter_mut_with(obj, &mut process_map);
+            let entries = vm.heap().proto_map_entries(obj);
+            process_map(vm, &entries);
         }
 
         true
@@ -254,23 +291,42 @@ mod reload_tests {
     use super::*;
     use crate::widget_async::MAIN_SPLASH_VM_ID;
 
+    /// A state applied as a widget's default reaches the shader's slots as
+    /// written, `snap(..)` and all: the button's `hover.on` and `hover.down`
+    /// are both written with one, and a slot that skipped it left a button
+    /// built pressed showing rest.
+    #[test]
+    fn a_snap_in_a_default_state_is_written_to_a_shader_slot() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            script_mod(vm);
+            let animator = vm.module(id!(animator));
+            let snap = vm.value(animator, id!(snap));
+            let snapped = vm.call(snap, &[1.0.into()]);
+            assert!(vm.heap().has_apply_transform(snapped), "snap() made no snap object");
+            let mut slots = [0.0f32; 2];
+            DrawVars::write_value_to_f32_slots(vm.heap(), snapped, &mut slots, 1, 1, DrawShaderAttrFormat::Float);
+            assert_eq!(slots, [0.0, 1.0]);
+        });
+    }
+
     #[test]
     fn running_animation_survives_collection_of_replaced_stylesheet() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (group, old_template) = cx.with_vm(|vm| {
-            let off = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(off, id!(opacity).into(), 0.0.into());
-            let on = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(on, id!(opacity).into(), 1.0.into());
-            let template = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(template, id!(off).into(), off.into());
-            vm.bx.heap.set_value_def(template, id!(on).into(), on.into());
+            let off = vm.new_object();
+            vm.set_value_def(off, id!(opacity), 0.0);
+            let on = vm.new_object();
+            vm.set_value_def(on, id!(opacity), 1.0);
+            let template = vm.new_object();
+            vm.set_value_def(template, id!(off), off);
+            vm.set_value_def(template, id!(on), on);
             let mut group = AnimatorGroup { default: id!(off), ..Default::default() };
-            let off_ref = vm.bx.heap.new_object_ref(off);
-            let on_ref = vm.bx.heap.new_object_ref(on);
+            let off_ref = vm.new_object_ref(off);
+            let on_ref = vm.new_object_ref(on);
             group.states.insert(id!(off), AnimatorState { apply: Some(off_ref), ..Default::default() });
             group.states.insert(id!(on), AnimatorState { apply: Some(on_ref), ..Default::default() });
-            (group, vm.bx.heap.new_object_ref(template))
+            (group, vm.new_object_ref(template))
         });
         let mut animator = Animator { vm_id: MAIN_SPLASH_VM_ID, ..Default::default() };
         animator.groups.insert(id!(hover), group);
@@ -290,7 +346,7 @@ mod reload_tests {
             });
             let result = animator.handle_event(&mut cx, &event, &mut AnimatorAction::None).unwrap();
             let value = cx.with_vm(|vm| {
-                vm.bx.heap.value(result.as_object().unwrap(), id!(opacity).into(), NoTrap).as_f64()
+                vm.value(result.as_object().unwrap(), id!(opacity)).as_f64()
             });
             assert_eq!(value, Some(expected));
         }
@@ -300,14 +356,14 @@ mod reload_tests {
     /// `{slide: {hide: {apply: {offset}}}}` as a widget stylesheet or a
     /// runtime `script_apply_eval!` would hand it to the animator.
     fn slide_tree(vm: &mut ScriptVm, offset: f64) -> ScriptObject {
-        let apply = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(apply, id!(offset).into(), offset.into());
-        let hide = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(hide, id!(apply).into(), apply.into());
-        let slide = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(slide, id!(hide).into(), hide.into());
-        let tree = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(tree, id!(slide).into(), slide.into());
+        let apply = vm.new_object();
+        vm.set_value_def(apply, id!(offset), offset);
+        let hide = vm.new_object();
+        vm.set_value_def(hide, id!(apply), apply);
+        let slide = vm.new_object();
+        vm.set_value_def(slide, id!(hide), hide);
+        let tree = vm.new_object();
+        vm.set_value_def(tree, id!(slide), slide);
         tree
     }
 
@@ -319,7 +375,7 @@ mod reload_tests {
         let stylesheet = cx.with_vm(|vm| {
             let tree = slide_tree(vm, 100.0);
             animator.script_apply(vm, &Apply::New, &mut Scope::empty(), tree.into());
-            vm.bx.heap.new_object_ref(tree)
+            vm.new_object_ref(tree)
         });
         // A runtime re-target (an app resizing its page slide to the live
         // width). The eval tree is temporary: after the apply nothing but the
@@ -344,7 +400,7 @@ mod reload_tests {
             });
             let result = animator.handle_event(&mut cx, &event, &mut AnimatorAction::None).unwrap();
             last = cx.with_vm(|vm| {
-                vm.bx.heap.value(result.as_object().unwrap(), id!(offset).into(), NoTrap).as_f64()
+                vm.value(result.as_object().unwrap(), id!(offset)).as_f64()
             });
         }
         assert_eq!(last, Some(402.0));
@@ -442,7 +498,7 @@ impl ScriptHook for Animator {
         if apply.follows_script_rerun() {
             self.tracks.clear();
         }
-        let obj_ref = vm.bx.heap.new_object_ref(obj);
+        let obj_ref = vm.new_object_ref(obj);
         // Minted from the VM we are running in, so this always resolves; the
         // fallback only exists because the lookup is fallible in general.
         self.vm_id = vm
@@ -470,8 +526,9 @@ impl ScriptHook for Animator {
             }
         }
 
-        let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
-            for (key, map_value) in map.iter() {
+        let mut process_map = |vm: &mut ScriptVm, entries: &[ScriptMapEntry]| {
+            for map_value in entries {
+                let key = map_value.key;
                 if let Some(group_id) = key.as_id() {
                     // Reuse existing group if present, otherwise create new
                     if let Some(existing) = self.groups.get_mut(&group_id) {
@@ -486,10 +543,12 @@ impl ScriptHook for Animator {
 
         if apply.is_eval() {
             // For eval, only process the object's own map (no prototype chain)
-            vm.map_mut_with(obj, &mut process_map);
+            let entries = vm.heap().map_entries(obj);
+            process_map(vm, &entries);
         } else {
             // Walk prototype chain from root to leaf, so child properties override parent
-            vm.proto_map_iter_mut_with(obj, &mut process_map);
+            let entries = vm.heap().proto_map_entries(obj);
+            process_map(vm, &entries);
         }
 
         // Only mark as defined if we actually have animator groups
@@ -548,6 +607,20 @@ impl AnimatorAction {
     }
 }
 
+/// How the Animator would move a state group into a state: the duration and
+/// ease of the `Play` it picks, and whether the state asks for a redraw.
+/// Read with [`Animator::state_motion`] so a tween can move the same way
+/// (GSAP: the `duration` and `ease` of a tween built from a CSS transition).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StateMotion {
+    /// Seconds: the `Forward` duration, 0 for `Snap`.
+    pub secs: f64,
+    /// The state's `ease` (`Ease::Linear` when unset, as the Animator uses).
+    pub ease: Ease,
+    /// The state's `redraw` flag.
+    pub redraw: bool,
+}
+
 impl Animator {
     /// The VM that owns this animator's script objects: the isolate VM of the
     /// `Splash` the widget was built in, or `MAIN_SPLASH_VM_ID` for the app VM.
@@ -599,6 +672,63 @@ impl Animator {
         state.apply.as_ref().map(|apply| apply.as_object())
     }
 
+    /// The motion the Animator would play for `group.state` coming from
+    /// `from_state` (read only; nothing starts). The `Play` is picked the way
+    /// [`Animator::play`] picks it: the state's `from[from_state]`, else
+    /// `from[all]`, else `Forward { duration: 0.3 }`. `from_state` `None`
+    /// means where the group is now (its running track's state, else its
+    /// current state, else its default).
+    ///
+    /// `Forward` gives its duration and `Snap` gives 0. `None` wherever
+    /// `play` would not run a plain forward motion to `state`: an unknown
+    /// group or state, a state with no `apply`, the group already resting in
+    /// `state` (with `from_state` `None`: `play` then does nothing), a
+    /// `Reverse` (it runs the mix from `end` back toward the start values,
+    /// the opposite of a tween to `state`) and the loops (which never end).
+    ///
+    /// ```text
+    /// if let Some(m) = self.animator.state_motion(id!(hover), id!(on), None) {
+    ///     let o = TweenOpts::new().duration(m.secs).ease(m.ease.into());
+    /// }
+    /// ```
+    pub fn state_motion(
+        &self,
+        group: LiveId,
+        state: LiveId,
+        from_state: Option<LiveId>,
+    ) -> Option<StateMotion> {
+        let g = self.groups.get(&group)?;
+        let target = g.states.get(&state)?;
+        target.apply.as_ref()?;
+        let current = self.current_states.get(&group).copied().unwrap_or(g.default);
+        let track = self.tracks.iter().find(|t| t.group_id == group);
+        let from = match from_state {
+            Some(f) => f,
+            // Mirrors `play`: resting in `state` already means no motion.
+            None if current == state && track.is_none() => return None,
+            None => track.map(|t| t.state_id).unwrap_or(current),
+        };
+        let play = target
+            .from
+            .get(&from)
+            .or_else(|| target.from.get(&id!(all)))
+            .copied()
+            .unwrap_or(Play::Forward { duration: 0.3 });
+        let secs = match play {
+            Play::Forward { duration } => duration,
+            Play::Snap => 0.0,
+            Play::Reverse { .. }
+            | Play::Loop { .. }
+            | Play::ReverseLoop { .. }
+            | Play::BounceLoop { .. } => return None,
+        };
+        Some(StateMotion {
+            secs,
+            ease: target.ease.unwrap_or(Ease::Linear),
+            redraw: target.redraw,
+        })
+    }
+
     /// Start animating to a new state
     pub fn play(
         &mut self,
@@ -634,6 +764,13 @@ impl Animator {
             .map(|idx| self.tracks[idx].state_id)
             .unwrap_or(current_state_id);
 
+        // Already animating to this very state: asking again must not restart
+        // the track (a widget that re-asserts its state every frame would
+        // otherwise never reach it and keep the frame loop running forever).
+        if existing_track_idx.is_some_and(|idx| self.tracks[idx].state_id == target_state_id) {
+            return None;
+        }
+
         // If we're already in this state and not animating, do nothing
         if current_state_id == target_state_id && existing_track_idx.is_none() {
             return None;
@@ -668,8 +805,8 @@ impl Animator {
                 let state_obj = if let Some(ref obj_ref) = self.state_object {
                     obj_ref.as_object()
                 } else {
-                    let new_obj = vm.bx.heap.new_object();
-                    let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                    let new_obj = vm.new_object();
+                    let obj_ref = vm.new_object_ref(new_obj);
                     self.state_object = Some(obj_ref);
                     new_obj
                 };
@@ -691,7 +828,7 @@ impl Animator {
         // We sample from state_object (current animated values) or fall back to static state apply.
         let vm_id = self.vm_id;
         let (from_snapshot, target_apply_ref) = cx.with_script_vm_id(vm_id, |vm| {
-            let snapshot = vm.bx.heap.new_object();
+            let snapshot = vm.new_object();
 
             // Get the default state's apply for fallback values
             let default_state_id = group.default;
@@ -703,46 +840,43 @@ impl Animator {
             // For each key in target_apply (including prototype chain), get the "from" value:
             // 1. First try state_object (current animated values)
             // 2. Fall back to default state's apply if not in state_object
-            vm.proto_map_iter_mut_with(
-                target_apply,
-                &mut |vm: &mut ScriptVm, target_map: &mut ScriptObjectMap| {
-                    for (key, _) in target_map.iter() {
-                        // Try state_object first, fall back to default_apply
-                        let from_val = if let Some(ref state_obj_ref) = self.state_object {
-                            let v = vm.bx.heap.value(state_obj_ref.as_object(), *key, NoTrap);
-                            if !v.is_nil() && !v.is_err() {
-                                v
-                            } else if let Some(default_obj) = default_apply {
-                                vm.bx.heap.value(default_obj, *key, NoTrap)
-                            } else {
-                                ScriptValue::NIL
-                            }
-                        } else if let Some(default_obj) = default_apply {
-                            vm.bx.heap.value(default_obj, *key, NoTrap)
-                        } else {
-                            ScriptValue::NIL
-                        };
+            for entry in vm.heap().proto_map_entries(target_apply) {
+                let key = entry.key;
 
-                        if !from_val.is_nil() && !from_val.is_err() {
-                            // Deep copy if it's an object
-                            if let Some(from_obj) = from_val.as_object() {
-                                let new_obj = vm.bx.heap.new_object();
-                                Self::deep_copy_object(vm, new_obj, from_obj);
-                                vm.bx.heap.set_value_def(snapshot, *key, new_obj.into());
-                            } else {
-                                vm.bx.heap.set_value_def(snapshot, *key, from_val);
-                            }
-                        }
+                // Try state_object first, fall back to default_apply
+                let from_val = if let Some(ref state_obj_ref) = self.state_object {
+                    let v = vm.value(state_obj_ref.as_object(), key);
+                    if !v.is_nil() && !v.is_err() {
+                        v
+                    } else if let Some(default_obj) = default_apply {
+                        vm.value(default_obj, key)
+                    } else {
+                        ScriptValue::NIL
                     }
-                },
-            );
+                } else if let Some(default_obj) = default_apply {
+                    vm.value(default_obj, key)
+                } else {
+                    ScriptValue::NIL
+                };
+
+                if !from_val.is_nil() && !from_val.is_err() {
+                    // Deep copy if it's an object
+                    if let Some(from_obj) = from_val.as_object() {
+                        let new_obj = vm.new_object();
+                        Self::deep_copy_object(vm, new_obj, from_obj);
+                        vm.set_value_def(snapshot, key, new_obj);
+                    } else {
+                        vm.set_value_def(snapshot, key, from_val);
+                    }
+                }
+            }
 
             // Both inputs must outlive the stylesheet that started the track,
             // and any later `script_mod` re-run, so GC cannot free them under
             // the running animation.
             (
-                vm.bx.heap.new_object_ref(snapshot),
-                vm.bx.heap.new_object_ref(target_apply),
+                vm.new_object_ref(snapshot),
+                vm.new_object_ref(target_apply),
             )
         });
 
@@ -802,8 +936,8 @@ impl Animator {
             let state_obj = if let Some(ref obj_ref) = self.state_object {
                 obj_ref.as_object()
             } else {
-                let new_obj = vm.bx.heap.new_object();
-                let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                let new_obj = vm.new_object();
+                let obj_ref = vm.new_object_ref(new_obj);
                 self.state_object = Some(obj_ref);
                 new_obj
             };
@@ -1009,8 +1143,8 @@ impl Animator {
                 let state_obj = if let Some(ref obj_ref) = self.state_object {
                     obj_ref.as_object()
                 } else {
-                    let new_obj = vm.bx.heap.new_object();
-                    let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                    let new_obj = vm.new_object();
+                    let obj_ref = vm.new_object_ref(new_obj);
                     self.state_object = Some(obj_ref);
                     new_obj
                 };
@@ -1082,96 +1216,74 @@ impl Animator {
     ) {
         // Iterate over the 'to' object's properties INCLUDING prototype chain
         // This ensures we don't miss inherited properties
-        vm.proto_map_iter_mut_with(
-            to,
-            &mut |vm: &mut ScriptVm, to_map: &mut ScriptObjectMap| {
-                for (key, to_value) in to_map.iter() {
-                    let to_val = to_value.value;
+        for entry in vm.heap().proto_map_entries(to) {
+            let key = entry.key;
+            let to_val = entry.value;
 
-                    // Read from 'from' snapshot (never mutated)
-                    let from_val = vm.bx.heap.value(from, *key, NoTrap);
+            // Read from 'from' snapshot (never mutated)
+            let from_val = vm.value(from, key);
 
-                    // Get existing value at this key in result's OWN map only (not prototype)
-                    // This is critical: we must not reuse objects from prototypes as they
-                    // might be shared with template objects
-                    let existing = vm.map_mut_with(result, |_vm, result_map| {
-                        result_map
-                            .get(key)
-                            .map(|v| v.value)
-                            .unwrap_or(ScriptValue::NIL)
-                    });
+            // Get existing value at this key in result's OWN map only (not prototype)
+            // This is critical: we must not reuse objects from prototypes as they
+            // might be shared with template objects
+            let existing = vm.heap().map_own_value(result, key).unwrap_or(ScriptValue::NIL);
 
-                    // Interpolate values (creates new objects for nested structures to avoid aliasing)
-                    let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
+            // Interpolate values (creates new objects for nested structures to avoid aliasing)
+            let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
 
-                    // Write to result (state_object)
-                    vm.bx.heap.set_value_def(result, *key, interpolated);
-                }
-            },
-        );
+            // Write to result (state_object)
+            vm.set_value_def(result, key, interpolated);
+        }
     }
 
     /// Merge source object's values into target object (used for snap/cut operations)
     /// IMPORTANT: This deep-copies objects from source to avoid mutating templates
-    /// Uses proto_map_iter_mut_with to include inherited properties from prototypes
+    /// Uses proto_map_entries to include inherited properties from prototypes
     fn merge_object(vm: &mut ScriptVm, target: ScriptObject, source: ScriptObject) {
-        vm.proto_map_iter_mut_with(
-            source,
-            &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
-                for (key, source_value) in source_map.iter() {
-                    let source_val = source_value.value;
+        for entry in vm.heap().proto_map_entries(source) {
+            let key = entry.key;
+            let source_val = entry.value;
 
-                    // Get existing value at this key in target's OWN map only
-                    let existing = vm.map_mut_with(target, |_vm, target_map| {
-                        target_map
-                            .get(key)
-                            .map(|v| v.value)
-                            .unwrap_or(ScriptValue::NIL)
-                    });
+            // Get existing value at this key in target's OWN map only
+            let existing = vm.heap().map_own_value(target, key).unwrap_or(ScriptValue::NIL);
 
-                    if let Some(source_obj) = source_val.as_object() {
-                        // Source is an object - we need to handle it carefully
-                        if let Some(existing_obj) = existing.as_object() {
-                            // Both exist as objects in own map - recursively merge into existing
-                            Self::merge_object(vm, existing_obj, source_obj);
-                        } else {
-                            // Target doesn't have this in own map yet - create a COPY, don't reference
-                            let new_obj = vm.bx.heap.new_object();
-                            Self::deep_copy_object(vm, new_obj, source_obj);
-                            vm.bx.heap.set_value_def(target, *key, new_obj.into());
-                        }
-                    } else {
-                        // Primitive value - just copy it directly (primitives are value types)
-                        vm.bx.heap.set_value_def(target, *key, source_val);
-                    }
+            if let Some(source_obj) = source_val.as_object() {
+                // Source is an object - we need to handle it carefully
+                if let Some(existing_obj) = existing.as_object() {
+                    // Both exist as objects in own map - recursively merge into existing
+                    Self::merge_object(vm, existing_obj, source_obj);
+                } else {
+                    // Target doesn't have this in own map yet - create a COPY, don't reference
+                    let new_obj = vm.new_object();
+                    Self::deep_copy_object(vm, new_obj, source_obj);
+                    vm.set_value_def(target, key, new_obj);
                 }
-            },
-        );
+            } else {
+                // Primitive value - just copy it directly (primitives are value types)
+                vm.set_value_def(target, key, source_val);
+            }
+        }
     }
 
     /// Deep copy all values from source object to dest object
     /// This ensures we never share object references with templates
     /// IMPORTANT: Flattens the prototype chain to avoid shared prototype issues
     fn deep_copy_object(vm: &mut ScriptVm, dest: ScriptObject, source: ScriptObject) {
-        // Use proto_map_iter_mut_with to walk the prototype chain and flatten all values
-        vm.proto_map_iter_mut_with(
-            source,
-            &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
-                for (key, source_value) in source_map.iter() {
-                    let source_val = source_value.value;
+        // Use proto_map_entries to walk the prototype chain and flatten all values
+        for entry in vm.heap().proto_map_entries(source) {
+            let key = entry.key;
+            let source_val = entry.value;
 
-                    if let Some(source_obj) = source_val.as_object() {
-                        // Recursively copy nested objects (also flattening their prototypes)
-                        let new_obj = vm.bx.heap.new_object();
-                        Self::deep_copy_object(vm, new_obj, source_obj);
-                        vm.bx.heap.set_value_def(dest, *key, new_obj.into());
-                    } else {
-                        // Primitive - copy directly
-                        vm.bx.heap.set_value_def(dest, *key, source_val);
-                    }
-                }
-            },
-        );
+            if let Some(source_obj) = source_val.as_object() {
+                // Recursively copy nested objects (also flattening their prototypes)
+                let new_obj = vm.new_object();
+                Self::deep_copy_object(vm, new_obj, source_obj);
+                vm.set_value_def(dest, key, new_obj);
+            } else {
+                // Primitive - copy directly
+                vm.set_value_def(dest, key, source_val);
+            }
+        }
     }
 
     /// Interpolate between two ScriptValues
@@ -1189,17 +1301,17 @@ impl Animator {
             // For objects, we must create a COPY, not return the template directly!
             if let Some(to_obj) = to.as_object() {
                 // Check if it's an apply_transform (snap/timeline) - handle those specially
-                if vm.bx.heap.has_apply_transform(to) {
-                    let keyframes = vm.bx.heap.value(to_obj, id!(keyframes).into(), NoTrap);
+                if vm.heap().has_apply_transform(to) {
+                    let keyframes = vm.value(to_obj, id!(keyframes));
                     if keyframes.as_object().is_some() {
                         // Timeline - just return to value for now (the timeline itself, not interpolated)
                         return to;
                     }
                     // Snap - return the stored value
-                    return vm.bx.heap.value(to_obj, id!(value).into(), NoTrap);
+                    return vm.value(to_obj, id!(value));
                 }
                 // Regular object - create a COPY to avoid aliasing with template
-                let new_obj = vm.bx.heap.new_object();
+                let new_obj = vm.new_object();
                 Self::deep_copy_object(vm, new_obj, to_obj);
                 return new_obj.into();
             }
@@ -1209,14 +1321,14 @@ impl Animator {
 
         // Handle apply_transform objects (snap and timeline)
         if let Some(to_obj) = to.as_object() {
-            if vm.bx.heap.has_apply_transform(to) {
+            if vm.heap().has_apply_transform(to) {
                 // Check if it's a timeline object (has keyframes property)
-                let keyframes = vm.bx.heap.value(to_obj, id!(keyframes).into(), NoTrap);
+                let keyframes = vm.value(to_obj, id!(keyframes));
                 if let Some(kf_obj) = keyframes.as_object() {
                     return Self::interpolate_timeline(vm, from, kf_obj, mix, existing);
                 }
                 // Otherwise it's a snap object - return the stored value
-                return vm.bx.heap.value(to_obj, id!(value).into(), NoTrap);
+                return vm.value(to_obj, id!(value));
             }
 
             // If it's an object, recursively interpolate
@@ -1226,7 +1338,7 @@ impl Animator {
                 // After first frame, we reuse the same object and just update its keys.
                 let result_obj = existing
                     .as_object()
-                    .unwrap_or_else(|| vm.bx.heap.new_object());
+                    .unwrap_or_else(|| vm.new_object());
                 Self::interpolate_object(vm, result_obj, from_obj, to_obj, mix);
                 return result_obj.into();
             } else {
@@ -1307,7 +1419,7 @@ impl Animator {
         mix: f64,
         existing: ScriptValue,
     ) -> ScriptValue {
-        let len = vm.bx.heap.vec_len(keyframes);
+        let len = vm.heap().vec_len(keyframes);
         let num_pairs = len / 2;
 
         if num_pairs == 0 {
@@ -1315,13 +1427,10 @@ impl Animator {
         }
 
         // Get first keyframe
-        let first_time = vm
-            .bx
-            .heap
-            .vec_value(keyframes, 0, NoTrap)
+        let first_time = vm.vec_value(keyframes, 0)
             .as_f64()
             .unwrap_or(0.0);
-        let first_value = vm.bx.heap.vec_value(keyframes, 1, NoTrap);
+        let first_value = vm.vec_value(keyframes, 1);
 
         // If mix is before first keyframe, interpolate from `from` to first keyframe value
         if mix <= first_time {
@@ -1333,16 +1442,10 @@ impl Animator {
         }
 
         // Get last keyframe
-        let last_time = vm
-            .bx
-            .heap
-            .vec_value(keyframes, (num_pairs - 1) * 2, NoTrap)
+        let last_time = vm.vec_value(keyframes, (num_pairs - 1) * 2)
             .as_f64()
             .unwrap_or(1.0);
-        let last_value = vm
-            .bx
-            .heap
-            .vec_value(keyframes, (num_pairs - 1) * 2 + 1, NoTrap);
+        let last_value = vm.vec_value(keyframes, (num_pairs - 1) * 2 + 1);
 
         // If mix is at or after last keyframe, return last value
         if mix >= last_time {
@@ -1354,13 +1457,10 @@ impl Animator {
         let mut v0 = first_value;
 
         for i in 1..num_pairs {
-            let t1 = vm
-                .bx
-                .heap
-                .vec_value(keyframes, i * 2, NoTrap)
+            let t1 = vm.vec_value(keyframes, i * 2)
                 .as_f64()
                 .unwrap_or(1.0);
-            let v1 = vm.bx.heap.vec_value(keyframes, i * 2 + 1, NoTrap);
+            let v1 = vm.vec_value(keyframes, i * 2 + 1);
 
             if mix <= t1 {
                 // Interpolate between t0,v0 and t1,v1
@@ -1568,347 +1668,75 @@ pub enum Ease {
 }
 
 impl Ease {
+    /// The ease curve at `t`. The math lives in one place, `makepad_tween::Easing`
+    /// (its parity family reproduces this enum bit for bit).
     pub fn map(&self, t: f64) -> f64 {
-        match self {
-            Self::ExpDecay { d1, d2, max } => {
-                // there must be a closed form for this
-                if t > 0.999 {
-                    return 1.0;
-                }
+        crate::tween::Easing::from(self).map(t)
+    }
+}
 
-                // first we count the number of steps we'd need to decay
-                let mut di = *d1;
-                let mut dt = 1.0;
-                let max_steps = (*max).min(1000);
-                let mut steps = 0;
-                // for most of the settings we use this takes max 15 steps or so
-                while dt > 0.001 && steps < max_steps {
-                    steps = steps + 1;
-                    dt = dt * di;
-                    di *= d2;
-                }
-                // then we know how to find the step, and lerp it
-                let step = t * (steps as f64);
-                let mut di = *d1;
-                let mut dt = 1.0;
-                let max_steps = max_steps as f64;
-                let mut steps = 0.0;
-                while dt > 0.001 && steps < max_steps {
-                    steps += 1.0;
-                    if steps >= step {
-                        // right step
-                        let fac = steps - step;
-                        return 1.0 - (dt * fac + (dt * di) * (1.0 - fac));
-                    }
-                    dt = dt * di;
-                    di *= d2;
-                }
-                1.0
-            }
-            Self::Linear => {
-                return t.max(0.0).min(1.0);
-            }
-            Self::Constant(t) => {
-                return t.max(0.0).min(1.0);
-            }
-            Self::None => {
-                return 1.0;
-            }
-            Self::Pow { begin, end } => {
-                if t < 0. {
-                    return 0.;
-                }
-                if t > 1. {
-                    return 1.;
-                }
-                let a = -1. / (begin * begin).max(1.0);
-                let b = 1. + 1. / (end * end).max(1.0);
-                let t2 = (((a - 1.) * -b) / (a * (1. - b))).powf(t);
-                return (-a * b + b * a * t2) / (a * t2 - b);
-            }
-
-            Self::InQuad => {
-                return t * t;
-            }
-            Self::OutQuad => {
-                return t * (2.0 - t);
-            }
-            Self::InOutQuad => {
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * t * t;
-                } else {
-                    let t = t - 1.;
-                    return -0.5 * (t * (t - 2.) - 1.);
-                }
-            }
-            Self::InCubic => {
-                return t * t * t;
-            }
-            Self::OutCubic => {
-                let t2 = t - 1.0;
-                return t2 * t2 * t2 + 1.0;
-            }
-            Self::InOutCubic => {
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * t * t * t;
-                } else {
-                    let t = t - 2.;
-                    return 1. / 2. * (t * t * t + 2.);
-                }
-            }
-            Self::InQuart => return t * t * t * t,
-            Self::OutQuart => {
-                let t = t - 1.;
-                return -(t * t * t * t - 1.);
-            }
-            Self::InOutQuart => {
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * t * t * t * t;
-                } else {
-                    let t = t - 2.;
-                    return -0.5 * (t * t * t * t - 2.);
-                }
-            }
-            Self::InQuint => {
-                return t * t * t * t * t;
-            }
-            Self::OutQuint => {
-                let t = t - 1.;
-                return t * t * t * t * t + 1.;
-            }
-            Self::InOutQuint => {
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * t * t * t * t * t;
-                } else {
-                    let t = t - 2.;
-                    return 0.5 * (t * t * t * t * t + 2.);
-                }
-            }
-            Self::InSine => {
-                return -(t * PI * 0.5).cos() + 1.;
-            }
-            Self::OutSine => {
-                return (t * PI * 0.5).sin();
-            }
-            Self::InOutSine => {
-                return -0.5 * ((t * PI).cos() - 1.);
-            }
-            Self::InExp => {
-                if t < 0.001 {
-                    return 0.;
-                } else {
-                    return 2.0f64.powf(10. * (t - 1.));
-                }
-            }
-            Self::OutExp => {
-                if t > 0.999 {
-                    return 1.;
-                } else {
-                    return -(2.0f64.powf(-10. * t)) + 1.;
-                }
-            }
-            Self::InOutExp => {
-                if t < 0.001 {
-                    return 0.;
-                }
-                if t > 0.999 {
-                    return 1.;
-                }
-                let t = t * 2.0;
-                if t < 1. {
-                    return 0.5 * 2.0f64.powf(10. * (t - 1.));
-                } else {
-                    let t = t - 1.;
-                    return 0.5 * (-(2.0f64.powf(-10. * t)) + 2.);
-                }
-            }
-            Self::InCirc => {
-                return -((1. - t * t).sqrt() - 1.);
-            }
-            Self::OutCirc => {
-                let t = t - 1.;
-                return (1. - t * t).sqrt();
-            }
-            Self::InOutCirc => {
-                let t = t * 2.;
-                if t < 1. {
-                    return -0.5 * ((1. - t * t).sqrt() - 1.);
-                } else {
-                    let t = t - 2.;
-                    return 0.5 * ((1. - t * t).sqrt() + 1.);
-                }
-            }
-            Self::InElastic => {
-                let p = 0.3;
-                let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
-                if t < 0.001 {
-                    return 0.;
-                }
-                if t > 0.999 {
-                    return 1.;
-                }
-                let t = t - 1.0;
-                return -(2.0f64.powf(10.0 * t) * ((t - s) * (2.0 * PI) / p).sin());
-            }
-            Self::OutElastic => {
-                let p = 0.3;
-                let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
-
-                if t < 0.001 {
-                    return 0.;
-                }
-                if t > 0.999 {
-                    return 1.;
-                }
-                return 2.0f64.powf(-10.0 * t) * ((t - s) * (2.0 * PI) / p).sin() + 1.0;
-            }
-            Self::InOutElastic => {
-                let p = 0.3;
-                let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
-                if t < 0.001 {
-                    return 0.;
-                }
-                if t > 0.999 {
-                    return 1.;
-                }
-                let t = t * 2.0;
-                if t < 1. {
-                    let t = t - 1.0;
-                    return -0.5 * (2.0f64.powf(10.0 * t) * ((t - s) * (2.0 * PI) / p).sin());
-                } else {
-                    let t = t - 1.0;
-                    return 0.5 * 2.0f64.powf(-10.0 * t) * ((t - s) * (2.0 * PI) / p).sin() + 1.0;
-                }
-            }
-            Self::InBack => {
-                let s = 1.70158;
-                return t * t * ((s + 1.) * t - s);
-            }
-            Self::OutBack => {
-                let s = 1.70158;
-                let t = t - 1.;
-                return t * t * ((s + 1.) * t + s) + 1.;
-            }
-            Self::InOutBack => {
-                let s = 1.70158;
-                let t = t * 2.0;
-                if t < 1. {
-                    let s = s * 1.525;
-                    return 0.5 * (t * t * ((s + 1.) * t - s));
-                } else {
-                    let t = t - 2.;
-                    return 0.5 * (t * t * ((s + 1.) * t + s) + 2.);
-                }
-            }
-            Self::InBounce => {
-                return 1.0 - Self::OutBounce.map(1.0 - t);
-            }
-            Self::OutBounce => {
-                if t < (1. / 2.75) {
-                    return 7.5625 * t * t;
-                }
-                if t < (2. / 2.75) {
-                    let t = t - (1.5 / 2.75);
-                    return 7.5625 * t * t + 0.75;
-                }
-                if t < (2.5 / 2.75) {
-                    let t = t - (2.25 / 2.75);
-                    return 7.5625 * t * t + 0.9375;
-                }
-                let t = t - (2.625 / 2.75);
-                return 7.5625 * t * t + 0.984375;
-            }
-            Self::InOutBounce => {
-                if t < 0.5 {
-                    return Self::InBounce.map(t * 2.) * 0.5;
-                } else {
-                    return Self::OutBounce.map(t * 2. - 1.) * 0.5 + 0.5;
-                }
-            }
-            Self::Bezier { cp0, cp1, cp2, cp3 } => {
-                if t < 0. {
-                    return 0.;
-                }
-                if t > 1. {
-                    return 1.;
-                }
-
-                if (cp0 - cp1).abs() < 0.001 && (cp2 - cp3).abs() < 0.001 {
-                    return t;
-                }
-
-                // Tight enough that steep curves stay smooth instead of jittering back and forth.
-                const EPSILON: f64 = 1e-7;
-                let cx = 3.0 * cp0;
-                let bx = 3.0 * (cp2 - cp0) - cx;
-                let ax = 1.0 - cx - bx;
-                let cy = 3.0 * cp1;
-                let by = 3.0 * (cp3 - cp1) - cy;
-                let ay = 1.0 - cy - by;
-                let mut u = t;
-
-                for _i in 0..8 {
-                    let x = ((ax * u + bx) * u + cx) * u - t;
-                    if x.abs() < EPSILON {
-                        return ((ay * u + by) * u + cy) * u;
-                    }
-                    let d = (3.0 * ax * u + 2.0 * bx) * u + cx;
-                    if d.abs() < 1e-6 {
-                        break;
-                    }
-                    u = u - x / d;
-                }
-
-                if t > 1. {
-                    return (ay + by) + cy;
-                }
-                if t < 0. {
-                    return 0.0;
-                }
-
-                let mut w = 0.0;
-                let mut v = 1.0;
-                u = t;
-                for _i in 0..30 {
-                    let x = ((ax * u + bx) * u + cx) * u;
-                    if (x - t).abs() < EPSILON {
-                        return ((ay * u + by) * u + cy) * u;
-                    }
-
-                    if t > x {
-                        w = u;
-                    } else {
-                        v = u;
-                    }
-                    u = (v - w) * 0.5 + w;
-                }
-
-                return ((ay * u + by) * u + cy) * u;
-            }
-            Self::Emphasized => {
-                // Android's path is the emphasized-accelerate curve up to 40% at a sixth of
-                // the time, then the emphasized-decelerate curve for the rest.
-                const SPLIT_TIME: f64 = 1.0 / 6.0;
-                const SPLIT_PROGRESS: f64 = 0.4;
-                if t <= 0. {
-                    return 0.;
-                }
-                if t >= 1. {
-                    return 1.;
-                }
-                if t < SPLIT_TIME {
-                    let accelerate = Self::Bezier { cp0: 0.3, cp1: 0.0, cp2: 0.8, cp3: 0.15 };
-                    return SPLIT_PROGRESS * accelerate.map(t / SPLIT_TIME);
-                }
-                let decelerate = Self::Bezier { cp0: 0.05, cp1: 0.7, cp2: 0.1, cp3: 1.0 };
-                let t = (t - SPLIT_TIME) / (1. - SPLIT_TIME);
-                return SPLIT_PROGRESS + (1. - SPLIT_PROGRESS) * decelerate.map(t);
-            }
+/// The tween engine's ease for an Animator ease, bit for bit: `Easing::from(&e).map(t)`
+/// equals `e.map(t)` for every `t` (the parity family of `makepad_tween::Easing`).
+/// This is how theme motion tokens (`theme.motion_ease_*`, read into an
+/// `#[live] ease: Ease` field) reach a tween (GSAP `ease`):
+///
+/// ```text
+/// TweenOpts::new().duration(self.open_secs).ease((&self.open_ease).into())
+/// ```
+impl From<&Ease> for crate::tween::Easing {
+    fn from(e: &Ease) -> Self {
+        use crate::tween::Easing as E;
+        match *e {
+            Ease::Linear => E::Linear,
+            Ease::None => E::Instant,
+            Ease::Constant(c) => E::Constant(c),
+            Ease::InQuad => E::InQuad,
+            Ease::OutQuad => E::OutQuad,
+            Ease::InOutQuad => E::InOutQuad,
+            Ease::InCubic => E::InCubic,
+            Ease::OutCubic => E::OutCubic,
+            Ease::InOutCubic => E::InOutCubic,
+            Ease::InQuart => E::InQuart,
+            Ease::OutQuart => E::OutQuart,
+            Ease::InOutQuart => E::InOutQuart,
+            Ease::InQuint => E::InQuint,
+            Ease::OutQuint => E::OutQuint,
+            Ease::InOutQuint => E::InOutQuint,
+            Ease::InSine => E::InSine,
+            Ease::OutSine => E::OutSine,
+            Ease::InOutSine => E::InOutSine,
+            Ease::InExp => E::InExp,
+            Ease::OutExp => E::OutExp,
+            Ease::InOutExp => E::InOutExp,
+            Ease::InCirc => E::InCirc,
+            Ease::OutCirc => E::OutCirc,
+            Ease::InOutCirc => E::InOutCirc,
+            Ease::InElastic => E::InElastic,
+            Ease::OutElastic => E::OutElastic,
+            Ease::InOutElastic => E::InOutElastic,
+            Ease::InBack => E::InBack,
+            Ease::OutBack => E::OutBack,
+            Ease::InOutBack => E::InOutBack,
+            Ease::InBounce => E::InBounce,
+            Ease::OutBounce => E::OutBounce,
+            Ease::InOutBounce => E::InOutBounce,
+            Ease::ExpDecay { d1, d2, max } => E::exp_decay(d1, d2, max),
+            Ease::Pow { begin, end } => E::pow(begin, end),
+            Ease::Bezier { cp0, cp1, cp2, cp3 } => E::Bezier {
+                x1: cp0,
+                y1: cp1,
+                x2: cp2,
+                y2: cp3,
+            },
+            Ease::Emphasized => E::Emphasized,
         }
+    }
+}
+
+/// The same conversion as `From<&Ease>`, by value.
+impl From<Ease> for crate::tween::Easing {
+    fn from(e: Ease) -> Self {
+        Self::from(&e)
     }
 }
 

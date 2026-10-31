@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
@@ -285,7 +285,7 @@ pub enum RadioButtonAction {
     None,
 }
 
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, ScriptHook, Widget, WidgetSet, Animator)]
 pub struct RadioButton {
     #[uid]
     uid: WidgetUid,
@@ -388,6 +388,54 @@ impl RadioButton {
 }
 
 impl Widget for RadioButton {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult, Actions as A};
+        if action.action != A::SELECT && action.action != A::TOGGLE && action.action != A::PRESS {
+            return ActionResult::Unhandled;
+        }
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        let on = action.action == A::SELECT || !self.independent || !self.active(cx);
+        if on != self.active(cx) {
+            self.set_active(cx, on, Animate::Yes);
+            cx.widget_action_with_data(
+                &self.action_data,
+                self.widget_uid(),
+                RadioButtonAction::Clicked,
+            );
+        }
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Radio;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SELECT;
+        node.toggle = match (|| -> Option<bool> { Some(self.active(cx)) })() {
+            Some(true) => a11y_tree::Toggle::On,
+            Some(false) => a11y_tree::Toggle::Off,
+            None => a11y_tree::Toggle::None,
+        };
+        node.states
+            .set(a11y_tree::States::SELECTED, self.active(cx));
+        node.actions.insert(a11y_tree::Actions::TOGGLE);
+    }
+
+    /// Its text, laid out (hidden radio buttons draw nothing).
+    fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
+        self.draw_text.scan_text(cx, self.text.as_ref());
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,
@@ -402,9 +450,7 @@ impl Widget for RadioButton {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn snapshot_checked(&self, cx: &Cx) -> Option<bool> {
-        Some(self.active(cx))
-    }
+
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
@@ -590,7 +636,7 @@ mod style_reapply_tests {
                 assert!(radio.active(cx));
             });
             for (style, dark) in [(DesktopStyle::Windows2000, false), (DesktopStyle::Macos, true), (DesktopStyle::Omarchy, false)] {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+                install(vm, StyleSheet::load(style.sheet(dark)));
                 vm.with_reload(crate::script_mod);
                 radio.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
                 vm.with_cx(|cx| {

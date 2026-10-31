@@ -1,6 +1,7 @@
 //! Worker-owned label layout and raster preparation. The UI only admits immutable
-//! runs and places their resident glyphs. All channels are bounded; UI sends and
-//! receives never block. A caller must request frames while `pending()` is true.
+//! runs and places their resident glyphs. Under the HAL, runs are admitted after layout and
+//! resolve host atlas slots when drawn, retaining unresolved glyph rectangles. All channels are
+//! bounded; UI sends and receives never block. A caller must request frames while `pending()` is true.
 use super::{
     font::FontId,
     font_family::{FontDiagnostics, FontFamilyId},
@@ -8,19 +9,14 @@ use super::{
     geom::Point,
     layouter::{BorrowedLayoutParams, LayoutOptions, Layouter, Settings, Style},
     loader::{FontDefinition, FontFamilyDefinition},
-    rasterizer::{PublishedGlyph, RasterizedGlyph},
+    rasterizer::RasterizedGlyph,
 };
+#[cfg(target_arch = "wasm32")]
+use super::rasterizer::PublishedGlyph;
 use crate::makepad_platform::recording_buffer::RecordingBuffer;
 use crate::{makepad_platform::*, Cx2d, DrawText};
-use std::{
-    cell::RefCell,
-    collections::VecDeque,
-    rc::Rc,
-    sync::{
-        mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc,
-    },
-};
+use crate::makepad_platform::makepad_network::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc};
 
 use crate::makepad_platform::thread::ui_hang::hashing::{HashMap, HashSet};
 
@@ -79,10 +75,18 @@ struct Request {
 struct Glyph {
     origin: Point<f32>,
     size: f32,
+    #[cfg(target_arch = "wasm32")]
     image: Arc<PublishedGlyph>,
+    /// Under the HAL the worker publishes no pixels: the UI asks the host for the glyph.
+    #[cfg(not(target_arch = "wasm32"))]
+    font: FontId,
+    #[cfg(not(target_arch = "wasm32"))]
+    glyph: super::font::GlyphId,
+    #[cfg(not(target_arch = "wasm32"))]
+    dpxs: f32,
 }
 struct Publication {
-    #[cfg(test)]
+    #[cfg(all(target_arch = "wasm32", test))]
     shaped_on: std::thread::ThreadId,
     width: f64,
     missing_glyphs: bool,
@@ -90,6 +94,7 @@ struct Publication {
 }
 struct Resident {
     publication: Arc<Publication>,
+    #[cfg(target_arch = "wasm32")]
     epoch: u64,
     glyphs: Vec<(Point<f32>, f32, RasterizedGlyph)>,
 }
@@ -102,7 +107,6 @@ struct Worker {
 struct InstanceStorage {
     free: Vec<LabelDrawStorage>,
     job: Option<crate::makepad_platform::thread::TaskHandle<Vec<LabelDrawStorage>>>,
-    queue_full_reported: bool,
     /// When to try the storage again, on `makepad_platform::monotonic_seconds`.
     retry_at: Option<f64>,
 }
@@ -135,6 +139,7 @@ impl LabelCache {
         let (output, receiver) = mpsc::sync_channel(128);
         match cx.spawn_worker(move || {
             let mut layouter = Layouter::new(Settings::default());
+            #[cfg(target_arch = "wasm32")]
             let mut glyphs = HashMap::default();
             while let Ok(request) = input.recv() {
                 if let Some(family) = request.family {
@@ -153,7 +158,8 @@ impl LabelCache {
                             );
                         }
                     }
-                    layouter.define_font_family(
+                    // Sent again when its faces change (a lazy or OS face arrived).
+                    layouter.set_font_family_definition(
                         family.id,
                         FontFamilyDefinition {
                             expected_member_count: family.font_ids.len(),
@@ -162,10 +168,18 @@ impl LabelCache {
                         },
                     );
                 }
+                #[cfg(target_arch = "wasm32")]
                 let result = prepare(&mut layouter, &mut glyphs, &request.key);
+                #[cfg(not(target_arch = "wasm32"))]
+                let result = prepare(&mut layouter, &request.key);
                 // The UI imports into this worker-allocated capacity.
                 let glyphs = Vec::with_capacity(result.glyphs.len());
-                let run = Resident { publication: Arc::new(result), epoch: u64::MAX, glyphs };
+                let run = Resident {
+                    publication: Arc::new(result),
+                    #[cfg(target_arch = "wasm32")]
+                    epoch: u64::MAX,
+                    glyphs,
+                };
                 if output.send((request.key, run)).is_err() {
                     break;
                 }
@@ -177,16 +191,6 @@ impl LabelCache {
             }
             Err(error) => crate::error!("label worker unavailable: {error}"),
         }
-    }
-
-    /// Reserve known scene inventory once, outside incremental label emission.
-    pub fn reserve_inventory(&mut self, count: usize) {
-        self.texts.reserve(count.saturating_sub(self.texts.len()));
-        self.waiting
-            .reserve(count.saturating_sub(self.waiting.len()));
-        self.ready.reserve(count.saturating_sub(self.ready.len()));
-        self.unsent
-            .reserve(256usize.saturating_sub(self.unsent.len()));
     }
 
     fn intern_text(&mut self, text: &str) -> LabelText {
@@ -227,10 +231,6 @@ impl LabelCache {
             .filter_map(|pool| pool.retry_at)
             .reduce(f64::min)
     }
-    pub fn storage_blocked(&self) -> bool {
-        self.storage_retry_at()
-            .is_some_and(|at| at > makepad_platform::monotonic_seconds())
-    }
     fn poll_instance_storage(&mut self) {
         for pool in &mut self.instance_storage {
             if let Some(result) = pool.job.as_mut().and_then(|job| job.try_take()) {
@@ -249,63 +249,9 @@ impl LabelCache {
         }
     }
 
-    /// Unique CPU recording storage, prefaulted on Heavy workers. Each batch
-    /// is at most32 buffers and normally256KiB; long runs get one buffer.
-    /// The caller owns retirement of any replaced recording storage.
-    pub fn take_draw_storage(
-        &mut self,
-        cx: &mut Cx2d,
-        draw: &DrawText,
-        text: &str,
-    ) -> Option<LabelDrawStorage> {
-        self.poll_instance_storage();
-        let key = self.key(draw, cx.current_dpi_factor(), text);
-        let glyphs = self.ready.get(&key)?.glyphs.len();
-        let floats = glyphs.checked_mul(draw.draw_vars.as_slice().len())?.max(1).checked_next_power_of_two()?;
-        let pool = self.instance_storage.get_mut(floats.trailing_zeros() as usize)?;
-        let storage = pool.free.pop();
-        if pool.free.is_empty()
-            && pool.job.is_none()
-            && pool
-                .retry_at
-                .is_none_or(|at| at <= makepad_platform::monotonic_seconds())
-        {
-            use crate::makepad_platform::thread::Lane;
-            match cx.task_pool().reserve(Lane::Heavy) {
-                Ok(slot) => {
-                    pool.queue_full_reported = false;
-                    pool.retry_at=None;
-                    let mut free = std::mem::take(&mut pool.free);
-                    let recording_budget=cx.draw_lists.1.recordings.clone();
-                    pool.job = Some(slot.submit_internal_named("text.label-instance-storage", move || {
-                        let count = (65536 / floats).clamp(1, 32);
-                        free.reserve(count);
-                        for _ in 0..count {
-                            let mut buffer = RecordingBuffer::new(recording_budget.clone());
-                            buffer.resize(floats,1.0);
-                            if buffer.refused() { break; }
-                            std::hint::black_box(buffer.as_slice());
-                            buffer.clear();
-                            let recording=DrawListRecordingStorage::with_instance_capacity_in(2,256,&recording_budget);
-                            if recording.refused() {break;}
-                            free.push(LabelDrawStorage {instances:buffer,recording});
-                        }
-                        free
-                    }));
-                }
-                Err(error) if !pool.queue_full_reported => {
-                    pool.queue_full_reported = true;
-                    pool.retry_at=Some(makepad_platform::monotonic_seconds()+1.0);
-                    crate::log!("label instance storage queue unavailable; retrying: {error:?}");
-                }
-                Err(_) => {pool.retry_at=Some(makepad_platform::monotonic_seconds()+1.0);}
-            }
-        }
-        storage
-    }
-
     /// Drain replies and bind glyph images within 0.5ms. A partially admitted
-    /// run remains pending; drawing never pays its first-use raster cost.
+    /// run remains pending; drawing never pays its first-use raster cost. HAL runs need only
+    /// their layout here: drawing resolves atlas slots without waiting for the host's pixels.
     pub fn pump(&mut self, cx: &mut Cx) -> bool {
         self.poll_instance_storage();
         let Some(worker) = self.worker.as_ref() else {
@@ -331,9 +277,12 @@ impl LabelCache {
                 break;
             }
         }
+        #[cfg(target_arch = "wasm32")]
         let fonts = cx
             .has_global::<Rc<RefCell<Fonts>>>()
             .then(|| cx.get_global::<Rc<RefCell<Fonts>>>().clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = cx;
         while spent() < 500e-6 {
             if self.admitting.is_none() {
                 let Ok(run) = worker.receiver.try_recv() else {
@@ -341,8 +290,9 @@ impl LabelCache {
                 };
                 self.admitting = Some(run);
             }
-            let (key, run) = self.admitting.as_mut().unwrap();
+            #[cfg(target_arch = "wasm32")]
             if let Some(fonts) = &fonts {
+                let (_, run) = self.admitting.as_mut().unwrap();
                 let fonts = fonts.borrow();
                 let mut rasterizer = fonts.rasterizer().borrow_mut();
                 if run.epoch != rasterizer.epoch() {
@@ -359,8 +309,8 @@ impl LabelCache {
                     run.glyphs.push((glyph.origin, glyph.size, image));
                 }
             }
-            self.waiting.remove(key);
             let (key, run) = self.admitting.take().unwrap();
+            self.waiting.remove(&key);
             self.ready.insert(key, run);
             changed = true;
         }
@@ -369,28 +319,48 @@ impl LabelCache {
 
     pub fn measure(&mut self, cx: &mut Cx2d, draw: &DrawText, text: &str) -> Option<f64> {
         let key = self.key(draw, cx.current_dpi_factor(), text);
-        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        let epoch = fonts.borrow().rasterizer().borrow().epoch();
-        if self.ready.get(&key).is_some_and(|r| r.epoch != epoch) {
-            if self.admitting.is_none() {
-                let run = self.ready.remove(&key).unwrap();
-                self.waiting.insert(key.clone());
-                self.admitting = Some((key.clone(), run));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+            let epoch = fonts.borrow().rasterizer().borrow().epoch();
+            if self.ready.get(&key).is_some_and(|r| r.epoch != epoch) {
+                if self.admitting.is_none() {
+                    let run = self.ready.remove(&key).unwrap();
+                    self.waiting.insert(key.clone());
+                    self.admitting = Some((key.clone(), run));
+                }
+                return None;
             }
-            return None;
         }
         if let Some(run) = self.ready.get(&key) {
             let width = run.publication.width;
             if run.publication.missing_glyphs {
                 let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-                let mut requested = false;
-                for family in [LazyFontFamily::Cjk, LazyFontFamily::Emoji] {
-                    requested |= fonts
-                        .borrow_mut()
-                        .take_lazy_font_request(key.family, family, text);
+                // The OS first under a `System` font set, the bundled lazy
+                // faces first otherwise (as `DrawText::layout`).
+                let system_first = cx.font_set().prefers_system_fonts();
+                let index_wait = system_first && !crate::text::system_fonts::index_ready();
+                let mut requested = system_first && fonts.borrow_mut().request_system_fallback(key.family, text);
+                if !requested && !index_wait {
+                    let mut lazy = false;
+                    for family in [LazyFontFamily::Cjk, LazyFontFamily::Emoji] {
+                        lazy |= fonts
+                            .borrow_mut()
+                            .take_lazy_font_request(key.family, family, text);
+                    }
+                    if lazy {
+                        draw.text_style.ensure_fonts_loaded(cx);
+                    }
+                    requested = lazy;
+                    if !system_first {
+                        requested |= fonts.borrow_mut().request_system_fallback(key.family, text);
+                    }
                 }
                 if requested {
-                    draw.text_style.ensure_fonts_loaded(cx);
+                    // The worker shapes with the family it was sent: send it
+                    // again with its new faces, and this run with it.
+                    self.families.remove(&key.family);
+                    self.ready.remove(&key);
                     cx.redraw_all();
                 }
             }
@@ -445,32 +415,64 @@ impl LabelCache {
         storage: Option<&mut RecordingBuffer>,
     ) -> bool {
         let key = self.key(draw, cx.current_dpi_factor(), text);
-        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        let epoch = fonts.borrow().rasterizer().borrow().epoch();
-        if self.ready.get(&key).is_some_and(|run| run.epoch != epoch) {
-            if self.admitting.is_none() {
-                let run = self.ready.remove(&key).unwrap();
-                self.waiting.insert(key.clone());
-                self.admitting = Some((key.clone(), run));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+            let epoch = fonts.borrow().rasterizer().borrow().epoch();
+            if self.ready.get(&key).is_some_and(|run| run.epoch != epoch) {
+                if self.admitting.is_none() {
+                    let run = self.ready.remove(&key).unwrap();
+                    self.waiting.insert(key.clone());
+                    self.admitting = Some((key.clone(), run));
+                }
+                draw.draw_vars.area = Area::Empty;
+                return false;
             }
-            draw.draw_vars.area = Area::Empty;
-            return false;
         }
         let Some(run) = self.ready.get_mut(&key) else {
             self.measure(cx, draw, text);
             draw.draw_vars.area = Area::Empty;
             return false;
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Resolve every drawn glyph, including already-requested ones, so this draw reports
+            // its pending keys and keeps used slots alive. Ready answers, MSDF upgrades and
+            // evictions take effect immediately; none of them discard the worker's layout.
+            let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+            let mut fonts = fonts.borrow_mut();
+            let rasterizer = fonts.rasterizer().clone();
+            let mut rasterizer = rasterizer.borrow_mut();
+            run.glyphs.clear();
+            for glyph in &run.publication.glyphs {
+                let Some(font) = fonts.font(glyph.font) else {
+                    continue;
+                };
+                let Some(image) = rasterizer.rasterize_glyph(&font, glyph.glyph, glyph.dpxs) else {
+                    continue;
+                };
+                run.glyphs.push((
+                    Point::new(
+                        glyph.origin.x + pos.x as f32,
+                        glyph.origin.y + pos.y as f32,
+                    ),
+                    glyph.size,
+                    image,
+                ));
+            }
+        }
         if run.glyphs.is_empty() {
             draw.draw_vars.area = Area::Empty;
             return true;
         }
         // Reuse the run storage for placement and restore its local coordinates.
+        #[cfg(target_arch = "wasm32")]
         for glyph in &mut run.glyphs {
             glyph.0.x += pos.x as f32;
             glyph.0.y += pos.y as f32;
         }
         draw.draw_rasterized_glyphs_abs_with_storage(cx, &run.glyphs, draw.color, storage);
+        #[cfg(target_arch = "wasm32")]
         for (glyph, local) in run.glyphs.iter_mut().zip(&run.publication.glyphs) {
             glyph.0 = local.origin;
         }
@@ -480,7 +482,7 @@ impl LabelCache {
 
 fn prepare(
     layouter: &mut Layouter,
-    images: &mut HashMap<(FontId, u16, u32), Arc<PublishedGlyph>>,
+    #[cfg(target_arch = "wasm32")] images: &mut HashMap<(FontId, u16, u32), Arc<PublishedGlyph>>,
     key: &Key,
 ) -> Publication {
     let scale = f32::from_bits(key.scale);
@@ -498,7 +500,7 @@ fn prepare(
         },
     });
     let mut result = Publication {
-        #[cfg(test)]
+        #[cfg(all(target_arch = "wasm32", test))]
         shaped_on: std::thread::current().id(),
         width: (laidout.size_in_lpxs.width * scale) as f64,
         missing_glyphs: laidout
@@ -511,7 +513,20 @@ fn prepare(
     for row in &laidout.rows {
         for glyph in &row.glyphs {
             let size = glyph.font_size_in_lpxs * scale;
+            #[cfg(not(target_arch = "wasm32"))]
+            result.glyphs.push(Glyph {
+                origin: Point::new(
+                    (row.origin_in_lpxs.x + glyph.origin_in_lpxs.x + glyph.offset_in_lpxs()) * scale,
+                    (row.origin_in_lpxs.y + glyph.origin_in_lpxs.y) * scale,
+                ),
+                size: glyph.font_size_in_lpxs,
+                font: glyph.font.id(),
+                glyph: glyph.id,
+                dpxs: size * dpi,
+            });
+            #[cfg(target_arch = "wasm32")]
             let id = (glyph.font.id(), glyph.id, (size * dpi).to_bits());
+            #[cfg(target_arch = "wasm32")]
             let image = if let Some(image) = images.get(&id) {
                 image.clone()
             } else {
@@ -534,6 +549,7 @@ fn prepare(
                 images.insert(id, image.clone());
                 image
             };
+            #[cfg(target_arch = "wasm32")]
             result.glyphs.push(Glyph {
                 origin: Point::new(
                     (row.origin_in_lpxs.x + glyph.origin_in_lpxs.x + glyph.offset_in_lpxs())
@@ -548,7 +564,7 @@ fn prepare(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(target_arch = "wasm32", test))]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

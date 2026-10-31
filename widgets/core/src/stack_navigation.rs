@@ -1,3 +1,7 @@
+use crate::tween::{
+    prop, tag, ClockPolicy, EventKind, LagSmoothing, PropKey, PropTo, Tag, TargetId, TweenEvent,
+    TweenHost, TweenOpts,
+};
 use crate::{
     animator::*, button::*, label::*, makepad_derive_widget::*, makepad_draw::*, view::*,
     widget::*, widget_match_event::WidgetMatchEvent, widget_tree::CxWidgetExt,
@@ -5,6 +9,29 @@ use crate::{
     scroll_motion::{critically_damped_spring, estimate_release_velocity, push_sample, FrameClock, ScrollSample},
 };
 use std::{cell::Cell, collections::HashMap};
+
+/// The slide's clock: raw frame deltas with no lag clamp (the Animator it
+/// replaces measured `nf.time - start_time`), and a first frame of 0.
+const SLIDE_CLOCK: ClockPolicy = ClockPolicy {
+    lag: Some(LagSmoothing::OFF),
+    first_dt: 0.0,
+    follow_ticker: true,
+};
+/// The one target of the slide host: this view.
+const SLIDE_SELF: TargetId = TargetId(0);
+/// The slid property, `slide` (a fraction of the view's width: 0 shown, 1 hidden).
+const SLIDE_PROP: PropKey = prop(live_id!(slide));
+/// Tags of the two slides, read back from their events.
+const SLIDE_SHOW: Tag = tag(live_id!(slide_show));
+const SLIDE_HIDE: Tag = tag(live_id!(slide_hide));
+
+/// A slide whose start waits for the script VM (see
+/// `StackNavigationView::start_slide`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SlideStart {
+    Show,
+    Hide,
+}
 
 /// How far (in the OS's points, so UI zoom doesn't shrink it) a finger must move before we decide
 /// whether it's a swipe back. That's iOS's pan threshold, and at least both platforms' long-press tolerance.
@@ -193,13 +220,30 @@ pub struct StackNavigationView {
     #[live]
     slide: f64,
 
+    /// Configures the slide (its `slide` group: durations, eases, offsets,
+    /// including apps' overrides); the `slide` host below plays it.
     #[apply_default]
     animator: Animator,
 
-    /// The slide to play on the next frame, so that a slow first draw of the view
+    /// Plays the slide into `slide` and reports its ends as events.
+    #[rust(TweenHost::with_clock(SLIDE_CLOCK)
+        .inspect_named("StackNavigation slide")
+        .inspect_tags(&["slide_show", "slide_hide"]))]
+    slide_host: TweenHost,
+
+    /// The slide host's drained events (reused every frame).
+    #[rust]
+    slide_events: Vec<TweenEvent>,
+
+    /// A slide requested while the script VM was held (inside an apply walk):
+    /// started on the next event, as the Animator replays deferred plays.
+    #[rust]
+    slide_deferred: Option<SlideStart>,
+
+    /// The slide to start on the next frame, so that a slow first draw of the view
     /// it reveals happens before the slide's clock starts, rather than making it jump.
     #[rust]
-    pending_slide: Option<[LiveId; 2]>,
+    pending_slide: Option<SlideStart>,
 
     #[rust]
     next_frame: NextFrame,
@@ -303,24 +347,36 @@ impl StackNavigationView {
 }
 
 impl Widget for StackNavigationView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if let Some(slide_state) = self.pending_slide {
+        // The animator first: it flushes deferred cuts, which the slide host
+        // then overrides while it plays.
+        if let Some(start) = self.pending_slide {
             if self.next_frame.is_event(event).is_some() {
                 self.pending_slide = None;
-                self.animator_play(cx, &slide_state);
+                self.start_slide(cx, start);
             }
         }
         if self.animator_handle_event(cx, event).must_redraw() {
             self.view.redraw(cx);
         }
+        if let Some(start) = self.slide_deferred.take() {
+            self.start_slide(cx, start);
+        }
+        self.step_slide(cx, event);
         self.view.handle_event(cx, event, scope);
 
         self.handle_stack_view_closure_request(cx, event, scope);
-        self.trigger_action_post_opening_if_done(cx);
-        self.finish_closure_animation_if_done(cx);
+        self.finish_slide_if_done(cx);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.slide_host.draw_check(cx);
         let parent_rect = cx.peek_walk_turtle(walk);
         let abs_pos = Vec2d {
             x: parent_rect.pos.x + self.slide * parent_rect.size.x,
@@ -334,7 +390,7 @@ impl Widget for StackNavigationView {
 impl StackNavigationView {
     fn hide_stack_view(&mut self, cx: &mut Cx) {
         self.begin_hide(cx);
-        self.schedule_slide(cx, ids!(slide.hide));
+        self.schedule_slide(cx, SlideStart::Hide);
     }
 
     fn begin_hide(&mut self, cx: &mut Cx) {
@@ -384,12 +440,129 @@ impl StackNavigationView {
         }
     }
 
-    fn finish_closure_animation_if_done(&mut self, cx: &mut Cx) {
-        if self.state == StackNavigationViewState::Active
-            && self.animator.in_state(cx, ids!(slide.hide))
-            && !self.is_animating()
-        {
-            self.finish_hide(cx);
+    /// Starts the slide into the `slide` group's `show` or `hide` state on
+    /// the host, with the duration, ease and offsets the Animator holds for
+    /// it. The Animator is cut to the destination at once (so `in_state`
+    /// and a re-apply see where the slide goes) and the host carries
+    /// `offset` there. Cuts need the script VM: while an apply walk holds it
+    /// the start waits for the next event, as `Animator::defer_play` does.
+    fn start_slide(&mut self, cx: &mut Cx, start: SlideStart) {
+        if cx.is_script_vm_held() {
+            self.slide_deferred = Some(start);
+            cx.new_next_frame();
+            return;
+        }
+        let (from, to, motion, tag) = match start {
+            SlideStart::Show => {
+                // Each cut applies its state now: read the offsets back.
+                self.animator_cut(cx, ids!(slide.show));
+                let show_to = self.slide;
+                self.animator_cut(cx, ids!(slide.hide));
+                // The show starts from the hide offset (4000, or the app's
+                // override), as the Animator's play from the hide state did.
+                let hide_to = self.slide;
+                let motion = self
+                    .animator
+                    .state_motion(live_id!(slide), live_id!(show), Some(live_id!(hide)))
+                    .unwrap_or(StateMotion {
+                        secs: 0.45,
+                        ease: Ease::Emphasized,
+                        redraw: true,
+                    });
+                self.animator_cut(cx, ids!(slide.show));
+                (hide_to, show_to, motion, SLIDE_SHOW)
+            }
+            SlideStart::Hide => {
+                // From where the view is (the cut applies the hide offset).
+                let from = self.slide;
+                self.animator_cut(cx, ids!(slide.hide));
+                let hide_to = self.slide;
+                let motion = self
+                    .animator
+                    .state_motion(live_id!(slide), live_id!(hide), Some(live_id!(show)))
+                    .unwrap_or(StateMotion {
+                        secs: 0.45,
+                        ease: Ease::Emphasized,
+                        redraw: true,
+                    });
+                (from, hide_to, motion, SLIDE_HIDE)
+            }
+        };
+        self.stop_slide();
+        // The first frame of the slide moves 0, as the Animator's first
+        // frame (its start time) did, even when a slide was cut short.
+        self.slide_host.clock.stop();
+        self.slide = from;
+        self.slide_host.seed(SLIDE_SELF, SLIDE_PROP, from);
+        let opts = TweenOpts::new()
+            .duration(motion.secs)
+            .ease((&motion.ease).into())
+            .tag(tag)
+            .on_update()
+            .on_complete();
+        self.slide_host.to(
+            cx,
+            SLIDE_SELF.into(),
+            &[PropTo::to_f64(SLIDE_PROP, to)],
+            opts,
+        );
+        if !self.slide_host.is_active() {
+            // Over as it was built (a duration of 0, or reduced motion):
+            // land now. The next event may be any event, not the host's
+            // frame, and it drains the Complete that reports the end
+            // against this offset.
+            self.slide = self.slide_host.f64(SLIDE_SELF, SLIDE_PROP, to);
+        }
+        self.view.redraw(cx);
+    }
+
+    /// Ends any slide at once, dropping what it queued (external completion:
+    /// `show_at_rest` / `hide_immediately`, and apps that synthesize
+    /// `ShowDone` / `HideEnd`). `offset` stays where the caller puts it.
+    fn stop_slide(&mut self) {
+        self.slide_deferred = None;
+        self.pending_slide = None;
+        // Straight on the engine: the host's kill arms a frame to report the
+        // kill, and there is nothing to report (the events go just below).
+        self.slide_host.engine.kill_all();
+        self.slide_host.clear_changes();
+        self.slide_host.engine.clear_events();
+        self.slide_events.clear();
+    }
+
+    /// Steps the slide host and writes its value into `offset` whenever it
+    /// plays (or landed this frame), so a re-apply or a deferred cut cannot
+    /// snap the view mid-slide. Drains the slide's events.
+    fn step_slide(&mut self, cx: &mut Cx, event: &Event) {
+        let act = self.slide_host.handle_event(cx, event);
+        if self.slide_host.is_active() || act.settled() {
+            let v = self.slide_host.f64(SLIDE_SELF, SLIDE_PROP, self.slide);
+            if v != self.slide {
+                self.slide = v;
+                self.view.redraw(cx);
+            }
+        }
+        self.slide_host.clear_changes();
+        self.slide_host.swap_events(&mut self.slide_events);
+    }
+
+    /// Reports the ends of the slide from its frames: ShowDone when the incoming
+    /// view has arrived, HideEnd when the outgoing view has slid out.
+    fn finish_slide_if_done(&mut self, cx: &mut Cx) {
+        for i in 0..self.slide_events.len() {
+            let e = self.slide_events[i];
+            if !matches!(e.kind, EventKind::Complete) {
+                continue;
+            }
+            if e.tag == SLIDE_SHOW && self.state == StackNavigationViewState::Inactive {
+                cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
+                self.set_nav_state(cx, StackNavigationViewState::Active);
+                return;
+            }
+            if e.tag == SLIDE_HIDE && self.state == StackNavigationViewState::Active {
+                self.finish_hide(cx);
+                return;
+            }
         }
     }
 
@@ -397,6 +570,8 @@ impl StackNavigationView {
         self.view.visible = false;
         self.redraw(cx);
         // Release the scope even for standalone views with no parent to notify.
+        self.stop_slide();
+        self.animator_cut(cx, ids!(slide.hide));
         self.set_nav_state(cx, StackNavigationViewState::Inactive);
 
         // Dispatch HideEnd with the parent navigation's UID
@@ -411,16 +586,6 @@ impl StackNavigationView {
         };
 
         cx.widget_action(self.widget_uid(), hide_end_action);
-    }
-
-    fn trigger_action_post_opening_if_done(&mut self, cx: &mut Cx) {
-        if self.state == StackNavigationViewState::Inactive
-            && self.animator.in_state(cx, ids!(slide.show))
-            && !self.is_animating()
-        {
-            cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
-            self.set_nav_state(cx, StackNavigationViewState::Active);
-        }
     }
 
     /// Finish a state transition without replacing a scope already acquired by
@@ -441,16 +606,16 @@ impl StackNavigationView {
         self.state = state;
     }
 
-    fn schedule_slide(&mut self, cx: &mut Cx, slide_state: &[LiveId; 2]) {
+    fn schedule_slide(&mut self, cx: &mut Cx, start: SlideStart) {
         self.is_moved_by_gesture = false;
-        self.pending_slide = Some(*slide_state);
+        self.pending_slide = Some(start);
         self.next_frame = cx.new_next_frame();
     }
 
     fn is_animating(&self) -> bool {
         self.is_moved_by_gesture
             || self.pending_slide.is_some()
-            || self.animator.is_track_animating(live_id!(slide))
+            || self.slide_host.is_active()
     }
 }
 
@@ -463,8 +628,7 @@ impl StackNavigationViewRef {
             inner.cancel_scope = Some(cx.begin_widget_back_swipe_scope(inner.widget_uid().0));
 
             // Always slide in from fully hidden, wherever an earlier slide left off.
-            inner.animator_cut(cx, ids!(slide.hide));
-            inner.schedule_slide(cx, ids!(slide.show));
+            inner.schedule_slide(cx, SlideStart::Show);
             inner.redraw(cx);
         }
     }
@@ -493,6 +657,7 @@ impl StackNavigationViewRef {
 
     pub fn show_at_rest(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.stop_slide();
             inner.view.visible = true;
             inner.slide = 0.0;
             inner.pending_slide = None;
@@ -505,6 +670,7 @@ impl StackNavigationViewRef {
 
     pub fn hide_immediately(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.stop_slide();
             if inner.view.visible {
                 inner.dismiss_transient_children(cx);
             }
@@ -666,6 +832,12 @@ impl ScriptHook for StackNavigation {
 }
 
 impl Widget for StackNavigation {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.step_interactive_pop_release(cx, event);
 
@@ -951,7 +1123,7 @@ impl StackNavigation {
                     continue;
                 };
                 self.templates
-                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                    .insert(id, vm.new_object_ref(template_obj));
             }
         });
     }
@@ -1424,7 +1596,7 @@ impl StackNavigation {
         let Some(mut outgoing_view) = outgoing_ref.borrow_mut() else { return };
         outgoing_view.view.visible = true;
         outgoing_view.is_moved_by_gesture = true;
-        outgoing_view.pending_slide = None;
+        outgoing_view.stop_slide();
         outgoing_view.slide = slide;
         outgoing_view.view.redraw(cx);
     }

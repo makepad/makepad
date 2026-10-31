@@ -3,12 +3,12 @@ use {
         code_editor::*,
         session::{CodeDocument, CodeSession},
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
-    use makepad_widgets::theme_desktop_dark::*;
+    use makepad_widgets_core::theme_desktop_dark::*;
     use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
@@ -48,7 +48,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
+        makepad_widgets_core::live_design(cx);
         makepad_code_editor::code_editor::live_design(cx);
     }
 }

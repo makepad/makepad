@@ -6,5 +6,5 @@ license = "MIT OR Apache-2.0"
 description = "Send feedback: a caption icon and a small panel that shows exactly what is sent (message, screenshot, system info)"
 
 [dependencies]
-makepad-widgets = { path = "..", default-features = false }
+makepad-widgets-core = { path = "../core" }
 makepad-base64 = { path = "../../libs/base64" }

@@ -406,17 +406,8 @@ impl DateRange {
     }
 }
 
-/// What day a calendar says it is showing. `text` first, since that is what
-/// a widget says about itself; the snapshot value is the same answer by
-/// another road, for a calendar that spends its text on something else.
-fn calendar_text(calendar: &WidgetRef, cx: &Cx) -> String {
-    let text = calendar.text();
-    if text.is_empty() {
-        calendar.snapshot_value(cx).unwrap_or_default()
-    } else {
-        text
-    }
-}
+/// The calendar's current display text.
+fn calendar_text(calendar: &WidgetRef, _cx: &Cx) -> String { calendar.text() }
 
 /// Put a date in front of a calendar, and remember what the calendar ends
 /// up showing.
@@ -662,6 +653,18 @@ impl DateField {
 }
 
 impl Widget for DateField {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+        node.value = (|| -> Option<String> { Some(self.text()) })().unwrap_or_default();
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
         self.well.set_disabled(cx, disabled);
@@ -715,9 +718,7 @@ impl Widget for DateField {
         self.set_date_text(cx, v);
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.text())
-    }
+
 }
 
 impl DateFieldRef {
@@ -1092,6 +1093,13 @@ impl DatePicker {
 }
 
 impl Widget for DatePicker {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.text()) })().unwrap_or_default();
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
         self.set_slots_disabled(cx, disabled);
@@ -1143,9 +1151,7 @@ impl Widget for DatePicker {
         self.field().set_date_text(cx, v);
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.text())
-    }
+
 }
 
 impl DatePickerRef {

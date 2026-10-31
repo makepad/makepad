@@ -3,12 +3,12 @@ use {
         code_editor::*,
         state::{CodeDocument, CodeSession},
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
 st::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
-    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_widgets_core::desktop_window::DesktopWindow;
     use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
@@ -46,7 +46,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
+        makepad_widgets_core::live_design(cx);
         makepad_code_editor::code_editor::live_design(cx);
     }
 }
@@ -138,13 +138,13 @@ use {
         token::TokenKind,
         Line, Point, Selection, Token,
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{mem, slice::Iter},
 };
 
 live_design! {
     use makepad_draw::shader::std::*;
-    use makepad_widgets::theme::*;
+    use makepad_widgets_core::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -1176,8 +1176,8 @@ where
         }
     }
 }
-pub use makepad_widgets;
-use makepad_widgets::*;
+pub use makepad_widgets_core;
+use makepad_widgets_core::*;
 
 pub mod change;
 pub mod char;
@@ -4021,12 +4021,12 @@ use {
         code_editor::*,
         state::{CodeDocument, CodeSession},
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
-    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_widgets_core::desktop_window::DesktopWindow;
     use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
@@ -4064,7 +4064,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
+        makepad_widgets_core::live_design(cx);
         makepad_code_editor::code_editor::live_design(cx);
     }
 }
@@ -4156,13 +4156,13 @@ use {
         token::TokenKind,
         Line, Point, Selection, Token,
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{mem, slice::Iter},
 };
 
 live_design! {
     use makepad_draw::shader::std::*;
-    use makepad_widgets::theme::*;
+    use makepad_widgets_core::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -5194,8 +5194,8 @@ where
         }
     }
 }
-pub use makepad_widgets;
-use makepad_widgets::*;
+pub use makepad_widgets_core;
+use makepad_widgets_core::*;
 
 pub mod change;
 pub mod char;
@@ -8039,12 +8039,12 @@ use {
         code_editor::*,
         state::{CodeDocument, CodeSession},
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
-    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_widgets_core::desktop_window::DesktopWindow;
     use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
@@ -8082,7 +8082,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
+        makepad_widgets_core::live_design(cx);
         makepad_code_editor::code_editor::live_design(cx);
     }
 }
@@ -8174,13 +8174,13 @@ use {
         token::TokenKind,
         Line, Point, Selection, Token,
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{mem, slice::Iter},
 };
 
 live_design! {
     use makepad_draw::shader::std::*;
-    use makepad_widgets::theme::*;
+    use makepad_widgets_core::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -9212,8 +9212,8 @@ where
         }
     }
 }
-pub use makepad_widgets;
-use makepad_widgets::*;
+pub use makepad_widgets_core;
+use makepad_widgets_core::*;
 
 pub mod change;
 pub mod char;
@@ -12057,12 +12057,12 @@ use {
         code_editor::*,
         state::{CodeDocument, CodeSession},
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
-    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_widgets_core::desktop_window::DesktopWindow;
     use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
@@ -12100,7 +12100,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
+        makepad_widgets_core::live_design(cx);
         makepad_code_editor::code_editor::live_design(cx);
     }
 }
@@ -12192,13 +12192,13 @@ use {
         token::TokenKind,
         Line, Point, Selection, Token,
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{mem, slice::Iter},
 };
 
 live_design! {
     use makepad_draw::shader::std::*;
-    use makepad_widgets::theme::*;
+    use makepad_widgets_core::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -13230,8 +13230,8 @@ where
         }
     }
 }
-pub use makepad_widgets;
-use makepad_widgets::*;
+pub use makepad_widgets_core;
+use makepad_widgets_core::*;
 
 pub mod change;
 pub mod char;
@@ -16075,12 +16075,12 @@ use {
         code_editor::*,
         state::{CodeDocument, CodeSession},
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
-    use makepad_widgets::desktop_window::DesktopWindow;
+    use makepad_widgets_core::desktop_window::DesktopWindow;
     use makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
@@ -16118,7 +16118,7 @@ impl AppMain for App {
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
+        makepad_widgets_core::live_design(cx);
         makepad_code_editor::code_editor::live_design(cx);
     }
 }
@@ -16210,13 +16210,13 @@ use {
         token::TokenKind,
         Line, Point, Selection, Token,
     },
-    makepad_widgets::*,
+    makepad_widgets_core::*,
     std::{mem, slice::Iter},
 };
 
 live_design! {
     use makepad_draw::shader::std::*;
-    use makepad_widgets::theme::*;
+    use makepad_widgets_core::theme::*;
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
@@ -17248,8 +17248,8 @@ where
         }
     }
 }
-pub use makepad_widgets;
-use makepad_widgets::*;
+pub use makepad_widgets_core;
+use makepad_widgets_core::*;
 
 pub mod change;
 pub mod char;

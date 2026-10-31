@@ -807,11 +807,36 @@ const TEXT_SLACK: f64 = 2.0;
 /// slack a drawn run needs; a per-character estimate only for text the
 /// layout engine returns no row for.
 pub(crate) fn measure(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
+    advance(draw_text, cx, text) + TEXT_SLACK
+}
+
+/// How far a drawn run advances the pen, without the slack a box drawn AROUND
+/// it needs.
+///
+/// This is what a widget laying its own label out takes: the turtle walks the
+/// advance, so a width measured with the slack on is two points wider than the
+/// box that gets drawn. Use [`measure`] to draw a box around a run, and this to
+/// predict the width of a widget that already contains one.
+/// How much room an icon takes across, margin included -- or `None` when that
+/// cannot be said without drawing.
+///
+/// A stated width is the answer whether or not there is a document behind it,
+/// which matters for a mark drawn as a quad rather than loaded from a file: its
+/// `DrawSvg` has nothing to measure, and asking it would say `None` for a width
+/// the walk states plainly. Only an icon whose width is left to the turtle needs
+/// the document, and before that has loaded there is no honest number.
+pub(crate) fn icon_extent(svg: &mut DrawSvg, cx: &mut Cx2d, walk: Walk) -> Option<f64> {
+    if let Size::Fixed(w) = walk.width {
+        return Some(w + walk.margin.width());
+    }
+    Some(svg.measure(cx.cx, walk)?.x + walk.margin.width())
+}
+
+pub fn advance(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
     draw_text
         .prepare_single_line_run(cx, text)
         .map(|run| run.width_in_lpxs as f64)
         .unwrap_or_else(|| text.chars().count() as f64 * draw_text.text_style.font_size as f64 * 0.62)
-        + TEXT_SLACK
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -995,6 +1020,13 @@ impl Badge {
 }
 
 impl Widget for Badge {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.count.to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1033,11 +1065,7 @@ impl Widget for Badge {
         self.disabled
     }
 
-    /// The raw count, uncapped, so a test can wait on the number the host
-    /// pushed rather than on "99+".
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.count.to_string())
-    }
+
 }
 
 impl BadgeRef {
@@ -1106,6 +1134,14 @@ impl StatusDot {
 }
 
 impl Widget for StatusDot {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(self.status.name().to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1150,9 +1186,7 @@ impl Widget for StatusDot {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.status.name().to_string())
-    }
+
 }
 
 impl StatusDotRef {
@@ -1270,6 +1304,13 @@ impl LabelValue {
 }
 
 impl Widget for LabelValue {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.value_text()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1346,9 +1387,7 @@ impl Widget for LabelValue {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.value_text())
-    }
+
 }
 
 impl LabelValueRef {
@@ -1481,6 +1520,13 @@ impl BadgeAnchor {
 }
 
 impl Widget for BadgeAnchor {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        self.badge.semantics(cx, node);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let step = self.view.draw_walk(cx, scope, walk);
         if !step.is_done() {
@@ -1526,9 +1572,7 @@ impl Widget for BadgeAnchor {
         self.badge.disabled(cx)
     }
 
-    fn snapshot_value(&self, cx: &Cx) -> Option<String> {
-        self.badge.snapshot_value(cx)
-    }
+
 }
 
 impl BadgeAnchorRef {
@@ -1599,6 +1643,13 @@ impl Marker {
 }
 
 impl Widget for Marker {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.number.to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let step = self.view.draw_walk(cx, scope, walk);
         if !step.is_done() {
@@ -1656,9 +1707,7 @@ impl Widget for Marker {
         self.badge.disabled(cx)
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.number.to_string())
-    }
+
 }
 
 impl MarkerRef {

@@ -1,10 +1,21 @@
 //! Hotloadable application styles. The WM owns framebuffer transitions; this
 //! module only installs Splash definitions and reapplies the existing widget tree.
+//!
+//! A style is a sheet in the catalogue ([`SheetEntry`]): its Splash sources,
+//! and the desktop family ([`DesktopStyle`]) it lays out as. The library's own
+//! desktop sheets are the catalogue's first entries; an app adds its own with
+//! [`register`] at startup, before the first style load, and every list of
+//! styles -- the pickers, the theme lab, the storybook -- reads the catalogue.
 use crate::*;
 use makepad_micro_serde::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A desktop family: how the WM lays windows out (floating or tiled, a shelf,
+/// a title bar), which artwork its app icons draw and which of the WM's
+/// desktop identities it tweens to. Every sheet names the family it lays out
+/// as; a sheet is not a family.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SerJson, DeJson)]
 pub enum DesktopStyle {
     #[default]
     Omarchy,
@@ -17,13 +28,26 @@ pub enum DesktopStyle {
     /// A dark style in near-black and orange, the only one here not modelled
     /// on somebody else's desktop. Declared last: the window manager's style
     /// tween reads its weights by discriminant (1 is macOS, 3 Windows 2000,
-    /// 4 NeXTSTEP), so a new style takes the next number and `ALL` below
+    /// 4 NeXTSTEP), so a new family takes the next number and `ALL` below
     /// keeps the order they are shown in.
     BlackOrange,
 }
 
 impl DesktopStyle {
-    pub const ALL: [Self; 8] = [Self::Omarchy, Self::BlackOrange, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
+    /// How many families there are, and so how many weights a table indexed
+    /// by discriminant needs: every variant is in `ALL`.
+    pub const COUNT: usize = 8;
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Omarchy, Self::BlackOrange, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android,
+    ];
+    /// The families laid out as tiles rather than as floating windows, with
+    /// no shelf and no title bar of their own.
+    const TILING: [Self; 2] = [Self::Omarchy, Self::BlackOrange];
+    fn tiling(self) -> bool {
+        Self::TILING.contains(&self)
+    }
+    /// The family's id, which is also the id of its own sheet in the
+    /// catalogue.
     pub fn id(self) -> &'static str {
         match self {
             Self::Omarchy => "omarchy",
@@ -48,16 +72,19 @@ impl DesktopStyle {
             Self::Android => "Android",
         }
     }
+    /// The family of this id. A sheet's name is not a family's: look a sheet
+    /// up with [`find`] and read its `family`.
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.strip_suffix("-dark").unwrap_or(s);
         Self::ALL.into_iter().find(|v| v.id() == s)
     }
+    /// Whether the family's desktop has a dark appearance, which its own
+    /// sheet then offers as its `dark` variant.
     pub fn supports_dark(self) -> bool { matches!(self, Self::Macos | Self::Windows | Self::Ios | Self::Android) }
     pub fn mobile(self) -> bool { matches!(self, Self::Ios | Self::Android) }
-    /// Which set of app artwork this style draws, as an index into the icon
-    /// table. A style is free to borrow another's drawings rather than have
+    /// Which set of app artwork this family draws, as an index into the icon
+    /// table. A family is free to borrow another's drawings rather than have
     /// every icon redrawn for it -- the table is one entry per SET, not one
-    /// per style, so the enum's own order must not be read as an index into
+    /// per family, so the enum's own order must not be read as an index into
     /// it.
     pub fn icon_set(self) -> usize {
         match self {
@@ -76,7 +103,7 @@ impl DesktopStyle {
         Self::ALL[(at + 1) % Self::ALL.len()]
     }
     pub fn floating(self) -> bool {
-        !matches!(self, Self::Omarchy | Self::BlackOrange) && !self.mobile()
+        !self.tiling() && !self.mobile()
     }
     pub fn shelf_height(self) -> f64 {
         match self {
@@ -97,13 +124,195 @@ impl DesktopStyle {
             Self::Ios | Self::Android => 0.0,
         }
     }
+    /// The family's own sheet in the catalogue, in the appearance asked for
+    /// where it has one.
+    pub fn sheet(self, dark: bool) -> &'static SheetEntry {
+        find(self.id())
+            .unwrap_or_else(|| panic!("the catalogue has no sheet for the {} family", self.id()))
+            .with_appearance(dark)
+    }
+}
+
+/// One sheet in the catalogue: what it is called, the family it lays out as,
+/// and its two Splash halves. Build one with [`sheet_entry!`], which embeds
+/// the sources from the owning crate.
+#[derive(Debug)]
+pub struct SheetEntry {
+    /// The id a setting, the `MAKEPAD_WIDGET_STYLE` variable and the WM name
+    /// it by, and the directory under `source_dir` its files live in.
+    pub id: &'static str,
+    /// What a picker shows.
+    pub label: &'static str,
+    /// The desktop family it lays out as.
+    pub family: DesktopStyle,
+    /// The id of its dark appearance, itself a sheet in the catalogue.
+    pub dark: Option<&'static str>,
+    /// The token half, embedded.
+    pub theme: &'static str,
+    /// The widget half, embedded.
+    pub widgets: &'static str,
+    /// The directory holding `<id>/theme.splash` and `<id>/widgets.splash` in
+    /// a source checkout (the owning crate's), hotloaded on every load.
+    pub source_dir: &'static str,
+    /// The cargo manifest directory the sheet's `crate_resource("self:...")`
+    /// resolves against: the crate that owns the fonts and images it names.
+    pub resources: fn() -> &'static str,
+    /// A script module the sheet brings with it, registered before its widget
+    /// half evaluates: a shader library its rules call that the widget
+    /// library does not carry. None for a sheet that needs only the library's.
+    pub script_mod: Option<fn(&mut ScriptVm)>,
+}
+
+impl SheetEntry {
+    /// This sheet in the appearance asked for: its dark variant for `dark`
+    /// where it has one, its light one otherwise.
+    pub fn with_appearance(&'static self, dark: bool) -> &'static SheetEntry {
+        if dark {
+            self.dark.and_then(find).unwrap_or(self)
+        } else {
+            self.light()
+        }
+    }
+    /// The sheet whose dark variant this one is, or itself.
+    pub fn light(&'static self) -> &'static SheetEntry {
+        catalogue().into_iter().find(|entry| entry.dark == Some(self.id)).unwrap_or(self)
+    }
+    /// Whether this is another sheet's dark variant.
+    pub fn is_dark_variant(&'static self) -> bool {
+        !std::ptr::eq(self.light(), self)
+    }
+}
+
+/// A [`SheetEntry`] for the sheet in `<dir>/<id>/`, `dir` relative to the
+/// invoking crate's manifest directory: the sources are embedded from there,
+/// and a source checkout hotloads them from there.
+#[macro_export]
+macro_rules! sheet_entry {
+    (dir: $dir:literal, id: $id:literal, label: $label:literal, family: $family:expr, dark: $dark:expr, resources: $resources:expr $(,)?) => {
+        $crate::desktop_style::SheetEntry {
+            id: $id,
+            label: $label,
+            family: $family,
+            dark: $dark,
+            theme: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir, "/", $id, "/theme.splash")),
+            widgets: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir, "/", $id, "/widgets.splash")),
+            source_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir),
+            resources: $resources,
+            script_mod: None,
+        }
+    };
+    (dir: $dir:literal, id: $id:literal, label: $label:literal, family: $family:expr, dark: $dark:expr, resources: $resources:expr, script_mod: $script_mod:expr $(,)?) => {
+        $crate::desktop_style::SheetEntry {
+            id: $id,
+            label: $label,
+            family: $family,
+            dark: $dark,
+            theme: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir, "/", $id, "/theme.splash")),
+            widgets: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir, "/", $id, "/widgets.splash")),
+            source_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir),
+            resources: $resources,
+            script_mod: Some($script_mod),
+        }
+    };
+}
+
+/// The library's own sheets: the desktop families', each followed by its
+/// dark appearance where it has one.
+static DESKTOP_SHEETS: [SheetEntry; 12] = [
+    sheet_entry!(dir: "../themes", id: "omarchy", label: "Omarchy", family: DesktopStyle::Omarchy, dark: None, resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "black-orange", label: "Black orange", family: DesktopStyle::BlackOrange, dark: None, resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "macos", label: "macOS", family: DesktopStyle::Macos, dark: Some("macos-dark"), resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "macos-dark", label: "macOS dark", family: DesktopStyle::Macos, dark: None, resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "windows", label: "Windows", family: DesktopStyle::Windows, dark: Some("windows-dark"), resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "windows-dark", label: "Windows dark", family: DesktopStyle::Windows, dark: None, resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "windows-2000", label: "Windows 2000", family: DesktopStyle::Windows2000, dark: None, resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "nextstep", label: "NeXTSTEP", family: DesktopStyle::NextStep, dark: None, resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "ios", label: "iOS", family: DesktopStyle::Ios, dark: Some("ios-dark"), resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "ios-dark", label: "iOS dark", family: DesktopStyle::Ios, dark: None, resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "android", label: "Android", family: DesktopStyle::Android, dark: Some("android-dark"), resources: crate::widgets_dir),
+    sheet_entry!(dir: "../themes", id: "android-dark", label: "Android dark", family: DesktopStyle::Android, dark: None, resources: crate::widgets_dir),
+];
+
+/// One registered set of sheets, and the set registered before it. The list
+/// only grows, from its head, and a node is never freed: readers walk it with
+/// no lock, from any thread, with or without a `Cx`.
+struct CatalogueNode {
+    sheets: &'static [SheetEntry],
+    next: *const CatalogueNode,
+}
+unsafe impl Sync for CatalogueNode {}
+
+static DESKTOP_NODE: CatalogueNode = CatalogueNode { sheets: &DESKTOP_SHEETS, next: std::ptr::null() };
+static CATALOGUE: AtomicPtr<CatalogueNode> = AtomicPtr::new(&DESKTOP_NODE as *const CatalogueNode as *mut CatalogueNode);
+
+fn catalogue_sets() -> Vec<&'static [SheetEntry]> {
+    let mut sets = Vec::new();
+    let mut at = CATALOGUE.load(Ordering::Acquire) as *const CatalogueNode;
+    while !at.is_null() {
+        // Safety: every node is a static or leaked, and never freed or changed
+        // after it was published.
+        let node = unsafe { &*at };
+        sets.push(node.sheets);
+        at = node.next;
+    }
+    sets.reverse();
+    sets
+}
+
+/// Add an app's own sheets to the catalogue, after those already there. Call
+/// it at startup, before the first style load; registering the same set again
+/// changes nothing.
+pub fn register(sheets: &'static [SheetEntry]) {
+    let node = Box::leak(Box::new(CatalogueNode { sheets, next: std::ptr::null() }));
+    loop {
+        let head = CATALOGUE.load(Ordering::Acquire);
+        if catalogue_sets().iter().any(|set| std::ptr::eq(*set, sheets)) {
+            return;
+        }
+        node.next = head;
+        if CATALOGUE
+            .compare_exchange(head, node as *mut CatalogueNode, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+/// Every sheet in the catalogue, in the order the sets were registered (the
+/// library's own first), each followed by its dark variant where the set
+/// lists it so.
+pub fn catalogue() -> Vec<&'static SheetEntry> {
+    catalogue_sets().into_iter().flat_map(|set| set.iter()).collect()
+}
+
+/// The sheets a picker offers: every sheet that is not another's dark
+/// variant, which the appearance toggle reaches instead.
+pub fn picks() -> Vec<&'static SheetEntry> {
+    let all = catalogue();
+    all.iter()
+        .copied()
+        .filter(|entry| !all.iter().any(|other| other.dark == Some(entry.id)))
+        .collect()
+}
+
+/// The sheet of this id, the first registered where two share one.
+pub fn find(id: &str) -> Option<&'static SheetEntry> {
+    catalogue_sets().into_iter().flat_map(|set| set.iter()).find(|entry| entry.id == id)
 }
 
 /// Two phases: theme tokens before widget registration, component overrides
 /// after it. Applications then evaluate their own Splash against those defaults.
+/// It is complete on its own: a process that receives one (a hosted app from
+/// the WM) installs it without the sheet being in its own catalogue.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct StyleSheet {
     pub name: String,
+    /// The family it lays out as, and whose icons it carries.
+    pub family: DesktopStyle,
+    /// The manifest directory its `crate_resource("self:...")` resolves
+    /// against.
+    pub resources: String,
     pub theme: String,
     pub widgets: String,
     pub icons: Vec<crate::app_icon::IconAsset>,
@@ -112,94 +321,76 @@ pub struct StyleSheet {
 struct Envelope {
     makepad_style: StyleSheet,
 }
+/// What a heap wears. `Inherited` is the sheet the window system handed
+/// down (`MAKEPAD_WIDGET_STYLE`, a WM's `makepad_style` event); `Picked` is
+/// what the app or somebody using it chose, `None` being the plain theme.
+/// A pick stands: the window system's sheet neither comes back over it on
+/// the next read nor replaces it when the system look changes.
+#[derive(Clone, Debug, PartialEq)]
+enum Worn {
+    Inherited(StyleSheet),
+    Picked(Option<StyleSheet>),
+}
+impl Worn {
+    fn sheet(&self) -> Option<&StyleSheet> {
+        match self {
+            Worn::Inherited(sheet) => Some(sheet),
+            Worn::Picked(sheet) => sheet.as_ref(),
+        }
+    }
+}
 #[derive(Default)]
 struct Styles {
-    heaps: HashMap<usize, StyleSheet>,
+    heaps: HashMap<usize, Worn>,
+    /// The window system's family (the environment's sheet, then its makepad_style
+    /// events), whatever the app picked for itself: `None` until read.
+    system: Option<Option<DesktopStyle>>,
 }
 
 impl StyleSheet {
-    pub fn load(style: DesktopStyle) -> Self {
-        Self::load_with_appearance(style, false)
-    }
-    pub fn load_with_appearance(style: DesktopStyle, dark: bool) -> Self {
-        let name = match (style, dark) {
-            (DesktopStyle::Macos, true) => "macos-dark",
-            (DesktopStyle::Windows, true) => "windows-dark",
-            (DesktopStyle::Ios, true) => "ios-dark",
-            (DesktopStyle::Android, true) => "android-dark",
-            _ => style.id(),
-        };
-        let (theme, widgets) = match style {
-            DesktopStyle::Omarchy => (
-                include_str!("../../themes/omarchy/theme.splash"),
-                include_str!("../../themes/omarchy/widgets.splash"),
-            ),
-            DesktopStyle::BlackOrange => (
-                include_str!("../../themes/black-orange/theme.splash"),
-                include_str!("../../themes/black-orange/widgets.splash"),
-            ),
-            DesktopStyle::Macos if dark => (
-                include_str!("../../themes/macos-dark/theme.splash"),
-                include_str!("../../themes/macos-dark/widgets.splash"),
-            ),
-            DesktopStyle::Macos => (
-                include_str!("../../themes/macos/theme.splash"),
-                include_str!("../../themes/macos/widgets.splash"),
-            ),
-            DesktopStyle::Windows if dark => (
-                include_str!("../../themes/windows-dark/theme.splash"),
-                include_str!("../../themes/windows-dark/widgets.splash"),
-            ),
-            DesktopStyle::Windows => (
-                include_str!("../../themes/windows/theme.splash"),
-                include_str!("../../themes/windows/widgets.splash"),
-            ),
-            DesktopStyle::Windows2000 => (
-                include_str!("../../themes/windows-2000/theme.splash"),
-                include_str!("../../themes/windows-2000/widgets.splash"),
-            ),
-            DesktopStyle::NextStep => (
-                include_str!("../../themes/nextstep/theme.splash"),
-                include_str!("../../themes/nextstep/widgets.splash"),
-            ),
-            DesktopStyle::Ios if dark => (
-                include_str!("../../themes/ios-dark/theme.splash"),
-                include_str!("../../themes/ios-dark/widgets.splash"),
-            ),
-            DesktopStyle::Ios => (
-                include_str!("../../themes/ios/theme.splash"),
-                include_str!("../../themes/ios/widgets.splash"),
-            ),
-            DesktopStyle::Android if dark => (
-                include_str!("../../themes/android-dark/theme.splash"),
-                include_str!("../../themes/android-dark/widgets.splash"),
-            ),
-            DesktopStyle::Android => (
-                include_str!("../../themes/android/theme.splash"),
-                include_str!("../../themes/android/widgets.splash"),
-            ),
-        };
+    /// The sheet as it stands: a source checkout hotloads it from its source
+    /// directory on every load; installed and wasm builds carry the identical
+    /// embedded sources, with no external dependency.
+    pub fn load(entry: &SheetEntry) -> Self {
         let read = |file: &str, bundled: &str| {
-            // Source checkouts hotload on every selection; installed/wasm builds
-            // carry the identical embedded stylesheet, with no external dependency.
             #[cfg(not(target_arch = "wasm32"))]
-            if let Ok(text) = std::fs::read_to_string(
-                std::path::Path::new(crate::widgets_dir())
-                    .join("themes")
-                    .join(name)
-                    .join(file),
-            ) {
+            if let Ok(text) = std::fs::read_to_string(std::path::Path::new(entry.source_dir).join(entry.id).join(file)) {
                 return text;
             }
             let _ = file;
             bundled.to_string()
         };
         Self {
-            name: name.into(),
-            theme: read("theme.splash", theme),
-            widgets: read("widgets.splash", widgets),
-            icons: crate::app_icon::load_assets(style),
+            name: entry.id.into(),
+            family: entry.family,
+            resources: (entry.resources)().into(),
+            theme: read("theme.splash", entry.theme),
+            widgets: read("widgets.splash", entry.widgets),
+            icons: crate::app_icon::load_assets(entry.family),
         }
+    }
+    /// The catalogue's sheet of this id.
+    pub fn named(id: &str) -> Option<Self> {
+        find(id).map(Self::load)
+    }
+    /// A colour token the sheet's token half assigns as a literal
+    /// (`mod.theme.color_bg_app = #cacacc`), as `0xRRGGBBAA`: what a host
+    /// that does not run the sheet (the WM's desktop ground, which is the
+    /// window ground `theme.color_bg_app`) reads off it. The last assignment
+    /// wins, as it does when the sheet runs.
+    pub fn theme_color(&self, key: &str) -> Option<u32> {
+        let prefix = format!("mod.theme.{key}");
+        self.theme.lines().rev().find_map(|line| {
+            let rest = line.trim().strip_prefix(&prefix)?.trim_start().strip_prefix('=')?;
+            let hex = rest.split("//").next()?.trim().strip_prefix('#')?;
+            let hex = hex.strip_prefix('x').unwrap_or(hex);
+            let value = u32::from_str_radix(hex, 16).ok()?;
+            match hex.len() {
+                6 => Some((value << 8) | 0xff),
+                8 => Some(value),
+                _ => None,
+            }
+        })
     }
     pub fn to_json(&self) -> String {
         Envelope {
@@ -222,61 +413,116 @@ pub(crate) fn gc_heaps(cx: &mut Cx, heaps: &[usize]) {
         .heaps
         .retain(|key, _| !heaps.contains(key));
 }
+/// Wear `sheet` from now on: the app's (or its user's) pick, which the
+/// window system's sheet does not override.
 pub fn install(vm: &mut ScriptVm, sheet: StyleSheet) {
-    let style = DesktopStyle::parse(&sheet.name).unwrap_or(DesktopStyle::Macos);
-    crate::app_icon::install(vm.cx_mut(), style, &sheet.icons);
-    let key = vm.bx.heap.heap_key();
-    vm.cx_mut().global::<Styles>().heaps.insert(key, sheet);
+    wear(vm, Worn::Picked(Some(sheet)));
 }
-/// Take the sheet off again, so the next evaluation runs under the plain
-/// theme. `install` had no way back: an app that lets somebody try a sheet
-/// could put one on and never return to what it started with. A sheet named
-/// by `MAKEPAD_WIDGET_STYLE` comes back on the next read, as it would have
-/// arrived in the first place.
+/// Take the sheet off: the next evaluation runs under the plain theme, and
+/// stays there. The plain theme is a pick like any sheet, so a sheet named by
+/// `MAKEPAD_WIDGET_STYLE` (or `MAKEPAD_WIDGET_STYLE_FILE`) or sent by the WM
+/// does not come back over it.
 pub fn uninstall(vm: &mut ScriptVm) {
-    let key = vm.bx.heap.heap_key();
-    vm.cx_mut().global::<Styles>().heaps.remove(&key);
+    wear(vm, Worn::Picked(None));
+}
+fn wear(vm: &mut ScriptVm, worn: Worn) {
+    if let Some(sheet) = worn.sheet() {
+        crate::app_icon::install(vm.cx_mut(), sheet.family, &sheet.icons);
+    }
+    let key = vm.heap_key();
+    vm.cx_mut().global::<Styles>().heaps.insert(key, worn);
+}
+/// What a VM wears, taken to put back later: the sheet and whether it was
+/// picked or handed down by the window system, so a tool that tries other
+/// sheets and returns leaves an app that followed the system following it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wearing(Option<Worn>);
+impl Wearing {
+    pub fn sheet(&self) -> Option<&StyleSheet> {
+        self.0.as_ref().and_then(Worn::sheet)
+    }
+}
+/// What `vm` wears now (the environment's sheet adopted first, as any read).
+pub fn wearing(vm: &mut ScriptVm) -> Wearing {
+    current(vm);
+    let key = vm.heap_key();
+    Wearing(worn(vm.cx_mut(), key))
+}
+/// Put back what [`wearing`] took.
+pub fn put_back(vm: &mut ScriptVm, wearing: Wearing) {
+    match wearing.0 {
+        Some(worn) => wear(vm, worn),
+        None => {
+            let key = vm.heap_key();
+            vm.cx_mut().global::<Styles>().heaps.remove(&key);
+        }
+    }
+}
+/// What the heap `key` wears, if it has settled on anything yet.
+fn worn(cx: &mut Cx, key: usize) -> Option<Worn> {
+    cx.global::<Styles>().heaps.get(&key).cloned()
+}
+/// The sheet installed on the heap `key`, if any: what a VM allocated from
+/// that one inherits.
+pub(crate) fn sheet_of_heap(cx: &mut Cx, key: usize) -> Option<StyleSheet> {
+    worn(cx, key)?.sheet().cloned()
 }
 pub fn current(vm: &mut ScriptVm) -> Option<StyleSheet> {
-    let key = vm.bx.heap.heap_key();
-    if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key).cloned() {
-        return Some(sheet);
+    let key = vm.heap_key();
+    if let Some(worn) = worn(vm.cx_mut(), key) {
+        return worn.sheet().cloned();
     }
     // Opt-in only. Picking a sheet from OsType restyled every app that had
     // never asked for one, and an app that calls `theme_mod` + `widgets_mod`
     // without `script_mod` got the theme half of it and not the widget half.
-    let name = std::env::var("MAKEPAD_WIDGET_STYLE").ok()?;
-    let style = DesktopStyle::parse(&name)?;
-    let sheet = StyleSheet::load_with_appearance(style, name.ends_with("-dark"));
-    install(vm, sheet.clone());
+    let sheet = env_sheet()?;
+    wear(vm, Worn::Inherited(sheet.clone()));
     Some(sheet)
+}
+/// The sheet the environment names. `MAKEPAD_WIDGET_STYLE_FILE` is a
+/// `StyleSheet::to_json` file, so a launcher hands an app a sheet the app
+/// never registered (Stage's app runs launch other apps under Stage's
+/// sheets); it wins over `MAKEPAD_WIDGET_STYLE`, a catalogue id.
+fn env_sheet() -> Option<StyleSheet> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = std::env::var_os("MAKEPAD_WIDGET_STYLE_FILE") {
+        match std::fs::read_to_string(&path).ok().as_deref().and_then(StyleSheet::parse) {
+            Some(sheet) => return Some(sheet),
+            None => error!("MAKEPAD_WIDGET_STYLE_FILE: no style sheet in {}", std::path::Path::new(&path).display()),
+        }
+    }
+    StyleSheet::named(&std::env::var("MAKEPAD_WIDGET_STYLE").ok()?)
 }
 /// Read just the active appearance without cloning the Splash and SVG payloads.
 pub fn current_name(vm: &mut ScriptVm) -> Option<String> {
-    let key = vm.bx.heap.heap_key();
-    if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key) {
-        return Some(sheet.name.clone());
+    let key = vm.heap_key();
+    if let Some(worn) = vm.cx_mut().global::<Styles>().heaps.get(&key) {
+        return worn.sheet().map(|sheet| sheet.name.clone());
     }
     current(vm).map(|sheet| sheet.name)
 }
+/// The window system's family: the sheet the environment names (the WM hands every app
+/// its look) or the WM's newest style event, independent of what the app picked for
+/// itself. What the window's controls follow under a window manager (window.rs): they are
+/// the WM's chrome, drawn by the app. `None` without a window system's sheet.
+pub fn system_style(cx: &mut Cx) -> Option<DesktopStyle> {
+    if let Some(system) = cx.global::<Styles>().system {
+        return system;
+    }
+    let system = env_sheet().map(|sheet| sheet.family);
+    cx.global::<Styles>().system = Some(system);
+    system
+}
 /// The active family, without copying a stylesheet or its assets.
 pub fn current_style(vm: &mut ScriptVm) -> DesktopStyle {
-    let key=vm.bx.heap.heap_key();
-    if let Some(sheet)=vm.cx_mut().global::<Styles>().heaps.get(&key) {
-        return DesktopStyle::parse(&sheet.name).unwrap_or_default();
+    let key=vm.heap_key();
+    if let Some(worn)=vm.cx_mut().global::<Styles>().heaps.get(&key) {
+        return worn.sheet().map(|sheet| sheet.family).unwrap_or_default();
     }
-    current(vm).and_then(|sheet|DesktopStyle::parse(&sheet.name)).unwrap_or_default()
+    current(vm).map(|sheet| sheet.family).unwrap_or_default()
 }
 fn evaluate(vm: &mut ScriptVm, sheet: &StyleSheet, phase: &str, code: String) {
-    vm.eval(ScriptMod {
-        cargo_manifest_path: crate::widgets_dir().into(),
-        module_path: format!("desktop_style_{}_{}", sheet.name, phase),
-        file: format!("themes/{}/{phase}.splash", sheet.name),
-        line: 0,
-        column: 0,
-        code,
-        values: vec![],
-    });
+    vm.eval(ScriptMod::new(&sheet.resources, &format!("desktop_style_{}_{}", sheet.name, phase), &format!("themes/{}/{phase}.splash", sheet.name), 0, 0, &code, &[]));
 }
 pub fn apply_theme(vm: &mut ScriptVm) {
     if let Some(sheet) = current(vm) {
@@ -285,20 +531,461 @@ pub fn apply_theme(vm: &mut ScriptVm) {
         // names them, so they are brought into line with what this one set.
         let roles = {
             let theme = vm.module(id!(theme));
-            let mut read = |key: &str| vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color();
+            let mut read = |key: &str| vm.value(theme, LiveId::from_str(key)).as_color();
             crate::theme_tokens::sheet_roles_script(&sheet.theme, &mut read)
         };
         evaluate(vm, &sheet, "roles", roles);
-        if DesktopStyle::parse(&sheet.name).is_some_and(|style| style.mobile()) {
+        if sheet.family.mobile() {
             crate::font_policy::append_style_fallbacks(vm);
         }
     }
 }
 pub fn apply_widgets(vm: &mut ScriptVm) {
     if let Some(sheet) = current(vm) {
-        evaluate(vm, &sheet, "widgets", sheet.widgets.clone());
+        // The module a sheet brings with it comes from its catalogue entry: a
+        // sheet that travels as a value (a hosted app's) has no function in
+        // it, so a sheet with its own module needs its crate registered in
+        // every process that runs it.
+        if let Some(script_mod) = find(&sheet.name).and_then(|entry| entry.script_mod) {
+            script_mod(vm);
+        }
+        let code = without_unregistered_widgets(vm, &sheet.widgets);
+        evaluate(vm, &sheet, "widgets", code);
     }
 }
+
+/// The sheet's widget rules less every line that names a widget this app did
+/// not register. A sheet styles the whole library and the widget families are
+/// optional: an app built without the dates family has no `DateField`, and a
+/// line reaching for one would only raise an error at every install. So a
+/// sheet names a family's widget on a line of its own, and that line is
+/// blanked rather than removed, so the evaluator's line numbers still point
+/// into the file. A line that opens a block -- a replaced `vertex` or
+/// `pixel` function, an object -- takes the block with it, up to the line
+/// that closes it, or its body would be left standing at the top level.
+fn without_unregistered_widgets(vm: &mut ScriptVm, code: &str) -> String {
+    let widgets = vm.module(id!(widgets));
+    let registered = |vm: &mut ScriptVm, name: &str| {
+        let value = vm.value(widgets, LiveId::from_str(name));
+        !(value.is_nil() || value.is_err())
+    };
+    // How far a line opens (or closes) brackets, its comment left out.
+    let depth = |line: &str| -> i32 {
+        let code = line.split("//").next().unwrap_or("");
+        code.chars()
+            .map(|c| match c {
+                '{' | '(' | '[' => 1,
+                '}' | ')' | ']' => -1,
+                _ => 0,
+            })
+            .sum()
+    };
+    let mut out: Vec<&str> = Vec::new();
+    // The brackets still open in a statement being blanked.
+    let mut open = 0;
+    for line in code.split('\n') {
+        if open > 0 {
+            open += depth(line);
+            out.push("");
+            continue;
+        }
+        let missing = line.match_indices("mod.widgets.").any(|(at, prefix)| {
+            let name: String = line[at + prefix.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            !name.is_empty() && !registered(vm, &name)
+        });
+        if missing {
+            open = depth(line).max(0);
+            out.push("");
+        } else {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+/// Keep the library as it stands before any sheet, for the chrome that must
+/// look and measure the same under every sheet: `mod.stock_widgets`, the
+/// stock templates, and `mod.prelude.stock_internal`, the prelude with the
+/// stock theme under `theme`.
+///
+/// A sheet reaches a template two ways. Its token half runs before any
+/// template registers, so every token a template bakes -- a spacing rung, a
+/// font, a corner, an animation time -- is the sheet's; its widget half runs
+/// after, and writes straight onto the templates, so every template derived
+/// from one it wrote to takes what it wrote -- a face, a margin, an animator
+/// state -- wherever it does not say otherwise. The developer panel, the fab
+/// controls and a host's own tool panels are built from those templates. So
+/// while a sheet is installed, the module run registers the library twice:
+/// once without the sheet, kept here, and once with it, which is what
+/// `mod.widgets` holds and what the sheet's widget half writes into. Chrome
+/// takes its templates and its theme from the kept one, after whatever else
+/// it uses:
+///
+/// ```text
+/// use mod.prelude.stock_internal.*
+/// use mod.stock_widgets.*
+/// ```
+///
+/// With no sheet installed there is one registration, and the kept library
+/// is `mod.widgets` itself.
+pub(crate) fn keep_stock(vm: &mut ScriptVm) {
+    script_eval!(vm, {
+        mod.stock_widgets = mod.widgets
+    });
+    script_eval!(vm, {
+        mod.prelude.stock_internal = {
+            ..mod.prelude.widgets_header,
+            theme: mod.theme,
+        }
+    });
+}
+
+/// What an object holds or inherits, as (name, value): its own keys and its
+/// prototypes', resolved on the object, and its children -- its own, or,
+/// where it was made without a copy of them, the nearest prototype's.
+fn resolved_entries(heap: &ScriptHeap, obj: ScriptObject) -> Vec<(String, ScriptValue)> {
+    let mut keys: Vec<ScriptValue> = Vec::new();
+    let mut at = Some(obj);
+    while let Some(o) = at {
+        for e in heap.map_entries(o) {
+            let key = e.key;
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        at = heap.proto(o).as_object();
+    }
+    let name = |key: ScriptValue| key.as_id().map(|id| id.to_string()).unwrap_or_else(|| "_".into());
+    let mut out: Vec<(String, ScriptValue)> = keys.into_iter().map(|key| (name(key), heap.value(obj, key, NoTrap))).collect();
+    let mut at = Some(obj);
+    while let Some(o) = at {
+        let vec = heap.vec_ref(o);
+        if !vec.is_empty() {
+            out.extend(vec.iter().map(|entry| (name(entry.key), entry.value)));
+            break;
+        }
+        at = heap.proto(o).as_object();
+    }
+    out
+}
+
+/// A name a sheet can write after a dot.
+fn writable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_uppercase() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with("__")
+}
+
+/// A sheet that sets everything a sheet may, read off the stock library: a
+/// value of its own for every token the stock theme holds, and for every
+/// number, colour, switch, inset, text style and face (`pixel` and `vertex`)
+/// of every template the stock library registered, down through each draw
+/// object, animator state and nested part the template holds of its own.
+/// What a host's tests install to prove that its chrome resolves the same
+/// under any sheet; see [`resolution`]. Build it with no sheet installed, so
+/// that what it reads is what a sheet would find. `spare` names templates the
+/// sheet leaves alone: a host's own controls, registered beside the stock
+/// ones, which no sheet has any business writing to by name.
+#[doc(hidden)]
+pub fn everything_sheet(vm: &mut ScriptVm, spare: &dyn Fn(&str) -> bool) -> StyleSheet {
+    let theme = script_eval!(vm, {mod.prelude.stock_internal.theme});
+    let inset = script_eval!(vm, {mod.turtle.Inset});
+    let text_style = script_eval!(vm, {mod.text.TextStyle});
+    let widgets = vm.module(id!(stock_widgets));
+    let font = "TextStyle{font_family: FontFamily{latin := FontMember{res: crate_resource(\"self:resources/Inter.ttf\") weight: 400.0 asc: 0.0 desc: 0.0}} font_size: 19.0 line_spacing: 1.7}";
+    let heap = vm.heap();
+    let is = |value: ScriptValue, proto: ScriptValue| {
+        let mut at = value.as_object();
+        while let Some(o) = at {
+            if ScriptValue::from(o) == proto {
+                return true;
+            }
+            at = heap.proto(o).as_object();
+        }
+        false
+    };
+    // A leaf's new value as a sheet would write it, or `None` for what is
+    // not a leaf a sheet sets (text, names, enums, objects to walk into).
+    let leaf = |name: &str, value: ScriptValue| -> Option<String> {
+        if let Some(o) = value.as_object() {
+            if heap.is_fn(o) {
+                return match name {
+                    "pixel" => Some("fn() { return #ff00ffff }".into()),
+                    "vertex" => Some("fn() { self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size) }".into()),
+                    _ => None,
+                };
+            }
+            if is(value, inset) {
+                return Some("mod.turtle.Inset{top: 9.5 right: 9.5 bottom: 9.5 left: 9.5}".into());
+            }
+            if is(value, text_style) {
+                return Some(font.into());
+            }
+            // `uniform(x)` and `instance(x)`: a number under a wrapper.
+            if let Some(number) = heap.proto(o).as_f64() {
+                return Some(format!("{:?}", number + 1.25));
+            }
+            return None;
+        }
+        if let Some(color) = value.as_color() {
+            return Some(format!("#{:08x}", color ^ 0x5a3c9600));
+        }
+        if let Some(b) = value.as_bool() {
+            return Some(format!("{}", !b));
+        }
+        if value.is_f64() {
+            let number = value.as_f64()?;
+            return number.is_finite().then(|| format!("{:?}", number + 1.25));
+        }
+        None
+    };
+
+    let mut tokens = String::from("mod.theme = mod.themes.dark\nuse mod.res.*\nuse mod.text.*\n");
+    if let Some(theme) = theme.as_object() {
+        let mut entries = resolved_entries(heap, theme);
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, value) in entries {
+            if !writable_name(&name) {
+                continue;
+            }
+            if let Some(text) = leaf(&name, value) {
+                tokens.push_str(&format!("mod.theme.{name} = {text}\n"));
+            }
+        }
+    }
+    tokens.push_str("true\n");
+
+    let mut writes = String::from("use mod.prelude.widgets_internal.*\n");
+    let mut names: Vec<String> = heap.map_entries(widgets).into_iter().filter_map(|e| e.key.as_id().map(|id| id.to_string())).collect();
+    names.sort();
+    let mut seen: std::collections::HashSet<ScriptObject> = std::collections::HashSet::new();
+    // Every object once, through the first path that reaches it: a write
+    // lands on the object the path resolves to, whichever template names it.
+    // Into the parts a template holds of its own, and not into those it
+    // inherits: those are another template's, and are written through that
+    // one's name.
+    // A part is the template's own when it was made in the same source as
+    // the template: a value the template only names -- a layout constant, a
+    // token's inset, another template -- is somebody else's, shared with
+    // everything else that names it, and a sheet replaces it rather than
+    // writing into it.
+    let mut stack: Vec<(ScriptObject, String, usize, u16)> = Vec::new();
+    for name in names.iter().rev() {
+        let value = heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+        if let Some(o) = value.as_object() {
+            if writable_name(name) && !spare(name) && !heap.is_fn(o) {
+                stack.push((o, format!("mod.widgets.{name}"), 0, heap.made_at(o).body));
+            }
+        }
+    }
+    while let Some((obj, path, depth, body)) = stack.pop() {
+        if !seen.insert(obj) || heap.is_immutable(obj) {
+            continue;
+        }
+        for (name, value) in resolved_entries(heap, obj) {
+            if !writable_name(&name) {
+                continue;
+            }
+            if let Some(text) = leaf(&name, value) {
+                writes.push_str(&format!("{path}.{name} = {text}\n"));
+            }
+        }
+        let own = heap.map_entries(obj).into_iter().map(|e| (e.key, e.value)).chain(heap.vec_ref(obj).iter().map(|entry| (entry.key, entry.value)));
+        let mut children = Vec::new();
+        for (key, value) in own {
+            let Some(name) = key.as_id().map(|id| id.to_string()) else { continue };
+            if !writable_name(&name) || leaf(&name, value).is_some() {
+                continue;
+            }
+            if let Some(child) = value.as_object() {
+                if depth < 8 && !heap.is_fn(child) && heap.made_at(child).body == body {
+                    children.push((child, format!("{path}.{name}"), depth + 1, body));
+                }
+            }
+        }
+        stack.extend(children.into_iter().rev());
+    }
+    writes.push_str("true\n");
+    StyleSheet {
+        name: "everything".into(),
+        family: DesktopStyle::Omarchy,
+        resources: crate::widgets_dir().into(),
+        theme: tokens,
+        widgets: writes,
+        icons: Vec::new(),
+    }
+}
+
+/// What `root` resolves to, as one line per leaf: `path = value`, walking
+/// everything the object holds or inherits, its children and theirs. An
+/// object met again is named by the path it was first met at. Two readings
+/// of the same templates, taken in two module runs, are equal line for line
+/// exactly when every value, face and nested part resolves the same; a face
+/// is read as the place in the source it was written, so a sheet's face and
+/// the stock one tell apart. See [`everything_sheet`].
+#[doc(hidden)]
+pub fn resolution(vm: &mut ScriptVm, root: ScriptValue, what: &str) -> Vec<String> {
+    let heap = vm.heap();
+    fn text(heap: &ScriptHeap, value: ScriptValue) -> String {
+        if let Some(color) = value.as_color() {
+            format!("#{color:08x}")
+        } else if value.is_string_like() {
+            heap.string_with(value, |_, s| format!("{s:?}")).unwrap_or_default()
+        } else if let Some(pod) = value.as_pod() {
+            let (ty, words) = heap.pod_data(pod);
+            format!("{:?}{words:?}", ty.name())
+        } else if let Some(array) = value.as_array() {
+            if let Some((front, back)) = heap.array_values(array) {
+                let items: Vec<String> = front
+                    .iter()
+                    .chain(back)
+                    .map(|item| match item.as_object() {
+                        Some(o) => match heap.as_fn(o) {
+                            Some(face) => format!("fn {face:?}"),
+                            None => "{..}".into(),
+                        },
+                        None => text(heap, *item),
+                    })
+                    .collect();
+                format!("[{}]", items.join(", "))
+            } else if let Some(items) = heap.array_f32(array) {
+                format!("{items:?}")
+            } else if let Some(items) = heap.array_u32(array) {
+                format!("{items:?}")
+            } else if let Some(items) = heap.array_u16(array) {
+                format!("{items:?}")
+            } else if let Some(items) = heap.array_u8(array) {
+                format!("{items:?}")
+            } else {
+                unreachable!("unsupported array storage kind")
+            }
+        } else {
+            format!("{value:?}")
+        }
+    }
+    let mut out = Vec::new();
+    let mut first: HashMap<ScriptObject, String> = HashMap::new();
+    let mut stack: Vec<(ScriptValue, String)> = vec![(root, what.to_string())];
+    while let Some((value, path)) = stack.pop() {
+        if out.len() > 400_000 {
+            out.push("... cut short".into());
+            break;
+        }
+        let Some(obj) = value.as_object() else {
+            out.push(format!("{path} = {}", text(heap, value)));
+            continue;
+        };
+        if let Some(face) = heap.as_fn(obj) {
+            out.push(format!("{path} = fn {face:?}"));
+            continue;
+        }
+        if let Some(at) = first.get(&obj) {
+            out.push(format!("{path} = @{at}"));
+            continue;
+        }
+        first.insert(obj, path.clone());
+        let mut entries = resolved_entries(heap, obj);
+        // The geometry a draw object is handed is made for each module run,
+        // and is not a thing a sheet sets.
+        entries.retain(|(name, _)| name != "geom");
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        // A wrapper round a value (`uniform(x)`) is read as its value.
+        if entries.is_empty() {
+            let proto = heap.proto(obj);
+            if proto.as_object().is_none() {
+                out.push(format!("{path} = {}", text(heap, proto)));
+                continue;
+            }
+        }
+        for (name, value) in entries.into_iter().rev() {
+            stack.push((value, format!("{path}.{name}")));
+        }
+    }
+    out
+}
+
+/// The lines of two readings that differ, the first `limit` of them, for a
+/// failure message.
+#[doc(hidden)]
+pub fn resolution_diff(want: &[String], got: &[String], limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for (at, (w, g)) in want.iter().zip(got.iter()).enumerate() {
+        if w != g {
+            out.push(format!("line {at}: want {w}\n            got  {g}"));
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    if want.len() != got.len() && out.len() < limit {
+        out.push(format!("{} lines wanted, {} read", want.len(), got.len()));
+    }
+    out
+}
+
+/// The stock caption a window draws under a style sheet, as the sheet resolves it: the bar's
+/// colour (the window's ground where the bar is clear, as the caption shows it), the title's,
+/// each with focus and without, and the title's font size. Colours 0xRRGGBBAA.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CaptionLook {
+    pub bar: u32,
+    pub bar_unfocused: u32,
+    pub ink: u32,
+    pub ink_unfocused: u32,
+    pub size: f64,
+    /// The window buttons' glyph colour (minimise / maximise / close at rest).
+    pub button: u32,
+}
+
+/// The stock caption of `mod.widgets.Window` in `vm` as its theme and sheet left it.
+pub fn caption_look(vm: &mut ScriptVm) -> CaptionLook {
+    let widgets = vm.module(id!(widgets));
+    let window = vm.value(widgets, id!(Window));
+    let path = |vm: &mut ScriptVm, ids: &[LiveId]| {
+        let mut at = window;
+        for id in ids {
+            match at.as_object() {
+                Some(obj) => at = vm.value(obj, *id),
+                None => return ScriptValue::NIL,
+            }
+        }
+        at
+    };
+    // `uniform(vec4(-1.0))`, the template's "no colour of its own": anything not a colour
+    let color = |vm: &mut ScriptVm, ids: &[LiveId]| path(vm, ids).as_color();
+    let ground = color(vm, &[id!(pass), id!(clear_color)]).unwrap_or(0);
+    let over_ground = |c: u32| if c & 0xff == 0 { ground } else { c };
+    let bar = over_ground(color(vm, &[id!(caption_bar), id!(draw_bg), id!(color)]).unwrap_or(0));
+    let bar_unfocused = color(vm, &[id!(caption_bar), id!(draw_bg), id!(color_unfocused)]).map_or(bar, over_ground);
+    let ink = color(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(color)]).unwrap_or(0xff);
+    let ink_unfocused = color(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(color_unfocused)]).unwrap_or(ink);
+    // a text style takes what it leaves out from its prototype (the theme's face)
+    let style = path(vm, &[id!(caption_bar), id!(caption_label), id!(label), id!(draw_text), id!(text_style)]);
+    let size = TextStyle::script_from_value(vm, style).font_size as f64;
+    let button = color(vm, &[id!(caption_bar), id!(windows_buttons), id!(min), id!(draw_bg), id!(color)]).unwrap_or(ink);
+    CaptionLook { bar, bar_unfocused, ink, ink_unfocused, size, button }
+}
+
+/// [`caption_look`] under `sheet`, in a VM of its own made as a child process makes its
+/// library (the sheet installed, then the theme and the widgets under it), freed after. What
+/// a window manager hands what draws its caption without widgets (`makepad run`'s load screen).
+pub fn caption_look_of(cx: &mut Cx, sheet: &StyleSheet) -> CaptionLook {
+    use crate::widget_async::CxSplashVmExt;
+    let sheet = sheet.clone();
+    let vm_id = cx.alloc_splash_vm_with_ui(false, Box::new(move |vm: &mut ScriptVm| {
+        install(vm, sheet);
+        crate::theme_mod(vm);
+        crate::isolate_widgets_mod_with(vm, &[]);
+        apply_widgets(vm);
+    }));
+    let look = cx.with_script_vm_id(vm_id, caption_look);
+    cx.free_splash_vm(vm_id);
+    look
+}
+
 /// Window provides the common receive path, including apps with no WM API dependency.
 pub fn handle_event(cx: &mut Cx, event: &Event) {
     let Event::Custom(json) = event else {
@@ -307,12 +994,20 @@ pub fn handle_event(cx: &mut Cx, event: &Event) {
     let Some(sheet) = StyleSheet::parse(json) else {
         return;
     };
+    // The window system's look: it restyles an app that wears the system
+    // sheet (or has not read one yet), never one that picked its own. Its
+    // family is the window controls' style either way (`system_style`).
+    cx.global::<Styles>().system = Some(Some(sheet.family));
     let changed = cx.with_vm(|vm| {
-        if current(vm).as_ref() == Some(&sheet) {
-            return false;
+        let key = vm.heap_key();
+        match worn(vm.cx_mut(), key) {
+            Some(Worn::Picked(_)) => false,
+            Some(Worn::Inherited(worn)) if worn == sheet => false,
+            _ => {
+                wear(vm, Worn::Inherited(sheet));
+                true
+            }
         }
-        install(vm, sheet);
-        true
     });
     if changed {
         cx.request_style_reload();
@@ -322,6 +1017,48 @@ pub fn handle_event(cx: &mut Cx, event: &Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::sheet_checks;
+
+    /// A tool that tries a sheet and goes back (the Tweaker's lab and
+    /// builder, a token resolve) leaves an app that wore the window system's
+    /// sheet still following the system, not holding that sheet as a pick.
+    #[test]
+    fn put_back_keeps_a_system_sheet_the_systems() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let send = |cx: &mut Cx, id: &str| handle_event(cx, &Event::Custom(StyleSheet::named(id).unwrap().to_json()));
+        send(&mut cx, "macos");
+        let before = cx.with_vm(wearing);
+        cx.with_vm(|vm| install(vm, StyleSheet::named("windows").unwrap()));
+        cx.with_vm(|vm| put_back(vm, before));
+        send(&mut cx, "macos-dark");
+        assert_eq!(cx.with_vm(current_name).as_deref(), Some("macos-dark"), "put_back turned the system's sheet into a pick");
+    }
+
+    /// The caption a sheet resolves for the load screen is the one a window draws: printed per
+    /// sheet, and the macOS sheet's own lines land.
+    #[test]
+    fn caption_look_reads_the_sheets_caption() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        for entry in catalogue() {
+            let look = caption_look_of(&mut cx, &StyleSheet::load(entry));
+            println!("{}: {:08x} {:08x} {:08x} {:08x} {} {:08x}", entry.id, look.bar, look.bar_unfocused, look.ink, look.ink_unfocused, look.size, look.button);
+            assert!(look.size > 0.0 && look.bar & 0xff != 0, "{}: {look:?}", entry.id);
+        }
+        let mac = caption_look_of(&mut cx, &StyleSheet::named("macos").unwrap());
+        assert_eq!((mac.bar, mac.bar_unfocused, mac.ink, mac.ink_unfocused), (0xededf0ff, 0xf6f6f6ff, 0x242426ff, 0x98989eff));
+    }
+
+    /// A row of fields is one height, under every sheet in the catalogue.
+    #[test]
+    fn every_field_stands_at_the_height_its_sheet_gives_the_text_box() {
+        for entry in catalogue() {
+            sheet_checks::field_row(crate::script_mod, entry);
+        }
+    }
+
     #[test]
     fn mobile_typefaces_keep_symbol_fallbacks_across_appearances() {
         let mut cx=Cx::new(Box::new(|_,_|{}));
@@ -330,7 +1067,7 @@ mod tests {
             crate::script_mod(vm);
             for style in [DesktopStyle::Ios,DesktopStyle::Android] {
                 for dark in [false,true] {
-                    install(vm,StyleSheet::load_with_appearance(style,dark));
+                    install(vm,StyleSheet::load(style.sheet(dark)));
                     vm.with_reload(crate::script_mod);
                     let value=script_eval!(vm,{mod.theme.font_regular});
                     let text=TextStyle::script_from_value(vm,value);
@@ -344,6 +1081,31 @@ mod tests {
             }
         });
     }
+    /// Every face a sheet gives the app keeps the app's fallbacks behind it,
+    /// under every sheet in the catalogue.
+    #[test]
+    fn every_sheet_keeps_the_fallbacks_behind_its_own_face() {
+        let checked: usize = catalogue().into_iter().map(|entry| sheet_checks::font_fallbacks(crate::script_mod, entry)).sum();
+        assert!(checked > 50, "only {checked} faces were read");
+    }
+    #[test]
+    fn every_sheet_button_face_takes_the_colour_the_app_paints() {
+        for entry in catalogue() {
+            sheet_checks::button_faces_take_the_host_colour(entry);
+        }
+    }
+    #[test]
+    fn every_shader_a_sheet_writes_compiles() {
+        for entry in catalogue() {
+            sheet_checks::replaced_shaders_compile(crate::script_mod, entry);
+        }
+    }
+    #[test]
+    fn every_sheet_evaluates_and_ends_both_halves_in_true() {
+        for entry in catalogue() {
+            sheet_checks::evaluates(crate::script_mod, entry);
+        }
+    }
     #[test]
     fn styles_re_evaluate_splash_without_replacing_user_text() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -353,15 +1115,12 @@ mod tests {
             let mut label = Label::script_from_value(vm, value);
             label.set_text(vm.cx_mut(), "edited document");
             for style in DesktopStyle::ALL {
-                install(vm, StyleSheet::load(style));
+                install(vm, StyleSheet::load(style.sheet(false)));
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
                 assert!(errors.is_empty(), "{}: {:?}", style.id(), errors);
                 let theme = vm.module(id!(theme));
-                let radius = vm
-                    .bx
-                    .heap
-                    .value(theme, id!(corner_radius).into(), NoTrap)
+                let radius = vm.value(theme, id!(corner_radius))
                     .as_f64()
                     .unwrap();
                 assert_eq!(
@@ -387,18 +1146,13 @@ mod tests {
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             for (style, dark) in [DesktopStyle::Macos, DesktopStyle::Windows, DesktopStyle::Ios, DesktopStyle::Android].into_iter().flat_map(|s| [false, true, false].map(|d|(s,d))) {
-                install(
-                    vm,
-                    StyleSheet::load_with_appearance(style, dark),
-                );
-                vm.bx.captured_errors = Some(Vec::new());
+                install(vm, StyleSheet::load(style.sheet(dark)));
+                vm.capture_errors();
                 vm.with_reload(crate::script_mod);
                 assert!(vm.take_errors().is_empty());
                 let theme = vm.module(id!(theme));
                 assert_eq!(
-                    vm.bx
-                        .heap
-                        .value(theme, id!(color_bg_app).into(), NoTrap)
+                    vm.value(theme, id!(color_bg_app))
                         .as_color(),
                     Some(match (style, dark) {
                         (DesktopStyle::Macos, true) => 0x28282aff, (DesktopStyle::Macos, false) => 0xecececff,
@@ -408,22 +1162,14 @@ mod tests {
                     })
                 );
                 let widgets = vm.module(id!(widgets));
-                let button = vm
-                    .bx
-                    .heap
-                    .value(widgets, id!(Button).into(), NoTrap)
+                let button = vm.value(widgets, id!(Button))
                     .as_object()
                     .unwrap();
-                let draw = vm
-                    .bx
-                    .heap
-                    .value(button, id!(draw_bg).into(), NoTrap)
+                let draw = vm.value(button, id!(draw_bg))
                     .as_object()
                     .unwrap();
                 assert_eq!(
-                    vm.bx
-                        .heap
-                        .value(draw, id!(border_radius).into(), NoTrap)
+                    vm.value(draw, id!(border_radius))
                         .as_f64(),
                     Some(match style {DesktopStyle::Macos=>3.0,DesktopStyle::Ios=>22.0,DesktopStyle::Android=>24.0,_=>4.0})
                 );
@@ -438,7 +1184,7 @@ mod tests {
             let original = script_eval!(vm, {use mod.widgets.* View{visible: false}});
             let mut panel = View::script_from_value(vm, original);
             panel.visible = true;
-            install(vm, StyleSheet::load(DesktopStyle::Windows));
+            install(vm, StyleSheet::load(DesktopStyle::Windows.sheet(false)));
             vm.with_reload(crate::script_mod);
             panel.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
             assert!(panel.visible, "An open panel must survive a style change");
@@ -446,9 +1192,238 @@ mod tests {
             assert!(!panel.visible, "Explicit visibility edits must still apply");
         });
     }
+    /// A table indexed by discriminant is `COUNT` long, and every variant
+    /// is in `ALL` exactly once, so no family falls off the end of one.
+    #[test]
+    fn every_style_is_listed_once_and_fits_the_count() {
+        for (at, style) in DesktopStyle::ALL.into_iter().enumerate() {
+            assert!((style as usize) < DesktopStyle::COUNT, "{style:?}");
+            assert_eq!(DesktopStyle::ALL.iter().position(|s| *s == style), Some(at), "{style:?} twice");
+            assert_eq!(DesktopStyle::parse(style.id()), Some(style));
+        }
+        // The tilers have no shelf and no title bar of their own.
+        for style in DesktopStyle::TILING {
+            assert!(!style.floating(), "{style:?} floats");
+            assert_eq!(style.shelf_height(), 0.0);
+            assert_eq!(style.title_height(), 0.0);
+        }
+    }
+
+    /// Every family has its own sheet, of its own family, with a dark variant
+    /// exactly where the family has a dark appearance; no two sheets share an
+    /// id, and every dark variant named is in the catalogue, of the same
+    /// family, and offers no dark variant of its own.
+    #[test]
+    fn the_catalogue_holds_together() {
+        let all = catalogue();
+        for (at, entry) in all.iter().enumerate() {
+            assert!(!all[..at].iter().any(|other| other.id == entry.id), "{} is registered twice", entry.id);
+            if let Some(dark) = entry.dark {
+                let variant = find(dark).unwrap_or_else(|| panic!("{}: its dark variant {dark} is not in the catalogue", entry.id));
+                assert_eq!(variant.family, entry.family, "{dark}");
+                assert!(variant.dark.is_none(), "{dark} has a dark variant of its own");
+                assert!(variant.is_dark_variant() && std::ptr::eq(variant.light(), *entry));
+                assert!(std::ptr::eq(entry.with_appearance(true), variant));
+                assert!(std::ptr::eq(variant.with_appearance(false), *entry));
+            }
+        }
+        for style in DesktopStyle::ALL {
+            let own = style.sheet(false);
+            assert_eq!((own.id, own.family), (style.id(), style));
+            assert_eq!(own.dark.is_some(), style.supports_dark(), "{}", style.id());
+        }
+        assert_eq!(picks().len() + all.iter().filter(|entry| entry.is_dark_variant()).count(), all.len());
+    }
+
+    /// A sheet lays a window ground with two lines, and a window under a
+    /// sheet that writes neither keeps its ground off, so it only clears as
+    /// it always did. Read off a window made from the template the way an
+    /// app makes one, since that is where the sheet's writes have to land.
+    #[test]
+    fn a_sheet_lays_the_window_ground_and_only_a_sheet_that_asks_for_one() {
+        for entry in catalogue() {
+            sheet_checks::window_ground(crate::script_mod, entry);
+        }
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let shows = |vm: &mut ScriptVm| {
+                let window = script_eval!(vm, {mod.widgets.Window{}});
+                let obj = window.as_object().expect("a window object");
+                vm.value(obj, id!(show_bg)).as_bool()
+            };
+            assert_eq!(shows(vm), Some(false), "the stock window draws no ground");
+            let ground = StyleSheet {
+                name: "ground".into(),
+                family: DesktopStyle::Omarchy,
+                resources: crate::widgets_dir().into(),
+                theme: "mod.theme = mod.themes.dark\ntrue\n".into(),
+                widgets: "use mod.prelude.widgets_internal.*\n\
+                          mod.widgets.Window.show_bg = true\n\
+                          mod.widgets.Window.draw_bg.pixel = fn() {\n\
+                              let p = self.pos * self.rect_size\n\
+                              let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)\n\
+                              let g = Finish.grain(p / px, 0.01)\n\
+                              return vec4(self.color.rgb + vec3(g, g, g), 1.0)\n\
+                          }\n\
+                          true\n"
+                    .into(),
+                icons: Vec::new(),
+            };
+            install(vm, ground);
+            vm.capture_errors();
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the ground sheet does not evaluate: {errors:?}");
+            assert_eq!(shows(vm), Some(true), "the sheet's ground is on");
+            let source = script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Window.draw_bg, "hlsl", false)});
+            let text = vm.heap().string_with(source, |_heap, text| text.to_string()).expect("source");
+            assert!(!text.starts_with("ERRORS"), "the sheet's ground does not compile: {text}");
+            assert!(text.contains("_grain("), "the window draws the sheet's pixel, not its own");
+            // And a switch back to a sheet without a ground turns it off.
+            install(vm, StyleSheet::load(DesktopStyle::Macos.sheet(false)));
+            vm.with_reload(crate::script_mod);
+            assert_eq!(shows(vm), Some(false), "the ground outlived its sheet");
+            uninstall(vm);
+        });
+    }
+
+    /// The instruments are restyled from a sheet exactly as the stock
+    /// controls are: a uniform written, a pixel function replaced, the
+    /// face's own helpers and instances read. This is the handbook's worked
+    /// example, held to evaluating and compiling.
+    #[test]
+    fn a_sheet_restyles_the_readout_and_the_lamp() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let sheet = StyleSheet {
+                name: "instruments".into(),
+                family: DesktopStyle::Omarchy,
+                resources: crate::widgets_dir().into(),
+                theme: "mod.theme = mod.themes.dark\nmod.theme.color_screen_ink = #ffb347\ntrue\n".into(),
+                widgets: "use mod.prelude.widgets_internal.*\n\
+                          mod.widgets.Readout.draw_bg.stroke = 0.15\n\
+                          mod.widgets.Readout.draw_bg.pixel = fn() {\n\
+                              let h = max(self.rect_size.y, 1.0)\n\
+                              let over = (self.rect_size.x - self.span) * 0.5\n\
+                              let p = (self.pos * self.rect_size - vec2(over, 0.0)) / h\n\
+                              let q = vec2(p.x + (p.y - 0.5) * self.slant, p.y)\n\
+                              let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5) / h\n\
+                              let x0 = (self.span / h - self.glyph_width) * 0.3\n\
+                              let dd = self.digit(q - vec2(x0, 0.0))\n\
+                              let a = max(Finish.cover(dd.x, px), Finish.cover(dd.y, px) * self.ghost) * self.opacity\n\
+                              return vec4(self.color.rgb * a, a)\n\
+                          }\n\
+                          mod.widgets.Lamp.draw_bg.pixel = fn() {\n\
+                              let p = self.pos * self.rect_size\n\
+                              let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)\n\
+                              let reach = clamp(self.reach, 0.0, 1.0)\n\
+                              let t = self.rect_size.y / (1.0 + 2.0 * reach)\n\
+                              let c = self.rect_size * 0.5\n\
+                              let hb = vec2(max((self.rect_size.x - 2.0 * t * reach) * 0.5, t * 0.5), t * 0.5)\n\
+                              let d = Finish.sd_chamfer(p, c, hb, t * 0.2)\n\
+                              let ink = self.intent_color()\n\
+                              let lit = clamp(self.lit, 0.0, 1.0)\n\
+                              let body = mix(self.color_off.rgb, ink.rgb, lit)\n\
+                              let a = Finish.cover(d, px)\n\
+                              let h = self.halo_at(d, t, px, self.halo * lit, reach)\n\
+                              return Finish.over(self.halo_light(ink.rgb, h), vec4(body * a, a)) * self.opacity\n\
+                          }\n\
+                          true\n"
+                    .into(),
+                icons: Vec::new(),
+            };
+            install(vm, sheet);
+            vm.capture_errors();
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the example sheet does not evaluate: {errors:?}");
+            for (name, own, value) in [
+                ("Readout", "_digit(", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Readout.draw_bg, "hlsl", false)})),
+                ("Lamp", "_sd_chamfer(", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Lamp.draw_bg, "hlsl", false)})),
+            ] {
+                let text = vm.heap().string_with(value, |_heap, text| text.to_string()).expect("source");
+                assert!(!text.starts_with("ERRORS"), "{name} does not compile under the example: {text}");
+                assert!(text.contains(own), "{name} does not draw the sheet's face");
+            }
+            uninstall(vm);
+        });
+    }
+
+    /// Under a sheet, what a sheet can change about the library as it stands
+    /// without one, read the way `resolution` reads it: the stock theme and
+    /// every template the stock library registered, and the same templates
+    /// as `mod.widgets` holds them.
+    fn stock_and_live(vm: &mut ScriptVm) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let theme = script_eval!(vm, {mod.prelude.stock_internal.theme});
+        let stock = vm.module(id!(stock_widgets));
+        let widgets = vm.module(id!(widgets));
+        let theme = resolution(vm, theme, "theme");
+        let stock = resolution(vm, stock.into(), "stock");
+        let live = ["Button", "TextInput", "CheckBox", "DropDown", "ScrollBar", "Label"]
+            .into_iter()
+            .flat_map(|name| {
+                let value = vm.value(widgets, LiveId::from_str(name));
+                resolution(vm, value, name)
+            })
+            .collect();
+        (theme, stock, live)
+    }
+
+    /// The library as it stands without a sheet resolves the same under any
+    /// sheet: under one that sets everything a sheet may -- every token, and
+    /// every number, colour, switch, inset, text style and face of every
+    /// template -- the stock theme and every template in the stock library
+    /// read exactly as they do with no sheet installed. That is what the
+    /// developer panel, the fab controls and a host's tool panels are built
+    /// from (`keep_stock`), so what holds here holds for them.
+    ///
+    /// And the same templates as `mod.widgets` holds them do NOT read the
+    /// same, which says the sheet was installed, reached the library, and
+    /// the reading can tell.
+    #[test]
+    fn the_stock_library_resolves_the_same_under_a_sheet_that_sets_everything() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let (theme, stock, live) = stock_and_live(vm);
+            assert!(stock.len() > 10_000, "only {} lines were read off the stock library", stock.len());
+            let sheet = everything_sheet(vm, &|_| false);
+            assert!(sheet.theme.lines().count() > 400, "the sheet sets only {} tokens", sheet.theme.lines().count());
+            assert!(sheet.widgets.lines().count() > 5_000, "the sheet sets only {} leaves", sheet.widgets.lines().count());
+            install(vm, sheet);
+            vm.capture_errors();
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the sheet does not evaluate: {errors:?}");
+            let (sheet_theme, sheet_stock, sheet_live) = stock_and_live(vm);
+            let moved = resolution_diff(&theme, &sheet_theme, 20);
+            assert!(moved.is_empty(), "the stock theme moved under the sheet:\n{}", moved.join("\n"));
+            let moved = resolution_diff(&stock, &sheet_stock, 20);
+            assert!(moved.is_empty(), "the stock library moved under the sheet:\n{}", moved.join("\n"));
+            assert!(
+                resolution_diff(&live, &sheet_live, 1).len() == 1,
+                "the sheet reached nothing in `mod.widgets`, so nothing above was tested"
+            );
+            uninstall(vm);
+            vm.with_reload(crate::script_mod);
+            let (_, back, back_live) = stock_and_live(vm);
+            assert!(resolution_diff(&stock, &back, 1).is_empty(), "taking the sheet off did not give the library back");
+            assert!(resolution_diff(&live, &back_live, 1).is_empty(), "taking the sheet off did not give the templates back");
+        });
+    }
+
+    #[test]
+    fn a_host_reads_a_literal_colour_off_the_token_half() {
+        let sheet = StyleSheet::named("windows-2000").unwrap();
+        assert_eq!(sheet.theme_color("color_bg_app"), Some(0xd4d0c8ff));
+        assert_eq!(sheet.theme_color("color_no_such_token"), None);
+    }
+
     #[test]
     fn stylesheet_wire_preserves_both_splash_phases() {
-        let sheet = StyleSheet::load(DesktopStyle::Windows2000);
+        let sheet = StyleSheet::load(DesktopStyle::Windows2000.sheet(false));
         assert_eq!(StyleSheet::parse(&sheet.to_json()), Some(sheet));
         assert!(StyleSheet::parse("{\"wm\":\"Adopted\"}").is_none());
     }
