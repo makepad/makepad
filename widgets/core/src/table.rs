@@ -1049,6 +1049,7 @@ impl Widget for Table {
                     };
                     if catch.contains(fe.abs) {
                         self.thumb_grab = Some(fe.abs.y - thumb.pos.y);
+                        cx.claim_finger_drag(fe.digit_id);
                         return;
                     }
                 }

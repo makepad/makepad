@@ -710,7 +710,7 @@ pub struct CxFingers {
     scroll_drag_claims: Vec<(DigitId, Vec2Index, Area)>,
     /// The drag scrollers each digit pressed, whether or not they took an axis.
     scroll_drag_holders: Vec<(DigitId, Area)>,
-    /// The way each drag that two scrollers share is going.
+    /// The way each drag that two scrollers share, or that started on a widget inside one, is going.
     scroll_drag_locks: Vec<(DigitId, ScrollDirection)>,
     /// The presses something outside a drag scroller already held when it got them, which it never joins.
     presses_held_outside: Vec<(DigitId, Area)>,
@@ -1224,16 +1224,25 @@ impl CxFingers {
     /// Whether `area` can join the drag scrollers holding `digit_id`'s press, to drag it along `axis`:
     /// only drag scrollers inside `area` hold it, none of them took `axis`, and no widget claimed the drag.
     pub fn can_join_scroll_drag(&self, digit_id: DigitId, axis: Vec2Index, area: Area) -> bool {
-        let mut holders = self
-            .captures
-            .iter()
-            .filter(|capture| capture.digit_id == digit_id && capture.area != area)
-            .peekable();
-        holders.peek().is_some()
+        self.can_take_over_press(digit_id, axis, area) && !self.is_press_held_by_widget(digit_id, area)
+    }
+
+    /// Like [`Self::can_join_scroll_drag`], but widgets inside `area` that aren't drag scrollers may hold the
+    /// press too, since `area` takes it from them once it turns out to be a drag its way (see [`Cx::claim_finger_gesture`]).
+    pub fn can_take_over_press(&self, digit_id: DigitId, axis: Vec2Index, area: Area) -> bool {
+        self.captures.iter().any(|capture| capture.digit_id == digit_id && capture.area != area)
             && !self.is_drag_claimed(digit_id)
             && !self.presses_held_outside.contains(&(digit_id, area))
             && self.scroll_drag_owner(digit_id, axis).is_none_or(|owner| owner == area)
-            && holders.all(|capture| self.is_scroll_drag_holder(digit_id, capture.area))
+    }
+
+    /// Whether a widget inside `area` that isn't a drag scroller still holds `digit_id`'s press.
+    pub fn is_press_held_by_widget(&self, digit_id: DigitId, area: Area) -> bool {
+        // Widgets get a press before the scrollers around them, so theirs come before `area`'s own capture.
+        self.captures
+            .iter()
+            .take_while(|capture| capture.digit_id != digit_id || capture.area != area)
+            .any(|capture| capture.digit_id == digit_id && !self.is_scroll_drag_holder(digit_id, capture.area))
     }
 
     /// Marks `digit_id`'s press as already held by something outside `area` (like an overlay drawn
@@ -1252,9 +1261,16 @@ impl CxFingers {
 
     /// See [`Cx::lock_scroll_drag`].
     pub(crate) fn lock_scroll_drag(&mut self, digit_id: DigitId, travel: Vec2d) -> Option<ScrollDirection> {
-        if !self.is_scroll_drag_shared(digit_id) {
+        // A drag that started on a widget picked its way back then, so it keeps to it like a shared one.
+        let is_locked = self.scroll_drag_locks.iter().any(|(id, _)| *id == digit_id);
+        if !is_locked && !self.is_scroll_drag_shared(digit_id) {
             return Some(ScrollDirection::Free);
         }
+        self.lock_drag_direction(digit_id, travel)
+    }
+
+    /// See [`Cx::lock_drag_direction`].
+    pub(crate) fn lock_drag_direction(&mut self, digit_id: DigitId, travel: Vec2d) -> Option<ScrollDirection> {
         if let Some((_, direction)) = self.scroll_drag_locks.iter().find(|(id, _)| *id == digit_id) {
             return Some(*direction);
         }
@@ -2708,6 +2724,16 @@ mod tests {
             self.areas.get()[i]
         }
 
+        /// Draws a button in the inner scrollable, at (25, 25) and 100 x 50, so it's under [`OVER_INNER`].
+        fn add_button(&mut self) -> Area {
+            let list = &mut self.cx.draw_lists[self.draw_lists[INNER].id()];
+            list.rect_areas.push(CxRectArea {
+                rect: Rect { pos: dvec2(25.0, 25.0), size: dvec2(100.0, 50.0) },
+                draw_clip: (dvec2(0.0, 0.0), dvec2(200.0, 400.0)),
+            });
+            button_in(self.area(INNER))
+        }
+
         /// Takes the inner scrollable out of the UI, leaving its area stale.
         fn remove_inner(&mut self) {
             self.cx.draw_lists[self.draw_lists[INNER].id()].redraw_id += 1;
@@ -3041,14 +3067,19 @@ mod tests {
     }
 
     fn touch_event(state: TouchState, abs: Vec2d) -> Event {
+        touch_event_at(state, abs, 1.0)
+    }
+
+    /// Like [`touch_event`], at `time`, since a cancelled press gets its last FingerUp from one event only.
+    fn touch_event_at(state: TouchState, abs: Vec2d, time: f64) -> Event {
         Event::TouchUpdate(TouchUpdateEvent {
-            time: 1.0,
+            time,
             window_id: WindowId(0, 0),
             modifiers: KeyModifiers::default(),
             touches: vec![TouchPoint {
                 state,
                 abs,
-                time: 1.0,
+                time,
                 uid: 1,
                 rotation_angle: 0.0,
                 force: 0.0,
@@ -3227,6 +3258,129 @@ mod tests {
         assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, outer));
         assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::Y, outer));
         assert_eq!(fingers.lock_scroll_drag(touch, dvec2(1.0, 7.0)), Some(ScrollDirection::Free));
+    }
+
+    #[test]
+    fn a_scrollable_can_take_over_a_touch_a_widget_inside_it_holds() {
+        let nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let mut fingers = CxFingers::default();
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        assert!(!fingers.can_take_over_press(touch, Vec2Index::Y, outer), "nothing holds it");
+        fingers.capture_digit(touch, button_in(inner), Area::Empty, 1.0, OVER_INNER);
+        assert!(fingers.is_press_held_by_widget(touch, outer));
+        assert!(!fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer), "joining outright still needs only scrollers");
+        assert!(fingers.can_take_over_press(touch, Vec2Index::Y, outer));
+        // A nested scroller that took an axis keeps it.
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::Y, inner));
+        assert!(!fingers.can_take_over_press(touch, Vec2Index::Y, outer));
+        assert!(fingers.can_take_over_press(touch, Vec2Index::X, outer));
+        fingers.mark_press_as_held_outside(touch, outer);
+        assert!(!fingers.can_take_over_press(touch, Vec2Index::X, outer), "something outside it held it first");
+        fingers.release_digit(touch);
+        fingers.capture_digit(touch, button_in(inner), Area::Empty, 1.0, OVER_INNER);
+        fingers.claim_drag(touch);
+        assert!(!fingers.can_take_over_press(touch, Vec2Index::Y, outer), "a widget claimed the drag");
+    }
+
+    #[test]
+    fn a_touch_taken_over_from_a_widget_ends_for_it_as_cancelled() {
+        let mut nest = Nest::new();
+        let button = nest.add_button();
+        let outer = nest.area(OUTER);
+        let cx = &mut nest.cx;
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        let start = touch_event(TouchState::Start, OVER_INNER);
+        assert!(matches!(start.hits(cx, button), Hit::FingerDown(_)));
+        assert!(matches!(start.hits(cx, outer), Hit::Nothing), "the button holds it");
+        assert!(cx.fingers.can_take_over_press(touch, Vec2Index::Y, outer));
+        assert!(matches!(start.hits_with_capture_overload(cx, outer, true), Hit::FingerDown(_)));
+        assert!(cx.fingers.is_scroll_drag_owner(touch, Vec2Index::Y, outer));
+        // Not a drag yet, so the button keeps it.
+        assert_eq!(cx.lock_drag_direction(touch, dvec2(1.0, 3.0)), None);
+        assert!(cx.fingers.is_press_held_by_widget(touch, outer));
+        // A drag the scroller's way, so it takes the press.
+        assert_eq!(cx.lock_drag_direction(touch, dvec2(1.0, 20.0)), Some(ScrollDirection::Along(Vec2Index::Y)));
+        assert!(cx.claim_finger_gesture(touch, outer));
+        assert!(!cx.fingers.is_press_held_by_widget(touch, outer));
+        let cancels = cx.fingers.take_pending_cancels(1.1);
+        assert_eq!(cancels.len(), 1, "the button's press ends right after the claim");
+        let cancel = Event::FingerCancel(cancels[0].clone());
+        let Hit::FingerUp(fe) = cancel.hits(cx, button) else { panic!("the button should get one last FingerUp") };
+        assert!(fe.cancelled && !fe.is_over && !fe.was_tap());
+        let moved = touch_event_at(TouchState::Move, OVER_INNER + dvec2(1.0, 30.0), 1.2);
+        assert!(matches!(moved.hits(cx, outer), Hit::FingerMove(_)));
+        assert!(matches!(moved.hits(cx, button), Hit::Nothing), "the button let go of it");
+        let stop = touch_event_at(TouchState::Stop, OVER_INNER + dvec2(1.0, 30.0), 1.3);
+        assert!(matches!(stop.hits(cx, button), Hit::Nothing));
+        assert!(matches!(stop.hits(cx, outer), Hit::FingerUp(_)));
+        if let Event::TouchUpdate(e) = &stop {
+            cx.fingers.process_touch_update_end(&e.touches);
+        }
+        assert!(!cx.fingers.any_areas_captured());
+    }
+
+    #[test]
+    fn a_tap_on_a_widget_in_a_scrollable_stays_a_tap() {
+        let mut nest = Nest::new();
+        let button = nest.add_button();
+        let outer = nest.area(OUTER);
+        let cx = &mut nest.cx;
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        let start = touch_event(TouchState::Start, OVER_INNER);
+        assert!(matches!(start.hits(cx, button), Hit::FingerDown(_)));
+        assert!(matches!(start.hits_with_capture_overload(cx, outer, true), Hit::FingerDown(_)));
+        // A finger never stays perfectly still.
+        assert_eq!(cx.lock_drag_direction(touch, dvec2(2.0, 3.0)), None);
+        let stop = touch_event(TouchState::Stop, OVER_INNER + dvec2(2.0, 3.0));
+        let Hit::FingerUp(fe) = stop.hits(cx, button) else { panic!("the button should get its FingerUp") };
+        assert!(fe.is_over && !fe.cancelled && fe.was_tap());
+    }
+
+    #[test]
+    fn a_drag_that_goes_another_way_leaves_the_press_with_its_widget() {
+        let mut nest = Nest::new();
+        let button = nest.add_button();
+        let outer = nest.area(OUTER);
+        let cx = &mut nest.cx;
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        let start = touch_event(TouchState::Start, OVER_INNER);
+        assert!(matches!(start.hits(cx, button), Hit::FingerDown(_)));
+        assert!(matches!(start.hits_with_capture_overload(cx, outer, true), Hit::FingerDown(_)));
+        assert!(cx.fingers.is_scroll_drag_owner(touch, Vec2Index::Y, outer));
+        // Sideways, so a scroller that only goes down leaves it with the button, even after it turns down.
+        assert_eq!(cx.lock_drag_direction(touch, dvec2(20.0, 2.0)), Some(ScrollDirection::Along(Vec2Index::X)));
+        assert!(cx.fingers.is_press_held_by_widget(touch, outer));
+        assert_eq!(cx.lock_scroll_drag(touch, dvec2(20.0, 80.0)), Some(ScrollDirection::Along(Vec2Index::X)));
+        let stop = touch_event(TouchState::Stop, OVER_INNER + dvec2(20.0, 2.0));
+        let Hit::FingerUp(fe) = stop.hits(cx, button) else { panic!("the button should get its FingerUp") };
+        assert!(!fe.cancelled);
+    }
+
+    #[test]
+    fn a_takeover_waits_only_on_the_widgets_inside_the_scroller() {
+        let nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let mut fingers = CxFingers::default();
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        // A sideways scroller in a page that scrolls down, with something around the page holding it too.
+        let hold_in_page = |fingers: &mut CxFingers| {
+            fingers.capture_digit(touch, inner, Area::Empty, 1.0, OVER_INNER);
+            fingers.hold_scroll_drag(touch, inner);
+            assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, inner));
+            fingers.capture_digit(touch, outer, Area::Empty, 1.0, OVER_INNER);
+            assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::Y, outer));
+            fingers.capture_digit(touch, button_in(outer), Area::Empty, 1.0, OVER_INNER);
+        };
+        hold_in_page(&mut fingers);
+        assert!(!fingers.is_press_held_by_widget(touch, outer), "neither the nested scroller nor what's around the page");
+        fingers.release_digit(touch);
+        // A button in the sideways scroller holds it back, so the drag keeps to the way it goes.
+        fingers.capture_digit(touch, button_in(inner), Area::Empty, 1.0, OVER_INNER);
+        hold_in_page(&mut fingers);
+        assert!(fingers.is_press_held_by_widget(touch, outer));
+        assert_eq!(fingers.lock_drag_direction(touch, dvec2(0.0, 20.0)), Some(ScrollDirection::Along(Vec2Index::Y)));
+        assert_eq!(fingers.lock_scroll_drag(touch, dvec2(0.0, 40.0)), Some(ScrollDirection::Along(Vec2Index::Y)));
     }
 
     #[test]
