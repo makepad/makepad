@@ -1292,7 +1292,11 @@ fn program_rope(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProgram, Strin
 }
 
 fn program_im2col(op: &Tensor) -> Result<MetalOpProgram, String> {
-    let base = format!("kernel_im2col_{}", op.desc.ty.name());
+    let base = if op.op_param_i32(6) == 0 {
+        format!("kernel_im2col_1d_{}", op.desc.ty.name())
+    } else {
+        format!("kernel_im2col_{}", op.desc.ty.name())
+    };
     Ok(program_with_stage(stage_simple(
         MetalStageKind::Main,
         &base,

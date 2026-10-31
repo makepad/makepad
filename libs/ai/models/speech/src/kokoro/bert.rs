@@ -5,7 +5,7 @@
 //! 12 layers cost only 6.29M parameters.
 
 use super::ops::{add_into, gelu_new, layer_norm_rows, linear, softmax, Mat};
-use super::weights::Weights;
+use super::weights::{WeightData, Weights};
 use crate::TtsError;
 
 const HIDDEN: usize = 768;
@@ -17,26 +17,28 @@ const LAYERS: usize = 12;
 /// BERT's epsilon, distinct from StyleTTS2's 1e-5. Both appear in the export.
 const LAYER_NORM_EPS: f32 = 1e-12;
 
-struct AlbertLayer {
-    query: (Vec<f32>, Vec<f32>),
-    key: (Vec<f32>, Vec<f32>),
-    value: (Vec<f32>, Vec<f32>),
-    dense: (Vec<f32>, Vec<f32>),
-    attention_norm: (Vec<f32>, Vec<f32>),
-    ffn: (Vec<f32>, Vec<f32>),
-    ffn_output: (Vec<f32>, Vec<f32>),
-    full_norm: (Vec<f32>, Vec<f32>),
+pub(super) struct AlbertLayer {
+    pub(super) query: (WeightData, WeightData),
+    pub(super) key: (WeightData, WeightData),
+    pub(super) value: (WeightData, WeightData),
+    pub(super) dense: (WeightData, WeightData),
+    pub(super) attention_norm: (WeightData, WeightData),
+    pub(super) ffn: (WeightData, WeightData),
+    pub(super) ffn_output: (WeightData, WeightData),
+    pub(super) full_norm: (WeightData, WeightData),
 }
 
 pub struct Bert {
-    word_embeddings: Vec<f32>,
-    position_embeddings: Vec<f32>,
-    token_type_embeddings: Vec<f32>,
-    embedding_norm: (Vec<f32>, Vec<f32>),
-    mapping: (Vec<f32>, Vec<f32>),
-    layer: AlbertLayer,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) vulkan_id: std::sync::Arc<()>,
+    word_embeddings: WeightData,
+    position_embeddings: WeightData,
+    token_type_embeddings: WeightData,
+    embedding_norm: (WeightData, WeightData),
+    pub(super) mapping: (WeightData, WeightData),
+    pub(super) layer: AlbertLayer,
     /// `bert_encoder`: 768 -> 512, feeding the prosody predictor.
-    encoder: (Vec<f32>, Vec<f32>),
+    pub(super) encoder: (WeightData, WeightData),
 }
 
 pub struct Trace {
@@ -46,14 +48,13 @@ pub struct Trace {
     pub output: Mat,
 }
 
-fn need(weights: &Weights, name: &str) -> Result<Vec<f32>, TtsError> {
+fn need(weights: &Weights, name: &str) -> Result<WeightData, TtsError> {
     weights
-        .get(name)
-        .map(<[f32]>::to_vec)
+        .take(name)
         .ok_or_else(|| TtsError::Backend(format!("missing tensor {name}")))
 }
 
-fn pair(weights: &Weights, prefix: &str) -> Result<(Vec<f32>, Vec<f32>), TtsError> {
+fn pair(weights: &Weights, prefix: &str) -> Result<(WeightData, WeightData), TtsError> {
     Ok((
         need(weights, &format!("{prefix}.weight"))?,
         need(weights, &format!("{prefix}.bias"))?,
@@ -66,6 +67,8 @@ impl Bert {
         let layer = format!("{root}.encoder.albert_layer_groups.0.albert_layers.0");
 
         Ok(Self {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            vulkan_id: std::sync::Arc::new(()),
             word_embeddings: need(weights, &format!("{root}.embeddings.word_embeddings.weight"))?,
             position_embeddings: need(
                 weights,
@@ -174,6 +177,8 @@ impl Bert {
 
     pub fn trace(&self, tokens: &[u16]) -> Trace {
         let embedded = self.embeddings(tokens);
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(out) = super::vulkan::bert(self, &embedded, LAYERS) { return out; }
         let mut hidden = linear(&embedded, &self.mapping.0, &self.mapping.1, HIDDEN);
 
         let mut layers = Vec::with_capacity(LAYERS);

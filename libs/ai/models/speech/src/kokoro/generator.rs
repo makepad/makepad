@@ -32,7 +32,7 @@ use super::ops::{
     resize_linear, snake, Mat,
 };
 use super::stft::{istft, stft_mag_phase, BINS};
-use super::weights::Weights;
+use super::weights::{WeightData, Weights};
 use crate::TtsError;
 
 const SAMPLE_RATE: f32 = 24_000.0;
@@ -50,7 +50,7 @@ const KERNELS: usize = 3;
 
 static DETERMINISTIC: AtomicBool = AtomicBool::new(false);
 /// Distinct noise per synthesis call, still reproducible within a process.
-static NOISE_STREAM: AtomicU64 = AtomicU64::new(0);
+pub(super) static NOISE_STREAM: AtomicU64 = AtomicU64::new(0);
 
 /// Drop the excitation noise and match the traced graph exactly. Only the
 /// parity harness wants this — it diffs against the deterministic ONNX dump.
@@ -94,23 +94,27 @@ impl Gaussian {
     }
 }
 
-fn need(weights: &Weights, name: &str) -> Result<Vec<f32>, TtsError> {
+fn need(weights: &Weights, name: &str) -> Result<WeightData, TtsError> {
     weights
-        .get(name)
-        .map(<[f32]>::to_vec)
+        .take(name)
         .ok_or_else(|| TtsError::Backend(format!("missing tensor {name}")))
 }
 
 pub(crate) struct Conv {
-    weight: Vec<f32>,
-    bias: Vec<f32>,
-    out_channels: usize,
-    pad: usize,
-    stride: usize,
-    dilation: usize,
+    pub(super) weight: WeightData,
+    pub(super) bias: WeightData,
+    pub(super) out_channels: usize,
+    pub(super) pad: usize,
+    pub(super) stride: usize,
+    pub(super) dilation: usize,
 }
 
 impl Conv {
+    #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+    pub(crate) fn drop_host_copies(&mut self) {
+        self.weight.drop_host_copy();
+    }
+
     /// A weight-normed convolution: the checkpoint stores `weight_g`/`weight_v`.
     pub(crate) fn normed(
         weights: &Weights,
@@ -165,16 +169,23 @@ impl Conv {
 ///
 /// Unlike [`super::adain::AdainResBlk1d`] the residual is a plain add — there is
 /// no `1/sqrt(2)`.
-struct AdaResBlock1 {
-    adain1: Vec<AdaIn1d>,
-    adain2: Vec<AdaIn1d>,
-    convs1: Vec<Conv>,
-    convs2: Vec<Conv>,
-    alpha1: Vec<Vec<f32>>,
-    alpha2: Vec<Vec<f32>>,
+pub(super) struct AdaResBlock1 {
+    pub(super) adain1: Vec<AdaIn1d>,
+    pub(super) adain2: Vec<AdaIn1d>,
+    pub(super) convs1: Vec<Conv>,
+    pub(super) convs2: Vec<Conv>,
+    pub(super) alpha1: Vec<WeightData>,
+    pub(super) alpha2: Vec<WeightData>,
 }
 
 impl AdaResBlock1 {
+    #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+    fn drop_host_copies(&mut self) {
+        for conv in self.convs1.iter_mut().chain(self.convs2.iter_mut()) {
+            conv.drop_host_copies();
+        }
+    }
+
     fn load(
         weights: &Weights,
         prefix: &str,
@@ -239,22 +250,24 @@ impl AdaResBlock1 {
 }
 
 /// A transposed convolution whose weight is `[in, out, kernel]`.
-struct Upsample {
-    weight: Vec<f32>,
-    bias: Vec<f32>,
-    out_channels: usize,
-    stride: usize,
-    pad: usize,
+pub(super) struct Upsample {
+    pub(super) weight: WeightData,
+    pub(super) bias: WeightData,
+    pub(super) out_channels: usize,
+    pub(super) stride: usize,
+    pub(super) pad: usize,
 }
 
 pub struct Generator {
-    ups: Vec<Upsample>,
-    noise_convs: Vec<Conv>,
-    noise_res: Vec<AdaResBlock1>,
-    resblocks: Vec<AdaResBlock1>,
-    conv_post: Conv,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) vulkan_id: std::sync::Arc<()>,
+    pub(super) ups: Vec<Upsample>,
+    pub(super) noise_convs: Vec<Conv>,
+    pub(super) noise_res: Vec<AdaResBlock1>,
+    pub(super) resblocks: Vec<AdaResBlock1>,
+    pub(super) conv_post: Conv,
     /// `m_source.l_linear`: mixes the 9 sinusoids down to one excitation.
-    source_weight: Vec<f32>,
+    source_weight: WeightData,
     source_bias: f32,
 }
 
@@ -272,6 +285,14 @@ pub struct GeneratorTrace {
 }
 
 impl Generator {
+    #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+    pub(crate) fn drop_host_copies(&mut self) {
+        for up in &mut self.ups { up.weight.drop_host_copy(); }
+        for conv in &mut self.noise_convs { conv.drop_host_copies(); }
+        for block in self.noise_res.iter_mut().chain(self.resblocks.iter_mut()) { block.drop_host_copies(); }
+        self.conv_post.drop_host_copies();
+    }
+
     pub fn load(weights: &Weights, root: &str) -> Result<Self, TtsError> {
         // (channels, kernel) for the six residual blocks: three per upsample
         // stage, one per kernel size.
@@ -300,6 +321,8 @@ impl Generator {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            vulkan_id: std::sync::Arc::new(()),
             ups: vec![
                 Upsample {
                     weight: weights.weight_norm(&format!("{root}.ups.0"))?,
@@ -336,7 +359,8 @@ impl Generator {
     /// ~1e5 radians. Everything here stays in f32 in the graph's exact order —
     /// accumulating in f64 would be *more* accurate and match the reference
     /// *less*.
-    fn source(&self, f0: &Mat) -> Vec<f32> {
+    pub(super) fn source(&self, f0: &Mat) -> Vec<f32> {
+        let _t = super::ops::op_timer("harmonic_source");
         let samples = f0.cols;
         let f0 = f0.row(0);
 
@@ -405,6 +429,9 @@ impl Generator {
         har_source: Vec<f32>,
         har: Mat,
     ) -> GeneratorTrace {
+        let _t = super::ops::op_timer("generator_run_from_har");
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(out) = super::vulkan::generate(self, x, style, &har_source, &har) { return out; }
         let mut trace = GeneratorTrace {
             har_source,
             har,

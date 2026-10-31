@@ -442,10 +442,41 @@ pub struct Tensor {
     pub shape: Vec<usize>, // e.g. [rows, cols] for 2D
 }
 
+/// Weight bytes: owned, or a range of the model file's read-only mapping
+/// (then they live in the page cache, and once a GPU holds its own copy the
+/// process can drop them: [`WeightBytes::release`]; a CPU read faults them
+/// back in from the file).
+pub enum WeightBytes {
+    Owned(Vec<u8>),
+    Mapped { map: std::sync::Arc<makepad_ai_loader::MappedRegion>, offset: usize, len: usize },
+}
+
+impl std::ops::Deref for WeightBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            WeightBytes::Owned(v) => v,
+            WeightBytes::Mapped { map, offset, len } => &map.as_slice()[*offset..*offset + *len],
+        }
+    }
+}
+
+impl From<Vec<u8>> for WeightBytes {
+    fn from(v: Vec<u8>) -> Self {
+        WeightBytes::Owned(v)
+    }
+}
+
+impl std::fmt::Debug for WeightBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WeightBytes({} bytes)", self.len())
+    }
+}
+
 /// Raw weight tensor - stores quantized (or f16/f32) bytes as loaded from the model file.
 /// Dequantized on the fly during matrix multiply.
 pub struct RawTensor {
-    pub data: Vec<u8>,
+    pub data: WeightBytes,
     pub shape: Vec<usize>,
     pub ggml_type: u32,
 }
@@ -518,6 +549,12 @@ impl RawTensor {
                     out[b * QK..(b + 1) * QK].copy_from_slice(&tmp);
                 }
             }
+            GGML_TYPE_Q4_K | GGML_TYPE_Q5_K => {
+                let decode = if self.ggml_type == GGML_TYPE_Q4_K { dequantize_q4_k } else { dequantize_q5_k };
+                for (block, values) in self.data.chunks_exact(block_size(self.ggml_type)).zip(out.chunks_exact_mut(256)) {
+                    decode(block, values);
+                }
+            }
             t => panic!("unsupported dequantize type {}", t),
         }
         // Reverse shape from GGML column-major to row-major order.
@@ -549,7 +586,7 @@ impl RawTensor {
                 let n_elements: usize = self.shape.iter().product();
                 let data = quantize_f16_to_q8_0(&self.data, n_elements);
                 RawTensor {
-                    data,
+                    data: data.into(),
                     shape: self.shape,
                     ggml_type: GGML_TYPE_Q8_0,
                 }
@@ -569,7 +606,7 @@ impl RawTensor {
                 }
                 let data = quantize_f32_to_q8_0(&f32_data);
                 RawTensor {
-                    data,
+                    data: data.into(),
                     shape: self.shape,
                     ggml_type: GGML_TYPE_Q8_0,
                 }
@@ -1182,7 +1219,7 @@ impl Tensor {
         } else if quant_gpu_enabled() {
             match weight.ggml_type {
                 GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1
-                | GGML_TYPE_Q8_0 => {
+                | GGML_TYPE_Q8_0 | GGML_TYPE_Q4_K | GGML_TYPE_Q5_K => {
                     if let Some(out) = crate::whisper::accel::try_matmul_nt_ggml_bytes(
                         &x.data,
                         &weight.data,
@@ -1727,7 +1764,7 @@ impl Tensor {
                         ch_out,
                     ),
                     GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1
-                    | GGML_TYPE_Q8_0
+                    | GGML_TYPE_Q8_0 | GGML_TYPE_Q4_K | GGML_TYPE_Q5_K
                         if quant_gpu_enabled() =>
                     {
                         crate::whisper::accel::try_matmul_nt_ggml_bytes(

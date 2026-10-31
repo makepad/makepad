@@ -8,7 +8,7 @@
 //! (forward everything, for push-to-talk setups where intent is explicit) to a
 //! small local LLM judging and rewriting on its own worker thread.
 
-use makepad_widgets::makepad_draw::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
+use makepad_widgets_core::makepad_draw::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 /// What to do with one heard utterance.
@@ -95,7 +95,7 @@ impl FilterWorker {
         });
         match spawned {
             Ok(handle) => handle.detach(),
-            Err(error) => makepad_widgets::error!("converse filter worker unavailable: {error}"),
+            Err(error) => makepad_widgets_core::error!("converse filter worker unavailable: {error}"),
         }
         Self {
             jobs,

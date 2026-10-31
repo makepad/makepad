@@ -1,4 +1,23 @@
 workspace.members = [
+    "libs/ai/models/beats",
+    "libs/ai/models/body",
+    "libs/ai/models/common",
+    "libs/ai/models/flux",
+    "libs/ai/models/h3",
+    "libs/ai/models/motion",
+    "libs/ai/models/music",
+    "libs/ai/models/notes",
+    "libs/ai/models/paint",
+    "libs/ai/models/rife",
+    "libs/ai/models/rig",
+    "libs/ai/models/sfx",
+    "libs/ai/models/sing",
+    "libs/ai/models/speech",
+    "libs/ai/models/splat",
+    "libs/ai/models/stems",
+    "libs/ai/models/textdet",
+    "libs/ai/models/trellis",
+    "libs/ai/models/vision",
     # === app ===
     "libs/xkb_keymap",
     "libs/a11y",
@@ -28,6 +47,12 @@ workspace.members = [
     # The AI stack: loader (disk), cuda/metal (kernel and residency stores),
     # job (the one cross-model contract), llm and models/* (per-family model
     # crates), the generate hub and the live pipe.
+    "libs/ai/loader",
+    "libs/ai/cuda",
+    "libs/ai/metal",
+    "libs/ai/vulkan",
+    "libs/ai/job",
+    "libs/ai/llm",
     # Constructive solid geometry.
     "libs/csg/csg",
     "libs/csg/csg_cad",
@@ -83,12 +108,18 @@ workspace.members = [
     "libs/score_view/tests/embed_app",
     "libs/score_import",
     "libs/score_pdf",
+    "libs/score_ui",
     "libs/midi_file",
     "libs/soundfont",
+    "libs/piano_model",
     "libs/drumkit",
     "libs/drumkit_phys",
+    "libs/audio_synth",
     "libs/musicxml",
     # === Synth: live-coded scores, their player and the tweak UI kit ===
+    "libs/audio_dsp",
+    "libs/score_player",
+    "libs/score_voice",
     "libs/beat",
     "libs/edit_values",
     "libs/score_live/tools",
@@ -96,6 +127,7 @@ workspace.members = [
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
     "libs/audio_encode",
+    "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
     "libs/audio_reactive",
@@ -107,6 +139,7 @@ workspace.members = [
     # === realtime frame tweening: the classical GPU optical-flow pass
     # chain, the RIFE producer behind the same warp, and the mode set
     # (extracted from the VJ, which is still its reference user) ===
+    "libs/frametween",
     # === archive.org search + download content input (VJ / asset-ui) ===
     # === image tile wall: HEVC tape atlases + baker CLI + TileGrid widget
     # (the engine extracted from the Source Library picture wall) ===
@@ -123,6 +156,7 @@ workspace.members = [
     "libs/remote",
     "libs/devhub",
     "libs/stack",
+    "tools/agents",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
     "tools/run",
@@ -147,6 +181,7 @@ workspace.members = [
     "libs/relax/lex",
     "libs/system_speech",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
+    "libs/relax/compiler/rwbench",
     # Relax data-structure microbenchmarks (Vec, iterators, HashMap, BTreeMap, sort, strings, bounds loops)
     "libs/relax/compiler/dsbench",
     # Send feedback: caption icon + panel (Amp, Scope)

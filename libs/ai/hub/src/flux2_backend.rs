@@ -221,9 +221,13 @@ impl ContentBackend for Flux2Backend {
                         };
                         progress(stage, fraction);
                     };
-                    pipe.edit_with_hooks(&request, guidance, Some(&mut on_stage))
+                    pipe.edit_with_hooks(&request, guidance, Some(&mut on_stage), &|| cancel.is_cancelled())
                 }
-                .map_err(|err| AssetAiError::Backend(format!("flux2-dev edit: {err}")))?;
+                .map_err(|err| match err {
+                    // A cancel between denoise steps (the client's, or local use): job state "cancelled".
+                    makepad_ai_common::DiffusionError::Cancelled => AssetAiError::Cancelled,
+                    err => AssetAiError::Backend(format!("flux2-dev edit: {err}")),
+                })?;
                 cancel.check()?;
                 progress("png", 0.97);
                 Ok(vec![ArtifactData {
@@ -269,9 +273,13 @@ impl ContentBackend for Flux2Backend {
                         };
                         progress(stage, fraction);
                     };
-                    pipe.generate_with_hooks(&request, Some(&mut on_stage))
+                    pipe.generate_with_hooks(&request, Some(&mut on_stage), &|| cancel.is_cancelled())
                 }
-                .map_err(|err| AssetAiError::Backend(format!("flux2-dev generate: {err}")))?;
+                .map_err(|err| match err {
+                    // A cancel between denoise steps (the client's, or local use): job state "cancelled".
+                    makepad_ai_common::DiffusionError::Cancelled => AssetAiError::Cancelled,
+                    err => AssetAiError::Backend(format!("flux2-dev generate: {err}")),
+                })?;
                 cancel.check()?;
                 progress("png", 0.97);
                 Ok(vec![ArtifactData {

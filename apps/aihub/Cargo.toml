@@ -1,0 +1,55 @@
+[package]
+name = "makepad-app-aihub"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "AI Hub: serves this machine's AI (the sandboxed Claude backend, local models) to the fleet while it runs, with its control panel and tray icon"
+
+[[bin]]
+name = "makepad-app-aihub"
+path = "src/main.rs"
+
+[features]
+# The local model backends that run on Metal (macOS) and CUDA/CPU (Windows, Linux): chat,
+# vision and OCR (`localai`), Whisper speech-to-text, Kokoro text-to-speech, notes, beats,
+# stems, matting, depth, segmentation, upscaling, body pose. CUDA-only families (image
+# generation, video, music generation, sound effects, 3D) are left out.
+# Whisper and Kokoro bring the hub's speech-session code along (`speech`); the service
+# never starts a session, so the OS speech engines (and their permission prompts) are
+# never asked for.
+default = ["localai", "stt", "tts", "notes-native", "beats-native", "stems-native", "matte-native", "depth-native", "segment-native", "upscale-native", "body-native"]
+localai = ["makepad-ai-hub/localai"]
+stt = ["makepad-ai-hub/stt"]
+tts = ["makepad-ai-hub/tts"]
+notes-native = ["makepad-ai-hub/notes-native"]
+beats-native = ["makepad-ai-hub/beats-native"]
+stems-native = ["makepad-ai-hub/stems-native"]
+matte-native = ["makepad-ai-hub/matte-native"]
+depth-native = ["makepad-ai-hub/depth-native"]
+segment-native = ["makepad-ai-hub/segment-native"]
+upscale-native = ["makepad-ai-hub/upscale-native"]
+body-native = ["makepad-ai-hub/body-native"]
+# The CUDA kernels (Linux/Windows, where MAKEPAD_CUDA_ROOT names a toolkit). The hub is the one
+# app with them: apps stay CPU-only, so their builds never share a unit with this one.
+cuda = ["makepad-ai-hub/cuda"]
+# A makepad WM node's hub (the WM starts the app with `--features node`): every local model
+# backend the headless node hub (apps/ai-hub) builds by default, CUDA kernels included.
+# A Mac keeps the default (Metal/CPU backends only).
+node = ["localai", "cuda", "makepad-ai-hub/flux", "makepad-ai-hub/paint", "makepad-ai-hub/paint-cuda", "makepad-ai-hub/llm",
+    "makepad-ai-hub/tts", "makepad-ai-hub/indextts", "makepad-ai-hub/speech", "makepad-ai-hub/stt", "makepad-ai-hub/video",
+    "makepad-ai-hub/interpolate", "makepad-ai-hub/audio", "makepad-ai-hub/mesh", "makepad-ai-hub/matte-native",
+    "makepad-ai-hub/depth-native", "makepad-ai-hub/segment-native", "makepad-ai-hub/body-native", "makepad-ai-hub/upscale-native",
+    "makepad-ai-hub/motion-native", "makepad-ai-hub/rig-native", "makepad-ai-hub/splat-native", "makepad-ai-hub/stems-native",
+    "makepad-ai-hub/beats-native", "makepad-ai-hub/notes-native", "makepad-ai-hub/kernel"]
+# TEST BUILDS ONLY: MAKEPAD_AI_HUB_CLAUDE_STUB=<fake claude> serves that fake CLI as the
+# Claude backend (pool-node tests without anyone's login). Never in a shipped build.
+claude-stub = ["makepad-ai-hub/claude-stub"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-shell-kit = { path = "../../libs/shell_kit" }
+makepad-ai-hub-panel = { path = "../../libs/ai/hub_panel" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+makepad-network = { path = "../../platform/network" }
+makepad-strict-json = { path = "../../libs/strict_json" }

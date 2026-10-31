@@ -1,0 +1,77 @@
+// Elementwise and reduction kernels shared by every model (f32 activations).
+{
+    // Extend each contiguous f32 row with zeroes to the requested stride.
+    pad_rows: {
+        workgroup_size: 256
+        src: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        cols: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        len: shader.uniform(u32)
+        main: fn() {
+            let i = global_id().x
+            if i < self.len {
+                let col = i % self.stride
+                var v = 0.0
+                if col < self.cols { v = self.src[(i / self.stride) * self.cols + col] }
+                self.dst[i] = v
+            }
+        }
+    }
+    add_row_bias: {
+        workgroup_size: 256
+        dst: shader.buffer_rw(f32)
+        bias: shader.buffer(f32)
+        cols: shader.uniform(u32)
+        len: shader.uniform(u32)
+        main: fn() {
+            let i = global_id().x
+            if i < self.len { self.dst[i] += self.bias[i % self.cols] }
+        }
+    }
+    // dst[i] = src[i] * scale
+    scale: {
+        workgroup_size: 256
+        src: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        n: shader.uniform(u32)
+        scale: shader.uniform(f32)
+        main: fn() {
+            let i = global_id().x
+            if i < self.n {
+                self.dst[i] = self.src[i] * self.scale
+            }
+        }
+    }
+    // y[row] = sum(x[row, :]) over `cols` columns: one workgroup per row,
+    // strided partial sums, a subgroup reduction, then one per subgroup.
+    row_sum: {
+        workgroup_size: 256
+        x: shader.buffer(f32)
+        y: shader.buffer_rw(f32)
+        cols: shader.uniform(u32)
+        partial: shader.workgroup(f32, 32)
+        main: fn() {
+            let row = group_id().x
+            let t = local_id().x
+            var acc = 0.0
+            var c = t
+            while c < self.cols {
+                acc += self.x[row * self.cols + c]
+                c += self.workgroup_size
+            }
+            acc = subgroup_add(acc)
+            if subgroup_lane() == 0 {
+                self.partial[subgroup_id()] = acc
+            }
+            barrier()
+            if t == 0 {
+                var s = 0.0
+                for k in 0..self.workgroup_size / subgroup_size() {
+                    s += self.partial[k]
+                }
+                self.y[row] = s
+            }
+        }
+    }
+}

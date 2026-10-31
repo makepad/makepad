@@ -16,6 +16,8 @@ pub mod formats;
 pub mod mmap;
 pub mod prof;
 pub mod quant;
+pub mod quant_encode;
+pub mod qwen35_convert;
 pub mod quant_iq;
 pub mod quant_iq_tables;
 

@@ -16,11 +16,13 @@ use crate::TtsError;
 const BLOCKS: usize = 4;
 
 pub struct Decoder {
-    f0_conv: Conv,
-    n_conv: Conv,
-    asr_res: Conv,
-    encode: AdainResBlk1d,
-    decode: Vec<AdainResBlk1d>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) vulkan_id: std::sync::Arc<()>,
+    pub(super) f0_conv: Conv,
+    pub(super) n_conv: Conv,
+    pub(super) asr_res: Conv,
+    pub(super) encode: AdainResBlk1d,
+    pub(super) decode: Vec<AdainResBlk1d>,
     pub generator: Generator,
 }
 
@@ -36,6 +38,16 @@ pub struct DecoderTrace {
 }
 
 impl Decoder {
+    #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+    pub(crate) fn drop_host_copies(&mut self) {
+        self.f0_conv.drop_host_copies();
+        self.n_conv.drop_host_copies();
+        self.asr_res.drop_host_copies();
+        self.encode.drop_host_copies();
+        for block in &mut self.decode { block.drop_host_copies(); }
+        self.generator.drop_host_copies();
+    }
+
     pub fn load(weights: &Weights) -> Result<Self, TtsError> {
         let root = "decoder.module";
 
@@ -62,6 +74,8 @@ impl Decoder {
         debug_assert_eq!(decode.len(), BLOCKS);
 
         Ok(Self {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            vulkan_id: std::sync::Arc::new(()),
             f0_conv: Conv::normed(weights, &format!("{root}.F0_conv"), 1, 1, 2, 1)?,
             n_conv: Conv::normed(weights, &format!("{root}.N_conv"), 1, 1, 2, 1)?,
             asr_res: Conv::normed(weights, &format!("{root}.asr_res.0"), 64, 0, 1, 1)?,
@@ -76,6 +90,8 @@ impl Decoder {
     /// and `noise_curve` are `[1, 2 * frames]`. `style` is the *first* 128-wide
     /// half of the voice vector.
     pub fn run(&self, asr: &Mat, f0_curve: &Mat, noise_curve: &Mat, style: &[f32]) -> DecoderTrace {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(out) = super::vulkan::decode(self, asr, f0_curve, noise_curve, style, true) { return out; }
         let f0 = self.f0_conv.forward(f0_curve);
         let noise = self.n_conv.forward(noise_curve);
         let asr_res = self.asr_res.forward(asr);
@@ -98,5 +114,13 @@ impl Decoder {
             decode,
             generator,
         }
+    }
+
+    /// Normal synthesis reads back only the final spectrum. Diagnostic traces
+    /// still use `run` and retain every documented checkpoint.
+    pub fn waveform(&self, asr: &Mat, f0: &Mat, noise: &Mat, style: &[f32]) -> Vec<f32> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(out) = super::vulkan::decode(self, asr, f0, noise, style, false) { return out.generator.waveform; }
+        self.run(asr, f0, noise, style).generator.waveform
     }
 }

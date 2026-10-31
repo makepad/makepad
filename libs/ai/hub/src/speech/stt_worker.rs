@@ -32,6 +32,10 @@ pub(crate) fn run(
     send(SttEvent::Ready(engine.info()));
 
     let mut listening: Option<Listening> = None;
+    let mut stream = StreamBuffer::new(config.partial_interval_ms);
+    let mut last_partial = String::new();
+    // Messages taken off the channel out of order while coalescing fed PCM.
+    let mut backlog: std::collections::VecDeque<SttMsg> = std::collections::VecDeque::new();
     loop {
         if let Some(live) = listening.as_mut() {
             let mut ended = false;
@@ -54,7 +58,11 @@ pub(crate) fn run(
             }
         }
 
-        match msg_rx.recv_timeout(Duration::from_millis(20)) {
+        let next = match backlog.pop_front() {
+            Some(msg) => Ok(msg),
+            None => msg_rx.recv_timeout(Duration::from_millis(20)),
+        };
+        match next {
             Ok(SttMsg::Transcribe { utterance, generation: mine, samples }) => {
                 if mine != generation.load(Ordering::Relaxed) {
                     continue;
@@ -74,6 +82,45 @@ pub(crate) fn run(
                     }
                     Err(message) => send(SttEvent::Error { utterance: Some(utterance), message }),
                 }
+            }
+            Ok(SttMsg::Feed { generation: mine, samples }) => {
+                if mine != generation.load(Ordering::Relaxed) {
+                    continue;
+                }
+                stream.push(&samples);
+                // Take every chunk already waiting before spending time on a
+                // partial: a worker that falls behind skips ahead, it does not
+                // read the same utterance once per chunk.
+                let mut ended = None;
+                while let Ok(next) = msg_rx.try_recv() {
+                    match next {
+                        SttMsg::Feed { generation: g, samples } if g == generation.load(Ordering::Relaxed) => stream.push(&samples),
+                        SttMsg::Feed { .. } => {}
+                        SttMsg::EndUtterance { utterance, generation: g } => {
+                            ended = Some((utterance, g));
+                            break;
+                        }
+                        other => backlog.push_back(other),
+                    }
+                }
+                if let Some((utterance, g)) = ended {
+                    finish_utterance(&mut *engine, &config, &mut stream, utterance, g, &generation, &send);
+                    last_partial.clear();
+                } else if config.partial_results && stream.partial_due() {
+                    let window = stream.partial_window();
+                    if let Ok(transcript) = engine.transcribe(window, &config) {
+                        stream.mark_partial();
+                        let text = transcript.text();
+                        if mine == generation.load(Ordering::Relaxed) && text != last_partial && !text.is_empty() {
+                            last_partial = text.clone();
+                            send(SttEvent::Partial(text));
+                        }
+                    }
+                }
+            }
+            Ok(SttMsg::EndUtterance { utterance, generation: mine }) => {
+                finish_utterance(&mut *engine, &config, &mut stream, utterance, mine, &generation, &send);
+                last_partial.clear();
             }
             Ok(SttMsg::Listen) => {
                 if listening.is_some() {
@@ -96,6 +143,103 @@ pub(crate) fn run(
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+/// Recognise what was fed and send it as the utterance's `Final`.
+fn finish_utterance(
+    engine: &mut dyn Engine,
+    config: &SttConfig,
+    stream: &mut StreamBuffer,
+    utterance: u64,
+    mine: u64,
+    generation: &AtomicU64,
+    send: &dyn Fn(SttEvent),
+) {
+    let samples = stream.take();
+    if mine != generation.load(Ordering::Relaxed) || samples.is_empty() {
+        return;
+    }
+    let started = Instant::now();
+    match engine.transcribe(&samples, config) {
+        Ok(transcript) => {
+            if mine == generation.load(Ordering::Relaxed) {
+                send(SttEvent::Final { utterance, transcript, secs: started.elapsed().as_secs_f64() });
+            }
+        }
+        Err(message) => send(SttEvent::Error { utterance: Some(utterance), message }),
+    }
+}
+
+/// The fed PCM of the utterance in progress, and when a new partial is due.
+pub(crate) struct StreamBuffer {
+    samples: Vec<f32>,
+    /// `samples.len()` when the last partial was read.
+    read_upto: usize,
+    interval: usize,
+}
+
+/// Whisper reads 30 s at a time: a partial over a longer utterance reads the
+/// last stretch of it, so its cost stays flat while the speaker goes on.
+const PARTIAL_WINDOW_SECS: usize = 28;
+
+impl StreamBuffer {
+    pub(crate) fn new(interval_ms: u32) -> Self {
+        let interval = (interval_ms.max(100) as usize) * super::STT_SAMPLE_RATE as usize / 1000;
+        Self { samples: Vec::new(), read_upto: 0, interval }
+    }
+
+    pub(crate) fn push(&mut self, samples: &[f32]) {
+        self.samples.extend_from_slice(samples);
+    }
+
+    /// Enough new audio has come in since the last partial.
+    pub(crate) fn partial_due(&self) -> bool {
+        self.samples.len() >= self.read_upto + self.interval
+    }
+
+    pub(crate) fn partial_window(&self) -> &[f32] {
+        let max = PARTIAL_WINDOW_SECS * super::STT_SAMPLE_RATE as usize;
+        &self.samples[self.samples.len().saturating_sub(max)..]
+    }
+
+    pub(crate) fn mark_partial(&mut self) {
+        self.read_upto = self.samples.len();
+    }
+
+    /// The whole utterance; the buffer starts the next one empty.
+    pub(crate) fn take(&mut self) -> Vec<f32> {
+        self.read_upto = 0;
+        std::mem::take(&mut self.samples)
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn a_partial_is_due_each_interval_of_new_audio() {
+        let mut b = StreamBuffer::new(500);
+        b.push(&vec![0.0; 7_999]);
+        assert!(!b.partial_due());
+        b.push(&[0.0]);
+        assert!(b.partial_due());
+        b.mark_partial();
+        assert!(!b.partial_due());
+        b.push(&vec![0.0; 8_000]);
+        assert!(b.partial_due());
+    }
+
+    #[test]
+    fn the_partial_window_is_capped_and_take_resets() {
+        let mut b = StreamBuffer::new(1000);
+        b.push(&vec![0.0; 40 * 16_000]);
+        assert_eq!(b.partial_window().len(), 28 * 16_000);
+        let all = b.take();
+        assert_eq!(all.len(), 40 * 16_000);
+        assert!(!b.partial_due());
+        assert!(b.partial_window().is_empty());
     }
 }
 
@@ -201,12 +345,12 @@ impl Engine for RemoteStt {
             pipe: PipeId::new("stt.whisper"),
             engine: format!("whisper ({})", self.pipe.model),
             remote: Some(self.pipe.base_url.clone()),
-            capabilities: SttCapabilities { pcm_input: true, engine_mic: false, partial_results: false, offline: true },
+            capabilities: SttCapabilities { pcm_input: true, engine_mic: false, partial_results: true, offline: true },
         }
     }
 
     fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig) -> Result<Transcript, String> {
-        self.pipe.transcribe(samples_16k, &config.language, config.timestamps)
+        self.pipe.transcribe(samples_16k, &config.language, &config.prompt, config.timestamps)
     }
 
     fn listen(&mut self, _config: &SttConfig) -> Result<Listening, String> {
@@ -243,11 +387,16 @@ mod whisper {
                 pipe: PipeId::new("stt.whisper"),
                 engine: format!("whisper ({}, {})", self.name, makepad_ai_speech::whisper::accel_backend_name()),
                 remote: None,
-                capabilities: SttCapabilities { pcm_input: true, engine_mic: false, partial_results: false, offline: true },
+                capabilities: SttCapabilities { pcm_input: true, engine_mic: false, partial_results: true, offline: true },
             }
         }
 
         fn transcribe(&mut self, samples_16k: &[f32], config: &SttConfig) -> Result<Transcript, String> {
+            // The encoder's cost scales with its audio context: on a phone
+            // encode the utterance plus a second of margin, not 30 s of
+            // padding (a 4 s turn: ~1.8 s instead of ~8.8 s on the Pixel).
+            #[cfg(target_os = "android")]
+            makepad_ai_speech::whisper::set_audio_ctx(utterance_ctx(samples_16k.len()));
             let params = whisper_params(config);
             let segments = self.state.transcribe(&self.model, samples_16k, &params);
             Ok(Transcript {
@@ -255,12 +404,21 @@ mod whisper {
                     .into_iter()
                     .map(|s| super::super::Segment { start_ms: s.start_ms, end_ms: s.end_ms, text: s.text })
                     .collect(),
+                language: self.state.detected_language().map(|(code, _)| code.to_string()),
             })
         }
 
         fn listen(&mut self, _config: &SttConfig) -> Result<Listening, String> {
             Err("whisper takes PCM; record and call transcribe".to_string())
         }
+    }
+
+    /// Encoder positions (20 ms each) for `samples` at 16 kHz plus one
+    /// second, in steps of 64, at least 256 (shorter contexts lose accuracy),
+    /// at most the model's 1500.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn utterance_ctx(samples: usize) -> usize {
+        (samples / 320 + 50).next_multiple_of(64).clamp(256, 1500)
     }
 
     fn whisper_params(config: &SttConfig) -> WhisperParams {
@@ -272,6 +430,7 @@ mod whisper {
             .next()
             .unwrap_or("en")
             .to_ascii_lowercase();
+        params.prompt = config.prompt.clone();
         params.no_timestamps = !config.timestamps;
         params.single_segment = config.single_segment;
         if config.max_tokens > 0 {

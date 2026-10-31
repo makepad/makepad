@@ -91,6 +91,10 @@ pub enum ProviderEvent {
     /// advertises lanes). Providers that know none of it never emit it, and
     /// no consumer may depend on it arriving.
     Serving(ServingFacts),
+    /// A tool's arguments while they are being written. This is the whole
+    /// JSON prefix, possibly incomplete; consumers may preview it but must
+    /// wait for `FunctionCall` before executing the tool.
+    FunctionCallPartial { call_id: String, name: String, partial_json: String },
     /// A native function call. `arguments` is the raw JSON string; the
     /// session parses it to an object and remains the security boundary.
     FunctionCall { call_id: String, name: String, arguments: String },
@@ -147,6 +151,21 @@ pub trait ChatProvider {
     fn reset_conversation(&mut self) {
         self.cancel();
     }
+
+    /// The model calls the session's tools natively, through an MCP server
+    /// the host handed the provider, inside one turn: the session teaches
+    /// no text tool protocol and extracts no calls from the reply.
+    fn tools_over_mcp(&self) -> bool {
+        false
+    }
+
+    /// The model reasons on its own channel (a native reasoner): the session
+    /// never tells it to write its reasoning out in `<think>` tags (Claude's
+    /// API refuses that as reasoning extraction). Only the fleet's own Qwen
+    /// reasons in text.
+    fn reasons_natively(&self) -> bool {
+        self.kind() != ProviderKind::FleetQwen
+    }
 }
 
 // ------------------------------------------------------------------ threaded
@@ -167,6 +186,7 @@ pub trait ChatProvider {
 /// affects the status display between refreshes.
 pub struct ThreadedProvider {
     kind: ProviderKind,
+    reasons_natively: bool,
     cmd_tx: std::sync::mpsc::Sender<ThreadedCmd>,
     msg_rx: std::sync::mpsc::Receiver<ThreadedMsg>,
     last_availability: ProviderAvailability,
@@ -201,6 +221,7 @@ impl ThreadedProvider {
         seed_availability: ProviderAvailability,
     ) -> ThreadedProvider {
         let kind = inner.kind();
+        let reasons_natively = inner.reasons_natively();
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ThreadedCmd>();
         let (msg_tx, msg_rx) = std::sync::mpsc::channel::<ThreadedMsg>();
         std::thread::Builder::new()
@@ -238,6 +259,7 @@ impl ThreadedProvider {
             .expect("spawn chat provider worker");
         ThreadedProvider {
             kind,
+            reasons_natively,
             cmd_tx,
             msg_rx,
             last_availability: seed_availability,
@@ -277,6 +299,10 @@ impl Drop for ThreadedProvider {
 impl ChatProvider for ThreadedProvider {
     fn kind(&self) -> ProviderKind {
         self.kind
+    }
+
+    fn reasons_natively(&self) -> bool {
+        self.reasons_natively
     }
 
     fn availability(&mut self) -> ProviderAvailability {

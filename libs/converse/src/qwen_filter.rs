@@ -14,7 +14,7 @@
 
 use crate::filter::{FilterDecision, TranscriptFilter};
 use makepad_ai_llm::{LlamaSession, LlamaSessionConfig};
-use makepad_widgets::log;
+use makepad_widgets_core::log;
 
 /// Cap on generated tokens per judgement: one SEND/SKIP line, never an essay.
 const MAX_JUDGE_TOKENS: usize = 96;

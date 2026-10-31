@@ -299,47 +299,18 @@ fn try_lock_exclusive(file: &File) -> io::Result<bool> {
 
 #[cfg(windows)]
 fn try_lock_exclusive(file: &File) -> io::Result<bool> {
-    use std::ffi::c_void;
+    use makepad_windows_sys::Win32::{
+        Foundation::{ERROR_LOCK_VIOLATION, HANDLE},
+        Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY},
+        System::IO::OVERLAPPED,
+    };
     use std::os::windows::io::AsRawHandle;
-
-    const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x0000_0002;
-    const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x0000_0001;
-    const ERROR_LOCK_VIOLATION: i32 = 33;
-
-    #[repr(C)]
-    struct Overlapped {
-        internal: usize,
-        internal_high: usize,
-        offset: u32,
-        offset_high: u32,
-        h_event: *mut c_void,
-    }
-    #[cfg(target_pointer_width = "64")]
-    const _: () = assert!(std::mem::size_of::<Overlapped>() == 32);
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn LockFileEx(
-            file: *mut c_void,
-            flags: u32,
-            reserved: u32,
-            bytes_low: u32,
-            bytes_high: u32,
-            overlapped: *mut Overlapped,
-        ) -> i32;
-    }
     // SAFETY: a zeroed OVERLAPPED with offset 0 locks from the file start;
     // the handle is owned and open.
-    let mut overlapped = Overlapped {
-        internal: 0,
-        internal_high: 0,
-        offset: 0,
-        offset_high: 0,
-        h_event: std::ptr::null_mut(),
-    };
+    let mut overlapped = OVERLAPPED::default();
     let rc = unsafe {
         LockFileEx(
-            file.as_raw_handle() as *mut c_void,
+            HANDLE(file.as_raw_handle()),
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
             0,
             u32::MAX,
@@ -347,11 +318,11 @@ fn try_lock_exclusive(file: &File) -> io::Result<bool> {
             &mut overlapped,
         )
     };
-    if rc != 0 {
+    if rc.is_ok() {
         return Ok(true);
     }
     let err = io::Error::last_os_error();
-    if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION) {
+    if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION.0 as i32) {
         return Ok(false);
     }
     Err(err)

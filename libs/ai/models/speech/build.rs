@@ -20,7 +20,8 @@ fn main() {
 }
 
 fn build_whisper_metallib() {
-    let precompile_enabled = env::var_os("CARGO_FEATURE_METAL_PRECOMPILE").is_some();
+    // run by Relax (a dev run): no `xcrun metal` per (re)run; the runtime compiles the source
+    let precompile_enabled = env::var_os("CARGO_FEATURE_METAL_PRECOMPILE").is_some() && env::var_os("MAKEPAD_RUN_BUILD_SCRIPT").is_none();
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();

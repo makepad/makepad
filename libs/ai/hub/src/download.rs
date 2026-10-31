@@ -135,6 +135,13 @@ impl Downloader {
             fs::create_dir_all(parent)
                 .map_err(|e| AssetAiError::Download(format!("mkdir {}: {e}", parent.display())))?;
         }
+        // A file with a current receipt is final: serving it writes nothing
+        // (no lock either), so a warm job never depends on the disk having
+        // room -- a full disk once put a resident chat model in `error`
+        // because its every turn created this lock.
+        if source_file_is_verified(file, cache_dir) {
+            return Ok(dest);
+        }
         // Serialize all verify/download/commit activity for one cache path
         // across service processes. Waiters re-check the final receipt after
         // acquiring the lock and therefore do no duplicate network work.
@@ -544,6 +551,41 @@ impl Drop for ArtifactLock {
     }
 }
 
+/// True when the owner file names a pid (`owner-<pid>-<ns>`) of another
+/// process that no longer exists on this machine.
+fn owner_process_is_gone(owner: &Path) -> bool {
+    let Some(pid) = owner
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("owner-"))
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|pid| pid.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    pid != std::process::id() && !process_exists(pid)
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let Ok(pid) = i32::try_from(pid) else { return true };
+    if pid <= 0 {
+        return true;
+    }
+    // Signal 0 only checks: success or EPERM means the process exists;
+    // ESRCH (3 on Linux, Android and macOS) means it is gone.
+    let alive = unsafe { kill(pid, 0) == 0 };
+    alive || std::io::Error::last_os_error().raw_os_error() != Some(3)
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: u32) -> bool {
+    true
+}
+
 fn break_stale_lock(dir: &Path) -> bool {
     break_stale_lock_older_than(dir, LOCK_STALE_AFTER)
 }
@@ -564,11 +606,14 @@ fn break_stale_lock_older_than(dir: &Path, stale_after: Duration) -> bool {
     }
     if owners.len() == 1 {
         let owner = &owners[0];
-        let stale = fs::metadata(owner)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age > stale_after);
+        // An owner whose process is gone (an app killed mid-download) is
+        // stale at once; otherwise its heartbeat age decides.
+        let stale = owner_process_is_gone(owner)
+            || fs::metadata(owner)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > stale_after);
         // Only one waiter can remove this exact unique owner. Losers do not
         // remove the directory, so they cannot accidentally delete a newly
         // acquired lock after the winner has cleaned it up.
@@ -787,6 +832,21 @@ fn source_receipt_matches(file: &FileSpec, dest: &Path, receipt: &VerificationRe
         && receipt.converter_version.is_none()
 }
 
+/// True when `dest` carries a current receipt for exactly this content
+/// (sha256 + size), whichever source delivered it: content-addressed files
+/// (the phone's model store) are the same file from any mirror.
+pub fn content_is_verified(dest: &Path, sha256: &str, size: u64) -> bool {
+    let (Some(receipt), Some((file_len, modified_ns))) = (read_receipt(dest), metadata_identity(dest)) else {
+        return false;
+    };
+    receipt.version == RECEIPT_VERSION
+        && receipt.kind == "source"
+        && receipt.file_len == file_len
+        && receipt.modified_ns == modified_ns
+        && file_len == size
+        && receipt.sha256.as_deref() == Some(sha256)
+}
+
 fn write_source_receipt(
     file: &FileSpec,
     dest: &Path,
@@ -903,6 +963,9 @@ pub fn verify_converted_file(
     let output = file.converted_path(cache_dir).ok_or_else(|| {
         AssetAiError::Download(format!("{} has no converted output path", file.cache_as))
     })?;
+    if converted_file_is_verified(file, cache_dir) {
+        return Ok(output);
+    }
     let artifact_lock = ArtifactLock::acquire(&output, cancel)?;
     verify_converted_file_locked(file, cache_dir, cancel, Some(&artifact_lock))
 }
@@ -984,6 +1047,9 @@ pub fn ensure_converted_file(
         fs::create_dir_all(parent)
             .map_err(|e| AssetAiError::Download(format!("mkdir {}: {e}", parent.display())))?;
     }
+    if converted_file_is_verified(file, cache_dir) {
+        return Ok(output);
+    }
     let artifact_lock = ArtifactLock::acquire(&output, cancel)?;
     if converted_file_is_verified(file, cache_dir) {
         return Ok(output);
@@ -1051,6 +1117,44 @@ mod receipt_tests {
                 converter_version: version.into(),
             }),
         }
+    }
+
+    /// A verified file is served without any write: a warm job keeps
+    /// working on a full disk (here: a directory nothing can be created in).
+    #[cfg(unix)]
+    #[test]
+    fn a_verified_file_is_served_without_writing() {
+        use std::os::unix::fs::PermissionsExt;
+        let bytes = b"weights";
+        let cache = temp_dir("verified-no-write");
+        let spec = FileSpec {
+            role: None,
+            repo: "org/repo".into(),
+            path: "model.gguf".into(),
+            revision: Some("a".repeat(40)),
+            cache_as: "llm/model.gguf".into(),
+            size: Some(bytes.len() as u64),
+            sha256: Some(sha256_hex(bytes)),
+            local: false,
+            optional: false,
+            converts_to: None,
+            conversion: None,
+        };
+        let dest = spec.dest_path(&cache);
+        let dir = dest.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&dest, bytes).unwrap();
+        let downloader = Downloader::new(DEFAULT_HF_BASE, None).unwrap();
+        let cancel = CancelToken::new();
+        // First use hashes the file and writes its receipt.
+        downloader.ensure_file(&spec, &cache, &mut |_| {}, &cancel).unwrap();
+        assert!(source_file_is_verified(&spec, &cache));
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let served = downloader.ensure_file(&spec, &cache, &mut |_| {}, &cancel);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(served.unwrap(), dest);
+        assert!(!lock_path(&dest).exists());
     }
 
     #[test]
@@ -1160,6 +1264,22 @@ mod receipt_tests {
         fs::write(&fresh, b"live").unwrap();
         assert!(!break_stale_lock_older_than(&dir, Duration::from_secs(3600)));
         assert!(fresh.exists());
+    }
+
+    #[test]
+    fn a_lock_left_by_a_dead_process_is_broken_at_once() {
+        let dir = temp_dir("dead-owner").join("artifact.lock");
+        fs::create_dir(&dir).unwrap();
+        // A pid far above any pid limit belongs to no process.
+        fs::write(dir.join("owner-2000000000-1"), b"pid=2000000000\n").unwrap();
+        assert!(break_stale_lock_older_than(&dir, Duration::from_secs(3600)));
+        assert!(!dir.exists());
+
+        // A lock held by a live process (this one) is never taken early.
+        let dest = temp_dir("live-owner").join("artifact");
+        let lock = ArtifactLock::acquire(&dest, &CancelToken::new()).unwrap();
+        assert!(!break_stale_lock_older_than(&lock.dir, Duration::from_secs(3600)));
+        assert!(lock.owner.exists());
     }
 
     #[test]

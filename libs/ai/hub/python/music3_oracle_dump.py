@@ -1,7 +1,8 @@
+# Offline reference-oracle tool for tests; not part of the product.
 # music3_oracle_dump.py - standalone MiniMax-Music3 stage dumps for the native
 # port. Does NOT talk to the live :8123 service. Loads the official
-# ModularPipeline from a local cache dir (same view rewrite as music3_worker.py)
-# and writes numpy + wav + meta.json for a short seeded clip.
+# ModularPipeline from a local cache dir (rewriting it into a
+# diffusers-loadable view) and writes numpy + wav + meta.json for a short seeded clip.
 #
 # Usage (169):
 #   C:\ai\music3venv\Scripts\python.exe music3_oracle_dump.py \

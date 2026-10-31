@@ -231,8 +231,8 @@ fn json_string(s: &str) -> String {
 }
 
 fn run_image(args: &ImageArgs, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(&str, u16)) -> Result<GenDone, String> {
-    use makepad_ai_hub::generate::{generate, JobExpect};
     use makepad_ai_hub::home::makepad_home;
+    use makepad_ai_hub::job::{generate, process_origin, FleetRouter, Want};
     use makepad_ai_hub::protocol::GenerateRequestJson;
     use makepad_ai_hub::registry::Domain;
     let seed = (Cx::time_now().max(0.0) * 1_000_000_000.0) as u64;
@@ -244,10 +244,13 @@ fn run_image(args: &ImageArgs, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMu
         ..Default::default()
     };
     progress("finding an image node", 0);
-    let expect = JobExpect { label: "image.generate", artifact: Some(&["image/png"]) };
-    let generated = generate(Domain::Image, wire, &expect, &|| cancel.load(Ordering::Relaxed), progress, std::time::Duration::from_millis(500))
+    let generated = generate(std::sync::Arc::new(FleetRouter::default()), process_origin("aichat"), Domain::Image, wire,
+        Want::Outputs { media: 1, text: 0 }, &|| cancel.load(Ordering::Relaxed), progress, std::time::Duration::from_millis(500))
         .map_err(|e| e.to_string())?;
-    let artifact = generated.artifact.ok_or("the node returned no picture")?;
+    let artifact = generated.artifacts.into_iter().next().ok_or("the node returned no picture")?;
+    if artifact.content_type != "image/png" {
+        return Err(format!("image.generate returned {}", artifact.content_type));
+    }
     let dir = makepad_home().join("gen");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
     let stamp = Cx::time_now().max(0.0) as u64;

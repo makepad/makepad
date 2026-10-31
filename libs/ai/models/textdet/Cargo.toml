@@ -1,0 +1,19 @@
+[package]
+name = "makepad-ai-textdet"
+version = "0.1.0"
+edition = "2021"
+description = "On-device text detection (boxes only): a small DB-style convolutional detector run on our Vulkan compute backend, with a CPU reference. Picture in, text-line boxes (fractions of the picture) out."
+license = "MIT"
+
+[dependencies]
+makepad-ai-loader = { path = "../../loader" }
+makepad-micro-serde = { path = "../../../micro_serde" }
+
+# The Vulkan executor: Android's backend (and Linux for tests). Elsewhere the
+# CPU reference runs.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+makepad-ai-vulkan = { path = "../../vulkan" }
+
+[[bin]]
+name = "textdet"
+path = "src/bin/textdet.rs"

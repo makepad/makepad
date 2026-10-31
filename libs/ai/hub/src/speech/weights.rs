@@ -17,6 +17,8 @@ pub const WHISPER_MODEL_ENV: &str = "MAKEPAD_VOICE_MODEL";
 pub const WHISPER_MODEL_ID: &str = "whisper-large-v3-turbo";
 
 pub const KOKORO_MODEL_FILE: &str = "kokoro-v1_0.mktts";
+/// The Kokoro v1.1-zh model (100 Mandarin voices, 3 English), next to the v1.0 one.
+pub const KOKORO_ZH_MODEL_FILE: &str = "kokoro-v1_1-zh.mktts";
 pub const KOKORO_MODEL_ENV: &str = "MAKEPAD_TTS_MODEL";
 pub const KOKORO_VOICE_ENV: &str = "MAKEPAD_TTS_VOICE";
 pub const KOKORO_DEFAULT_VOICE: &str = "bm_daniel";
@@ -61,6 +63,49 @@ pub fn kokoro_model_path() -> Option<PathBuf> {
     first_file(candidates(KOKORO_MODEL_ENV, KOKORO_MODEL_FILE, "tts"))
 }
 
+/// Which Kokoro model a voice belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KokoroModel {
+    V10,
+    V11Zh,
+}
+
+/// The text front end (and symbol table) a voice speaks with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KokoroFront {
+    English,
+    EnglishV11,
+    MandarinV10,
+    MandarinV11,
+}
+
+/// The model and text front end a voice pack speaks through, by its name:
+/// `zf_xiaobei` (v1.0 Mandarin), `zf_001` / `zm_009` (v1.1-zh Mandarin, numbered),
+/// `af_maple` / `af_sol` / `bf_vale` (the v1.1-zh English voices) and everything
+/// else (v1.0 English).
+pub fn kokoro_plan(voice: &str) -> (KokoroModel, KokoroFront) {
+    use KokoroFront as Frontend;
+    let name = voice.strip_suffix(".mkvoice").unwrap_or(voice);
+    let numbered = name.split_once('_').is_some_and(|(_, rest)| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
+    if name.starts_with('z') {
+        return if numbered { (KokoroModel::V11Zh, Frontend::MandarinV11) } else { (KokoroModel::V10, Frontend::MandarinV10) };
+    }
+    if matches!(name, "af_maple" | "af_sol" | "bf_vale") {
+        return (KokoroModel::V11Zh, Frontend::EnglishV11);
+    }
+    (KokoroModel::V10, Frontend::English)
+}
+
+/// The v1.1-zh model file, if this machine has it.
+pub fn kokoro_zh_model_path() -> Option<PathBuf> {
+    if let Some(v10) = kokoro_model_path() {
+        if let Some(sibling) = v10.parent().map(|d| d.join(KOKORO_ZH_MODEL_FILE)).filter(|p| p.is_file()) {
+            return Some(sibling);
+        }
+    }
+    first_file(candidates("MAKEPAD_TTS_ZH_MODEL", KOKORO_ZH_MODEL_FILE, "tts"))
+}
+
 /// A Kokoro voice pack by name (`"bm_daniel"` or `"bm_daniel.mkvoice"`),
 /// searched next to the model and along the usual chain. `MAKEPAD_TTS_VOICE`
 /// pointing at a file wins outright, as it always has.
@@ -99,6 +144,7 @@ pub fn kokoro_voice(name: &str) -> Voice {
     let language = match accent {
         Some('a') => "en-US",
         Some('b') => "en-GB",
+        Some('z') => "zh-CN",
         _ => "en",
     };
     let gender = match gender {
@@ -142,6 +188,32 @@ pub fn kokoro_voices() -> Vec<Voice> {
     names.iter().map(|n| kokoro_voice(n)).collect()
 }
 
+/// The installed voices with language and model, for `GET /voices`.
+pub fn voices_json() -> crate::protocol::VoicesJson {
+    let voices = kokoro_voices()
+        .into_iter()
+        .map(|v| {
+            let model = match kokoro_plan(&v.id).0 {
+                KokoroModel::V10 => "kokoro-v1.0",
+                KokoroModel::V11Zh => "kokoro-v1.1-zh",
+            };
+            crate::protocol::VoiceJson {
+                gender: match v.gender {
+                    VoiceGender::Female => "female",
+                    VoiceGender::Male => "male",
+                    _ => "unknown",
+                }
+                .to_string(),
+                id: v.id,
+                name: v.name,
+                language: v.language,
+                model: model.to_string(),
+            }
+        })
+        .collect();
+    crate::protocol::VoicesJson { voices }
+}
+
 /// The full catalogue, for a remote Kokoro whose files we cannot see.
 pub fn kokoro_voice_catalogue() -> Vec<Voice> {
     KOKORO_VOICE_NAMES.iter().map(|n| kokoro_voice(n)).collect()
@@ -168,6 +240,29 @@ mod tests {
         assert_eq!(v.gender, VoiceGender::Male);
         let v = kokoro_voice("af_heart.mkvoice");
         assert_eq!((v.id.as_str(), v.language.as_str(), v.gender), ("af_heart", "en-US", VoiceGender::Female));
+    }
+
+    #[test]
+    fn voices_name_their_model_and_front_end() {
+        use KokoroFront as Frontend;
+        assert_eq!(kokoro_plan("bm_daniel"), (KokoroModel::V10, Frontend::English));
+        assert_eq!(kokoro_plan("zf_xiaobei"), (KokoroModel::V10, Frontend::MandarinV10));
+        assert_eq!(kokoro_plan("zm_yunxi.mkvoice"), (KokoroModel::V10, Frontend::MandarinV10));
+        assert_eq!(kokoro_plan("zf_001"), (KokoroModel::V11Zh, Frontend::MandarinV11));
+        assert_eq!(kokoro_plan("zm_009"), (KokoroModel::V11Zh, Frontend::MandarinV11));
+        assert_eq!(kokoro_plan("af_maple"), (KokoroModel::V11Zh, Frontend::EnglishV11));
+        assert_eq!(kokoro_voice("zf_001").language, "zh-CN");
+    }
+
+    #[test]
+    fn the_voice_listing_names_language_and_model() {
+        let v = voices_json();
+        assert!(v.voices.iter().all(|v| !v.id.is_empty() && !v.language.is_empty()));
+        // Whatever is installed, the model a voice reports follows its name.
+        for voice in &v.voices {
+            let want = if voice.id.starts_with('z') && voice.id.rsplit('_').next().is_some_and(|t| t.chars().all(|c| c.is_ascii_digit())) { "kokoro-v1.1-zh" } else if matches!(voice.id.as_str(), "af_maple" | "af_sol" | "bf_vale") { "kokoro-v1.1-zh" } else { "kokoro-v1.0" };
+            assert_eq!(voice.model, want, "{}", voice.id);
+        }
     }
 
     #[test]

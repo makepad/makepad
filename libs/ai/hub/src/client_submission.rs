@@ -109,7 +109,7 @@ impl Transport for HttpTransport {
             .next().ok_or_else(|| failure("no address for submission endpoint"))?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(failure("submission deadline elapsed resolving endpoint")); }
-        let stream = TcpStream::connect_timeout(&addr, remaining.min(Duration::from_secs(3)))?;
+        let stream = makepad_network::lan::connect_timeout("ai-hub submission", &addr, remaining.min(Duration::from_secs(3)))?;
         let mut stream = DeadlineStream { stream, deadline };
         let mut head = format!("POST {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
             parsed.target, parsed.host, parsed.port, body.len());

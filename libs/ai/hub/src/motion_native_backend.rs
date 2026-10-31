@@ -1340,7 +1340,7 @@ impl MotionWorker {
             .is_ok();
         drop(tx);
         if sent {
-            match replies.recv_timeout(Duration::from_secs(120)) {
+            match crate::progress_watch::release_reply(&replies, "HY-Motion") {
                 Ok(WorkerEvent::Done(Ok(_))) => {}
                 Ok(WorkerEvent::Done(Err(error))) => {
                     return Err(AssetAiError::Backend(format!(
@@ -1352,10 +1352,10 @@ impl MotionWorker {
                         "HY-Motion unload received an invalid acknowledgement".to_string(),
                     ))
                 }
-                Err(error) => {
-                    return Err(AssetAiError::Backend(format!(
-                        "HY-Motion unload acknowledgement timed out: {error}"
-                    )))
+                Err(_) => {
+                    return Err(AssetAiError::Backend(
+                        "HY-Motion worker died before acknowledging unload".to_string(),
+                    ))
                 }
             }
         }

@@ -751,7 +751,7 @@ fn column(text: &str, cols: usize) -> String {
     let mut result = String::new();
     let mut width = 0;
     for ch in text.chars().filter(|c| !c.is_control()) {
-        let advance = usize::from(crate::term::unicode::char_width(ch as u32));
+        let advance = usize::from(makepad_cell_width::char_width(ch as u32));
         if width + advance > cols {
             break;
         }
@@ -766,7 +766,7 @@ fn line(out: &mut String, row: usize, cols: usize, style: &str, text: &str) {
     let _ = write!(out, "\x1b[{row};1H\x1b[0m\x1b[2K{style}");
     let mut width = 0;
     for ch in text.chars().filter(|c| !c.is_control()) {
-        let advance = usize::from(crate::term::unicode::char_width(ch as u32));
+        let advance = usize::from(makepad_cell_width::char_width(ch as u32));
         if width + advance >= cols {
             break;
         }

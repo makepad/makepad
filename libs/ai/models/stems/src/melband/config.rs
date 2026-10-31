@@ -27,6 +27,8 @@ pub const NUM_BANDS: usize = 60;
 pub const NUM_TARGETS: usize = 1;
 /// The lane a cache entry of this model holds, in [`NUM_TARGETS`] order.
 pub const LANES: [&str; NUM_TARGETS] = ["vocals"];
+/// The lane a cache entry of the de-reverb model holds: the dry voice.
+pub const DEREVERB_LANES: [&str; NUM_TARGETS] = ["dry"];
 
 /// The trained chunk: 8 seconds, `config.inference.chunk_size` 352800, with
 /// the same 2x overlap as the four-stem model. Spelled out rather than

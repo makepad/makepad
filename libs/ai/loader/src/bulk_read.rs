@@ -182,30 +182,7 @@ mod imp {
     /// 512e and 4Kn NVMe geometry.
     const SECTOR: u64 = 4096;
 
-    extern "system" {
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            security: *mut c_void,
-            disposition: u32,
-            flags: u32,
-            template: Handle,
-        ) -> Handle;
-        fn ReadFile(
-            file: Handle,
-            buffer: *mut c_void,
-            count: u32,
-            read: *mut u32,
-            overlapped: *mut c_void,
-        ) -> i32;
-        fn SetFilePointerEx(file: Handle, distance: i64, new: *mut i64, method: u32) -> i32;
-        fn CloseHandle(handle: Handle) -> i32;
-        fn GetLastError() -> u32;
-        fn VirtualAlloc(address: *mut c_void, size: usize, kind: u32, protect: u32)
-            -> *mut c_void;
-        fn VirtualFree(address: *mut c_void, size: usize, kind: u32) -> i32;
-    }
+    use makepad_windows_sys::Win32::{Foundation::*, Storage::FileSystem::*, System::Memory::*};
 
     /// Sector-aligned staging block. `VirtualAlloc` aligns to 64 KB, well
     /// past what unbuffered reads require.
@@ -216,16 +193,20 @@ mod imp {
     impl Staging {
         fn new(len: usize) -> Result<Self, String> {
             let ptr = unsafe {
-                VirtualAlloc(
+                VirtualAlloc_raw(
                     std::ptr::null_mut(),
                     len,
-                    MEM_COMMIT | MEM_RESERVE,
-                    PAGE_READWRITE,
+                    makepad_windows_sys::Win32::System::Memory::VIRTUAL_ALLOCATION_TYPE(
+                        MEM_COMMIT | MEM_RESERVE,
+                    ),
+                    makepad_windows_sys::Win32::System::Memory::PAGE_PROTECTION_FLAGS(
+                        PAGE_READWRITE,
+                    ),
                 )
             };
             if ptr.is_null() {
                 return Err(format!("VirtualAlloc({}) failed: {}", len, unsafe {
-                    GetLastError()
+                    GetLastError_raw().0
                 }));
             }
             Ok(Self {
@@ -237,7 +218,12 @@ mod imp {
     impl Drop for Staging {
         fn drop(&mut self) {
             unsafe {
-                VirtualFree(self.ptr.cast::<c_void>(), 0, MEM_RELEASE);
+                VirtualFree_raw(
+                    self.ptr.cast::<c_void>(),
+                    0,
+                    makepad_windows_sys::Win32::System::Memory::VIRTUAL_FREE_TYPE(MEM_RELEASE),
+                )
+                .0;
             }
         }
     }
@@ -253,18 +239,25 @@ mod imp {
             .chain(Some(0))
             .collect::<Vec<u16>>();
         let handle = unsafe {
-            CreateFileW(
-                name.as_ptr(),
+            CreateFileW_raw(
+                makepad_windows_sys::core::PCWSTR(name.as_ptr()),
                 GENERIC_READ,
-                FILE_SHARE_READ,
+                makepad_windows_sys::Win32::Storage::FileSystem::FILE_SHARE_MODE(FILE_SHARE_READ),
                 std::ptr::null_mut(),
-                OPEN_EXISTING,
-                FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN,
-                std::ptr::null_mut(),
+                makepad_windows_sys::Win32::Storage::FileSystem::FILE_CREATION_DISPOSITION(
+                    OPEN_EXISTING,
+                ),
+                makepad_windows_sys::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(
+                    FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN,
+                ),
+                makepad_windows_sys::Win32::Foundation::HANDLE(std::ptr::null_mut()),
             )
+            .0
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(format!("CreateFileW failed: {}", unsafe { GetLastError() }));
+            return Err(format!("CreateFileW failed: {}", unsafe {
+                GetLastError_raw().0
+            }));
         }
         Ok(handle)
     }
@@ -337,7 +330,7 @@ mod imp {
         };
         let handle = open(path)?;
         let result = read_group_inner(handle, arena, group, chunk, first.file_offset);
-        unsafe { CloseHandle(handle) };
+        unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
         result
     }
 
@@ -360,9 +353,20 @@ mod imp {
 
         let staging = Staging::new(chunk)?;
         let mut moved = 0i64;
-        if unsafe { SetFilePointerEx(handle, start as i64, &mut moved, FILE_BEGIN) } == 0 {
+        if unsafe {
+            SetFilePointerEx_raw(
+                makepad_windows_sys::Win32::Foundation::HANDLE(handle),
+                start as i64,
+                &mut moved,
+                makepad_windows_sys::Win32::Storage::FileSystem::SET_FILE_POINTER_MOVE_METHOD(
+                    FILE_BEGIN,
+                ),
+            )
+            .0
+        } == 0
+        {
             return Err(format!("SetFilePointerEx failed: {}", unsafe {
-                GetLastError()
+                GetLastError_raw().0
             }));
         }
 
@@ -373,16 +377,19 @@ mod imp {
             let want = (chunk as u64).min(end - window) as u32;
             let mut read = 0u32;
             let ok = unsafe {
-                ReadFile(
-                    handle,
-                    staging.ptr.cast::<c_void>(),
+                ReadFile_raw(
+                    makepad_windows_sys::Win32::Foundation::HANDLE(handle),
+                    (staging.ptr.cast::<c_void>()) as *mut u8,
                     want,
                     &mut read,
                     std::ptr::null_mut(),
                 )
+                .0
             };
             if ok == 0 {
-                return Err(format!("ReadFile failed: {}", unsafe { GetLastError() }));
+                return Err(format!("ReadFile failed: {}", unsafe {
+                    GetLastError_raw().0
+                }));
             }
             if read == 0 {
                 break;

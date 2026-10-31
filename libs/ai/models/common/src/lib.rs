@@ -19,6 +19,7 @@ pub mod progress;
 pub mod raw_st;
 pub mod sharded;
 pub mod torch_pth;
+pub mod torch_rng;
 
 pub use dtype::f16_word_to_f32;
 pub use error::{DiffusionError, Result};

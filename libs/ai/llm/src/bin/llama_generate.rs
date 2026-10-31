@@ -32,6 +32,7 @@ struct Args {
     draft_vocab_text: Vec<PathBuf>,
     draft_vocab_eval: Vec<PathBuf>,
     spec_determinism_runs: usize,
+    prefix_split: bool,
     prompt_dir: Option<PathBuf>,
     runs: usize,
     temperature: f32,
@@ -77,6 +78,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if !args.draft_vocab_eval.is_empty() {
         return run_draft_vocab_eval(&model, &vocab, &args);
+    }
+
+    if args.prefix_split {
+        return run_prefix_split(&model, &vocab, &args);
     }
 
     if args.spec_sample_gate {
@@ -143,6 +148,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("prefill.batch_size: {}", args.prefill_batch_size);
     eprintln!("prompt.tokens: {}", prompt_token_ids.len());
     eprintln!("generated.tokens: {}", generation.token_ids.len());
+    if let Some(stats) = session.speculative_stats() {
+        eprintln!("spec.draft_max: {}", session.speculation_depth());
+        eprintln!("spec.drafted: {}", stats.drafted);
+        eprintln!("spec.accepted: {}", stats.accepted);
+        eprintln!("spec.rounds: {}", stats.rounds);
+        eprintln!("spec.acceptance: {:.6}", stats.acceptance());
+        eprintln!("spec.tokens_per_round: {:.3}", stats.tokens_per_round());
+        eprintln!("spec.seconds: draft={:.3} verify={:.3} catchup={:.3}",
+            stats.draft_nanos as f64 / 1e9,
+            stats.verify_nanos as f64 / 1e9,
+            stats.catchup_nanos as f64 / 1e9);
+    }
     eprintln!("prefill.seconds: {:.3}", prefill_elapsed.as_secs_f64());
     eprintln!(
         "prefill.tok_s: {:.3}",
@@ -195,6 +212,7 @@ fn parse_args(
     let mut draft_vocab_text: Vec<PathBuf> = Vec::new();
     let mut draft_vocab_eval: Vec<PathBuf> = Vec::new();
     let mut spec_determinism_runs = 0usize;
+    let mut prefix_split = false;
     let mut prompt_dir = None;
     let mut runs = 20usize;
     let mut temperature = 0.7f32;
@@ -291,6 +309,9 @@ fn parse_args(
                 let value = args.next().ok_or("--spec-determinism-runs requires a value")?;
                 spec_determinism_runs = value.to_string_lossy().parse()?;
             }
+            "--prefix-split" => {
+                prefix_split = true;
+            }
             "--prompt-dir" => {
                 let value = args.next().ok_or("--prompt-dir requires a value")?;
                 prompt_dir = Some(PathBuf::from(value));
@@ -351,6 +372,7 @@ fn parse_args(
         draft_vocab_text,
         draft_vocab_eval,
         spec_determinism_runs,
+        prefix_split,
         prompt_dir,
         runs,
         temperature,
@@ -1175,7 +1197,9 @@ fn print_usage() {
     eprintln!(
         "usage: llama-generate <model.gguf> [--max-new-tokens N] [--prefill-batch-size N] [--upstream-completion-bin PATH] [--no-bos] [--no-parse-special] [--dump-token-ids] [--no-stream] [--verify-upstream] [--prompt TEXT | prompt words ...]\n\
          draft vocabulary: [--build-draft-vocab --prompt-dir DIR [--runs N] [--draft-vocab-text FILE]... [--draft-vocab-coverage C]]\n\
-         \x20                [--draft-vocab-eval FILE]...   measure the sidecar on held-out text"
+         \x20                [--draft-vocab-eval FILE]...   measure the sidecar on held-out text\n\
+         prompt prefix snapshots: --prefix-split --prompt-dir DIR   split each chat prompt at its user turn, prefill the\n\
+         \x20                shared prefix once, restore it per prompt, and check the output against a from-scratch run"
     );
 }
 
@@ -1343,4 +1367,172 @@ mod tests {
     fn leaves_non_terminated_output_unchanged() {
         assert_eq!(normalize_upstream_completion_stdout("hello"), "hello");
     }
+}
+
+/// Prompt-prefix snapshot check. Each prompt file is a whole chat prompt; the
+/// part before `<|im_start|>user` is the shared prefix (the system message).
+/// Per prompt, three greedy runs:
+/// - `fresh`: reset, append prefix, append the rest (the same two appends the
+///   snapshot path makes, so prefill batching is identical) -- the reference;
+/// - `restored`: restore the prefix snapshot, append the rest;
+/// - `oneshot`: reset, append the whole prompt in one call (timing baseline;
+///   its tokens are reported but not required to match, because a different
+///   prefill split may round differently).
+/// `restored` must be token-identical to `fresh`. Snapshots of every distinct
+/// prefix are kept and restored in turn, with the reference runs' resets in
+/// between, so a snapshot that leaned on state left in place would fail.
+fn run_prefix_split(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const USER_TURN: &str = "<|im_start|>user";
+    let dir = args
+        .prompt_dir
+        .as_ref()
+        .ok_or("--prefix-split requires --prompt-dir DIR")?;
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().map(|ext| ext == "txt").unwrap_or(false))
+        .collect();
+    files.sort();
+    let mut prompts = Vec::new();
+    for path in &files {
+        let text = std::fs::read_to_string(path)?;
+        let split = text
+            .find(USER_TURN)
+            .ok_or_else(|| format!("{} has no {USER_TURN}", path.display()))?;
+        let (prefix, rest) = text.split_at(split);
+        let prefix_ids = vocab.tokenize(prefix, !args.no_bos, args.parse_special)?;
+        let rest_ids = vocab.tokenize(rest, false, args.parse_special)?;
+        let whole_ids = vocab.tokenize(&text, !args.no_bos, args.parse_special)?;
+        let mut joined = prefix_ids.clone();
+        joined.extend_from_slice(&rest_ids);
+        if joined != whole_ids {
+            eprintln!(
+                "prefix.warn: {} tokenizes differently split ({}) and whole ({})",
+                path.display(),
+                joined.len(),
+                whole_ids.len()
+            );
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        prompts.push((name, prefix.to_string(), prefix_ids, rest_ids));
+    }
+    if prompts.is_empty() {
+        return Err("no .txt prompts in --prompt-dir".into());
+    }
+    let longest = prompts
+        .iter()
+        .map(|(_, _, p, r)| p.len() + r.len())
+        .max()
+        .unwrap_or(0);
+    let max_context = args
+        .max_context
+        .unwrap_or(longest + args.max_new_tokens + 16);
+    let mut session = LlamaSession::from_model(
+        model,
+        LlamaSessionConfig {
+            max_context: Some(u32::try_from(max_context)?),
+            prefill_batch_size: args.prefill_batch_size,
+            spec_draft_max: args.spec_draft_max,
+            ..LlamaSessionConfig::default()
+        },
+    )?;
+    eprintln!("prefix.device: {}", session.device_name());
+
+    let mut snapshots: Vec<(String, makepad_ai_llm::LlamaSessionState)> = Vec::new();
+    let mut identical = 0usize;
+    let mut oneshot_identical = 0usize;
+    let mut oneshot_ms = Vec::new();
+    let mut restored_ms = Vec::new();
+    let mut restore_only_ms = Vec::new();
+    for (name, prefix, prefix_ids, rest_ids) in &prompts {
+        // From-scratch reference with the same two appends.
+        session.reset()?;
+        session.append_tokens(prefix_ids)?;
+        session.append_tokens(rest_ids)?;
+        let fresh = session.continue_greedy(args.max_new_tokens)?;
+
+        // One-shot baseline.
+        session.reset()?;
+        let mut whole = prefix_ids.clone();
+        whole.extend_from_slice(rest_ids);
+        let start = Instant::now();
+        session.append_tokens(&whole)?;
+        oneshot_ms.push(start.elapsed().as_secs_f64() * 1e3);
+        let oneshot = session.continue_greedy(args.max_new_tokens)?;
+
+        // Snapshot path.
+        if !snapshots.iter().any(|(text, _)| text == prefix) {
+            session.reset()?;
+            let start = Instant::now();
+            session.append_tokens(prefix_ids)?;
+            let prefill = start.elapsed();
+            let start = Instant::now();
+            let state = session.save_state()?;
+            eprintln!(
+                "prefix.snapshot: {} tokens, {:.1} MiB, prefill {:.1} ms, save {:.1} ms",
+                state.token_count(),
+                state.state_bytes() as f64 / (1 << 20) as f64,
+                prefill.as_secs_f64() * 1e3,
+                start.elapsed().as_secs_f64() * 1e3
+            );
+            snapshots.push((prefix.clone(), state));
+        }
+        let state = &snapshots
+            .iter()
+            .find(|(text, _)| text == prefix)
+            .ok_or("snapshot vanished")?
+            .1;
+        let start = Instant::now();
+        session.restore_state(state)?;
+        let restore = start.elapsed();
+        session.append_tokens(rest_ids)?;
+        let total = start.elapsed();
+        restore_only_ms.push(restore.as_secs_f64() * 1e3);
+        restored_ms.push(total.as_secs_f64() * 1e3);
+        let restored = session.continue_greedy(args.max_new_tokens)?;
+
+        let same = restored.token_ids == fresh.token_ids;
+        let same_oneshot = oneshot.token_ids == fresh.token_ids;
+        identical += same as usize;
+        oneshot_identical += same_oneshot as usize;
+        eprintln!(
+            "prefix.prompt {name}: prefix {} + rest {} tokens, generated {}, restored==fresh {}, oneshot==fresh {}, oneshot prefill {:.1} ms, restore {:.1} ms + rest prefill {:.1} ms",
+            prefix_ids.len(),
+            rest_ids.len(),
+            fresh.token_ids.len(),
+            same,
+            same_oneshot,
+            oneshot_ms.last().copied().unwrap_or(0.0),
+            restore.as_secs_f64() * 1e3,
+            (total - restore).as_secs_f64() * 1e3,
+        );
+        if !same {
+            eprintln!("  fresh:    {:?}", fresh.text);
+            eprintln!("  restored: {:?}", restored.text);
+        }
+    }
+    let median = |values: &mut Vec<f64>| -> f64 {
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        values.get(values.len() / 2).copied().unwrap_or(0.0)
+    };
+    eprintln!(
+        "prefix.summary: {}/{} restored token-identical to fresh, {}/{} one-shot identical to fresh; median one-shot prefill {:.1} ms, median restore+rest prefill {:.1} ms (restore alone {:.1} ms)",
+        identical,
+        prompts.len(),
+        oneshot_identical,
+        prompts.len(),
+        median(&mut oneshot_ms),
+        median(&mut restored_ms),
+        median(&mut restore_only_ms),
+    );
+    if identical != prompts.len() {
+        return Err("restored output differs from a from-scratch run".into());
+    }
+    Ok(())
 }

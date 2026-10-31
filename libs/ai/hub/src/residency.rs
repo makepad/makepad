@@ -36,9 +36,6 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_RESERVE_MB: u64 = 2048;
 /// How long to wait for freed VRAM to become visible after one unload.
 pub const EVICT_VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
-/// How long the final admission gate may poll for the target free amount
-/// (driver bookkeeping can trail the allocator by seconds on WDDM).
-pub const ADMIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const UNKNOWN_USABLE_MB: u64 = u64::MAX;
 
@@ -272,10 +269,216 @@ pub fn wait_free_at_least(target_mb: u64, timeout: Duration) -> Option<u64> {
     Some(seen)
 }
 
+/// How long free VRAM may stay flat before an admission wait concludes that
+/// nothing more is coming (the driver publishes a free within a poll or two).
+pub const ADMIT_PLATEAU: Duration = Duration::from_millis(1500);
+
+/// [`wait_free_at_least`] for an eviction check: ends when `target_mb` is
+/// reached, when the timeout passes, or as soon as free memory has stopped
+/// rising for `plateau`.
+pub fn wait_free_settled(target_mb: u64, timeout: Duration, plateau: Duration) -> Option<u64> {
+    wait_free_settled_with(target_mb, timeout, plateau, POLL_INTERVAL, fresh_free_mb, std::thread::sleep)
+}
+
+fn wait_free_settled_with(
+    target_mb: u64,
+    timeout: Duration,
+    plateau: Duration,
+    poll: Duration,
+    mut sample: impl FnMut() -> Option<u64>,
+    mut sleep: impl FnMut(Duration),
+) -> Option<u64> {
+    let mut seen = sample()?;
+    let mut best = seen;
+    let mut waited = Duration::ZERO;
+    let mut flat = Duration::ZERO;
+    while seen < target_mb && waited < timeout && flat < plateau {
+        sleep(poll);
+        waited += poll;
+        seen = sample()?;
+        if seen > best {
+            best = seen;
+            flat = Duration::ZERO;
+        } else {
+            flat += poll;
+        }
+    }
+    Some(seen)
+}
+
+/// The final admission gate. Ends with `Some(seen)` once `target_mb` is free,
+/// or when free memory has stopped rising for `plateau` AND no other job is
+/// running (nothing more can be coming: waiting longer only stalls the job
+/// behind memory other processes hold). While another job runs or unloads its
+/// memory may still be handed back, so the wait has no elapsed-time limit; each
+/// reading is reported through `note` as "waiting for GPU memory". `Err` only
+/// for the client's cancel. `None` = no NVML on this machine.
+pub fn wait_for_admission(
+    target_mb: u64,
+    others_active: impl FnMut() -> bool,
+    cancel: &crate::backend::CancelToken,
+    note: &mut dyn FnMut(&str),
+) -> Result<Option<u64>, AssetAiError> {
+    wait_for_admission_with(
+        target_mb,
+        ADMIT_PLATEAU,
+        POLL_INTERVAL,
+        fresh_free_mb,
+        std::thread::sleep,
+        others_active,
+        || cancel.is_cancelled(),
+        note,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_for_admission_with(
+    target_mb: u64,
+    plateau: Duration,
+    poll: Duration,
+    mut sample: impl FnMut() -> Option<u64>,
+    mut sleep: impl FnMut(Duration),
+    mut others_active: impl FnMut() -> bool,
+    mut cancelled: impl FnMut() -> bool,
+    note: &mut dyn FnMut(&str),
+) -> Result<Option<u64>, AssetAiError> {
+    let Some(mut seen) = sample() else { return Ok(None) };
+    let mut best = seen;
+    let mut flat = Duration::ZERO;
+    let mut reported = None;
+    while seen < target_mb {
+        if cancelled() {
+            return Err(AssetAiError::Cancelled);
+        }
+        if flat >= plateau && !others_active() {
+            break;
+        }
+        if reported != Some(seen) {
+            reported = Some(seen);
+            note(&format!("waiting for GPU memory: need {target_mb} MB, free {seen} MB"));
+        }
+        sleep(poll);
+        let Some(next) = sample() else { return Ok(None) };
+        seen = next;
+        if seen > best {
+            best = seen;
+            flat = Duration::ZERO;
+        } else {
+            flat += poll;
+        }
+    }
+    Ok(Some(seen))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::registry::Domain;
+
+    #[test]
+    fn an_admission_wait_ends_when_free_memory_stops_rising() {
+        // 100 MB free for ever, 5000 wanted: ends after the plateau, not the timeout.
+        let mut sleeps = 0u32;
+        let seen = wait_free_settled_with(
+            5000,
+            Duration::from_secs(20),
+            Duration::from_millis(1500),
+            Duration::from_millis(250),
+            || Some(100),
+            |_| sleeps += 1,
+        );
+        assert_eq!(seen, Some(100));
+        assert_eq!(sleeps, 6, "1.5 s of flat readings, not 20 s");
+    }
+
+    #[test]
+    fn a_rising_free_keeps_the_wait_open_until_the_target() {
+        let mut readings = vec![100u64, 300, 900, 2000, 4000, 5200].into_iter();
+        let seen = wait_free_settled_with(
+            5000,
+            Duration::from_secs(20),
+            Duration::from_millis(1500),
+            Duration::from_millis(250),
+            || readings.next(),
+            |_| {},
+        );
+        assert_eq!(seen, Some(5200));
+    }
+
+    fn admit(
+        target: u64,
+        mut readings: impl FnMut() -> Option<u64>,
+        mut others: impl FnMut() -> bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> (Result<Option<u64>, AssetAiError>, u32, Vec<String>) {
+        let (mut sleeps, mut notes) = (0u32, Vec::new());
+        let result = wait_for_admission_with(
+            target,
+            Duration::from_millis(1500),
+            Duration::from_millis(250),
+            &mut readings,
+            |_| sleeps += 1,
+            &mut others,
+            &mut cancelled,
+            &mut |text: &str| notes.push(text.to_string()),
+        );
+        (result, sleeps, notes)
+    }
+
+    #[test]
+    fn admission_waits_without_a_time_limit_while_another_job_runs() {
+        // Flat 100 MB for 100,000 polls (7 hours of 250 ms) with a job running:
+        // never given up on, never an elapsed-time failure; then the job unloads.
+        let mut polls = 0u64;
+        let (result, sleeps, notes) = admit(
+            5000,
+            || {
+                polls += 1;
+                Some(if polls > 100_000 { 6000 } else { 100 })
+            },
+            || true,
+            || false,
+        );
+        assert_eq!(result.unwrap(), Some(6000));
+        assert_eq!(sleeps, 100_000);
+        assert_eq!(notes, ["waiting for GPU memory: need 5000 MB, free 100 MB"], "reported once per reading");
+    }
+
+    #[test]
+    fn admission_gives_up_only_when_nothing_is_running_and_free_is_flat() {
+        let (result, sleeps, _) = admit(5000, || Some(100), || false, || false);
+        assert_eq!(result.unwrap(), Some(100));
+        assert_eq!(sleeps, 6, "the plateau, as before");
+    }
+
+    #[test]
+    fn admission_wait_ends_on_the_clients_cancel_and_without_nvml() {
+        let mut polls = 0;
+        let (result, _, _) = admit(5000, || Some(100), || true, || {
+            polls += 1;
+            polls > 3
+        });
+        assert!(matches!(result, Err(AssetAiError::Cancelled)));
+        let (result, _, _) = admit(5000, || None, || true, || false);
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn the_timeout_still_bounds_a_slow_climb() {
+        let mut n = 0u64;
+        let seen = wait_free_settled_with(
+            u64::MAX,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            Duration::from_millis(250),
+            || {
+                n += 1;
+                Some(n)
+            },
+            |_| {},
+        );
+        assert_eq!(seen, Some(5));
+    }
     use std::cell::Cell;
 
     fn spec(vram_gb: Option<f64>) -> ModelSpec {

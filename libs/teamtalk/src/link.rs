@@ -575,6 +575,14 @@ impl VoiceLink {
     }
 }
 
+impl VoiceLink {
+    /// Ends the receive thread (it sees the flag within its 100 ms read timeout) without dropping
+    /// the link: an app held in a static stops it at shutdown so its threads end with it.
+    pub fn stop(&self) {
+        self.shared.running.store(false, Ordering::Relaxed);
+    }
+}
+
 impl Drop for VoiceLink {
     fn drop(&mut self) {
         self.shared.running.store(false, Ordering::Relaxed);

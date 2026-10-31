@@ -368,7 +368,7 @@ impl RigWorker {
             .is_ok();
         drop(tx);
         if sent {
-            match replies.recv_timeout(Duration::from_secs(120)) {
+            match crate::progress_watch::release_reply(&replies, "SkinTokens") {
                 Ok(WorkerEvent::Done(Ok(_))) => {}
                 Ok(WorkerEvent::Done(Err(error))) => {
                     return Err(AssetAiError::Backend(format!(
@@ -380,10 +380,10 @@ impl RigWorker {
                         "SkinTokens unload received an invalid acknowledgement".to_string(),
                     ))
                 }
-                Err(error) => {
-                    return Err(AssetAiError::Backend(format!(
-                        "SkinTokens unload acknowledgement timed out: {error}"
-                    )))
+                Err(_) => {
+                    return Err(AssetAiError::Backend(
+                        "SkinTokens worker died before acknowledging unload".to_string(),
+                    ))
                 }
             }
         }

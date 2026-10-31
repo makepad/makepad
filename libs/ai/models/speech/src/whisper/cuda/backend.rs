@@ -16,13 +16,14 @@
 //! * **Worth it** — ops whose arithmetic dwarfs the bytes moved, *and* whose
 //!   big operand (the weight, the cross-attention K/V) can stay device
 //!   resident across calls: the matmul family, the encoder's self-attention,
-//!   and the decoder's cross-attention.
+//!   and the decoder's cross-attention. The Q8_0 encoder stack keeps all
+//!   activations resident too, with one input upload and one output download.
 //! * **A pessimization** — elementwise ops (`add`/`mul`/`gelu`/`layer_norm`).
 //!   One float in, one float out, a handful of FLOPs: the PCIe round trip
 //!   costs more than the CPU spends computing them. They are implemented here
 //!   (so the on-box harness can exercise them) but are not selected.
-//! * **Deliberately `None`** — every fused whole-block op
-//!   (`try_encoder_stack_f32`, `try_encoder_layer_f32`,
+//! * **Deliberately `None`** — the remaining fused whole-block ops
+//!   (`try_encoder_layer_f32`,
 //!   `try_encoder_attn_block_f32`, `try_encoder_ffn_block_f32`,
 //!   `try_decoder_self_qkv_step_f32`, `try_decoder_cross_ffn_step_f32`,
 //!   `try_decoder_self_cross_ffn_step_f32`) and
@@ -34,16 +35,12 @@
 //!
 //! ## Numerics
 //!
-//! Weights are dequantized **to f32 once** on first use and kept device
-//! resident; every GEMM is `cublasSgemm` f32 in / f32 accumulate / f32 out,
-//! and attention uses the explicit-f32 `gpu_attention_packed_cross_f32`
-//! composite. That is the closest reachable match to the CPU ground truth
-//! (which also dequantizes to f32 and accumulates in f32), which is what makes
-//! the "token-identical at temperature 0" parity gate meaningful. No f16/bf16
-//! tensor-core path is taken.
-//!
-//! Resident f32 weights cost 4 bytes/parameter: ~300 MB for `base`, ~1 GB for
-//! `small`, ~3.2 GB for `large-v3-turbo`, ~6.2 GB for `large-v3`.
+//! Q8_0 weights stay raw on the device and dequantize to f32 inside the GEMM.
+//! The whole encoder stack uses f32 activations, reductions and attention;
+//! its layer norm and tanh GELU follow the CPU operation order, apart from
+//! f32 reduction rounding. Other projections retain their existing F16 or
+//! dequantized-f32 paths. `MAKEPAD_WHISPER_F32` disables the Q8_0 stack and
+//! keeps the existing f32-weight fallback available for parity comparisons.
 
 use crate::whisper::model::{DecoderLayer, EncoderLayer};
 
@@ -79,6 +76,11 @@ fn ok<T>(what: &str, r: Result<T, String>) -> Option<T> {
 
 fn ready() -> bool {
     is_available() && !degraded()
+}
+
+fn f32_weights_forced() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("MAKEPAD_WHISPER_F32").is_some())
 }
 
 /// Minimum query count for the packed (non-resident) attention path. The
@@ -408,6 +410,14 @@ pub(crate) fn try_flash_attn_f32_packed(
     )
 }
 
+/// Free the device memory this thread holds for Whisper (its f32 weights are
+/// ~4 GB): called when the model is unloaded so another model can take the card.
+pub(crate) fn release_device_state() {
+    if is_available() {
+        imp::release_all();
+    }
+}
+
 pub(crate) fn clear_decoder_kv_cache() {
     if is_available() {
         imp::clear_cross_kv_cache();
@@ -523,13 +533,9 @@ pub(crate) fn try_im2col_1d_f32(
     im2col_1d(input, ic, iw, kw, stride, pad)
 }
 
-// --- fused whole-block ops: deliberately unimplemented on CUDA -------------
-//
-// Each of these would keep a whole encoder/decoder block resident on the
-// device. That is the right next step (it is where the remaining decoder win
-// is), but an unverified fused block is worse than no fused block: the
-// unfused path below is exercised by the same parity harness and is known to
-// match the CPU.
+// --- whole-block ops ------------------------------------------------------
+// The Q8_0 encoder stack is resident end-to-end. Individual block hooks and
+// the decoder's fused hooks continue to fall back to the existing primitives.
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_encoder_attn_block_f32(
@@ -603,15 +609,35 @@ pub(crate) fn try_encoder_layer_f32(
 }
 
 pub(crate) fn try_encoder_stack_f32(
-    _x: &[f32],
-    _seq_len: usize,
-    _n_state: usize,
-    _n_head: usize,
-    _layers: &[EncoderLayer],
-    _final_ln_w: &[f32],
-    _final_ln_b: &[f32],
+    x: &[f32],
+    seq_len: usize,
+    n_state: usize,
+    n_head: usize,
+    layers: &[EncoderLayer],
+    final_ln_w: &[f32],
+    final_ln_b: &[f32],
 ) -> Option<Vec<f32>> {
-    None
+    if f32_weights_forced()
+        || layers.iter().any(|layer| {
+            [
+                &layer.attn_q_w,
+                &layer.attn_k_w,
+                &layer.attn_v_w,
+                &layer.attn_ln_1_w,
+                &layer.mlp_0_w,
+                &layer.mlp_1_w,
+            ]
+            .iter()
+            .any(|weight| weight.ggml_type != 8)
+        })
+        || !ready()
+    {
+        return None;
+    }
+    ok(
+        "encoder stack",
+        imp::encoder_stack(x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -678,10 +704,14 @@ pub(crate) fn try_decoder_self_cross_ffn_step_f32(
     makepad_ai_cuda_kernels
 ))]
 mod imp {
-    use super::{dequant_to_f32, fingerprint, fingerprint_f32, WeightSrc};
+    use super::{
+        dequant_to_f32, f32_weights_forced, fingerprint, fingerprint_f32, fnv_mix, EncoderLayer,
+        WeightSrc, FNV_OFFSET,
+    };
     use makepad_ai_cuda::launch::{
-        gpu_attention_packed_cross_f32, gpu_device_available, gpu_download,
-        gpu_linear_f32_resident, gpu_upload, GpuTensor,
+        gpu_attention_packed_cross_f32, gpu_device_available, gpu_download, gpu_linear_f32_resident,
+        gpu_upload, try_matmul_nt_ggml_bytes_cached, try_matmul_nt_q8_0_cached,
+        whisper_encoder_stack_q8, GpuTensor, WhisperEncLayerQ8,
     };
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -800,7 +830,7 @@ mod imp {
         })
     }
 
-    /// `out[m, n] = a[m, k] @ W[n, k]^T (+ bias[n])`, f32 throughout.
+    /// `out[m, n] = a[m, k] @ W[n, k]^T (+ bias[n])`.
     pub(super) fn matmul_nt(
         a: &[f32],
         weight: WeightSrc<'_>,
@@ -809,6 +839,29 @@ mod imp {
         n: usize,
         bias: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
+        // Q8_0 weights stay 8-bit on the device (dequantized in registers by the
+        // q8_dense kernel, f32 accumulate); F16 weights stay F16 (cuBLAS GemmEx,
+        // f32 accumulate). Either is a quarter / half of the f32 copy.
+        if let WeightSrc::Ggml { bytes, ggml_type } = &weight {
+            if (*ggml_type == 1 || *ggml_type == 8) && !f32_weights_forced() {
+                let key = format!("{:016x}-{n}x{k}", fingerprint(bytes));
+                let ty = *ggml_type;
+                let mut out = if ty == 8 {
+                    // Q8_0 stays 8-bit on the device; the kernel dequantizes in registers.
+                    try_matmul_nt_q8_0_cached(a, m, k, n, "whisper", &key, || Ok(bytes.to_vec()))?
+                } else {
+                    try_matmul_nt_ggml_bytes_cached(a, 1, m, k, n, "whisper", &key, || Ok(bytes.to_vec()))?
+                };
+                if let Some(b) = bias {
+                    for row in out.chunks_mut(n) {
+                        for (o, bv) in row.iter_mut().zip(b) {
+                            *o += bv;
+                        }
+                    }
+                }
+                return Ok(out);
+            }
+        }
         let x = gpu_upload(a, m, k)?;
         let bias_dev = match bias {
             Some(b) => Some(gpu_upload(b, 1, n)?),
@@ -818,6 +871,62 @@ mod imp {
             let out = gpu_linear_f32_resident(&x, w, bias_dev.as_ref())?;
             gpu_download(&out)
         })
+    }
+
+    pub(super) fn encoder_stack(
+        x: &[f32],
+        seq_len: usize,
+        n_state: usize,
+        n_head: usize,
+        layers: &[EncoderLayer],
+        final_ln_w: &[f32],
+        final_ln_b: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        // Include every matrix's identity: layer indices alone alias when a
+        // different model is loaded on the same inference thread. The dense
+        // cache is released with the other "whisper" entries by release_all.
+        let mut identity = FNV_OFFSET;
+        fnv_mix(&mut identity, n_state as u64);
+        fnv_mix(&mut identity, n_head as u64);
+        fnv_mix(&mut identity, layers.len() as u64);
+        let mut resident_layers = Vec::with_capacity(layers.len());
+        for layer in layers {
+            for weight in [
+                &layer.attn_q_w,
+                &layer.attn_k_w,
+                &layer.attn_v_w,
+                &layer.attn_ln_1_w,
+                &layer.mlp_0_w,
+                &layer.mlp_1_w,
+            ] {
+                if weight.ggml_type != 8 {
+                    return Err("CUDA Whisper encoder requires Q8_0 weights".to_string());
+                }
+                fnv_mix(&mut identity, weight.data.as_ptr() as u64);
+                fnv_mix(&mut identity, fingerprint(&weight.data));
+            }
+            resident_layers.push(WhisperEncLayerQ8 {
+                attn_ln_w: &layer.attn_ln_0_w.data,
+                attn_ln_b: &layer.attn_ln_0_b.data,
+                q_w: &layer.attn_q_w.data,
+                q_b: &layer.attn_q_b.data,
+                k_w: &layer.attn_k_w.data,
+                v_w: &layer.attn_v_w.data,
+                v_b: &layer.attn_v_b.data,
+                out_w: &layer.attn_ln_1_w.data,
+                out_b: &layer.attn_ln_1_b.data,
+                mlp_ln_w: &layer.mlp_ln_w.data,
+                mlp_ln_b: &layer.mlp_ln_b.data,
+                fc1_w: &layer.mlp_0_w.data,
+                fc1_b: &layer.mlp_0_b.data,
+                fc2_w: &layer.mlp_1_w.data,
+                fc2_b: &layer.mlp_1_b.data,
+            });
+        }
+        let namespace = format!("whisper::encoder-{identity:016x}");
+        whisper_encoder_stack_q8(
+            x, seq_len, n_state, n_head, &resident_layers, final_ln_w, final_ln_b, &namespace,
+        )
     }
 
     /// Non-causal, maskless multi-head attention on token-major packed q/k/v
@@ -885,6 +994,14 @@ mod imp {
         CROSS_KV.with(|cache| cache.borrow_mut().clear());
     }
 
+    /// Drop every device-resident weight (and the cross K/V) of the calling thread.
+    pub(super) fn release_all() {
+        CROSS_KV.with(|cache| cache.borrow_mut().clear());
+        WEIGHTS.with(|cache| cache.borrow_mut().clear());
+        let _ = makepad_ai_cuda::launch::gpu_weight_cache_evict_prefix_if_loaded("whisper");
+        let _ = makepad_ai_cuda::launch::gpu_release_cached();
+    }
+
 }
 
 #[cfg(not(all(
@@ -903,6 +1020,18 @@ mod imp {
         _k: usize,
         _n: usize,
         _bias: Option<&[f32]>,
+    ) -> Result<Vec<f32>, String> {
+        Err("CUDA kernels are not compiled into this build".to_string())
+    }
+
+    pub(super) fn encoder_stack(
+        _x: &[f32],
+        _seq_len: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _layers: &[super::EncoderLayer],
+        _final_ln_w: &[f32],
+        _final_ln_b: &[f32],
     ) -> Result<Vec<f32>, String> {
         Err("CUDA kernels are not compiled into this build".to_string())
     }
@@ -937,6 +1066,8 @@ mod imp {
     }
 
     pub(super) fn clear_cross_kv_cache() {}
+
+    pub(super) fn release_all() {}
 
 }
 
@@ -1026,7 +1157,7 @@ mod tests {
         let q8 = quantize_f32_to_q8_0(&values);
 
         let raw = RawTensor {
-            data: q8.clone(),
+            data: q8.clone().into(),
             shape: vec![32, 8],
             ggml_type: GGML_TYPE_Q8_0,
         };

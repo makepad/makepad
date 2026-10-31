@@ -48,17 +48,10 @@ use makepad_ai_vision::da3::{
 #[cfg(feature = "depth-native")]
 use makepad_ai_common::DiffusionError;
 use std::path::PathBuf;
-#[cfg(feature = "python-backends")]
-use std::time::Duration;
 
 pub const DEPTH_CMD_ENV: &str = "MAKEPAD_DEPTH_CMD";
 #[cfg(feature = "python-backends")]
 const DEPTH_CMD_DEFAULT: &str = r"C:\ai\venv\Scripts\python.exe C:\ai\depth_da3.py {in} {out}";
-
-/// Per-job budget: warm inference is seconds; cold covers the model load
-/// from the box HF cache on a slow disk.
-#[cfg(feature = "python-backends")]
-const DEPTH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[cfg(feature = "python-backends")]
 fn depth_cmd() -> String {
@@ -326,7 +319,6 @@ impl ContentBackend for DepthBackend {
                     &tmp_dir,
                     "depth",
                     &params.input_bytes,
-                    DEPTH_TIMEOUT,
                     cancel,
                     &mut sub_progress,
                 )

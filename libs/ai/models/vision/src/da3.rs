@@ -161,15 +161,19 @@ impl Da3Prediction {
     }
 }
 
-struct DinoLayer {
-    norm1: GpuTensor,
-    norm2: GpuTensor,
-    linears: DinoLinears,
+pub(crate) struct DinoLayer {
+    pub(crate) norm1: GpuTensor,
+    pub(crate) norm2: GpuTensor,
+    pub(crate) linears: DinoLinears,
+    /// Transformer width and MLP width (ViT-S 384/1536 ... ViT-L 1024/4096).
+    pub(crate) hidden: usize,
+    pub(crate) mlp: usize,
+    pub(crate) namespace: &'static str,
 }
 
 /// Per-mode transformer linear storage.  Exactly one representation exists
 /// per loaded model, so the compute mode cannot drift at run time.
-enum DinoLinears {
+pub(crate) enum DinoLinears {
     /// Strict-f32: resident f32 weights, plain `cublas_sgemm`.
     F32 {
         qkv_w: GpuTensor,
@@ -187,23 +191,24 @@ enum DinoLinears {
     Bf16(DinoLayerBf16),
 }
 
-struct DinoLayerBf16 {
-    qkv: Vec<u8>,
-    qkv_key: String,
-    qkv_bias: Vec<f32>,
-    proj: Vec<u8>,
-    proj_key: String,
-    proj_bias: Vec<f32>,
-    fc1: Vec<u8>,
-    fc1_key: String,
-    fc1_bias: Vec<f32>,
-    fc2: Vec<u8>,
-    fc2_key: String,
-    fc2_bias: Vec<f32>,
+pub(crate) struct DinoLayerBf16 {
+    pub(crate) qkv: Vec<u8>,
+    pub(crate) qkv_key: String,
+    pub(crate) qkv_bias: Vec<f32>,
+    pub(crate) proj: Vec<u8>,
+    pub(crate) proj_key: String,
+    pub(crate) proj_bias: Vec<f32>,
+    pub(crate) fc1: Vec<u8>,
+    pub(crate) fc1_key: String,
+    pub(crate) fc1_bias: Vec<f32>,
+    pub(crate) fc2: Vec<u8>,
+    pub(crate) fc2_key: String,
+    pub(crate) fc2_bias: Vec<f32>,
 }
 
 impl DinoLayer {
     fn bf16_linear(
+        &self,
         x: &GpuTensor,
         bytes: &[u8],
         key: &str,
@@ -212,7 +217,7 @@ impl DinoLayer {
     ) -> Result<GpuTensor> {
         gpu_linear_nt_cached_bf16_f32acc(
             x,
-            CACHE_NAMESPACE,
+            self.namespace,
             &[GpuLinearPart {
                 bt_ggml_type: GGML_TYPE_BF16,
                 n,
@@ -224,53 +229,53 @@ impl DinoLayer {
         .map_err(DiffusionError::model)
     }
 
-    fn qkv(&self, x: &GpuTensor) -> Result<GpuTensor> {
+    pub(crate) fn qkv(&self, x: &GpuTensor) -> Result<GpuTensor> {
         match &self.linears {
             DinoLinears::F32 { qkv_w, qkv_b, .. } => {
                 gpu_linear_f32_resident(x, qkv_w, Some(qkv_b)).map_err(DiffusionError::model)
             }
             DinoLinears::Bf16(bf16) => {
-                Self::bf16_linear(x, &bf16.qkv, &bf16.qkv_key, 3 * DA3_HIDDEN, &bf16.qkv_bias)
+                self.bf16_linear(x, &bf16.qkv, &bf16.qkv_key, 3 * self.hidden, &bf16.qkv_bias)
             }
         }
     }
 
-    fn proj(&self, x: &GpuTensor) -> Result<GpuTensor> {
+    pub(crate) fn proj(&self, x: &GpuTensor) -> Result<GpuTensor> {
         match &self.linears {
             DinoLinears::F32 { proj_w, proj_b, .. } => {
                 gpu_linear_f32_resident(x, proj_w, Some(proj_b)).map_err(DiffusionError::model)
             }
             DinoLinears::Bf16(bf16) => {
-                Self::bf16_linear(x, &bf16.proj, &bf16.proj_key, DA3_HIDDEN, &bf16.proj_bias)
+                self.bf16_linear(x, &bf16.proj, &bf16.proj_key, self.hidden, &bf16.proj_bias)
             }
         }
     }
 
-    fn fc1(&self, x: &GpuTensor) -> Result<GpuTensor> {
+    pub(crate) fn fc1(&self, x: &GpuTensor) -> Result<GpuTensor> {
         match &self.linears {
             DinoLinears::F32 { fc1_w, fc1_b, .. } => {
                 gpu_linear_f32_resident(x, fc1_w, Some(fc1_b)).map_err(DiffusionError::model)
             }
             DinoLinears::Bf16(bf16) => {
-                Self::bf16_linear(x, &bf16.fc1, &bf16.fc1_key, DA3_MLP, &bf16.fc1_bias)
+                self.bf16_linear(x, &bf16.fc1, &bf16.fc1_key, self.mlp, &bf16.fc1_bias)
             }
         }
     }
 
-    fn fc2(&self, x: &GpuTensor) -> Result<GpuTensor> {
+    pub(crate) fn fc2(&self, x: &GpuTensor) -> Result<GpuTensor> {
         match &self.linears {
             DinoLinears::F32 { fc2_w, fc2_b, .. } => {
                 gpu_linear_f32_resident(x, fc2_w, Some(fc2_b)).map_err(DiffusionError::model)
             }
             DinoLinears::Bf16(bf16) => {
-                Self::bf16_linear(x, &bf16.fc2, &bf16.fc2_key, DA3_HIDDEN, &bf16.fc2_bias)
+                self.bf16_linear(x, &bf16.fc2, &bf16.fc2_key, self.hidden, &bf16.fc2_bias)
             }
         }
     }
 }
 
 /// Round-to-nearest-even f32 -> bf16 bytes, matching torch's conversion.
-fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {
+pub(crate) fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(values.len() * 2);
     for &value in values {
         let bits = value.to_bits();
@@ -285,7 +290,7 @@ fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {
 /// bit-exact for weights in [0.5, 2] (Sterbenz) and within 1 ulp outside.
 /// Resident norms keep the whole forward free of per-call host uploads, which
 /// CUDA graph capture requires.
-fn norm_mods(weights: &Da3WeightFile, prefix: &str, dim: usize) -> Result<GpuTensor> {
+pub(crate) fn norm_mods(weights: &dyn TensorSource, prefix: &str, dim: usize) -> Result<GpuTensor> {
     let weight = tensor(weights, &format!("{prefix}.weight"), dim)?;
     let bias = tensor(weights, &format!("{prefix}.bias"), dim)?;
     let mut packed = Vec::with_capacity(2 * dim);
@@ -294,7 +299,30 @@ fn norm_mods(weights: &Da3WeightFile, prefix: &str, dim: usize) -> Result<GpuTen
     upload(&packed, 1, 2 * dim)
 }
 
-struct Conv2d {
+/// Where a model's converted weights live in the backend weight caches:
+/// the namespace plus a per-checkpoint key prefix, so two checkpoints with
+/// the same tensor names never share a cache entry.
+#[derive(Clone)]
+pub(crate) struct CacheScope {
+    pub(crate) namespace: &'static str,
+    pub(crate) key_prefix: String,
+}
+
+impl CacheScope {
+    fn da3() -> Self {
+        Self {
+            namespace: CACHE_NAMESPACE,
+            key_prefix: String::new(),
+        }
+    }
+
+    pub(crate) fn key(&self, name: &str) -> String {
+        format!("{}{name}", self.key_prefix)
+    }
+}
+
+pub(crate) struct Conv2d {
+    namespace: &'static str,
     key: String,
     weights: Vec<f32>,
     bias: Vec<f32>,
@@ -307,7 +335,21 @@ struct Conv2d {
 
 impl Conv2d {
     fn load(
-        weights: &Da3WeightFile,
+        weights: &dyn TensorSource,
+        name: &str,
+        in_channels: usize,
+        out_channels: usize,
+        kw: usize,
+        kh: usize,
+        bias: bool,
+    ) -> Result<Self> {
+        Self::load_in(&CacheScope::da3(), weights, name, in_channels, out_channels, kw, kh, bias)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn load_in(
+        scope: &CacheScope,
+        weights: &dyn TensorSource,
         name: &str,
         in_channels: usize,
         out_channels: usize,
@@ -322,7 +364,8 @@ impl Conv2d {
             vec![0.0; out_channels]
         };
         Ok(Self {
-            key: name.to_string(),
+            namespace: scope.namespace,
+            key: scope.key(name),
             weights: values,
             bias: bias_values,
             out_channels,
@@ -333,12 +376,12 @@ impl Conv2d {
         })
     }
 
-    fn forward(&self, input: &Planar) -> Result<Planar> {
+    pub(crate) fn forward(&self, input: &Planar) -> Result<Planar> {
         let tensor = gpu_conv2d_planar_cached(
             &input.tensor,
             input.width,
             input.height,
-            CACHE_NAMESPACE,
+            self.namespace,
             &self.key,
             &self.weights,
             &self.bias,
@@ -357,7 +400,8 @@ impl Conv2d {
     }
 }
 
-struct ConvTransposeNoOverlap {
+pub(crate) struct ConvTransposeNoOverlap {
+    namespace: &'static str,
     weight: GpuTensor, // [out_channels * scale^2, in_channels]
     bias: Vec<f32>,
     bias_key: String,
@@ -367,7 +411,17 @@ struct ConvTransposeNoOverlap {
 
 impl ConvTransposeNoOverlap {
     fn load(
-        weights: &Da3WeightFile,
+        weights: &dyn TensorSource,
+        name: &str,
+        channels: usize,
+        scale: usize,
+    ) -> Result<Self> {
+        Self::load_in(&CacheScope::da3(), weights, name, channels, scale)
+    }
+
+    pub(crate) fn load_in(
+        scope: &CacheScope,
+        weights: &dyn TensorSource,
         name: &str,
         channels: usize,
         scale: usize,
@@ -392,15 +446,16 @@ impl ConvTransposeNoOverlap {
             }
         }
         Ok(Self {
+            namespace: scope.namespace,
             weight: upload(&reordered, channels * scale * scale, channels)?,
             bias: tensor(weights, &format!("{name}.bias"), channels)?,
-            bias_key: name.to_string(),
+            bias_key: scope.key(name),
             out_channels: channels,
             scale,
         })
     }
 
-    fn forward(&self, input: Planar) -> Result<Planar> {
+    pub(crate) fn forward(&self, input: Planar) -> Result<Planar> {
         let tokens = gpu_birefnet_tokens_to_planar(&input.tensor)
             .map_err(DiffusionError::model)?;
         let expanded = gpu_linear_f32_resident(&tokens, &self.weight, None)
@@ -413,7 +468,7 @@ impl ConvTransposeNoOverlap {
             input.height,
             self.out_channels,
             self.scale,
-            CACHE_NAMESPACE,
+            self.namespace,
             &self.bias_key,
             &self.bias,
         )
@@ -432,10 +487,18 @@ struct ResidualConvUnit {
 }
 
 impl ResidualConvUnit {
-    fn load(weights: &Da3WeightFile, prefix: &str) -> Result<Self> {
+    fn load_in(
+        scope: &CacheScope,
+        weights: &dyn TensorSource,
+        prefix: &str,
+        features: usize,
+    ) -> Result<Self> {
+        let conv = |name: &str| {
+            Conv2d::load_in(scope, weights, &format!("{prefix}.{name}"), features, features, 3, 3, true)
+        };
         Ok(Self {
-            conv1: Conv2d::load(weights, &format!("{prefix}.conv1"), 256, 256, 3, 3, true)?,
-            conv2: Conv2d::load(weights, &format!("{prefix}.conv2"), 256, 256, 3, 3, true)?,
+            conv1: conv("conv1")?,
+            conv2: conv("conv2")?,
         })
     }
 
@@ -448,27 +511,57 @@ impl ResidualConvUnit {
     }
 }
 
-struct FusionBlock {
+pub(crate) struct FusionBlock {
     residual: Option<ResidualConvUnit>,
     main: ResidualConvUnit,
     out: Conv2d,
 }
 
 impl FusionBlock {
-    fn load(weights: &Da3WeightFile, index: usize, has_residual: bool) -> Result<Self> {
+    fn load(weights: &dyn TensorSource, index: usize, has_residual: bool) -> Result<Self> {
         let prefix = format!("{PREFIX}head.scratch.refinenet{index}");
+        Self::load_in(&CacheScope::da3(), weights, &prefix, DA3_DPT_FEATURES, has_residual)
+    }
+
+    /// One DPT `FeatureFusionBlock` at `prefix` (`...scratch.refinenetN`).
+    pub(crate) fn load_in(
+        scope: &CacheScope,
+        weights: &dyn TensorSource,
+        prefix: &str,
+        features: usize,
+        has_residual: bool,
+    ) -> Result<Self> {
         Ok(Self {
             residual: if has_residual {
-                Some(ResidualConvUnit::load(weights, &format!("{prefix}.resConfUnit1"))?)
+                Some(ResidualConvUnit::load_in(
+                    scope,
+                    weights,
+                    &format!("{prefix}.resConfUnit1"),
+                    features,
+                )?)
             } else {
                 None
             },
-            main: ResidualConvUnit::load(weights, &format!("{prefix}.resConfUnit2"))?,
-            out: Conv2d::load(weights, &format!("{prefix}.out_conv"), 256, 256, 1, 1, true)?,
+            main: ResidualConvUnit::load_in(
+                scope,
+                weights,
+                &format!("{prefix}.resConfUnit2"),
+                features,
+            )?,
+            out: Conv2d::load_in(
+                scope,
+                weights,
+                &format!("{prefix}.out_conv"),
+                features,
+                features,
+                1,
+                1,
+                true,
+            )?,
         })
     }
 
-    fn forward(&self, top: Planar, lateral: Option<&Planar>, out_size: (usize, usize)) -> Result<Planar> {
+    pub(crate) fn forward(&self, top: Planar, lateral: Option<&Planar>, out_size: (usize, usize)) -> Result<Planar> {
         let merged = match (&self.residual, lateral) {
             (Some(unit), Some(lateral)) => {
                 let residual = unit.forward(lateral)?;
@@ -483,10 +576,10 @@ impl FusionBlock {
     }
 }
 
-struct Planar {
-    tensor: GpuTensor,
-    width: usize,
-    height: usize,
+pub(crate) struct Planar {
+    pub(crate) tensor: GpuTensor,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
 }
 
 pub struct Da3MetricLarge {
@@ -513,12 +606,28 @@ pub struct Da3MetricLarge {
     /// Resident one-hot selection matrix for the stride-two downsample of
     /// `resize_layers.3`.  A GEMM with one-hot rows is exact for finite
     /// values and, unlike an index gather, uploads nothing per call.
-    stride_cache: Mutex<Option<((usize, usize), GpuTensor)>>,
+    stride_cache: StrideCache,
     precision: Da3Precision,
     /// Process-unique instance id keying the captured-graph cache. An
     /// address key replayed a stale graph (freed device buffers) when a
     /// model was dropped and a reload landed at the same address.
     generation: u64,
+}
+
+/// Named f32 tensors, whatever the checkpoint format.
+pub(crate) trait TensorSource {
+    fn tensor_f32(&self, name: &str) -> Result<Vec<f32>>;
+    fn tensor_names(&self) -> Vec<String>;
+}
+
+impl TensorSource for Da3WeightFile {
+    fn tensor_f32(&self, name: &str) -> Result<Vec<f32>> {
+        Da3WeightFile::tensor_f32(self, name)
+    }
+
+    fn tensor_names(&self) -> Vec<String> {
+        self.tensors.keys().cloned().collect()
+    }
 }
 
 pub struct Da3WeightFile {
@@ -528,7 +637,7 @@ pub struct Da3WeightFile {
 }
 
 impl Da3WeightFile {
-    fn load(path: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut file = std::fs::File::open(&path)
             .map_err(|err| DiffusionError::model(format!("{}: {err}", path.display())))?;
@@ -603,7 +712,7 @@ impl Da3WeightFile {
     }
 }
 
-fn tensor(weights: &Da3WeightFile, name: &str, len: usize) -> Result<Vec<f32>> {
+pub(crate) fn tensor(weights: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>> {
     let values = weights.tensor_f32(name)?;
     if values.len() != len {
         return Err(DiffusionError::model(format!(
@@ -614,7 +723,7 @@ fn tensor(weights: &Da3WeightFile, name: &str, len: usize) -> Result<Vec<f32>> {
     Ok(values)
 }
 
-fn upload(values: &[f32], rows: usize, cols: usize) -> Result<GpuTensor> {
+pub(crate) fn upload(values: &[f32], rows: usize, cols: usize) -> Result<GpuTensor> {
     gpu_upload(values, rows, cols).map_err(DiffusionError::model)
 }
 
@@ -734,6 +843,9 @@ impl Da3MetricLarge {
                 norm1: norm_mods(weights, &format!("{prefix}.norm1"), DA3_HIDDEN)?,
                 norm2: norm_mods(weights, &format!("{prefix}.norm2"), DA3_HIDDEN)?,
                 linears,
+                hidden: DA3_HIDDEN,
+                mlp: DA3_MLP,
+                namespace: CACHE_NAMESPACE,
             });
         }
 
@@ -1081,7 +1193,7 @@ impl Da3MetricLarge {
             .lock()
             .map_err(|_| DiffusionError::workflow("DA3 position cache poisoned"))?;
         if pos_cache.as_ref().map(|(shape, _)| *shape) != Some((patch_w, patch_h)) {
-            let pos = interpolate_position_embedding(&self.base_pos, patch_w, patch_h)?;
+            let pos = interpolate_position_embedding(&self.base_pos, patch_w, patch_h, DA3_HIDDEN)?;
             *pos_cache = Some(((patch_w, patch_h), upload(&pos, 1 + patch_count, DA3_HIDDEN)?));
         }
         let pos = &pos_cache.as_ref().expect("DA3 position cache filled").1;
@@ -1214,7 +1326,7 @@ impl Da3MetricLarge {
     }
 }
 
-fn relu(input: &Planar) -> Result<Planar> {
+pub(crate) fn relu(input: &Planar) -> Result<Planar> {
     Ok(Planar {
         tensor: gpu_birefnet_relu(&input.tensor).map_err(DiffusionError::model)?,
         width: input.width,
@@ -1222,7 +1334,7 @@ fn relu(input: &Planar) -> Result<Planar> {
     })
 }
 
-fn add_planar(left: &Planar, right: &Planar) -> Result<Planar> {
+pub(crate) fn add_planar(left: &Planar, right: &Planar) -> Result<Planar> {
     if left.width != right.width || left.height != right.height {
         return Err(DiffusionError::workflow("DA3 planar add shape mismatch"));
     }
@@ -1233,7 +1345,7 @@ fn add_planar(left: &Planar, right: &Planar) -> Result<Planar> {
     })
 }
 
-fn resize(input: &Planar, width: usize, height: usize, align_corners: bool) -> Result<Planar> {
+pub(crate) fn resize(input: &Planar, width: usize, height: usize, align_corners: bool) -> Result<Planar> {
     Ok(Planar {
         tensor: gpu_birefnet_resize_bilinear(
             &input.tensor,
@@ -1251,35 +1363,42 @@ fn resize(input: &Planar, width: usize, height: usize, align_corners: bool) -> R
 
 impl Da3MetricLarge {
     fn stride_two(&self, input: Planar) -> Result<Planar> {
-        let width = input.width.div_ceil(2);
-        let height = input.height.div_ceil(2);
-        let mut cache = self
-            .stride_cache
-            .lock()
-            .map_err(|_| DiffusionError::workflow("DA3 stride cache poisoned"))?;
-        if cache.as_ref().map(|(shape, _)| *shape) != Some((input.width, input.height)) {
-            let in_count = input.width * input.height;
-            let out_count = width * height;
-            let mut select = vec![0.0f32; out_count * in_count];
-            for y in 0..height {
-                for x in 0..width {
-                    let source = (y * 2) * input.width + x * 2;
-                    select[(y * width + x) * in_count + source] = 1.0;
-                }
-            }
-            *cache = Some((
-                (input.width, input.height),
-                upload(&select, out_count, in_count)?,
-            ));
-        }
-        let select = &cache.as_ref().expect("DA3 stride cache filled").1;
-        Ok(Planar {
-            tensor: gpu_linear_f32_resident(&input.tensor, select, None)
-                .map_err(DiffusionError::model)?,
-            width,
-            height,
-        })
+        stride_two(&self.stride_cache, input)
     }
+}
+
+/// Resident GPU cache of the one-hot stride-two selection matrix.
+pub(crate) type StrideCache = Mutex<Option<((usize, usize), GpuTensor)>>;
+
+/// Every second row and column (`resize_layers.3`'s stride-2 conv output).
+pub(crate) fn stride_two(stride_cache: &StrideCache, input: Planar) -> Result<Planar> {
+    let width = input.width.div_ceil(2);
+    let height = input.height.div_ceil(2);
+    let mut cache = stride_cache
+        .lock()
+        .map_err(|_| DiffusionError::workflow("DA3 stride cache poisoned"))?;
+    if cache.as_ref().map(|(shape, _)| *shape) != Some((input.width, input.height)) {
+        let in_count = input.width * input.height;
+        let out_count = width * height;
+        let mut select = vec![0.0f32; out_count * in_count];
+        for y in 0..height {
+            for x in 0..width {
+                let source = (y * 2) * input.width + x * 2;
+                select[(y * width + x) * in_count + source] = 1.0;
+            }
+        }
+        *cache = Some((
+            (input.width, input.height),
+            upload(&select, out_count, in_count)?,
+        ));
+    }
+    let select = &cache.as_ref().expect("DA3 stride cache filled").1;
+    Ok(Planar {
+        tensor: gpu_linear_f32_resident(&input.tensor, select, None)
+            .map_err(DiffusionError::model)?,
+        width,
+        height,
+    })
 }
 
 /// PyTorch interpolate(..., mode="bicubic", align_corners=false) coefficient.
@@ -1295,8 +1414,13 @@ fn cubic_weight(x: f64) -> f64 {
     }
 }
 
-fn interpolate_position_embedding(base: &[f32], width: usize, height: usize) -> Result<Vec<f32>> {
-    let expected = (1 + DA3_BASE_PATCH_SIDE * DA3_BASE_PATCH_SIDE) * DA3_HIDDEN;
+pub(crate) fn interpolate_position_embedding(
+    base: &[f32],
+    width: usize,
+    height: usize,
+    hidden: usize,
+) -> Result<Vec<f32>> {
+    let expected = (1 + DA3_BASE_PATCH_SIDE * DA3_BASE_PATCH_SIDE) * hidden;
     if base.len() != expected || width == 0 || height == 0 {
         return Err(DiffusionError::workflow("DA3 position embedding shape mismatch"));
     }
@@ -1304,9 +1428,9 @@ fn interpolate_position_embedding(base: &[f32], width: usize, height: usize) -> 
     if width == DA3_BASE_PATCH_SIDE && height == DA3_BASE_PATCH_SIDE {
         return Ok(base.to_vec());
     }
-    let mut output = vec![0.0f32; (1 + width * height) * DA3_HIDDEN];
-    output[..DA3_HIDDEN].copy_from_slice(&base[..DA3_HIDDEN]);
-    let source = &base[DA3_HIDDEN..];
+    let mut output = vec![0.0f32; (1 + width * height) * hidden];
+    output[..hidden].copy_from_slice(&base[..hidden]);
+    let source = &base[hidden..];
     // Preserve DINOv2's historical 0.1 interpolation offset. PyTorch receives
     // this as an explicit scale_factor with recompute_scale_factor=false, so
     // the sampling scale is (target + 0.1) / 37 rather than target / 37.
@@ -1318,8 +1442,8 @@ fn interpolate_position_embedding(base: &[f32], width: usize, height: usize) -> 
         for ox in 0..width {
             let fx = (ox as f64 + 0.5) / scale_x - 0.5;
             let ix = fx.floor() as isize;
-            let dst = (1 + oy * width + ox) * DA3_HIDDEN;
-            for channel in 0..DA3_HIDDEN {
+            let dst = (1 + oy * width + ox) * hidden;
+            for channel in 0..hidden {
                 let mut value = 0.0f64;
                 for ky in -1..=2 {
                     let sy = (iy + ky).clamp(0, DA3_BASE_PATCH_SIDE as isize - 1) as usize;
@@ -1327,7 +1451,7 @@ fn interpolate_position_embedding(base: &[f32], width: usize, height: usize) -> 
                     for kx in -1..=2 {
                         let sx = (ix + kx).clamp(0, DA3_BASE_PATCH_SIDE as isize - 1) as usize;
                         let wx = cubic_weight(fx - (ix + kx) as f64);
-                        value += source[(sy * DA3_BASE_PATCH_SIDE + sx) * DA3_HIDDEN + channel]
+                        value += source[(sy * DA3_BASE_PATCH_SIDE + sx) * hidden + channel]
                             as f64
                             * wy
                             * wx;

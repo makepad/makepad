@@ -39,8 +39,8 @@ impl CliKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            CliKind::ClaudeCode => "Claude Code",
-            CliKind::Codex => "Codex",
+            CliKind::ClaudeCode => "Claude Code (this machine)",
+            CliKind::Codex => "Codex (this machine)",
         }
     }
 
@@ -54,7 +54,8 @@ impl CliKind {
 
     fn provider(self) -> Box<dyn ChatProvider + Send> {
         match self {
-            CliKind::ClaudeCode => Box::new(ClaudeCodeChatProvider::new(None)),
+            // The in-app chat's turns are tool-driven, with the person waiting.
+            CliKind::ClaudeCode => Box::new(ClaudeCodeChatProvider::new(None).effort("low")),
             CliKind::Codex => Box::new(CodexCliChatProvider::new(None)),
         }
     }
@@ -62,7 +63,7 @@ impl CliKind {
     /// Whether the CLI is installed here: `None` when it is, else why not.
     pub fn unavailable(self) -> Option<String> {
         match self.provider().availability() {
-            ProviderAvailability::Unavailable { reason } => Some(reason),
+            ProviderAvailability::Unavailable { .. } => Some("not installed".into()),
             _ => None,
         }
     }
@@ -194,12 +195,13 @@ fn safe_end(raw: &str, from: usize) -> usize {
     if let Some(at) = next_block(tail) {
         return from + at;
     }
-    // Hold back a suffix that is a prefix of a marker.
+    // Hold back a suffix that is a prefix of a marker. A cut inside a
+    // multi-byte character starts no (ASCII) marker and is skipped.
     for keep in (1.."<function_calls>".len()).rev() {
         if tail.len() >= keep {
             let cut = tail.len() - keep;
-            let end = &tail[cut..];
-            if tail.is_char_boundary(cut) && [OPEN, "<function_calls>", "<invoke name="].iter().any(|m| m.starts_with(end)) {
+            let Some(end) = tail.get(cut..) else { continue };
+            if [OPEN, "<function_calls>", "<invoke name="].iter().any(|m| m.starts_with(end)) {
                 return from + cut;
             }
         }
@@ -222,6 +224,8 @@ pub struct CliModel {
     cut: bool,
     /// Calls handed to the engine this turn.
     made: usize,
+    /// The size last said of the tool block being written, in KB.
+    writing_kb: Option<usize>,
     /// Inside a `<think>` block the CLI forwards its reasoning in.
     thinking: bool,
     /// Results the engine owes for the round: (call id, tool name).
@@ -246,6 +250,7 @@ impl CliModel {
             shown: 0,
             cut: false,
             made: 0,
+            writing_kb: None,
             thinking: false,
             awaiting: Vec::new(),
             results: Vec::new(),
@@ -261,6 +266,7 @@ impl CliModel {
         self.thinking = false;
         self.cut = false;
         self.made = 0;
+        self.writing_kb = None;
         let images: Vec<ToolImage> = std::mem::take(&mut self.images)
             .into_iter()
             .map(|i| ToolImage { label: i.label, png: i.png })
@@ -353,8 +359,17 @@ impl CliModel {
             let (body, used) = match tail[skip..].find(close) {
                 Some(end) => (&tail[skip..skip + end], skip + end + close.len()),
                 None if last || self.cut => (&tail[skip..], tail.len()),
-                None => return,
+                None => {
+                    // The block is still being written, out of sight: say so.
+                    let kb = (tail.len() - skip) / 1024;
+                    if self.writing_kb != Some(kb) {
+                        self.writing_kb = Some(kb);
+                        out.push(ModelEvent::Working(if kb == 0 { "Writing a tool call".to_string() } else { format!("Writing a tool call · {kb} KB") }));
+                    }
+                    return;
+                }
             };
+            self.writing_kb = None;
             let call = if skip > 0 { parse_call(body.trim()) } else { parse_invoke(body) };
             self.shown += used;
             if let Some(after) = self.raw[self.shown..limit].trim_start().strip_prefix("</function_calls>") {
@@ -473,7 +488,7 @@ impl Model for CliModel {
             match event {
                 ProviderEvent::Delta(text) => self.take_delta(&text, &mut out),
                 ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => {}
-                ProviderEvent::FunctionCall { .. } => {}
+                ProviderEvent::FunctionCall { .. } | ProviderEvent::FunctionCallPartial { .. } => {}
                 ProviderEvent::Done { text } => self.finish(text, &mut out),
                 ProviderEvent::Error(e) => {
                     self.in_turn = false;
@@ -496,5 +511,31 @@ impl Model for CliModel {
             self.images.drain(..cut);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_end_never_cuts_inside_a_character() {
+        // A streamed reply arrives in pieces that may end anywhere, and
+        // the part already shown may end anywhere before that.
+        for text in ["sun at 12°", "exposure −", "storm 🌩", "°", "−", "🌩", "a °<tool_c", "−<invoke name=", "🌩<function_calls"] {
+            for len in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+                let raw = &text[..len];
+                for from in (0..=len).filter(|&i| raw.is_char_boundary(i)) {
+                    let end = safe_end(raw, from);
+                    assert!(from <= end && end <= len, "{raw:?} from {from}: {end}");
+                    assert!(raw.is_char_boundary(end), "{raw:?} from {from}: {end} is inside a character");
+                }
+            }
+        }
+        // A marker's start after a multi-byte character is still held back.
+        assert_eq!(safe_end("12°<tool_c", 0), "12°".len());
+        assert_eq!(safe_end("−<inv", 0), "−".len());
+        assert_eq!(safe_end("🌩<", 0), "🌩".len());
+        assert_eq!(safe_end("12°", 0), "12°".len());
     }
 }

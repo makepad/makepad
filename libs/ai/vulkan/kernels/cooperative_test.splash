@@ -1,0 +1,107 @@
+use mod.pod.*
+use mod.math.*
+use mod.shader
+
+let Base = {
+    workgroup_size: 32
+    A: shader.coopmat(f16, 16, 16, shader.matrix_a)
+    B: shader.coopmat(f16, 16, 16, shader.matrix_b)
+    C: shader.coopmat(f32, 16, 16, shader.matrix_accumulator)
+    H: shader.coopmat(f16, 16, 16, shader.matrix_accumulator)
+    src: shader.buffer(f16)
+    dst: shader.buffer_rw(f32)
+    tmp: shader.workgroup(f16, 256)
+    stride: shader.uniform(u32)
+    main: fn() {
+        var i = local_id().x
+        while i < 256 {
+            self.tmp[i] = self.src[256 + i]
+            i += self.workgroup_size
+        }
+        barrier()
+        let a = coopmat_load(self.A, self.src[0], self.stride, shader.row_major)
+        let b = coopmat_load(self.B, self.tmp[0], 16, shader.column_major)
+        var c = coopmat_fill(self.C, 0)
+        c = coopmat_mul_add(a, b, c)
+        c = coopmat_scale(c, 0.5)
+        let h = coopmat_convert(self.H, c)
+        coopmat_store(h, self.tmp[0], 16, shader.row_major)
+        c = coopmat_convert(self.C, h)
+        coopmat_store(c, self.dst[0], self.stride, shader.column_major)
+    }
+}
+let Integer = {
+    workgroup_size: 32
+    A: shader.coopmat(shader.i8, 16, 32, shader.matrix_a)
+    B: shader.coopmat(shader.u8, 32, 16, shader.matrix_b)
+    C: shader.coopmat(i32, 16, 16, shader.matrix_accumulator)
+    src: shader.buffer(vec4u)
+    src_b: shader.buffer(u32)
+    dst: shader.buffer_rw(i32)
+    tmp: shader.workgroup(u32, 128)
+    main: fn() {
+        var i = local_id().x
+        while i < 128 {
+            self.tmp[i] = self.src_b[i]
+            i += self.workgroup_size
+        }
+        barrier()
+        let a = coopmat_load(self.A, self.src[0], 2, 0)
+        let b = coopmat_load(self.B, self.tmp[0], 8, 1)
+        var c = coopmat_fill(self.C, 0)
+        c = coopmat_mul_add(a, b, c)
+        c = coopmat_scale(c, 2)
+        coopmat_store(c, self.dst[0], 16, 0)
+    }
+}
+{
+    float_matrices: Base{}
+    integer_matrices: Integer{}
+    signed_matrices: Integer{B: shader.coopmat(shader.i8, 32, 16, shader.matrix_b)}
+    unsigned_matrices: Integer{
+        A: shader.coopmat(shader.u8, 16, 32, shader.matrix_a)
+        C: shader.coopmat(u32, 16, 16, shader.matrix_accumulator)
+        dst: shader.buffer_rw(u32)
+    }
+    float32_matrices: Base{
+        A: shader.coopmat(f32, 16, 16, shader.matrix_a)
+        B: shader.coopmat(f32, 16, 16, shader.matrix_b)
+    }
+    component_conversions: {
+        S: shader.coopmat(i32, 16, 16, shader.matrix_accumulator)
+        U: shader.coopmat(u32, 16, 16, shader.matrix_accumulator)
+        F: shader.coopmat(f32, 16, 16, shader.matrix_accumulator)
+        I: shader.coopmat(shader.i8, 16, 16, shader.matrix_a)
+        B: shader.coopmat(shader.u8, 16, 16, shader.matrix_a)
+        dst: shader.buffer_rw(f32)
+        bytes: shader.buffer_rw(u32)
+        main: fn() {
+            let s = coopmat_fill(self.S, -3)
+            let u = coopmat_convert(self.U, s)
+            let f = coopmat_convert(self.F, u)
+            let r = coopmat_convert(self.S, f)
+            coopmat_store(coopmat_convert(self.F, r), self.dst[0], 16, 0)
+            let i = coopmat_fill(self.I, -2)
+            let b = coopmat_convert(self.B, i)
+            coopmat_store(b, self.bytes[0], 4, 0)
+        }
+    }
+    reject_shape: Base{B: shader.coopmat(f16, 8, 16, shader.matrix_b)}
+    reject_use: Base{B: shader.coopmat(f16, 16, 16, shader.matrix_a)}
+    reject_zero: Base{A: shader.coopmat(f16, 0, 16, shader.matrix_a)}
+    reject_assignment: Base{main: fn() {
+        var a = coopmat_fill(self.A, 0)
+        a = coopmat_fill(self.B, 0)
+    }}
+    reject_readonly: Base{main: fn() {
+        let h = coopmat_fill(self.H, 0)
+        coopmat_store(h, self.src[0], 16, 0)
+    }}
+    reject_layout: Base{main: fn() {
+        let a = coopmat_load(self.A, self.src[0], 16, self.stride)
+    }}
+    reject_conversion: Base{main: fn() {
+        let a = coopmat_fill(self.A, 0)
+        let b = coopmat_convert(self.B, a)
+    }}
+}

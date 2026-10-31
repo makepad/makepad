@@ -3,8 +3,8 @@
 //! An app builds its manifest and opens a port. Hosted by the window manager
 //! (`--stdin-loop` under wm) the port registers over the studio protocol
 //! and calls arrive as `Event::Custom` frames. Embedding the chat panel
-//! itself, the app opens an in-process port and hands the matching
-//! [`ServiceLink`] to its own engine's registry. Either way the app sees the
+//! itself, or standalone, the app opens an in-process port whose
+//! [`ServiceLink`] goes to the process's registry. Either way the app sees the
 //! same thing: [`PortEvent::Call`]s out of `handle_event`, answered with
 //! [`AiServicePort::reply`] whenever the work is done — the same frame or
 //! many frames later, from the main thread or a worker's channel.
@@ -76,6 +76,8 @@ impl ServiceLink {
 enum Transport {
     InProcess { up: Sender<HostedUp>, down: Receiver<HostedDown> },
     Hosted,
+    #[cfg(not(target_arch = "wasm32"))]
+    Domain(makepad_platform::os::hal::HalParentSender),
 }
 
 static NEXT_PORT_TAG: AtomicU32 = AtomicU32::new(1);
@@ -98,6 +100,10 @@ impl AiServicePort {
     /// The manifest must validate; a bad one is a programming error in the
     /// app and is refused loudly rather than registered half-way.
     pub fn hosted(cx: &Cx, manifest: ServiceManifest) -> Option<AiServicePort> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sender) = cx.hal_parent_sender() {
+            return Self::with_host_transport(manifest, Transport::Domain(sender));
+        }
         if !cx.in_makepad_studio() {
             return None;
         }
@@ -106,13 +112,17 @@ impl AiServicePort {
 
     /// The hosted transport without the host check: the caller knows.
     fn hosted_unchecked(manifest: ServiceManifest) -> Option<AiServicePort> {
+        Self::with_host_transport(manifest, Transport::Hosted)
+    }
+
+    fn with_host_transport(manifest: ServiceManifest, transport: Transport) -> Option<AiServicePort> {
         if let Err(e) = manifest.validate() {
             makepad_platform::error!("ai service manifest refused: {e}");
             return None;
         }
         let port = AiServicePort {
             manifest,
-            transport: Transport::Hosted,
+            transport,
             port_tag: NEXT_PORT_TAG.fetch_add(1, Ordering::Relaxed),
             endpoint: None,
             chat_open: false,
@@ -169,6 +179,12 @@ impl AiServicePort {
                     if let Some(down) = HostedDown::parse(json) {
                         frames.push(down);
                     }
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Transport::Domain(_) => {
+                if let Event::Custom(json) = event {
+                    if let Some(down) = HostedDown::parse(json) { frames.push(down); }
                 }
             }
             Transport::InProcess { down, .. } => loop {
@@ -229,7 +245,9 @@ impl AiServicePort {
         self.send(ServiceUp::Result(result));
     }
 
-    /// Keep a long call alive and show where it is.
+    /// Report real work (for example, a completed batch) and show where it is.
+    /// Silence marks the call "not responding"; it never cancels it. Long
+    /// computations should report here at their existing worker boundaries.
     pub fn progress(&self, call_id: &str, note: &str, permille: u16) {
         let mut note = note.to_string();
         if note.len() > MAX_NOTE_BYTES {
@@ -277,6 +295,8 @@ impl AiServicePort {
         let frames: Vec<HostedDown> = match &mut self.transport {
             Transport::InProcess { down, .. } => down.try_iter().collect(),
             Transport::Hosted => Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Transport::Domain(_) => Vec::new(),
         };
         frames.into_iter().filter_map(|f| self.accept(f)).collect()
     }
@@ -288,6 +308,8 @@ impl AiServicePort {
             Transport::Hosted => {
                 Cx::send_studio_message(AppToStudio::Custom(frame.to_json()));
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            Transport::Domain(sender) => sender.send(&frame.to_json()),
             Transport::InProcess { up: tx, .. } => {
                 if tx.send(frame).is_ok() {
                     // The engine polls on events; make sure one comes.
@@ -340,11 +362,11 @@ mod tests {
         };
         assert!(port.endpoint().is_none());
         // A call before registration, and one for someone else, are ignored.
-        link.down.send(HostedDown { to: Some(ep("other")), msg: ServiceDown::Call(ServiceCall { call_id: "c0".into(), tool: "stat".into(), args: "{}".into() }) }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("other")), msg: ServiceDown::Call(ServiceCall { call_id: "c0".into(), tool: "stat".into(), args: "{}".into(), caller: None }) }).unwrap();
         link.down.send(HostedDown { to: None, msg: ServiceDown::Registered { port_tag: tag + 100, endpoint: ep("not-me") } }).unwrap();
         link.down.send(HostedDown { to: None, msg: ServiceDown::Registered { port_tag: tag, endpoint: ep("e1") } }).unwrap();
-        link.down.send(HostedDown { to: Some(ep("e1")), msg: ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into() }) }).unwrap();
-        link.down.send(HostedDown { to: Some(ep("e2")), msg: ServiceDown::Call(ServiceCall { call_id: "c2".into(), tool: "stat".into(), args: "{}".into() }) }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("e1")), msg: ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into(), caller: None }) }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("e2")), msg: ServiceDown::Call(ServiceCall { call_id: "c2".into(), tool: "stat".into(), args: "{}".into(), caller: None }) }).unwrap();
         link.down.send(HostedDown { to: Some(ep("e1")), msg: ServiceDown::ChatOpen { open: true } }).unwrap();
         let events = pump(&mut port);
         assert_eq!(events.len(), 3, "{events:?}");
@@ -439,55 +461,29 @@ mod tests {
 
 // ------------------------------------------------------------- open
 
-/// In-process links waiting for a chat root to adopt them.
-///
-/// Parked on `Cx` as a typed global (never a static) by
-/// [`AiServicePort::open`] when the process is standalone. Whichever chat
-/// root is up drains it into its registry on its next event — the
-/// Window's F10 overlay today, the superbuild's in-process pane later. A
-/// link that arrives before any root exists simply waits here; the port
-/// behind it is already registered from the app's point of view and the
-/// `Registered` answer comes when the root adopts it.
-#[derive(Default)]
-pub struct PendingServiceLinks {
-    pub links: Vec<ServiceLink>,
-}
-
-impl PendingServiceLinks {
-    /// Everything parked so far; the lot is empty afterwards.
-    pub fn take(&mut self) -> Vec<ServiceLink> {
-        std::mem::take(&mut self.links)
-    }
-}
-
 impl AiServicePort {
-    /// The one call every app makes to expose itself: hosted by the window
-    /// manager it is the hosted transport; standalone it is an in-process
-    /// port whose link waits on `Cx` ([`PendingServiceLinks`]) for the chat
-    /// root to adopt it. `None` only for a manifest that does not validate
-    /// — a programming error, logged.
+    /// The one call every app makes to expose itself: hosted by the window manager it is the
+    /// hosted transport; standalone it is an in-process port registered at once in the
+    /// process's registry ([`ServiceRegistry::process`]), which the process's `app` service and
+    /// any chat panel of the process read. `None` only for a manifest that does not validate — a
+    /// programming error, logged.
     pub fn open(cx: &mut Cx, manifest: ServiceManifest) -> Option<AiServicePort> {
-        let hosted = cx.in_makepad_studio();
-        Self::open_in(hosted, cx.global::<PendingServiceLinks>(), manifest)
+        #[cfg(not(target_arch = "wasm32"))]
+        if cx.hal_is_embedded() { return Self::hosted(cx, manifest); }
+        Self::open_in(cx.in_makepad_studio(), &crate::engine::ServiceRegistry::process(), manifest)
     }
 
-    /// [`open`](Self::open) without a `Cx`: `hosted` is the host flag,
-    /// `pending` the lot a standalone link is parked in.
-    pub fn open_in(
-        hosted: bool,
-        pending: &mut PendingServiceLinks,
-        manifest: ServiceManifest,
-    ) -> Option<AiServicePort> {
+    /// [`open`](Self::open) without a `Cx`: `hosted` is the host flag, `registry` where a
+    /// standalone port is registered.
+    pub fn open_in(hosted: bool, registry: &crate::engine::ServiceRegistry, manifest: ServiceManifest) -> Option<AiServicePort> {
         if hosted {
             return Self::hosted_unchecked(manifest);
         }
-        match Self::in_process(manifest) {
-            Ok((port, link)) => {
-                pending.links.push(link);
-                Some(port)
-            }
+        let opened = Self::in_process(manifest).and_then(|(port, link)| registry.register(link, "in this window", None).map(|_| port));
+        match opened {
+            Ok(port) => Some(port),
             Err(e) => {
-                makepad_platform::error!("ai service manifest refused: {e}");
+                makepad_platform::error!("ai service refused: {e}");
                 None
             }
         }
@@ -509,44 +505,34 @@ mod open_tests {
     }
 
     #[test]
-    fn a_standalone_open_parks_a_link_a_chat_root_can_adopt() {
-        let mut pending = PendingServiceLinks::default();
-        let mut port = AiServicePort::open_in(false, &mut pending, sheets()).expect("a valid manifest opens");
-        assert_eq!(pending.links.len(), 1);
-        assert!(port.endpoint().is_none(), "no address until a root adopts the link");
-        // The root (the overlay) drains the lot into its registry…
+    fn a_standalone_open_is_registered_and_addressed_at_once() {
         let registry = ServiceRegistry::new();
-        for link in pending.take() {
-            registry.register(link, "in this window", None).expect("adopted");
-        }
-        assert!(pending.links.is_empty());
-        // …and the registry's pump answers the port's Register with its address.
-        let _ = registry.pump();
-        let events = port.test_drain();
-        assert!(matches!(events.as_slice(), [PortEvent::Registered(_)]), "{events:?}");
+        let mut port = AiServicePort::open_in(false, &registry, sheets()).expect("a valid manifest opens");
         assert_eq!(registry.services().len(), 1);
         assert_eq!(registry.services()[0].id, "sheets");
+        let events = port.test_drain();
+        assert!(matches!(events.as_slice(), [PortEvent::Registered(_)]), "{events:?}");
     }
 
     #[test]
     fn a_bad_manifest_opens_nothing_either_way() {
         let mut bad = sheets();
         bad.tools[0].name = "Summary".into();
-        let mut pending = PendingServiceLinks::default();
-        assert!(AiServicePort::open_in(false, &mut pending, bad.clone()).is_none());
-        assert!(pending.links.is_empty());
-        assert!(AiServicePort::open_in(true, &mut pending, bad).is_none());
+        let registry = ServiceRegistry::new();
+        assert!(AiServicePort::open_in(false, &registry, bad.clone()).is_none());
+        assert!(registry.services().is_empty());
+        assert!(AiServicePort::open_in(true, &registry, bad).is_none());
     }
+
     #[test]
     fn a_call_dispatched_before_the_first_pump_still_reaches_the_port() {
-        // The port announced itself at open; the registry answers that
-        // Register at registration, so a call sent before any pump lands
-        // AFTER the port learned its address — Registered, then Call.
-        let mut pending = PendingServiceLinks::default();
-        let mut port = AiServicePort::open_in(false, &mut pending, sheets()).expect("opens");
+        // The port announced itself at open; the registry answers that Register at
+        // registration, so a call sent before any pump lands AFTER the port learned its
+        // address — Registered, then Call.
         let registry = ServiceRegistry::new();
-        let endpoint = registry.register(pending.take().remove(0), "in this window", None).expect("adopted");
-        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into() };
+        let mut port = AiServicePort::open_in(false, &registry, sheets()).expect("opens");
+        let endpoint = registry.pick_instance("sheets", None).unwrap();
+        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into(), caller: None };
         assert!(registry.send(&endpoint, ServiceDown::Call(call)));
         let events = port.test_drain();
         assert!(
