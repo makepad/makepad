@@ -2194,6 +2194,11 @@ impl Cx {
         res
     }
 
+    /// Goes up every time a frame is requested, so a caller can tell whether code it ran asked for one.
+    pub fn next_frame_id(&self) -> u64 {
+        self.next_frame_id
+    }
+
     /// The frame `next_frame` asked for has not been sent yet. Once it has,
     /// this is false whether or not the asker heard it: a container that
     /// stops passing events on (a closed modal) swallows it, and a widget

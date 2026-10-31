@@ -3,6 +3,7 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_micro_serde::*,
+    next_frame_gate::NextFrameGates,
     splitter::{Splitter, SplitterAction, SplitterAlign, SplitterAxis},
     tab::Tab,
     tab_bar::{TabBar, TabBarAction},
@@ -201,6 +202,8 @@ pub struct Dock {
     #[rust]
     items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
     #[rust]
+    item_frame_gates: NextFrameGates,
+    #[rust]
     drop_state: Option<DropPosition>,
     /// Info about the tab currently being dragged, for ghost tab rendering.
     #[rust]
@@ -317,6 +320,7 @@ impl ScriptHook for Dock {
 
         // Update existing items if templates changed
         if apply.is_reload() {
+            self.item_frame_gates.mark_all_wanting_frame();
             for (kind, widget) in self.items.values_mut() {
                 if let Some(template_ref) = self.templates.get(kind) {
                     let template_value: ScriptValue = template_ref.as_object().into();
@@ -2486,9 +2490,19 @@ impl Dock {
                 dispatch_to_bodies(cx);
             }
         } else {
-            for (_id, (_templ_id, item)) in self.items.iter_mut() {
-                item.handle_event(cx, event, scope);
+            let visible_ids: SmallVec<[LiveId; 8]> = self.visible_items().map(|(id, _)| id).collect();
+            for (id, (_templ_id, item)) in self.items.iter_mut() {
+                self.item_frame_gates.get_or_insert(item.widget_uid()).deliver_event(
+                    cx,
+                    event,
+                    visible_ids.contains(id),
+                    |cx| item.handle_event(cx, event, scope),
+                );
             }
+            let items = &self.items;
+            self.item_frame_gates.prune(items.len(), |uid| {
+                items.values().any(|(_, item)| item.widget_uid() == uid)
+            });
         }
         // A press claimed by a tab's contents belongs to that tab, even on a popup hanging past
         // its tab bar, and any other press belongs to the tab bar it landed in.
@@ -2770,6 +2784,7 @@ impl Widget for Dock {
                             if !existed {
                                 cx.widget_tree_insert_child_deep(self.uid, id, entry.clone());
                             }
+                            self.item_frame_gates.get_or_insert(entry.widget_uid()).mark_drawn(cx);
                             entry.draw(cx, scope)?;
                         }
                     }

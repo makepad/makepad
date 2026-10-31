@@ -167,6 +167,7 @@ pub mod stack_navigation;
 pub mod callout_tooltip;
 pub mod floating_panel;
 pub mod modal;
+pub mod next_frame_gate;
 pub mod page_flip;
 pub mod pagination;
 pub mod placeholder;
