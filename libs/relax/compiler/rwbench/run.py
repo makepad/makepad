@@ -96,7 +96,7 @@ def relax_env(n, w=""):
     suffix = n.upper().replace("-", "_")
     nstd = os.environ.get("MAKEPAD_RUN_STD_" + suffix, std)
     # rwbench links the platform (the layout workload), so `makepad run` hosts it through the HAL: with no
-    # display (a bench box, a pool node) it needs the HAL's headless backend; no window opens on the mini either
+    # display (a bench box, a node) it needs the HAL's headless backend; no window opens on the mini either
     e = dict(base, MAKEPAD_RUN_CACHE="0", MAKEPAD_RUN_STD=nstd, MAKEPAD_RUN_CACHE_DIR=os.path.join(target, "relax-" + n))
     e.setdefault("MAKEPAD_HAL_BACKEND", "headless")
     # the timed window starts when the JIT reports its optimised code settled (main.rs RW_O3_PROGRESS)

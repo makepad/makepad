@@ -8,7 +8,7 @@
 //!   --quest`), `adb install -r` and `am start` (never adb tcpip/usb/connect/disconnect/kill-server).
 //!
 //! A show on the Mac is gated: before it reaches the user, devhub boots the app at the exact
-//! landed pair headless under the JIT on a box of the same OS (a Mac node, mini), keeps it up for the
+//! landed pair headless under the JIT on a box of the same OS (mac-a, mac-b), keeps it up for the
 //! settle window ([`SETTLE`]) and requires no panic, pause, hang, deadlock, patch or script error
 //! on any thread and no early exit. Only then does it launch on the user's Mac. A failed pre-boot
 //! never reaches the user: it is a `show_blocked` event (the inbox: the manager, and the lane that

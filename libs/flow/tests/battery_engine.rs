@@ -436,7 +436,7 @@ fn http_accept_policy_private_redirect_and_json_contracts() {
     )));
 
     let private = run_with_policy(
-        &source("", "json", "http://10.77.0.1/data"),
+        &source("", "json", "http://192.0.2.16/data"),
         FakeHttp::json(200, "{}"),
         NetPolicy {
             allow: vec!["*".to_string()],

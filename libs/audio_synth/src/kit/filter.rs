@@ -5,15 +5,9 @@
 //! type and subtype; `var` picks among a type's subtypes when it has
 //! several (its first nine names are the original slot types).
 
-use super::analog::vcf::{self, Vcf};
 use super::fast_tanh;
 use super::flt::FilterUnit;
 use super::schema::{Builder, Unit::{self, Hz, Percent}, Values};
-
-/// The family id of the analog filter's wirings (subtype: the wiring).
-const ANALOG: u8 = 200;
-/// Frames a voice's block lasts (the analog filter ramps across it).
-const ANALOG_RAMP: usize = 32;
 
 /// Slot types: (name, family type id, family subtype; 255 = from `var`).
 pub const KINDS: &[(&str, u8, u8)] = &[
@@ -53,21 +47,12 @@ pub const KINDS: &[(&str, u8, u8)] = &[
     ("tri_pole", 33, 255),
     ("svf", 34, 255),
     ("cascade", 35, 255),
-    ("analog_lp", ANALOG, vcf::LP),
-    ("analog_hp", ANALOG, vcf::HP),
-    ("analog_bp", ANALOG, vcf::BP),
-    ("analog_ap", ANALOG, vcf::AP),
-    ("analog_sv_lp", ANALOG, vcf::SV_LP),
-    ("analog_sv_hp", ANALOG, vcf::SV_HP),
-    ("analog_sv_bp", ANALOG, vcf::SV_BP),
-    ("analog_notch", ANALOG, vcf::SV_NOTCH),
 ];
 
 pub const TYPES: &[&str] = &[
     "lp12", "lp24", "hp12", "hp24", "bp12", "notch", "peak", "allpass", "ladder", "bp24", "notch24", "comb", "comb_neg", "sample_hold", "vintage_ladder", "two_pole_lp",
     "two_pole_hp", "two_pole_bp", "two_pole_notch", "four_pole_lp", "sallen_key_lp", "sallen_key_hp", "diode_ladder", "warp_lp", "warp_hp", "warp_notch", "warp_bp",
-    "warp_allpass", "res_warp_lp", "res_warp_hp", "res_warp_notch", "res_warp_bp", "res_warp_allpass", "tri_pole", "svf", "cascade", "analog_lp", "analog_hp", "analog_bp",
-    "analog_ap", "analog_sv_lp", "analog_sv_hp", "analog_sv_bp", "analog_notch",
+    "warp_allpass", "res_warp_lp", "res_warp_hp", "res_warp_notch", "res_warp_bp", "res_warp_allpass", "tri_pole", "svf", "cascade",
 ];
 pub const ROUTES: &[&str] = &["serial", "parallel"];
 
@@ -88,7 +73,7 @@ pub struct FilterIx {
 /// Declare filter `n` (1-based): keys `f1_cutoff` …
 pub fn declare(b: &mut Builder, n: usize, on: bool, cutoff: f32) -> FilterIx {
     let k = |s: &str| format!("f{n}_{s}");
-    b.group(&format!("filter{n}"), "a filter per voice: 44 types (svf lp/hp/bp/notch, ladders, two/four-pole, sallen-key, diode, combs, warps, tri-pole, cascade, analog_*: a chip filter, self-oscillating from res 0.9), cutoff, res, drive, var (a type's variant, e.g. the cascade's 15 mixes; analog_*: part drift, 0 ideal, 0.5 typical, 1 worst), mix, pan (spreads the cutoff left/right), keytracked");
+    b.group(&format!("filter{n}"), "a filter per voice: 36 types (svf lp/hp/bp/notch, ladders, two/four-pole, sallen-key, diode, combs, warps, tri-pole, cascade), cutoff, res, drive, var (picks a type's variant, e.g. the cascade's 15 mixes), mix, pan (spreads the cutoff left/right), keytracked");
     FilterIx {
         on: b.flag(k("on"), "on", on, ""),
         kind: b.choice(k("type"), "type", TYPES, 1, ""),
@@ -145,33 +130,17 @@ impl FilterBlock {
 }
 
 /// One filter of one voice, stereo.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Filter {
     unit: [FilterUnit; 2],
-    vcf: [Vcf; 2],
-    analog: bool,
     drive: f32,
     mix: f32,
     level: f32,
 }
 
-impl Default for Filter {
-    fn default() -> Self {
-        Filter::new(1)
-    }
-}
-
 impl Filter {
-    /// `seed`: the analog filter's part (each voice has its own chips).
-    pub fn new(seed: u32) -> Filter {
-        Filter { unit: Default::default(), vcf: [Vcf::new(seed.wrapping_mul(2)), Vcf::new(seed.wrapping_mul(2) + 1)], analog: false, drive: 0.0, mix: 1.0, level: 1.0 }
-    }
-
     pub fn reset(&mut self) {
         for u in &mut self.unit {
-            u.reset();
-        }
-        for u in &mut self.vcf {
             u.reset();
         }
     }
@@ -182,30 +151,17 @@ impl Filter {
         self.mix = f.mix;
         self.level = f.level;
         let (ty, sub) = f.family();
-        self.analog = ty == ANALOG;
         for ch in 0..2 {
             let spread = (if ch == 0 { -f.pan } else { f.pan } * 0.5).exp2();
             let hz = (f.cutoff * spread).clamp(20.0, rate * 0.45);
-            if self.analog {
-                // Drive is the input level: the chip's own stages do the rest.
-                self.vcf[ch].prepare(sub, hz, f.res, 1.0 + f.drive * 7.0, f.var, rate, ANALOG_RAMP);
-            } else {
-                let note = 12.0 * (hz / 440.0).log2();
-                self.unit[ch].set_block(ty, sub, note, f.res, rate, true);
-            }
+            let note = 12.0 * (hz / 440.0).log2();
+            self.unit[ch].set_block(ty, sub, note, f.res, rate, true);
         }
     }
 
     #[inline]
     pub fn tick(&mut self, x: [f32; 2]) -> [f32; 2] {
         let mut out = [0.0; 2];
-        if self.analog {
-            for ch in 0..2 {
-                let y = self.vcf[ch].tick(x[ch]);
-                out[ch] = (x[ch] + (y - x[ch]) * self.mix) * self.level;
-            }
-            return out;
-        }
         let pre = 1.0 + self.drive * 15.0;
         for ch in 0..2 {
             let dry = x[ch];

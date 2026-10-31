@@ -468,14 +468,7 @@ impl Lanes {
         let mut moved: Vec<usize> = Vec::new();
         for (i, c) in &merges {
             let h = &unit[*i];
-            // A lane carried over from a retired work chain isn't a fast-forward: its tree moves
-            // the same careful way (refusing over a change), then its branch.
-            let (ok, _, err) = if git(&h.wt, &self.env, &["merge-base", "--is-ancestor", &h.head, c]).0 {
-                git(&h.wt, &self.env, &["merge", "--ff-only", "-q", c])
-            } else {
-                let moved = git(&h.wt, &self.env, &["read-tree", "-m", "-u", &h.head, c]);
-                if moved.0 { git(&h.wt, &self.env, &["update-ref", "HEAD", c, &h.head]) } else { moved }
-            };
+            let (ok, _, err) = git(&h.wt, &self.env, &["merge", "--ff-only", "-q", c]);
             if !ok {
                 let why = format!("fast-forward to the merge: {}", first_err(&err));
                 for j in &moved {
@@ -555,13 +548,7 @@ impl Lanes {
     /// parents), computed with plumbing only (`merge-tree --write-tree`, `commit-tree`): no
     /// worktree is touched. A conflict names its files.
     fn merge_commit(&self, h: &Half) -> Result<String, Outcome> {
-        let retired = crate::land::retired_base(&h.dir, &h.head, &h.base);
-        let mut args = vec!["merge-tree", "--write-tree", "--name-only", "--no-messages"];
-        if let Some(mb) = &retired {
-            args.extend(["--merge-base", mb]);
-        }
-        args.extend(if retired.is_some() { [h.base.as_str(), h.head.as_str()] } else { [h.head.as_str(), h.base.as_str()] });
-        let (ok, out, err) = git(&h.dir, &self.env, &args);
+        let (ok, out, err) = git(&h.dir, &self.env, &["merge-tree", "--write-tree", "--name-only", "--no-messages", &h.head, &h.base]);
         let mut lines = out.lines();
         let tree = lines.next().unwrap_or("").trim().to_string();
         if !ok {
@@ -571,16 +558,8 @@ impl Lanes {
             }
             return Err(Outcome::Conflict(files));
         }
-        let msg = if retired.is_some() {
-            format!("{}: carried over onto {} ({})", h.branch, h.tip_branch, &h.base[..h.base.len().min(10)])
-        } else {
-            format!("Merge {} ({}) into {}", h.tip_branch, &h.base[..h.base.len().min(10)], h.branch)
-        };
-        let (ok, commit, err) = if retired.is_some() {
-            git(&h.dir, &self.env, &["commit-tree", &tree, "-p", &h.base, "-m", &msg])
-        } else {
-            git(&h.dir, &self.env, &["commit-tree", &tree, "-p", &h.head, "-p", &h.base, "-m", &msg])
-        };
+        let msg = format!("Merge {} ({}) into {}", h.tip_branch, &h.base[..h.base.len().min(10)], h.branch);
+        let (ok, commit, err) = git(&h.dir, &self.env, &["commit-tree", &tree, "-p", &h.head, "-p", &h.base, "-m", &msg]);
         let commit = commit.trim().to_string();
         if !ok || !crate::sync::git::valid_sha(&commit) {
             return Err(Outcome::Failed(format!("commit-tree: {}", first_err(&err))));
@@ -877,30 +856,6 @@ mod tests {
     fn worktree_porcelain() {
         let t = "worktree /r\nHEAD 1111\nbranch refs/heads/work\n\nworktree /w/a\nHEAD 2222\nbranch refs/heads/rc-a\n\nworktree /w/d\nHEAD 3333\ndetached\n";
         assert_eq!(parse_worktrees(t), vec![(PathBuf::from("/r"), "work".into(), "1111".into()), (PathBuf::from("/w/a"), "rc-a".into(), "2222".into())]);
-    }
-
-    #[test]
-    fn a_lane_off_a_retired_chain_is_carried_over_without_its_history() {
-        let f = Fix::new("retired");
-        f.write(&f.repo, "old.txt", "old chain\n");
-        let old_tip = f.commit(&f.repo, "on the old chain");
-        let wt = f.lane("a");
-        f.write(&wt, "lane.txt", "lane\n");
-        let lane_tip = f.commit(&wt, "lane work");
-        // work moves onto a squashed tip with the same tree, and the old chain is kept aside
-        let tree = f.g(&f.repo, &["rev-parse", "HEAD^{tree}"]);
-        let squashed = f.g(&f.repo, &["commit-tree", &tree, "-m", "squashed"]);
-        f.g(&f.repo, &["update-ref", "refs/heads/work-old-1", &old_tip]);
-        f.g(&f.repo, &["update-ref", "refs/heads/work", &squashed]);
-        let bot = f.bot();
-        bot.pass(&f.w()).unwrap();
-        let Outcome::Merged(carried) = f.result(&bot, "rc-a") else { panic!("{:?}", bot.list()) };
-        assert_eq!(f.g(&wt, &["rev-parse", "HEAD"]), carried);
-        assert_eq!(f.g(&wt, &["rev-parse", "HEAD^"]), squashed);
-        assert!(wt.join("lane.txt").exists() && wt.join("old.txt").exists());
-        assert_eq!(f.g(&wt, &["status", "--porcelain"]), "");
-        let (is_old, _, _) = git(&wt, &[], &["merge-base", "--is-ancestor", &lane_tip, "HEAD"]);
-        assert!(!is_old);
     }
 
     #[test]

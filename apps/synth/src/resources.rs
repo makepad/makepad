@@ -501,13 +501,13 @@ impl Resources {
                 PATCHES | PATCHES_OLD => {
                     let set = patch_set(row);
                     let (caps, which) = if row == PATCHES {
-                        ("HYBRID PATCH LIBRARY", "The current patches, wavetables and presets (patch format revision 31, upstream commit dab78c6)")
+                        ("HYBRID PATCH LIBRARY", "Surge XT's current patches, wavetables and presets (patch format revision 31, upstream commit dab78c6)")
                     } else {
-                        ("HYBRID PATCH LIBRARY: OLDER RELEASE", "The 1.3.4 release's content (revision 25, migrated as it loads); install it only if you want that release's set")
+                        ("HYBRID PATCH LIBRARY: OLDER RELEASE", "Surge XT 1.3.4's content (revision 25, migrated as it loads); install it only if you want that release's set")
                     };
                     (
                         caps.to_string(),
-                        format!("Hybrid patch library · {} · GPL-3.0-or-later", megabytes(bytes)),
+                        format!("Surge XT patch library · {} · GPL-3.0-or-later", megabytes(bytes)),
                         format!(
                             "{which}: about 3,500 factory and third-party patches that Synth's Tandem instrument plays (`Tandem{{patch: \"Leads/Name\"}}`), unpacked to {} with a hash of every file. GPL-3: Synth does not ship them; you download them here.",
                             tandem_library::data_dir(set).display()

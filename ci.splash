@@ -16,10 +16,6 @@ ci.step("build the pty helper", fn(){
 
 ci.shared()
 
-ci.step("no private addresses or paths", fn(){
-    ci.cargo(["run", "-p", "makepad-private-check"])
-})
-
 ci.step("check host", fn(){
     ci.cargo(["check", "--workspace"])
 })

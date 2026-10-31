@@ -45,8 +45,8 @@ Flags on state: use_envelope, use_amplitude (apply the LFO EG / amplitude), clam
 Language: numbers, booleans, nil, strings (constants; s:sub s:find s:len s:byte), tables {1, 2, x = 3} with t[k] and #t; local, if/elseif/else, while, repeat, numeric for, local functions (no recursion), `a and b or c`. \
 Fields you add to state persist per instance; plain globals in process are shared by every voice running the same script. \
 math.* (also without the prefix): sin cos tan asin acos atan atan2 exp log log10 pow sqrt abs floor ceil fmod modf min max sinh cosh tanh deg rad pi huge random randomseed clamp limit_range sgn sign parity rescale norm range note_to_freq freq_to_note lin_to_dB dB_to_lin gcd lcm random_normal random_poisson random_exponential random_bernoulli. \
-Helpers: synth.mod.Slew:new{samplerate = state.samplerate, block_size = state.block_size} then s:run(x, up_rate, down_rate) (rates 0..1, 0.2 default); \
-synth.mod.ClockDivider:new{numerator = n, denominator = d} then c:tick(state.intphase, state.phase) setting c.phase c.ibeat c.intphase c.newbeat; synth.mod.AHDEnvelope:new{a = , h = , d = } then e:at(phase). \
+Helpers: surge.mod.Slew:new{samplerate = state.samplerate, block_size = state.block_size} then s:run(x, up_rate, down_rate) (rates 0..1, 0.2 default); \
+surge.mod.ClockDivider:new{numerator = n, denominator = d} then c:tick(state.intphase, state.phase) setting c.phase c.ibeat c.intphase c.newbeat; surge.mod.AHDEnvelope:new{a = , h = , d = } then e:at(phase). \
 Not supported: '..' concatenation, pairs/ipairs, '...', tostring, setmetatable, table/bit/string.format, shared, FFT helpers, recursion, storing functions in tables.";
 
 #[derive(Clone, Debug, PartialEq)]

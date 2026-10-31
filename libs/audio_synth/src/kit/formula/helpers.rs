@@ -2,7 +2,7 @@
 //! from MODULATION.md section 8.3 and FORMULA-ADDENDUM.md (sections 0-3,
 //! 7), written in our own code.
 //!
-//! Helper objects are tables whose prototype (`synth.mod.Slew` and the
+//! Helper objects are tables whose prototype (`surge.mod.Slew` and the
 //! others, real tables made by the load program) supplies the fields they
 //! do not set themselves; a script may change a prototype's defaults.
 
@@ -688,7 +688,7 @@ impl Cx<'_> {
     pub(super) fn helper_new(&mut self, a: Vec<V>) -> CR<V> {
         let proto = match self.const_f64(a[0].num) {
             Some(p) if self.const_i32(a[0].tag) == Some(T_TABLE) && (p as u32) < PINNED && p.fract() == 0.0 => p as u32,
-            _ => return cerr(self.line, "':new' is only supported on synth.mod.Slew, synth.mod.ClockDivider and synth.mod.AHDEnvelope"),
+            _ => return cerr(self.line, "':new' is only supported on surge.mod.Slew, surge.mod.ClockDivider and surge.mod.AHDEnvelope"),
         };
         let t = match a.get(1) {
             Some(t) if self.const_i32(t.tag) != Some(T_NIL) => {

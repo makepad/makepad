@@ -617,20 +617,20 @@ mod tests {
     #[test]
     fn a_session_starts_from_the_viewers_last_rate_or_the_start() {
         let mut r = RateControl::default();
-        r.begin("mac@192.0.2.2");
+        r.begin("mac@192.0.2.17");
         for _ in 0..1000 {
             r.second(&second(0.0, 0, 5.0, 300_000, true), u32::MAX);
         }
-        r.remember("mac@192.0.2.2");
+        r.remember("mac@192.0.2.17");
         // another viewer: not what this one's link carried
-        r.begin("phone@192.0.2.9");
+        r.begin("phone@192.0.2.23");
         assert_eq!((r.kbps(u32::MAX), r.limit(u32::MAX)), (START_KBPS, limit::START));
         r.second(&second(120.0, 0, 5.0, 200_000, true), u32::MAX);
-        r.remember("phone@192.0.2.9");
+        r.remember("phone@192.0.2.23");
         // each comes back at its own
-        r.begin("mac@192.0.2.2");
+        r.begin("mac@192.0.2.17");
         assert_eq!(r.kbps(u32::MAX), 375_000);
-        r.begin("phone@192.0.2.9");
+        r.begin("phone@192.0.2.23");
         assert_eq!(r.kbps(u32::MAX), 170_000, "85% of what its link carried");
     }
 

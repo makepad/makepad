@@ -29,7 +29,7 @@ fn fixture() -> &'static Fixture {
         let root = Root::generate().unwrap();
         let fleet = Fleet::new(root.point(), ["revoked-one".to_string()].into_iter().collect());
         id::install_fleet(fleet.clone());
-        id::install_local(machine(&root, "my-mac", Role::Device, Some(IpAddr::from(LOOPBACK))));
+        id::install_local(machine(&root, "rik-mac", Role::Device, Some(IpAddr::from(LOOPBACK))));
         Fixture { root, fleet }
     })
 }
@@ -145,7 +145,7 @@ fn front_end_to_end() {
     let response = http_fetch(&HttpClientRequest::get(&format!("https://{listen}/control"))).unwrap();
     assert_eq!(response.status, 200);
     let body = String::from_utf8(response.read_body_to_vec(1 << 20).unwrap()).unwrap();
-    assert!(body.contains("X-Makepad-Client: my-mac"), "{body}");
+    assert!(body.contains("X-Makepad-Client: rik-mac"), "{body}");
     assert!(body.contains("X-Makepad-Role: device"), "{body}");
     assert!(body.contains("X-Makepad-Admin: 1"), "{body}");
     assert!(body.contains("X-Makepad-Front: the-front-secret"));
@@ -164,7 +164,7 @@ fn front_end_to_end() {
     assert!(body.contains("X-Makepad-Admin: 0"), "{body}");
     assert_eq!(get_as(&elsewhere, listen, "/jobs").unwrap().0, 200);
     // A node: job routes and kernels, not control.
-    let node = machine(&fx.root, "n5", Role::Node, None);
+    let node = machine(&fx.root, "n217", Role::Node, None);
     let (status, body) = get_as(&node, listen, "/job/job-1").unwrap();
     assert_eq!(status, 200);
     assert!(body.contains("X-Makepad-Role: node"), "{body}");
@@ -189,7 +189,7 @@ fn front_end_to_end() {
     assert_eq!(get_as(&phone, listen, "/control").unwrap().0, 403);
 
     // Another root, a revoked name, a tampered role: 401.
-    let stranger = machine(&Root::generate().unwrap(), "n5", Role::Node, None);
+    let stranger = machine(&Root::generate().unwrap(), "n217", Role::Node, None);
     assert_eq!(get_as(&stranger, listen, "/jobs").unwrap().0, 401);
     let revoked = machine(&fx.root, "revoked-one", Role::Node, None);
     assert_eq!(get_as(&revoked, listen, "/jobs").unwrap().0, 401);

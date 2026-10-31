@@ -78,7 +78,7 @@ fn only_the_admin_views_a_desktop() {
 
     // The admin from its bound address views.
     let loopback = IpAddr::from([127, 0, 0, 1]);
-    let admin = machine(&root, "my-mac", Role::Device, Some(loopback));
+    let admin = machine(&root, "rik-mac", Role::Device, Some(loopback));
     // (its Welcome comes from the desktop's owner, which this test is: nothing to wait for)
     assert!(!matches!(hello_within(addr, &admin, Duration::from_millis(500)), Some(ServerMsg::Refused { .. })), "the admin is refused");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -90,7 +90,7 @@ fn only_the_admin_views_a_desktop() {
             Err(e) => panic!("no session opened: {e}"),
         }
     };
-    assert_eq!(client, "my-mac");
+    assert_eq!(client, "rik-mac");
 
     // The same kind of credential bound to another address, a node, another fleet: refused, saying why.
     let away = machine(&root, "mac-away", Role::Device, Some(IpAddr::from([10, 9, 9, 9])));
@@ -98,11 +98,11 @@ fn only_the_admin_views_a_desktop() {
         Some(ServerMsg::Refused { reason }) => assert!(reason.contains("not its bound address"), "{reason}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
-    match hello(addr, &machine(&root, "n5", Role::Node, None)) {
+    match hello(addr, &machine(&root, "n217", Role::Node, None)) {
         Some(ServerMsg::Refused { reason }) => assert!(reason.contains("not the admin credential"), "{reason}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
-    match hello(addr, &machine(&Root::generate().unwrap(), "my-mac", Role::Device, Some(loopback))) {
+    match hello(addr, &machine(&Root::generate().unwrap(), "rik-mac", Role::Device, Some(loopback))) {
         Some(ServerMsg::Refused { reason }) => assert!(reason.contains("not a credential of this fleet"), "{reason}"),
         other => panic!("expected a refusal, got {other:?}"),
     }

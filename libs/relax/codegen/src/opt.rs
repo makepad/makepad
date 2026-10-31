@@ -886,7 +886,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             let free = size <= INLINE_FREE_INSTS && size <= free_budget;
             // A tiny body (no bigger than the call's own argument/return moves, or within the free
             // size) is admitted whatever the caller has grown to: refusing it keeps a call that costs
-            // more than the body (sandbox leap, a pool node: encode_cascades left core::mem::drop x130,
+            // more than the body (sandbox leap, a node: encode_cascades left core::mem::drop x130,
             // rc::header_of x140, slice::iter::next x26 as calls -- "budget" -- once big chains had
             // filled the growth ceiling). Only the raw free allowance is charged for it.
             let tiny = size <= INLINE_FREE_INSTS;

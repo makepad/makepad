@@ -16,7 +16,7 @@ static SINK: AtomicU64 = AtomicU64::new(0);
 static LAST7: AtomicU64 = AtomicU64::new(0);
 
 // x4 nested: copies of a few mixing ops, a body that is slow to compile and fast to run (heavy: 4^6 =
-// 4096 copies, ~250 ms to compile on a pool node; big: 4^5)
+// 4096 copies, ~250 ms to compile on a node; big: 4^5)
 macro_rules! x4 {
     ($($t:tt)*) => { $($t)* $($t)* $($t)* $($t)* };
 }

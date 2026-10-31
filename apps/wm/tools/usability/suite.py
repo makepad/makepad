@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """WM usability gate: plain user tasks, scripted with human-like pointer
-timing against the real WM binary and real apps (hidden, a pool node).
+timing against the real WM binary and real apps (hidden, a node).
 
     suite.py <checkout-with-release-build> [--only name,name] [--out DIR]
 

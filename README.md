@@ -168,9 +168,3 @@ cargo run -p cargo-makepad --release -- android run -p makepad-example-ironfish
 ## Notes
 
 - Studio uses `cargo-makepad` internally for non-standard targets.
-
-## Contributing
-
-Open pull requests against `main`. `main` holds validated milestones; `work` is the fast-moving
-development branch, squashed onto `main` and re-pointed at its tip about every week, so rebase
-any branch based on `work` after a re-point.

@@ -550,7 +550,7 @@
     "restriction": "none"
    },
    "vram_gb": 18.0,
-   "note": "FLUX.1-schnell for 24 GB cards: the 4-step distilled DiT as city96's GGUF Q4_K_S (ComfyUI-GGUF reference conversion, 6.8 GB; canonical double_blocks.* names, loaded by libs/ai/models/flux flux_gguf) in a SPLIT bundle with the shared FLUX VAE (Kijai flux-vae-bf16) and the ComfyUI text encoders (clip_l + t5xxl fp8) that flux1-fill-dev already pins - same cache_as, so the blobs are shared. Measured on a pool node (GPU-C, 2026-10-13, 4 steps): 512px cold 9.4 s incl. all loads, warm 2.2 s, peak 13.6 GB; 1024px warm 7.8 s, peak 17.7 GB (CUDA pool included); vram_gb 18 is that 1024 peak, so it admits on a 24 GB card next to the UI reserve once the chat model yields. Default 4 steps. Request: prompt (+ width/height/steps/seed).",
+   "note": "FLUX.1-schnell for 24 GB cards: the 4-step distilled DiT as city96's GGUF Q4_K_S (ComfyUI-GGUF reference conversion, 6.8 GB; canonical double_blocks.* names, loaded by libs/ai/models/flux flux_gguf) in a SPLIT bundle with the shared FLUX VAE (Kijai flux-vae-bf16) and the ComfyUI text encoders (clip_l + t5xxl fp8) that flux1-fill-dev already pins - same cache_as, so the blobs are shared. Measured on a node (GPU-C, 2026-10-13, 4 steps): 512px cold 9.4 s incl. all loads, warm 2.2 s, peak 13.6 GB; 1024px warm 7.8 s, peak 17.7 GB (CUDA pool included); vram_gb 18 is that 1024 peak, so it admits on a 24 GB card next to the UI reserve once the chat model yields. Default 4 steps. Request: prompt (+ width/height/steps/seed).",
    "files": [
     {
      "role": "diffusion_model",

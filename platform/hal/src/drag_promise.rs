@@ -139,8 +139,6 @@ mod tests {
     #[test]
     fn promised_files_are_waited_for_and_failures_reported() {
         let dir = root().join(format!("test-{}", std::process::id()));
-        // (what a failed run with this pid left)
-        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("a.mp3");
         let bad = dir.join("b.mp3");

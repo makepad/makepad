@@ -8,7 +8,7 @@ is one full-file write, then the driver waits for its log record (an edit; after
 the restarted run's first present). At the end: % applied in place (patch + unchanged) per category
 and overall, p50/p95 save->applied of in-place edits, p50/p95 save->present of restarts, the
 restart/refuse reasons; the source file is restored and the app stopped (by its PID).
-Linux: needs WAYLAND_DISPLAY (a pool node: wayland-hrl from ~/hrl/weston_up.sh, outside x64run).
+Linux: needs WAYLAND_DISPLAY (a node: wayland-hrl from ~/hrl/weston_up.sh, outside x64run).
 """
 import argparse, importlib.util, json, os, signal, subprocess, sys, time
 

@@ -30,6 +30,7 @@ use std::time::Duration;
 pub type Publish = Arc<dyn Fn(Record) + Send + Sync>;
 
 /// The user's checkout: work, and its nested commercial main.
+pub const REPO: &str = crate::lease::wt::DEFAULT_REPO;
 /// Where the quick gates run: linux x64 nodes with their dev switch on (the gate's warm tree is Linux-only).
 pub const GATE_NEEDS: &str = "arch=x64,os=linux";
 /// How often the train looks at its entries when no hand-in or finished gate wakes it.
@@ -186,38 +187,16 @@ fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
     git(dir, &["merge-base", "--is-ancestor", a, b]).0
 }
 
-/// Where a branch left a retired work chain (`refs/heads/work-old-*`, kept when work moves onto
-/// main's squashed tip): its merge base with that chain, when `tip` doesn't hold it. Such a branch
-/// carries its own changes over as one commit on the tip, so the old history stays out of work.
-pub fn retired_base(dir: &Path, branch: &str, tip: &str) -> Option<String> {
-    let (_, refs) = git(dir, &["for-each-ref", "--format=%(refname)", "refs/heads/work-old-*"]);
-    refs.lines().find_map(|retired| {
-        let (ok, mb) = git(dir, &["merge-base", branch, retired]);
-        (ok && mb.len() == 40 && !is_ancestor(dir, &mb, tip)).then_some(mb)
-    })
-}
-
 /// `base` + `sha` as a merge commit (no worktree): Ok(commit), or Err(the conflicting paths).
-/// A branch off a retired chain lands as one commit with `base` as its only parent.
 pub fn merge_onto(dir: &Path, base: &str, sha: &str, msg: &str) -> Result<String, Vec<String>> {
-    let retired = retired_base(dir, sha, base);
-    let mut args = vec!["merge-tree", "--write-tree", "--name-only", "--no-messages"];
-    if let Some(mb) = &retired {
-        args.extend(["--merge-base", mb]);
-    }
-    args.extend([base, sha]);
-    let (ok, out) = git(dir, &args);
+    let (ok, out) = git(dir, &["merge-tree", "--write-tree", "--name-only", "--no-messages", base, sha]);
     let mut lines = out.lines();
     let tree = lines.next().unwrap_or("").to_string();
     if !ok || tree.len() != 40 {
         let files: Vec<String> = lines.map(str::to_string).filter(|l| !l.is_empty()).collect();
         return Err(if files.is_empty() { vec![format!("merge-tree failed ({base:.10} + {sha:.10})")] } else { files });
     }
-    let (ok, c) = if retired.is_some() {
-        git(dir, &["commit-tree", &tree, "-p", base, "-m", msg])
-    } else {
-        git(dir, &["commit-tree", &tree, "-p", base, "-p", sha, "-m", msg])
-    };
+    let (ok, c) = git(dir, &["commit-tree", &tree, "-p", base, "-p", sha, "-m", msg]);
     if ok && c.len() == 40 {
         Ok(c)
     } else {
@@ -755,8 +734,8 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
     let t = Arc::new(Train {
         machine: machine.to_string(),
         home: crate::proto::home(),
-        repo: crate::lease::wt::default_repo(),
-        exe: std::env::current_exe().unwrap_or_else(|_| crate::lease::wt::default_repo().join("target/host/makepad")),
+        repo: PathBuf::from(REPO),
+        exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from(REPO).join("target/host/makepad")),
         publish,
         st: Mutex::new(Vec::new()),
         clock: crate::proto::wall_ms,

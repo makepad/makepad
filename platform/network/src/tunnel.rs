@@ -566,13 +566,13 @@ mod tests {
 
     #[test]
     fn host_lookup_prefers_exact_port() {
-        assert_eq!(host_of("10.77.0.5:8384"), "10.77.0.5");
-        assert_eq!(host_of("10.77.0.5"), "10.77.0.5");
+        assert_eq!(host_of("192.0.2.20:8384"), "192.0.2.20");
+        assert_eq!(host_of("192.0.2.20"), "192.0.2.20");
         assert_eq!(host_of("[::1]:8384"), "[::1]");
-        let text = "10.77.0.5 aa\n10.77.0.5:9000 bb\n10.77.0.6 cc\n";
-        assert_eq!(lookup(text, "10.77.0.5:9000"), vec!["bb", "aa"]);
-        assert_eq!(lookup(text, "10.77.0.5:8384"), vec!["aa"]);
-        assert!(lookup(text, "10.77.0.7:8384").is_empty());
+        let text = "192.0.2.20 aa\n192.0.2.20:9000 bb\n192.0.2.21 cc\n";
+        assert_eq!(lookup(text, "192.0.2.20:9000"), vec!["bb", "aa"]);
+        assert_eq!(lookup(text, "192.0.2.20:8384"), vec!["aa"]);
+        assert!(lookup(text, "192.0.2.22:8384").is_empty());
     }
 
     /// Runs the server side against a client transcript built by `client`.

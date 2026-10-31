@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn off_unless_enabled_and_lan_only() {
         assert!(!Settings::parse("").enabled);
-        let s = Settings::parse("enabled = on\nhost = 10.77.0.92\nfps = 0");
+        let s = Settings::parse("enabled = on\nhost = 192.0.2.92\nfps = 0");
         assert!(s.enabled && s.fps == 120 && s.key_every == 2 && s.listen_addr().is_ok());
         assert_eq!(Settings::parse("key_every = 0").key_every, 0);
         assert!(Settings::parse("host = 1.1.1.1").listen_addr().is_err());

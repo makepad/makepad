@@ -1378,7 +1378,7 @@ fn chromium_switches() -> Vec<String> {
         switches.push(format!("--ozone-platform={ozone}"));
         // Headless has no scanout images: a playing <video> asked for one
         // (GpuMemoryBuffer video frames) and took the GPU process down
-        // ("Could not find SharedImageBackingFactory ... Scanout", a pool node).
+        // ("Could not find SharedImageBackingFactory ... Scanout", a node).
         if ozone == "headless" {
             switches.push("--disable-accelerated-video-decode".to_string());
             switches.push("--disable-gpu-memory-buffer-video-frames".to_string());
@@ -1449,7 +1449,7 @@ fn accelerated_paint_available() -> bool {
 /// Linux browsers paint on the GPU (dmabufs copied into the sink's slots)
 /// only when `MAKEPAD_CEF_LINUX_GPU=1` and Chromium has a display to run on;
 /// otherwise in software (one upload per frame into the slot). Measured on
-/// CEF 144 / NVIDIA 580 (a pool node): every Ozone/ANGLE combination either
+/// CEF 144 / NVIDIA 580 (a node): every Ozone/ANGLE combination either
 /// fails to make the shared images (headless; ANGLE over GL on Wayland or
 /// X11) or hands out dmabufs that stay empty (ANGLE over Vulkan on Wayland or
 /// X11), so GPU paint is not the default.

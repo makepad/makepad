@@ -7,7 +7,7 @@
 #   Each leg is its own lease AND its own lane dir (<lane>-<leg>): two ships into one dir would race on the same files; DEVHUB_LANE / DEVHUB_AGENT as usual.
 set -u
 lane=${DEVHUB_LANE:-$(basename "$PWD")}
-M=${MAKEPAD_BIN:-cargo run --profile host -q --manifest-path $HOME/makepad/Cargo.toml -p makepad-run --bin makepad --}
+M=${MAKEPAD_BIN:-cargo run --profile host -q --manifest-path /Users/me/makepad/Cargo.toml -p makepad-run --bin makepad --}
 log=$(mktemp -d "${TMPDIR:-/tmp}/platall.XXXXXX") || exit 2
 trap 'rm -rf -- "$log"' EXIT
 t0=$(date +%s)
@@ -18,8 +18,8 @@ leg() { # leg <name> <kind> <node args...> -- <CHECK_TARGETS>
   echo $? > "$log/$name.rc"
 }
 PKGS=("$@")
-leg apple_darwin test --node "${MAKEPAD_MAC_NODE:?name a Mac node}" "aarch64-apple-darwin" &
-leg apple_ios test --node "${MAKEPAD_MAC_NODE:?name a Mac node}" "aarch64-apple-ios" &
+leg apple_darwin test --node mac-b "aarch64-apple-darwin" &
+leg apple_ios test --node mac-b "aarch64-apple-ios" &
 leg cross build --needs arch=x64,os=linux "x86_64-unknown-linux-gnu x86_64-pc-windows-msvc wasm32-unknown-unknown aarch64-linux-android" &
 wait
 fail=0; ok=""

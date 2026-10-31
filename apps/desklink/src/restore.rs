@@ -105,6 +105,6 @@ mod tests {
         let w = vec![SavedWindow { pos: dvec2(10.0, 20.0), size: dvec2(1400.0, 860.0), host: "192.0.2.89".into(), port: 8790 }, SavedWindow { pos: dvec2(-1500.0, 0.0), size: dvec2(700.0, 860.0), host: "192.0.2.38".into(), port: 18801 }];
         assert_eq!(parse(&format(&w)), w);
         // junk and too-small windows are skipped
-        assert_eq!(parse("1 2 3\n0 0 50 50 192.0.2.1:1\nx y 300 300 a:1\n").len(), 0);
+        assert_eq!(parse("1 2 3\n0 0 50 50 192.0.2.16:1\nx y 300 300 a:1\n").len(), 0);
     }
 }

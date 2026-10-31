@@ -1,6 +1,6 @@
 #!/bin/bash
 # arm64_leg.sh [--diff-fast]: the landing gate's arm64 leg, run from the root of the tree under test on the Mac mini
-# under a devhub lease (land.sh: `makepad devhub lease build --node mini --rev <branch>,<commercial> -- bash
+# under a devhub lease (land.sh: `makepad devhub lease build --node mac-b --rev <branch>,<commercial> -- bash
 # tools/run/fixture/arm64_leg.sh --diff-fast`; CARGO_TARGET_DIR, offline cargo and the scratch dir come from the lease).
 #   1. cargo test --release -p relax-codegen -p relax-backend --no-fail-fast
 #   2. --diff-fast: build makepad-run and run diff_fast at o1 / base / o3 / counted

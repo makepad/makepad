@@ -55,10 +55,7 @@ and written once at the release.
   module (osc_a, filter1, env2, lfo1, macros, arp, fx_*). A good Morph tweak
   module: SynthTable per active oscillator with its pos, warp amounts and
   unison knobs; the filter with cutoff/res; env1; the LFOs that are routed
-  (SynthLfo + rate); SynthMods; the macros by their names. Analog parts
-  (`a_mode: @analog`, `f1_type: @analog_lp`, `env1_model: @analog`,
-  `amp_type: @analog`) bind the same way: `a_saw`, `a_pulse`, `a_pw`,
-  `a_sync`, `a_drift`, `amp_idle`.
+  (SynthLfo + rate); SynthMods; the macros by their names.
 - `SynthKeys{node: "lead" octave: 3 octaves: 2}`: a keyboard that plays the
   instrument as it is now.
 

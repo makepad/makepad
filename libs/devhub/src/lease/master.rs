@@ -946,7 +946,7 @@ mod tests {
             hold: None,
             latency: String::new(),
         };
-        let nodes = [view("quest", "192.0.2.85:8788", true, Some((true, 8790))), view("phone", "192.0.2.50", true, Some((true, 0))), view("off", "192.0.2.51", true, Some((false, 8790))), view("gone", "192.0.2.52", false, Some((true, 8790))), view("217", "192.0.2.89", true, None)];
+        let nodes = [view("quest", "192.0.2.85:8788", true, Some((true, 8790))), view("phone", "192.0.2.32", true, Some((true, 0))), view("off", "192.0.2.33", true, Some((false, 8790))), view("gone", "192.0.2.34", false, Some((true, 8790))), view("217", "192.0.2.89", true, None)];
         assert_eq!(desk_links(&nodes), "quest 192.0.2.85:8790\n");
     }
 

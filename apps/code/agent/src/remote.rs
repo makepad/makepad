@@ -12,8 +12,8 @@
 //!   workspace's own apps through the run manager the RUN panel shows (runs.rs); a run starts
 //!   with `--remote` (or under `makepad run`), so the tools above reach it by its pid.
 //!
-//! Targets: `stage`, a pid, `<host>:<app|pid>` (`n2:wm`). Apps a window manager hosts are
-//! reached through the WM for their tools (`n2:wm`, instance = the `w<id>` endpoint) and through
+//! Targets: `stage`, a pid, `<host>:<app|pid>` (`n149:wm`). Apps a window manager hosts are
+//! reached through the WM for their tools (`n149:wm`, instance = the `w<id>` endpoint) and through
 //! their own pid for `ui`. Approvals: a tool runs by its declared risk; Request and Destructive
 //! tools (and `ui quit` / `ui close`) ask first, through the same approval card as a shell
 //! command. The app keeps its own floor: it validates and refuses as it would for its own chat.

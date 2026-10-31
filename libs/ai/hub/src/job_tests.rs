@@ -636,13 +636,13 @@ mod lease_protocol_tests {
 
     #[test]
     fn absent_or_unrecognized_health_is_not_assumed_to_support_leases() {
-        let mut absent = snapshot("192.0.2.10", "0.3.0", "loaded");
+        let mut absent = snapshot("192.0.2.24", "0.3.0", "loaded");
         absent.health = None;
-        let unknown = snapshot("192.0.2.11", "development", "loaded");
-        let mut wrong_service = snapshot("192.0.2.12", "0.3.0", "loaded");
+        let unknown = snapshot("192.0.2.25", "development", "loaded");
+        let mut wrong_service = snapshot("192.0.2.26", "0.3.0", "loaded");
         wrong_service.health.as_mut().unwrap().service = "other-service".into();
         let error = route_generation(vec![absent, unknown, wrong_service], "image", &leased_request("flux1-schnell")).unwrap_err();
-        assert!(error.contains("192.0.2.10:8123: cannot verify job leases") || error.contains("192.0.2.10: cannot verify job leases"), "{error}");
+        assert!(error.contains("192.0.2.24:8123: cannot verify job leases") || error.contains("192.0.2.24: cannot verify job leases"), "{error}");
         assert!(error.contains("/health is unavailable"), "{error}");
         assert!(error.contains("development"), "{error}");
         assert!(error.contains("does not identify an AIHub service"), "{error}");

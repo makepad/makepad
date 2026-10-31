@@ -166,7 +166,7 @@ fn work() {
     step("host_lost (hosting: no-op)", &store, &|s| { s.host_lost(1); format!("{}", s.generation()) });
     // a second store that attaches to another host, loses it, re-resolves, attaches again
     let store2 = SandboxStore::new(resolve);
-    *store2.listen.lock().unwrap() = Some("192.0.2.1:5000 192.0.2.1:5001 ".into());
+    *store2.listen.lock().unwrap() = Some("192.0.2.16:5000 192.0.2.16:5001 ".into());
     SENDERS.with(|s| s.borrow()[1].send(Resolved { local: None, note: "attached".into() }).unwrap());
     step("attached resolved", &store2, &|s| format!("{}", s.resolved()));
     step("attached connection", &store2, &|s| format!("{:?}", s.connection()));

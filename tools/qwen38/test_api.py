@@ -59,7 +59,7 @@ def check(name, ok, detail=""):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", required=True)
+    ap.add_argument("--host", default="192.0.2.89")
     ap.add_argument("--port", default="8090")
     args = ap.parse_args()
     key = os.environ.get("QWEN38_KEY")

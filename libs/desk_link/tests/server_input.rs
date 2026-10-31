@@ -63,7 +63,7 @@ fn a_gone_viewer_lets_go_of_what_it_held() {
     let server = Server::start(config, Arc::new(|| {})).unwrap();
     let admin = {
         let key = generate_key().unwrap();
-        let cred = root.issue("my-mac", Role::Device, now_secs() + 3600, Some(IpAddr::from([127, 0, 0, 1])), &point_of(&key)).unwrap();
+        let cred = root.issue("rik-mac", Role::Device, now_secs() + 3600, Some(IpAddr::from([127, 0, 0, 1])), &point_of(&key)).unwrap();
         Me::new(key, cred).unwrap()
     };
     let session = |msgs: &[ClientMsg]| {

@@ -481,6 +481,7 @@ fn candidate_paths() -> Vec<String> {
         const TORCH_LIBS: &[&str] = &[
             r"C:\ai\venv_paint\Lib\site-packages\torch\lib",
             r"C:\ai\venv\Lib\site-packages\torch\lib",
+            r"C:\Users\me\Documents\ComfyUI\.venv\Lib\site-packages\torch\lib",
         ];
         for dir in TORCH_LIBS {
             for name in DLLS {

@@ -6719,7 +6719,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
             }
             nd.into_iter().filter(|(_, v)| v.0 == 1).map(|(k, v)| (k, (v.1, v.2))).collect()
         },
-        // off: pinned on a pool node it costs 12% on the parity test and nothing elsewhere; code/pool
+        // off: pinned on a node it costs 12% on the parity test and nothing elsewhere; code/pool
         // cache-line separation does not change that (tested). Cause not proven.
         memconst: options.memconst || host_avx(options),
         avx: host_avx(options),

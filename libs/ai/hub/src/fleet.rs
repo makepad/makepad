@@ -83,7 +83,7 @@ impl FleetConfig {
 /// Roles are DATA. `MAKEPAD_FLEET_ROLES` names them:
 ///
 /// ```text
-/// MAKEPAD_FLEET_ROLES="192.0.2.89=chat,text;192.0.2.9=image,edit"
+/// MAKEPAD_FLEET_ROLES="192.0.2.89=chat,text;192.0.2.23=image,edit"
 /// MAKEPAD_FLEET_ROLES=off      # no box is restricted (tests, one-box rigs)
 /// ```
 ///
@@ -101,13 +101,16 @@ pub struct FleetRoles {
     rules: Vec<(String, Vec<String>)>,
 }
 
-/// Env var naming the roles; it wins over the local file. `off` means no rules.
+/// The ratified fleet end state: `.76` (GPU-C) carries chat, the
+/// prompt expander and image generation (user's order 2026-09-04: "let the
+/// rtx serve images too" — the GPU-B cannot fit flux2-dev at the default
+/// reserve); every other generative domain lives on the other nodes. Sound
+/// effects fall back to it (user, 2026-09-30: the in-game AI's
+/// `audio.generate` failed while the GPU-As refused or lacked sa3-sfx).
+const DEFAULT_FLEET_ROLES: &str = "192.0.2.76=chat,text,image,audio?";
+
+/// Env var naming the roles; `off` disables the built-in list too.
 pub const FLEET_ROLES_ENV: &str = "MAKEPAD_FLEET_ROLES";
-/// The machine's own roles, under the home directory, same text as the env var. No file: no rules.
-const FLEET_ROLES_FILE: &str = ".makepad/fleet-roles";
-/// What this crate's tests schedule against, whatever the machine they run on has configured.
-#[cfg(test)]
-const TEST_FLEET_ROLES: &str = "192.0.2.76=chat,text,image,audio?";
 
 impl FleetRoles {
     /// Parse `host=domain[,domain][;host=…]`. `off`/`none` = no rules.
@@ -230,19 +233,12 @@ pub fn node_label(base_url: &str) -> String {
 pub fn fleet_roles() -> &'static FleetRoles {
     static ROLES: std::sync::OnceLock<FleetRoles> = std::sync::OnceLock::new();
     ROLES.get_or_init(|| {
-        #[cfg(test)]
-        return FleetRoles::parse(TEST_FLEET_ROLES);
-        #[cfg(not(test))]
-        let text = std::env::var(FLEET_ROLES_ENV)
-            .ok()
-            .filter(|text| !text.trim().is_empty())
-            .or_else(|| {
-                let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-                std::fs::read_to_string(std::path::Path::new(&home).join(FLEET_ROLES_FILE)).ok()
-            })
-            .unwrap_or_default();
-        #[cfg(not(test))]
-        FleetRoles::parse(&text)
+        let text = std::env::var(FLEET_ROLES_ENV).unwrap_or_default();
+        if text.trim().is_empty() {
+            FleetRoles::parse(DEFAULT_FLEET_ROLES)
+        } else {
+            FleetRoles::parse(&text)
+        }
     })
 }
 
@@ -1766,7 +1762,7 @@ mod tests {
 
     #[test]
     fn a_role_names_the_domains_a_box_may_serve() {
-        let roles = FleetRoles::parse("192.0.2.89=chat,text; 192.0.2.9 = image , edit ");
+        let roles = FleetRoles::parse("192.0.2.89=chat,text; 192.0.2.23 = image , edit ");
         // Named host: exactly its listed domains, nothing else.
         assert!(roles.allows("http://192.0.2.89:8123", "chat"));
         assert!(roles.allows("http://192.0.2.89:8123", "text"));
@@ -1774,8 +1770,8 @@ mod tests {
         assert!(!roles.allows("http://192.0.2.89:8123", "image"));
         // Port and scheme are not identity; the host is.
         assert!(!roles.allows("https://192.0.2.89:9999/", "video"));
-        assert!(roles.allows("192.0.2.9:8123", "edit"));
-        assert!(!roles.allows("192.0.2.9:8123", "video"));
+        assert!(roles.allows("192.0.2.23:8123", "edit"));
+        assert!(!roles.allows("192.0.2.23:8123", "video"));
         // A host nobody named is unrestricted, so adding a box needs no
         // config edit.
         assert!(roles.allows("http://192.0.2.59:8123", "video"));
@@ -1801,7 +1797,7 @@ mod tests {
         // The ratified fleet end state, as data: chat and text live on the
         // Blackwell (82 GB free beside the live model) since the GPU-B was
         // turned over to the live-feed pool on the user's order.
-        let roles = FleetRoles::parse(TEST_FLEET_ROLES);
+        let roles = FleetRoles::parse(DEFAULT_FLEET_ROLES);
         assert!(roles.allows("http://192.0.2.76:8123", "chat"));
         assert!(roles.allows("http://192.0.2.76:8123", "text"));
         assert!(roles.allows("http://192.0.2.76:8123", "image"));
@@ -2608,7 +2604,7 @@ mod tests {
                 2 * 1024,
             ),
             with_vram(
-                snapshot("http://192.0.2.98:8767", 0, vec![h3.clone()]),
+                snapshot("http://192.0.2.36:8767", 0, vec![h3.clone()]),
                 24 * 1024,
                 24 * 1024,
                 2 * 1024,
@@ -2930,7 +2926,7 @@ mod tests {
         woosh.vram_gb = Some(3.0);
         let models = vec![flux, moss, sa3, woosh];
         let legacy = with_legacy_vram(
-            snapshot("http://192.0.2.99:8765", 0, models.clone()),
+            snapshot("http://192.0.2.37:8765", 0, models.clone()),
             155,
             32_607,
         );
@@ -2956,7 +2952,7 @@ mod tests {
         // retires moss+sa3 before the job runs (resident fast path), and a
         // cold target earns the reclaim-by-eviction credit.
         let enforcing = with_vram(
-            snapshot("http://192.0.2.99:8765", 0, models),
+            snapshot("http://192.0.2.37:8765", 0, models),
             155,
             32_607,
             2 * 1024,
@@ -3038,7 +3034,7 @@ mod tests {
         let mut synthetic = model("testpattern", "image", MODEL_STATE_READY, true);
         synthetic.backend = "testpattern".to_string();
         let legacy = with_legacy_vram(
-            snapshot("http://192.0.2.99:8765", 0, vec![flux, moss, sa3, synthetic]),
+            snapshot("http://192.0.2.37:8765", 0, vec![flux, moss, sa3, synthetic]),
             155,
             32_607,
         );

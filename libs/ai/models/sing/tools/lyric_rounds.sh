@@ -1,5 +1,5 @@
 #!/bin/bash
-# Data-growth rounds for the sung-lyric voice (a pool node). When the harvested
+# Data-growth rounds for the sung-lyric voice (a node). When the harvested
 # clean set has grown by half since the last round: pause the GPU's other
 # users (the AI hub and the harvester; the song producers only use the
 # generator nodes and keep running), rebuild the score-aligned set, train the
@@ -29,7 +29,7 @@ echo $last > $R/last-secs
 log "rounds start: $(secs) s harvested${EXCLUDE:+ (without $EXCLUDE)}, next round at $((last * GROW / 100)) s"
 
 # --- pause / restart ---------------------------------------------------------
-HARVEST_CMD='cd ~/nv1; while [ ! -f lyric/STOP ]; do timeout 900 ./makepad/target/release/sing_data lyric/inbox lyric/out --shards prep/lyrics --watch --no-wav --whisper models/ggml-large-v3-turbo.bin --stems $HOME/.makepad/weights/stems/model_bs_roformer_ep_17_sdr_9.6568.ckpt >> lyric/harvest.log 2>&1; done'
+HARVEST_CMD='cd ~/nv1; while [ ! -f lyric/STOP ]; do timeout 900 ./makepad/target/release/sing_data lyric/inbox lyric/out --shards prep/lyrics --watch --no-wav --whisper models/ggml-large-v3-turbo.bin --stems /home/me/.makepad/weights/stems/model_bs_roformer_ep_17_sdr_9.6568.ckpt >> lyric/harvest.log 2>&1; done'
 paused_hub=0; paused_harvest=0
 pause() {
   local p

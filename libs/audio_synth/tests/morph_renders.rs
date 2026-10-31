@@ -311,9 +311,8 @@ fn the_schema_describes_itself_for_the_ai() {
     assert!(text.contains("f1_cutoff 20..20000 Hz log =4000 ~"), "{}", text.lines().find(|l| l.contains("f1_cutoff")).unwrap_or(""));
     let osc = schema.describe(&["osc_a"]);
     assert!(osc.contains("a_pos") && !osc.contains("b_pos"));
-    // Token-lean: every line short (the filter type's list is the longest).
-    let longest = text.lines().max_by_key(|l| l.len()).unwrap_or("");
-    assert!(longest.len() < 520, "{} {longest}", longest.len());
+    // Token-lean: every line short.
+    assert!(text.lines().all(|l| l.len() < 420));
 }
 
 #[test]

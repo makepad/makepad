@@ -828,16 +828,16 @@ mod tests {
 
     #[test]
     fn plan_bounds_and_ticket_selection() {
-        makepad_network::fleet::id::mark_fleet_endpoint("192.0.2.1:8765");
+        makepad_network::fleet::id::mark_fleet_endpoint("192.0.2.16:8765");
         let receiver = "b".repeat(32);
         let source = "a".repeat(32);
         let digest = "c".repeat(64);
         let now = 1_700_000_000u64;
         let minted = PeerTicket::mint(&secret(), &source, &receiver, &digest, now + 60);
         let plan = PeerPlan::for_job(
-            &["http://192.0.2.1:8765/".into(), "not-a-url".into()],
+            &["http://192.0.2.16:8765/".into(), "not-a-url".into()],
             &[minted.clone(), "garbage".into()],
-            &["https://192.0.2.1:8765".into(), "http://192.0.2.2:8765".into()],
+            &["https://192.0.2.16:8765".into(), "http://192.0.2.17:8765".into()],
             &receiver,
             None,
         )
@@ -845,20 +845,20 @@ mod tests {
         assert_eq!(
             plan.sources,
             vec![
-                "https://192.0.2.1:8765".to_string(),
-                "http://192.0.2.2:8765".to_string()
+                "https://192.0.2.16:8765".to_string(),
+                "http://192.0.2.17:8765".to_string()
             ]
         );
         assert_eq!(plan.tickets.len(), 1);
         // Coordinator ticket matched by scope.
         assert_eq!(
-            plan.ticket_for("https://192.0.2.1:8765", &source, &digest, now),
+            plan.ticket_for("https://192.0.2.16:8765", &source, &digest, now),
             Some(minted)
         );
         // No ticket for an unknown source without a secret.
         assert!(plan
             .ticket_for(
-                "https://192.0.2.1:8765",
+                "https://192.0.2.16:8765",
                 &"f".repeat(32),
                 &digest,
                 now
@@ -867,7 +867,7 @@ mod tests {
         // A request-provided URL must never turn the receiver's shared secret
         // into a signing oracle.
         let plan = PeerPlan::for_job(
-            &["https://192.0.2.1:8765".into()],
+            &["https://192.0.2.16:8765".into()],
             &[],
             &[],
             &receiver,
@@ -875,19 +875,19 @@ mod tests {
         )
         .unwrap();
         assert!(plan
-            .ticket_for("https://192.0.2.1:8765", &source, &digest, now)
+            .ticket_for("https://192.0.2.16:8765", &source, &digest, now)
             .is_none());
         // Operator-configured sources may self-mint in shared-secret mode.
         let plan = PeerPlan::for_job(
             &[],
             &[],
-            &["https://192.0.2.1:8765".into()],
+            &["https://192.0.2.16:8765".into()],
             &receiver,
             Some(secret()),
         )
         .unwrap();
         let text = plan
-            .ticket_for("https://192.0.2.1:8765", &source, &digest, now)
+            .ticket_for("https://192.0.2.16:8765", &source, &digest, now)
             .unwrap();
         let ticket = PeerTicket::parse(&text).unwrap();
         ticket
@@ -913,7 +913,7 @@ mod tests {
                 "http://example.com/?query".into(),
                 "http://example.com\r\nX-Evil: yes".into(),
                 "https://EXAMPLE.com:8765/".into(),
-                "https://192.0.2.66:8765".into(),
+                "https://192.0.2.110:8765".into(),
             ],
             &[],
             &[],

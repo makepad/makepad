@@ -122,7 +122,7 @@ it used (this one and any build or bench node):
 ## Commit content and Studio iteration history
 
 - NEVER create or publish additional public branches in `makepad/makepad`.
-  Use only the established `local` → `work` → `main` workflow. `local` remains
+  Use only the established `local` → `work` → `dev` workflow. `local` remains
   private and must never be pushed. Feature, test, release, packaging, and
   distribution work do not authorize another public branch; using a separate
   checkout or worktree does not change this rule.
@@ -142,18 +142,14 @@ it used (this one and any build or bench node):
 - Run the existing repository tests for validation. Do not add generated test
   files, inline test code, or test scaffolding unless the user explicitly requests
   that change. Preserve existing tests; do not remove or weaken them to pass.
-- The source hierarchy is `local` → `work` → `main`: `local` records every
-  build iteration, `work` carries day-to-day landings, and `main` holds validated
-  milestones, one squashed commit per logical block, and incoming external PRs.
-- About every week `work` is squashed onto `main` and then re-pointed at `main`'s
-  tip (`makepad devhub promote`). The old chain stays local as `work-old-<date>`;
-  `work` history is rewritten at each re-point, so a branch off `work` rebases
-  after it (lanes are carried over by devhub). External PRs target `main`.
+- Studio's source hierarchy is `local` → `work` → `dev`: `local` records every
+  build iteration, `work` contains coherent feature commits, and `dev` contains
+  lower-frequency, validated milestones and incoming external PRs.
 - NEVER push `local`, its private flow branches, or checkpoint/archive refs.
   Never merge private checkpoint ancestry into a public branch. Promote only
-  by squash from `local` into `work`, then squash logical blocks from `work`
-  onto `main`. `main` is never rewritten; fetch incoming `work` and `main`
-  changes without discarding unrelated work.
+  by squash from `local` into `work`, then squash feature groups from `work`
+  into named `dev` milestones. Fetch/sync incoming `work` and `dev` changes
+  without rewriting published history or discarding unrelated work.
 - For Studio-managed flow builds, use this order: platform build checks,
   rustfmt on changed Rust, repeat checks if formatting changed the source,
   commit the exact eligible source to `local`, release binary build, existing
@@ -172,7 +168,7 @@ it used (this one and any build or bench node):
   package/target support matrix. Missing SDKs, runners, or required tests are
   blocked coverage, not passes. Do not suppress warnings to obtain a green gate.
 - Validate the exact resulting source for each feature/milestone promotion so
-  `main` remains useful for bisecting. Public squash/push operations must expose
+  `dev` remains useful for bisecting. Public squash/push operations must expose
   their source, destination, included changes, validation, and conflicts.
 - An app with its own `AGENTS.md` (including the private products in the
   commercial repository checked out at `apps/commercial`) adds flow
@@ -193,7 +189,7 @@ it used (this one and any build or bench node):
 - Build profiles live in the root `Cargo.toml`: dev keeps line tables only,
   release is incremental without LTO. cargo-makepad's packaging commands
   build release non-incrementally.
-- The private commercial repository (`makepad/commercial`: Stage,
+- The private commercial repository (`makepad/commercial`: Stage with Amp,
   Scope, Sandbox) is cloned into `apps/commercial` and has no workspace of
   its own: its root `Cargo.toml` is a package whose `cfg(any())` path
   dependencies make Stage's and Scope's crates members of this workspace

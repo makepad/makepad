@@ -2,7 +2,7 @@
 //! Linux must be byte-identical: the store addresses built products by
 //! content, so a product that differs per platform splits the store and
 //! misses every cache the other machine filled. These goldens were recorded
-//! on Linux (a pool node) and pass unchanged on macOS (the Mac mini); a
+//! on Linux (a node) and pass unchanged on macOS (the Mac mini); a
 //! transcendental routed back through the platform libm breaks them there.
 
 use makepad_model::*;

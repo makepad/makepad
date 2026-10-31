@@ -229,7 +229,7 @@ fn strings_sub_find_len() {
 fn helpers_follow_the_addendum() {
     // Slew: first output equals the input; rate 0 jumps; the default rate
     // limits a unit step to 1 / (1 + 10000 * 0.2^3) per block at 48 kHz.
-    let src = "function init(s) s.a = synth.mod.Slew:new{ samplerate = s.samplerate, block_size = s.block_size }; s.b = synth.mod.Slew:new{}; s.n = 0; return s end\n\
+    let src = "function init(s) s.a = surge.mod.Slew:new{ samplerate = s.samplerate, block_size = s.block_size }; s.b = surge.mod.Slew:new{}; s.n = 0; return s end\n\
                function process(s) s.n = s.n + 1; local x = s.n > 1 and 1 or 0; s.output = { s.a:run(x), s.b:run(x), s.a.block_factor }; s.clamp_output = false; return s end";
     both(src);
     let formula = Formula::compile(src).unwrap();
@@ -247,13 +247,13 @@ fn helpers_follow_the_addendum() {
 
     // ClockDivider: ibeat wraps with the numerator; the typo keeps numerator 1.
     both(
-        "function init(s) s.c = synth.mod.ClockDivider:new{ numerator = 3, denominator = 2 }; s.t = synth.mod.ClockDivider:new{ enumerator = 5, denominator = 4 }; return s end\n\
+        "function init(s) s.c = surge.mod.ClockDivider:new{ numerator = 3, denominator = 2 }; s.t = surge.mod.ClockDivider:new{ enumerator = 5, denominator = 4 }; return s end\n\
          function process(s) s.c:tick(s.intphase, s.phase); s.t:tick(s.intphase, s.phase); s.output = { s.c.ibeat / 3, s.c.phase, s.c.newbeat and 1 or 0, s.t.ibeat, s.t.intphase / 10 }; return s end",
     );
     // AHD: piecewise linear, defaults 0.1 0.1 0.7, and prototype defaults
     // a script changes apply to later instances.
     both(
-        "function init(s) synth.mod.AHDEnvelope.d = 0.5; s.e = synth.mod.AHDEnvelope:new{ a = 0.2 }; return s end\n\
+        "function init(s) surge.mod.AHDEnvelope.d = 0.5; s.e = surge.mod.AHDEnvelope:new{ a = 0.2 }; return s end\n\
          function process(s) s.output = { s.e:at(s.phase), s.e:at(s.phase * 2 - 0.5), s.e.d }; return s end",
     );
 }

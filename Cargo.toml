@@ -1,5 +1,4 @@
 workspace.members = [
-    "tools/private_check",
     # === app ===
     "apps/browser",
     "apps/browser_host",

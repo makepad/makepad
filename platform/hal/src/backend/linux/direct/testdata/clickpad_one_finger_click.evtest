@@ -1,4 +1,4 @@
-# a pool node ASUF1209:00 2808:0219 Touchpad (clickpad, 4762x3099 at 32 units/mm, 5 slots),
+# a node ASUF1209:00 2808:0219 Touchpad (clickpad, 4762x3099 at 32 units/mm, 5 slots),
 # recorded read-only with: evtest /dev/input/event11 (no grab), one finger: touch, move, click, lift.
 # Trimmed to one contact; MSC_TIMESTAMP and the legacy ABS_X/ABS_Y duplicates dropped.
 Event: time 1791811785.320986, type 3 (EV_ABS), code 57 (ABS_MT_TRACKING_ID), value 1078

@@ -4428,12 +4428,12 @@ mod tests {
                 })
                 .collect(),
             models: vec![
-                model("flux2-dev", "192.0.2.1", true, "ready"),
-                model("flux2-dev", "192.0.2.2", true, "loaded"),
-                model("flux2-dev", "192.0.2.3", true, "absent"),
-                model("flux2-dev", "192.0.2.4", true, "absent"),
-                model("flux2-dev", "192.0.2.5", true, "absent"),
-                model("flux2-dev", "192.0.2.6", true, "absent"),
+                model("flux2-dev", "192.0.2.16", true, "ready"),
+                model("flux2-dev", "192.0.2.17", true, "loaded"),
+                model("flux2-dev", "192.0.2.18", true, "absent"),
+                model("flux2-dev", "192.0.2.19", true, "absent"),
+                model("flux2-dev", "192.0.2.20", true, "absent"),
+                model("flux2-dev", "192.0.2.21", true, "absent"),
             ],
             snapshot_ms: 1,
         };
@@ -4443,7 +4443,7 @@ mod tests {
         assert_eq!(choices[0].label, "flux2-dev · 2 ready · 4 absent");
         assert_eq!(
             choices[0].note,
-            "192.0.2.1 GPU-C · 192.0.2.2"
+            "192.0.2.16 GPU-C · 192.0.2.17"
         );
         assert!(!choices[0].dimmed);
     }

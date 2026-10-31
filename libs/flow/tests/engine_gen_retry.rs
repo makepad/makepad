@@ -268,9 +268,9 @@ fn three_admission_refusals_fail_with_every_node_listed() {
     let Poll::Failed(error) = executor.poll() else {
         panic!("third refusal did not fail the node");
     };
-    assert!(error.contains("192.0.2.1: insufficient VRAM"), "{error}");
-    assert!(error.contains("192.0.2.2: insufficient VRAM"), "{error}");
-    assert!(error.contains("192.0.2.3: insufficient VRAM"), "{error}");
+    assert!(error.contains("192.0.2.16: insufficient VRAM"), "{error}");
+    assert!(error.contains("192.0.2.17: insufficient VRAM"), "{error}");
+    assert!(error.contains("192.0.2.18: insufficient VRAM"), "{error}");
 }
 
 fn cancellation_node() -> makepad_flow::Node {

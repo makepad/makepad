@@ -197,9 +197,9 @@ mod tests {
     fn url_hosts() {
         // the rule's answer for a visible test process: LAN on, so every url passes
         if allowed() {
-            assert!(check_url("t", "https://10.77.0.76:8123/health").is_ok());
+            assert!(check_url("t", "https://192.0.2.76:8123/health").is_ok());
         } else {
-            assert!(check_url("t", "https://10.77.0.76:8123/health").is_err());
+            assert!(check_url("t", "https://192.0.2.76:8123/health").is_err());
             assert!(check_url("t", "http://[fd00::1]:80/").is_err());
             assert!(check_url("t", "http://studio.local/x").is_err());
         }
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn local_network_addresses() {
-        for ip in ["10.77.0.76", "192.168.77.2", "172.16.77.1", "169.254.1.1", "255.255.255.255", "224.0.0.251", "fd00::1", "fe80::1", "ff02::fb", "::ffff:10.77.0.1"] {
+        for ip in ["192.0.2.76", "198.51.100.22", "203.0.113.10", "169.254.1.1", "255.255.255.255", "224.0.0.251", "fd00::1", "fe80::1", "ff02::fb", "::ffff:192.0.2.16"] {
             assert!(is_local_network(ip.parse().unwrap()), "{ip}");
         }
         for ip in ["127.0.0.1", "::1", "8.8.8.8", "203.0.113.1", "172.32.0.1", "2001:db8::1", "0.0.0.0"] {

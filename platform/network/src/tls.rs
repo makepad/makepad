@@ -905,16 +905,16 @@ mod server_tests {
     fn known_hosts_record_then_warn_and_replace() {
         let dir = temp_dir("known");
         let known = KnownHosts::new(dir.join("known_nodes"));
-        assert_eq!(known.observe("10.77.0.5:8123", &[1; 32]), None);
-        assert_eq!(known.get("10.77.0.5:8123"), Some([1; 32]));
-        assert_eq!(known.observe("10.77.0.5:8123", &[1; 32]), None);
-        assert_eq!(known.observe("10.77.0.6:8123", &[2; 32]), None);
+        assert_eq!(known.observe("192.0.2.20:8123", &[1; 32]), None);
+        assert_eq!(known.get("192.0.2.20:8123"), Some([1; 32]));
+        assert_eq!(known.observe("192.0.2.20:8123", &[1; 32]), None);
+        assert_eq!(known.observe("192.0.2.21:8123", &[2; 32]), None);
         // A change is reported, logged and replaces the record.
-        assert_eq!(known.observe("10.77.0.5:8123", &[3; 32]), Some([1; 32]));
-        assert_eq!(known.get("10.77.0.5:8123"), Some([3; 32]));
-        assert_eq!(known.get("10.77.0.6:8123"), Some([2; 32]));
+        assert_eq!(known.observe("192.0.2.20:8123", &[3; 32]), Some([1; 32]));
+        assert_eq!(known.get("192.0.2.20:8123"), Some([3; 32]));
+        assert_eq!(known.get("192.0.2.21:8123"), Some([2; 32]));
         assert!(fs::read_to_string(dir.join("known_nodes.log")).unwrap().contains("changed"));
-        assert!(fingerprint_changes().iter().any(|c| c.host_port == "10.77.0.5:8123" && c.new == [3; 32]));
+        assert!(fingerprint_changes().iter().any(|c| c.host_port == "192.0.2.20:8123" && c.new == [3; 32]));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -772,7 +772,7 @@ fn census_report(crates: &[crates::CrateUnit], per: &[census::Census], total: &c
 pub mod std_source;
 
 /// std sources: $MAKEPAD_RUN_STD, else <repo>/libs/relax/compiler/std next to the binary's
-/// target dir (<worktree>/<target>/release/makepad; a pool node's layout keeps the sources under
+/// target dir (<worktree>/<target>/release/makepad; a node's layout keeps the sources under
 /// <dir>/src), else the source tree this binary was built from (a CARGO_TARGET_DIR outside the
 /// checkout). None found: the build tree's path, and a hint to set MAKEPAD_RUN_STD, said once.
 pub fn std_dir() -> String {

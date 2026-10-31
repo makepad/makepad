@@ -1,7 +1,7 @@
 //! Mac lane worktrees: `makepad devhub wt create|list|prune` (local git, no master needed).
 //!
-//! Lane worktrees live in `wt.noindex` next to the repo (`~/wt.noindex/<lane>` for
-//! `~/makepad`), on branch `rc-<lane>`, with an optional nested commercial worktree at
+//! Lane worktrees live in `wt.noindex` next to the repo (`/Users/me/wt.noindex/<lane>` for
+//! `/Users/me/makepad`), on branch `rc-<lane>`, with an optional nested commercial worktree at
 //! `apps/commercial`. `prune` removes only worktrees that are merged into `work`, clean (nested
 //! commercial included, and its commits on a commercial ref), unlocked and idle (no live process
 //! with its cwd inside), with `git worktree remove` + `git branch -d`; it reports what it kept and
@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// The user's checkout: where `wt` works unless `--repo` names another.
-pub fn default_repo() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("makepad")
-}
+pub const DEFAULT_REPO: &str = "/Users/me/makepad";
 
 /// Runs `git <args>` in `cwd` (or with `git_dir` as the repository); stdout on success.
 pub fn git(cwd: Option<&Path>, git_dir: Option<&Path>, args: &[&str]) -> Result<String, String> {
@@ -267,7 +265,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
     if args.first() != Some(&"wt") {
         return None;
     }
-    let mut repo = default_repo();
+    let mut repo = PathBuf::from(DEFAULT_REPO);
     let (mut from, mut commercial, mut size) = ("work".to_string(), false, false);
     let mut pos = Vec::new();
     let mut i = 1;

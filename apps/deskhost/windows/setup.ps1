@@ -1,7 +1,7 @@
 # Desk Host setup, all in one: installs the built host, writes its settings (it serves only the
 # fleet admin), registers the at-logon task in this user's session, the console task and the
 # inbound firewall rule (the listed viewer addresses only), then starts it. Asks for elevation itself (one UAC prompt).
-#   powershell -ep bypass -f setup.ps1 [-Exe <built exe>] -Peers <viewer addresses> [-Port 8790]
+#   powershell -ep bypass -f setup.ps1 [-Exe <built exe>] [-Peers 192.0.2.91] [-Port 8790]
 #   -SettingsOnly: rewrites deskhost.conf (and the firewall rule's peers) and restarts the host
 # Undo: Unregister-ScheduledTask -TaskName "Makepad Desk Host"; Unregister-ScheduledTask -TaskName "Makepad Desk Host console"
 #       Remove-NetFirewallRule -DisplayName "Makepad Desk Host"
@@ -13,7 +13,7 @@
 # is disconnected; the desktop and its apps stay as they are.
 param(
     [string]$Exe = "$env:USERPROFILE\rc\windesk\target\release\makepad-app-deskhost.exe",
-    [Parameter(Mandatory = $true)][string[]]$Peers,
+    [string[]]$Peers = @("192.0.2.91"),
     [int]$Port = 8790,
     [int]$Fps = 120,
     [string]$ForUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name,

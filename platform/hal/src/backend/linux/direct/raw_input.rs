@@ -1168,7 +1168,7 @@ mod tests {
         AbsInfo { maximum, resolution: 32, ..Default::default() }
     }
 
-    /// The clickpad on a pool node: 4762 x 3099 units at 32 units/mm, 5 slots.
+    /// The clickpad on a node: 4762 x 3099 units at 32 units/mm, 5 slots.
     fn clickpad() -> Touchpad {
         Touchpad::new([axis(4762), axis(3099)], 5, true, true)
     }

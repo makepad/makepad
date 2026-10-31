@@ -3691,17 +3691,17 @@ quest-unauthorized     unauthorized usb:3\n\
     #[test]
     fn parse_ip_addr_show_extracts_ipv4() {
         let output = "\
-2: wlan0    inet 192.0.2.42/24 brd 192.0.2.255 scope global wlan0\n\
+2: wlan0    inet 198.51.100.13/24 brd 198.51.100.20 scope global wlan0\n\
    valid_lft forever preferred_lft forever\n";
-        assert_eq!(parse_ip_addr_show(output), Some("192.0.2.42".to_string()));
+        assert_eq!(parse_ip_addr_show(output), Some("198.51.100.13".to_string()));
     }
 
     #[test]
     fn parse_ip_route_prefers_src_ipv4() {
         let output = "\
-default via 192.0.2.1 dev wlan0 proto dhcp src 192.0.2.42 metric 303\n\
-192.0.2.0/24 dev wlan0 proto kernel scope link src 192.0.2.42\n";
-        assert_eq!(parse_ip_route(output), Some("192.0.2.42".to_string()));
+default via 198.51.100.11 dev wlan0 proto dhcp src 198.51.100.13 metric 303\n\
+198.51.100.10/24 dev wlan0 proto kernel scope link src 198.51.100.13\n";
+        assert_eq!(parse_ip_route(output), Some("198.51.100.13".to_string()));
     }
 
     #[test]

@@ -5,5 +5,5 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN="${MAKEPAD_TUNNEL_BIN:-$REPO_ROOT/target/release/cargo-makepad}"
-ADDR="${WIN_TUNNEL_ADDR:?set WIN_TUNNEL_ADDR to the node host:port}"
+ADDR="${WIN_TUNNEL_ADDR:-192.0.2.89:8384}"
 exec "$BIN" tunnel "$ADDR" run "$@"

@@ -4,7 +4,7 @@
 # Remove with: Remove-NetFirewallRule -DisplayName "Makepad Desk Host"
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
-    [Parameter(Mandatory = $true)][string[]]$Peers,
+    [string[]]$Peers = @("192.0.2.91"),
     [int]$Port = 8790
 )
 $ErrorActionPreference = "Stop"

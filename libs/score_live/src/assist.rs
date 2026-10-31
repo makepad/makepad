@@ -49,7 +49,7 @@ pub fn type_doc(ty: &str) -> Option<&'static str> {
         "Drums" => "a synthesized drum kit: sixteen voices (kick, snare, hats, toms…), each with its own level and tuning",
         "Sampler" => "a library sample played pitched from its root note",
         "Ironfish" => "Ironfish: a rich 16-voice synth with its own chorus, delay and reverb",
-        "Morph" => "Morph: a wavetable and analog synth (3 wavetable/granular/spectral/sample/analog oscs with warps and unison, sub, noise, 2 filters incl. analog_ types, 4 envs incl. analog RC, an analog amp, 8 LFOs, 8 macros, mod rows, arp, fx rack); morph_params lists its parameters",
+        "Morph" => "Morph: a wavetable synth (3 wavetable/granular/spectral/sample oscs with warps and unison, sub, noise, 2 filters, 4 envs, 8 LFOs, 8 macros, mod rows, arp, fx rack); morph_params lists its parameters",
         "Tandem" => "Tandem: the hybrid two-scene synth that plays the hybrid patch library (patch: \"Category/Name\"); tandem_patches finds patches, tandem_params lists its parameters",
         "Shader" => "an instrument written as an audio shader: a library one or your own code",
         "Voice" => "sung voices: sing(notes, \"lyrics\") in the loops that play it",

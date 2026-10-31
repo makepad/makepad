@@ -666,7 +666,7 @@ impl DisplayTrials {
 }
 
 /// The gallery's Display menu: a laptop panel on one GPU and a 4K
-/// monitor on another (a pool node's pair), a 144 Hz mode on the monitor
+/// monitor on another (a node's pair), a 144 Hz mode on the monitor
 /// waiting to be kept, and a failed try noted under the panel.
 pub fn gallery_fixture() -> (LinuxDisplaySnapshot, DisplayTrials) {
     let hdmi_modes = vec![

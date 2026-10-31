@@ -158,14 +158,11 @@ pub(super) struct V {
     pub num: Val,
 }
 
-/// The table name the patch format's own formulas call (`<name>.mod.Slew`); ours is `synth`.
-pub(super) const PATCH_LIB_NAME: &str = "surge";
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Lib {
     Math,
-    Host,
-    HostMod,
+    Surge,
+    SurgeMod,
     String,
     /// A builtin function by its name (`sin`, `random`, `str.sub`, ...).
     Fn(&'static str),
@@ -1564,7 +1561,7 @@ impl<'s> Cx<'s> {
         }
         match name {
             "math" => Some(CV::Lib(Lib::Math)),
-            "synth" | PATCH_LIB_NAME => Some(CV::Lib(Lib::Host)),
+            "surge" => Some(CV::Lib(Lib::Surge)),
             "string" => Some(CV::Lib(Lib::String)),
             _ => math_fn(name).or_else(|| GLOBAL_FNS.iter().find(|n| **n == name).copied()).map(|f| CV::Lib(Lib::Fn(f))),
         }
@@ -1751,15 +1748,15 @@ impl<'s> Cx<'s> {
                     return cerr(self.line, format!("math.{} is not supported", name));
                 }
             }
-            Lib::Host => match name {
-                "mod" => CV::Lib(Lib::HostMod),
-                _ => return cerr(self.line, format!("synth.{} is not supported", name)),
+            Lib::Surge => match name {
+                "mod" => CV::Lib(Lib::SurgeMod),
+                _ => return cerr(self.line, format!("surge.{} is not supported", name)),
             },
-            Lib::HostMod => match name {
+            Lib::SurgeMod => match name {
                 "Slew" => CV::Rt(self.table_const(PROTO_SLEW)),
                 "ClockDivider" => CV::Rt(self.table_const(PROTO_CLOCK)),
                 "AHDEnvelope" => CV::Rt(self.table_const(PROTO_AHD)),
-                _ => return cerr(self.line, format!("synth.mod.{} is not supported", name)),
+                _ => return cerr(self.line, format!("surge.mod.{} is not supported", name)),
             },
             Lib::String => CV::Lib(Lib::Fn(match name {
                 "sub" => "str.sub",

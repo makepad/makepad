@@ -444,11 +444,11 @@ mod tests {
         };
         let back = FleetBeaconJson::deserialize_json(&beacon.serialize_json()).unwrap();
         assert_eq!(back.port, 8123);
-        let from: std::net::IpAddr = "192.0.2.9".parse().unwrap();
-        assert_eq!(accept_fleet_beacon(&beacon, from, "gen").as_deref(), Some("https://192.0.2.9:8123"));
-        assert!(makepad_network::fleet::id::is_fleet_endpoint("192.0.2.9:8123"));
-        assert!(accept_fleet_beacon(&beacon, "192.0.2.8".parse().unwrap(), "game").is_none());
-        assert!(!makepad_network::fleet::id::is_fleet_endpoint("192.0.2.8:8123"));
+        let from: std::net::IpAddr = "192.0.2.109".parse().unwrap();
+        assert_eq!(accept_fleet_beacon(&beacon, from, "gen").as_deref(), Some("https://192.0.2.109:8123"));
+        assert!(makepad_network::fleet::id::is_fleet_endpoint("192.0.2.109:8123"));
+        assert!(accept_fleet_beacon(&beacon, "192.0.2.108".parse().unwrap(), "game").is_none());
+        assert!(!makepad_network::fleet::id::is_fleet_endpoint("192.0.2.108:8123"));
     }
 
     #[test]
@@ -457,7 +457,7 @@ mod tests {
         let root = Root::generate().unwrap();
         let fleet = Fleet::new(root.point(), Default::default());
         let key = generate_key().unwrap();
-        let node = Me::new(key, root.issue("n5", Role::Node, now_secs() + 3600, None, &point_of(&key)).unwrap()).unwrap();
+        let node = Me::new(key, root.issue("n217", Role::Node, now_secs() + 3600, None, &point_of(&key)).unwrap()).unwrap();
         let payload = FleetBeaconJson {
             service: FLEET_SERVICE.into(),
             node_id: 7,
@@ -466,7 +466,7 @@ mod tests {
             node_key: "00".into(),
         }
         .serialize_json();
-        let from: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let from: std::net::IpAddr = "192.0.2.97".parse().unwrap();
         let signed = node.announce(ANNOUNCE_SERVICE, payload.as_bytes()).unwrap();
         assert_eq!(check_fleet_beacon(&fleet, &signed, from, now_secs()).map(|b| b.node_id), Some(7));
         // Another service, another fleet, an unsigned beacon: dropped.
@@ -529,10 +529,10 @@ mod tests {
             .nodes
             .lock()
             .unwrap()
-            .insert(7, ("http://192.0.2.9:8767".to_string(), Instant::now()));
+            .insert(7, ("http://192.0.2.23:8767".to_string(), Instant::now()));
         let nodes = discovered.nodes();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].base_url, "http://192.0.2.9:8767");
+        assert_eq!(nodes[0].base_url, "http://192.0.2.23:8767");
         // Backdate past expiry: the node drops out.
         discovered.nodes.lock().unwrap().get_mut(&7).unwrap().1 =
             Instant::now() - BEACON_EXPIRY - Duration::from_secs(1);

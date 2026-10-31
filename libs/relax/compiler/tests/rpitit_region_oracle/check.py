@@ -1,4 +1,4 @@
-# Targeted rustc oracle; invoke only through nbuild.sh on a pool node.
+# Targeted rustc oracle; invoke only through nbuild.sh on a node.
 import pathlib
 import subprocess
 import tempfile

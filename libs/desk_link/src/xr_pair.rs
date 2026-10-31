@@ -628,7 +628,7 @@ mod tests {
     fn probe_and_answer_round_trip_between_fleet_machines() {
         let root = Root::generate().unwrap();
         let fleet = Fleet::new(root.point(), Default::default());
-        let (headset, server) = (machine(&root, "quest"), machine(&root, "n4"));
+        let (headset, server) = (machine(&root, "quest"), machine(&root, "n166"));
         let probe = Probe { nonce: [3; 32], instance: 42, name: "quest".into(), pin_tag: pin_tag(42, "01234"), pin_made: 100 };
         let bytes = probe.encode(headset).unwrap();
         assert!(bytes.len() < 1400);
@@ -674,7 +674,7 @@ mod tests {
         assert!(valid_pin(&h.pin) && h.instance != 0);
         let again = HeadsetPairing::load(dir.join("pairing"));
         assert_eq!((again.instance, &again.pin), (h.instance, &h.pin));
-        let a = |instance: u64, kind| Answer { instance, app: "a".into(), tcp: "192.0.2.1:1".parse().unwrap(), kind };
+        let a = |instance: u64, kind| Answer { instance, app: "a".into(), tcp: "192.0.2.16:1".parse().unwrap(), kind };
         h.pairs = vec![ServerPair { instance: 1, app: "a".into(), at: 10 }, ServerPair { instance: 2, app: "b".into(), at: 20 }];
         assert_eq!(h.choose(&[a(1, AnswerKind::Paired), a(2, AnswerKind::Paired)]).unwrap().unwrap().instance, 2);
         assert_eq!(h.choose(&[a(1, AnswerKind::Paired), a(5, AnswerKind::Pin)]).unwrap().unwrap().instance, 5);

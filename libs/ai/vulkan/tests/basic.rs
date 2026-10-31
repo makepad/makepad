@@ -1,5 +1,5 @@
 //! Kernels run on the real device and match the CPU (skipped without a
-//! Vulkan device). Run on a pool node and on the phone.
+//! Vulkan device). Run on a node and on the phone.
 use makepad_ai_vulkan::*;
 use std::sync::{Arc, Barrier};
 

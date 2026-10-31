@@ -58,11 +58,7 @@ impl Knob {
     pub fn readout(&self) -> String {
         let v = self.value;
         if self.spec.is_choice() {
-            // An analog slot type reads by its wiring: the prefix would fill the room.
-            return self.spec.options.get(v.round().max(0.0) as usize).map_or(String::new(), |o| match o.strip_prefix("analog_") {
-                Some(w) => format!("an {w}").chars().take(8).collect(),
-                None => o.chars().take(7).collect(),
-            });
+            return self.spec.options.get(v.round().max(0.0) as usize).map_or(String::new(), |o| o.chars().take(7).collect());
         }
         match self.spec.unit {
             Unit::Hz if v >= 1000.0 => format!("{:.1}k", v / 1000.0),
@@ -110,9 +106,7 @@ pub enum Graph {
     /// highpass, 3 bandpass; `q_unit` the resonance is a Q (else 0..1).
     Filter { cutoff: usize, res: Option<usize>, drive: Option<usize>, mode: u8, q_unit: bool },
     /// An oscillator's wave: 0 sine, 1 triangle, 2 saw, 3 square, 4 pulse,
-    /// 5 noise, 6 FM, 7 string, 8 a wavetable (`pos` the knob of where in it);
-    /// plus 10: drawn only (the mix of outputs has its own knobs, a click on
-    /// it picks nothing).
+    /// 5 noise, 6 FM, 7 string, 8 a wavetable (`pos` the knob of where in it).
     Wave { shape: u8, pos: Option<usize> },
     /// An LFO's shape (as its options name it) at its rate.
     Lfo { shape: String, rate: Option<usize> },
@@ -128,17 +122,6 @@ pub struct Module {
     pub knobs: Vec<Knob>,
     /// How much it matters when the card is narrow (0 kept last).
     pub rank: u8,
-    /// Chips by its title: what kind of module it is.
-    pub picks: Vec<ModulePick>,
-}
-
-/// A chip that sets a choice: its label now, what a click writes.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ModulePick {
-    pub field: &'static str,
-    pub label: String,
-    pub value: String,
-    pub tip: String,
 }
 
 /// A drum kit's voice: a pad.
@@ -420,7 +403,6 @@ fn synth_modules(source: &str, outline: &Outline, node: &str, layer: &makepad_au
         graph: Graph::Wave { shape, pos: None },
         knobs: osc_knobs,
         rank: 2,
-        picks: Vec::new(),
     }];
     let mode = match l.filter {
         FilterMode::Off => 0,
@@ -440,7 +422,6 @@ fn synth_modules(source: &str, outline: &Outline, node: &str, layer: &makepad_au
         graph: Graph::Filter { cutoff: 0, res: Some(1), drive: Some(2), mode, q_unit: true },
         knobs: vec![k("cutoff"), k("res"), k("drive")],
         rank: 4,
-        picks: Vec::new(),
     });
     modules.push(Module {
         title: "AMP ENV".into(),
@@ -448,7 +429,6 @@ fn synth_modules(source: &str, outline: &Outline, node: &str, layer: &makepad_au
         graph: Graph::Env { attack: 0, decay: 1, sustain: 2, release: 3 },
         knobs: vec![k("attack"), k("decay"), k("sustain"), k("release")],
         rank: 5,
-        picks: Vec::new(),
     });
     // Modulation: only what this synth uses or the source writes.
     let mut mods = Vec::new();
@@ -461,9 +441,9 @@ fn synth_modules(source: &str, outline: &Outline, node: &str, layer: &makepad_au
         mods.push(k("sweep"));
     }
     if !mods.is_empty() {
-        modules.push(Module { title: "MOD".into(), tip: "modulation: vibrato and the filter's sweep".into(), graph: Graph::None, knobs: mods, rank: 1, picks: Vec::new() });
+        modules.push(Module { title: "MOD".into(), tip: "modulation: vibrato and the filter's sweep".into(), graph: Graph::None, knobs: mods, rank: 1 });
     }
-    modules.push(Module { title: "OUT".into(), tip: "the output level".into(), graph: Graph::None, knobs: vec![k("gain")], rank: 3, picks: Vec::new() });
+    modules.push(Module { title: "OUT".into(), tip: "the output level".into(), graph: Graph::None, knobs: vec![k("gain")], rank: 3 });
     modules
 }
 
@@ -492,7 +472,6 @@ fn group_shape(group: &str) -> (String, &'static str, &'static [&'static str]) {
         "voice" => ("OUT".into(), "out", &["level", "glide"]),
         "sub" => ("SUB".into(), "", &["level", "oct"]),
         "noise" => ("NOISE".into(), "", &["level"]),
-        "amp" => ("AMP".into(), "amp", &["gain", "idle"]),
         g => (g.to_uppercase(), "", &[]),
     }
 }
@@ -514,7 +493,7 @@ fn schema_modules(source: &str, outline: &Outline, node: &str, ty: &str, value: 
             let s = spec::spec(ty, k);
             outline.node(node).and_then(|n| n.field(k)).is_some() || matches!((value(k), s), (Some(v), Some(s)) if (v - s.default).abs() > 1e-6)
         });
-        let primary = matches!(*group, "osc_a" | "filter1" | "env1" | "voice" | "amp");
+        let primary = matches!(*group, "osc_a" | "filter1" | "env1" | "voice");
         let shown = match on {
             Some(on) => on && (primary || away || kind != "osc"),
             None => primary || away,
@@ -525,37 +504,6 @@ fn schema_modules(source: &str, outline: &Outline, node: &str, ty: &str, value: 
         // The module's knobs: its main ones in their order, then what is
         // set away from the default, in the schema's order.
         let make = |key: &str| knob(source, outline, node, ty, key, value);
-        // An oscillator's mode decides what its main knobs and picture are.
-        let osc_mode = key_of("mode").and_then(|k| {
-            let s = spec::spec(ty, &k)?;
-            let v = value(&k).unwrap_or(s.default);
-            s.options.get(v.round().max(0.0) as usize).cloned()
-        });
-        let analog_osc = kind == "osc" && osc_mode.as_deref() == Some("analog");
-        let first: &[&str] = if analog_osc { &["saw", "pulse", "pw", "level"] } else { first };
-        // What picks the module's kind: chips by its title.
-        let pick_keys: &[&str] = match kind {
-            "osc" if analog_osc => &["mode", "sync"],
-            "osc" => &["mode"],
-            "filter" => &["type"],
-            "env" => &["model"],
-            "amp" => &["type", "law"],
-            _ => &[],
-        };
-        let mut picks: Vec<ModulePick> = Vec::new();
-        for s in pick_keys {
-            let Some(field) = keys.iter().copied().find(|k| suffix(k) == *s) else { continue };
-            let knob = make(field);
-            let at = knob.value.round().max(0.0) as usize;
-            let Some(next) = knob.spec.options.get((at + 1) % knob.spec.options.len().max(1)) else { continue };
-            picks.push(ModulePick { field, label: knob.readout(), value: format!("@{next}"), tip: knob.tip.clone() });
-            // Forty-odd filter types: a second chip goes straight to or from the analog family.
-            if kind == "filter" {
-                let analog = knob.spec.options.get(at).is_some_and(|o| o.starts_with("analog_"));
-                let (label, value) = if analog { ("kit", "@lp24") } else { ("analog", "@analog_lp") };
-                picks.push(ModulePick { field, label: label.into(), value: value.into(), tip: "go to the kit's filters or to the analog chip's".into() });
-            }
-        }
         let mut chosen: Vec<String> = first.iter().filter_map(|s| key_of(s)).collect();
         let cap = match kind {
             "env" => 4,
@@ -595,27 +543,15 @@ fn schema_modules(source: &str, outline: &Outline, node: &str, ty: &str, value: 
                         let v = value(&k).unwrap_or(s.default);
                         s.options.get(v.round().max(0.0) as usize).cloned()
                     });
-                    let mode = mode.as_deref().map(|m| m.strip_prefix("analog_").unwrap_or(m));
-                    let mode = match mode {
-                        Some(m) if m.starts_with("hp") || m == "sv_hp" => 2,
-                        Some(m) if m.starts_with("bp") || m == "sv_bp" || m == "peak" || m == "notch" => 3,
+                    let mode = match mode.as_deref() {
+                        Some(m) if m.starts_with("hp") => 2,
+                        Some(m) if m.starts_with("bp") || m == "peak" || m == "notch" => 3,
                         _ => 1,
                     };
                     Graph::Filter { cutoff, res: at("res"), drive: at("drive"), mode, q_unit: false }
                 }
                 None => Graph::None,
             },
-            "osc" if analog_osc => {
-                let level = |s: &str| key_of(s).and_then(|k| value(&k).or_else(|| spec::spec(ty, &k).map(|s| s.default))).unwrap_or(0.0);
-                let shape = if level("pulse") > level("saw") {
-                    if (level("pw") - 0.5).abs() < 0.02 { 3 } else { 4 }
-                } else if level("tri") > level("saw") {
-                    1
-                } else {
-                    2
-                };
-                Graph::Wave { shape: shape + 10, pos: None }
-            }
             "osc" => Graph::Wave { shape: 8, pos: at("pos") },
             "lfo" => {
                 let shape = key_of("shape").and_then(|k| {
@@ -633,11 +569,11 @@ fn schema_modules(source: &str, outline: &Outline, node: &str, ty: &str, value: 
             "env" if *group == "env1" => 5,
             "filter" if *group == "filter1" => 4,
             "osc" if *group == "osc_a" => 4,
-            "amp" | "out" => 3,
+            "out" => 3,
             "osc" | "filter" => 2,
             _ => 1,
         };
-        out.push(Module { title, tip: about.to_string(), graph, knobs, rank, picks });
+        out.push(Module { title, tip: about.to_string(), graph, knobs, rank });
     }
     out
 }
@@ -818,7 +754,7 @@ pub fn build(doc: &ScoreDoc, source: &str, outline: &Outline, folds: &Folds, p: 
                         _ => {
                             let none = |_: &str| None;
                             let knobs = loose_knobs(source, outline, name, other, &[], &[], &none);
-                            let modules = if knobs.is_empty() { Vec::new() } else { vec![Module { title: "SOUND".into(), tip: String::new(), graph: Graph::None, knobs, rank: 3, picks: Vec::new() }] };
+                            let modules = if knobs.is_empty() { Vec::new() } else { vec![Module { title: "SOUND".into(), tip: String::new(), graph: Graph::None, knobs, rank: 3 }] };
                             (modules, Vec::new())
                         }
                     };
@@ -840,34 +776,6 @@ pub fn build(doc: &ScoreDoc, source: &str, outline: &Outline, folds: &Folds, p: 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Each module's kind is a chip on its card: that is where a person picks
-    /// the analog parts next to the kit's own.
-    #[test]
-    fn a_morphs_cards_pick_each_modules_kind() {
-        let outline = source::outline("");
-        let schema = &makepad_audio_synth::morph::layout().schema;
-        let values: Vec<(&str, f64)> = vec![("a_mode", 4.0), ("f1_type", schema.param("f1_type").unwrap().options.iter().position(|o| *o == "analog_hp").unwrap() as f64), ("env1_model", 1.0), ("amp_type", 1.0)];
-        let value = |k: &str| values.iter().find(|(key, _)| *key == k).map(|(_, v)| *v);
-        let modules = schema_modules("", &outline, "lead", "Morph", &value);
-        let card = |title: &str| modules.iter().find(|m| m.title == title).unwrap_or_else(|| panic!("{title} is not shown"));
-        let fields = |title: &str| card(title).knobs.iter().map(|k| k.field.clone()).collect::<Vec<_>>();
-        assert_eq!(fields("OSC A"), ["a_saw", "a_pulse", "a_pw", "a_level"]);
-        assert_eq!(fields("FILTER 1"), ["f1_cutoff", "f1_res", "f1_drive"]);
-        assert_eq!(fields("AMP ENV"), ["env1_attack", "env1_decay", "env1_sustain", "env1_release"]);
-        assert_eq!(fields("AMP"), ["amp_gain", "amp_idle"]);
-        // The chips name what is picked and step on; a drawn analog wave is no picker.
-        let picks = |title: &str| card(title).picks.iter().map(|p| (p.field, p.label.clone(), p.value.clone())).collect::<Vec<_>>();
-        assert_eq!(picks("OSC A")[0], ("a_mode", "analog".to_string(), "@wavetable".to_string()));
-        assert_eq!(picks("OSC A")[1].0, "a_sync");
-        assert_eq!(picks("FILTER 1")[0], ("f1_type", "an hp".to_string(), "@analog_bp".to_string()));
-        assert_eq!(picks("FILTER 1")[1], ("f1_type", "kit".to_string(), "@lp24".to_string()));
-        assert_eq!(picks("AMP ENV")[0], ("env1_model", "analog".to_string(), "@curve".to_string()));
-        assert_eq!(picks("AMP")[0], ("amp_type", "analog".to_string(), "@clean".to_string()));
-        assert!(matches!(card("OSC A").graph, Graph::Wave { shape: 12, pos: None }));
-        assert!(matches!(card("FILTER 1").graph, Graph::Filter { mode: 2, .. }));
-        assert!(matches!(card("AMP ENV").graph, Graph::Env { .. }));
-    }
 
     #[test]
     fn every_node_gets_a_lens_with_knobs_from_the_tables() {

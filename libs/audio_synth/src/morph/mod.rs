@@ -1,10 +1,10 @@
 //! Morph: a wavetable synth layout over the synth kit ([`crate::kit`]).
 //!
-//! A voice has three main oscillators (each wavetable, granular, spectral,
-//! sample or analog, with unison and two warps), a sub and a noise oscillator,
-//! two filters (serial or parallel; each source picks the filter it feeds),
-//! four envelopes (the first is the amp), an amplifier, eight LFOs, eight
-//! macros and a mod matrix of up to 64 rows. The voices are summed into the effects
+//! A voice has three main oscillators (each wavetable, granular, spectral
+//! or sample, with unison and two warps), a sub and a noise oscillator, two
+//! filters (serial or parallel; each source picks the filter it feeds),
+//! four envelopes (the first is the amp), eight LFOs, eight macros and a
+//! mod matrix of up to 64 rows. The voices are summed into the effects
 //! rack; an arpeggiator can play the held notes on the tempo.
 //!
 //! Every parameter is in one schema ([`layout`]), which the score, the
@@ -19,7 +19,6 @@ mod patch;
 
 pub use patch::{MorphPatch, MorphSources};
 
-use crate::kit::analog::vca::{self, Vca, VcaBlock, VcaIx};
 use crate::kit::arp::{self, Arp, ArpEvent, ArpIx, ArpSettings};
 use crate::kit::env::{bend, Env, EnvBlock, EnvIx};
 use crate::kit::filter::{self, Filter, FilterBlock, FilterIx};
@@ -47,7 +46,6 @@ pub struct Ix {
     pub filter: [FilterIx; 2],
     pub filter_route: usize,
     pub env: [EnvIx; 4],
-    pub amp: VcaIx,
     pub lfo: [LfoIx; 8],
     pub macros: [usize; 8],
     pub poly: usize,
@@ -89,7 +87,6 @@ fn build() -> Layout {
     b.group("filters", "serial: f1 then f2; parallel: side by side");
     let filter_route = b.choice("filter_route".into(), "route", filter::ROUTES, 0, "");
     let env = std::array::from_fn(|e| crate::kit::env::declare(&mut b, e + 1, e == 0));
-    let amp = vca::declare(&mut b);
     let lfo = std::array::from_fn(|l| lfo::declare(&mut b, l + 1));
     b.group("macros", "eight macro knobs (sources m1..m8): give each a job with mod rows; macro_names names them");
     let macros = std::array::from_fn(|m| b.num(format!("m{}", m + 1), &format!("macro {}", m + 1), 0.0, 1.0, 0.0, Percent, ""));
@@ -116,7 +113,7 @@ fn build() -> Layout {
     Layout {
         schema: b.finish(),
         ix: Ix {
-            osc, sub, noise, filter, filter_route, env, amp, lfo, macros, poly, mono, legato, glide, glide_mode, glide_scaled, glide_curve, bend_range,
+            osc, sub, noise, filter, filter_route, env, lfo, macros, poly, mono, legato, glide, glide_mode, glide_scaled, glide_curve, bend_range,
             pitch, velocity, level, rand_pan, rand_detune, rand_cutoff, rand_env, tuning, tuning_root, arp, fx,
         },
     }
@@ -152,16 +149,6 @@ pub const PRESETS: &[(&str, &str, &str)] = &[
     ("fm_metal", "a fifth-up oscillator frequency-modulating the first, closing", "b_on=true b_semi=19 b_level=0 a_warp1=fm a_warp1_amt=0.35 a_warp_src=b env2_decay=0.9 mod=env2,a_warp1_amt,0.5 env1_decay=1.4 env1_sustain=0.2 f1_on=false"),
     ("sync_lead", "a hard-sync lead, the sync swept by an envelope", "a_warp1=sync a_warp1_amt=0.2 env2_decay=0.6 mod=env2,a_warp1_amt,0.5 a_unison=2 a_detune=6 mono=true legato=true glide=0.07 f1_cutoff=6000 fx=delay delay_mix=0.15"),
     ("orbit_pad", "two tables moved by one circular path (x and y)", "a_table=organ b_on=true b_table=vocal b_level=0.6 lfo1_shape=circle lfo1_rate=0.15 mod=lfo1,a_pos,0.5 mod=lfo1y,b_pos,0.5 env1_attack=0.7 env1_release=2.5 fx=reverb reverb_mix=0.4"),
-    ("analog_bass", "a dark analog bass: saw and pulse cores an octave apart, the four-pole filter snapped shut by an RC envelope", "level=1.8 a_mode=analog b_on=true b_mode=analog b_saw=0.5 b_pulse=0.6 b_oct=-1 b_fine=-5 f1_type=analog_lp f1_cutoff=240 f1_res=0.5 env1_model=analog env1_attack=0.001 env1_decay=0.4 env1_sustain=0.6 env1_release=0.04 env2_model=analog env2_attack=0.001 env2_decay=0.12 env2_sustain=0 env2_release=0.08 mod=env2,f1_cutoff,0.42 amp_type=analog mono=true glide=0.02"),
-    ("analog_brass", "an analog brass swell: two detuned saws, the filter opening on a slow RC attack", "level=1.1 a_mode=analog a_fine=-4 b_on=true b_mode=analog b_fine=4 f1_type=analog_lp f1_cutoff=500 f1_res=0.25 env1_model=analog env1_attack=0.03 env1_decay=0.5 env1_sustain=0.8 env1_release=0.1 env2_model=analog env2_attack=0.05 env2_decay=0.35 env2_sustain=0.45 env2_release=0.12 mod=env2,f1_cutoff,0.4 amp_type=analog amp_idle=50 fx=reverb reverb_mix=0.15"),
-    ("analog_strings", "analog string pad: pulse width moved by slow LFOs, a soft filter, chorus", "a_mode=analog a_saw=0.4 a_pulse=0.7 b_on=true b_mode=analog b_saw=0.4 b_pulse=0.7 b_fine=7 lfo1_rate=0.4 lfo2_rate=0.53 mod=lfo1,a_pw,0.2 mod=lfo2,b_pw,0.2 f1_type=analog_lp f1_cutoff=2600 f1_res=0.1 env1_model=analog env1_attack=0.35 env1_decay=1 env1_sustain=1 env1_release=0.5 amp_type=analog amp_law=exponential amp_idle=100 fx=chorus,reverb reverb_mix=0.3"),
-    ("analog_sync_lead", "a screaming analog sync lead: a slave saw reset by its master, swept by an envelope", "level=2 a_mode=analog a_saw=0.3 b_on=true b_mode=analog b_sync=reset b_warp_src=a b_semi=7 env2_model=analog env2_attack=0.002 env2_decay=0.6 env2_sustain=0.1 env2_release=0.2 mod=env2,b_semi,0.3 f1_type=analog_lp f1_cutoff=5000 f1_res=0.3 env1_model=analog env1_attack=0.002 env1_decay=0.8 env1_sustain=0.75 env1_release=0.12 amp_type=analog mono=true legato=true glide=0.05 fx=delay delay_mix=0.2"),
-    ("analog_reversal", "the chip's reversal sync: a triangle core turned round by the master's edges, a hollow growling lead", "level=2 a_mode=analog a_saw=0 a_pulse=0.3 b_on=true b_mode=analog b_sync=hard b_warp_src=a b_semi=12 b_saw=0.7 b_tri=0.6 lfo1_rate=0.3 mod=lfo1,b_semi,0.12 f1_type=analog_lp f1_cutoff=3800 f1_res=0.2 env1_model=analog env1_attack=0.003 env1_decay=0.6 env1_sustain=0.7 env1_release=0.15 amp_type=analog mono=true"),
-    ("analog_pluck", "a bright analog pluck: the filter's envelope and the amp share one fast decay", "level=1.6 a_mode=analog a_pulse=0.3 f1_type=analog_lp f1_cutoff=500 f1_res=0.55 env1_model=analog env1_attack=0.001 env1_decay=0.22 env1_sustain=0 env1_release=0.1 env2_model=analog env2_attack=0.001 env2_decay=0.09 env2_sustain=0 env2_release=0.06 mod=env2,f1_cutoff,0.5 amp_type=analog amp_law=exponential amp_range=70 fx=delay delay_mix=0.18"),
-    ("analog_whistle", "the filter alone, self-oscillating: a pure sine tracking the keys, with a touch of noise", "level=2 a_on=false noise_on=true noise_level=0.03 f1_type=analog_lp f1_cutoff=261.6 f1_key=1 f1_res=0.97 env1_model=analog env1_attack=0.02 env1_decay=1 env1_sustain=1 env1_release=0.2 amp_type=analog amp_idle=100 lfo1_rate=5 mod=lfo1,f1_cutoff,0.006 fx=reverb reverb_mix=0.25"),
-    ("analog_phase_keys", "analog keys through the chip's all-pass wiring mixed with the dry signal: a slow phaser", "level=1.1 a_mode=analog a_saw=0.5 a_tri=0.7 f1_type=analog_ap f1_cutoff=900 f1_res=0.55 f1_mix=0.5 lfo1_rate=0.25 mod=lfo1,f1_cutoff,0.3 env1_model=analog env1_attack=0.003 env1_decay=0.9 env1_sustain=0.5 env1_release=0.25 amp_type=analog fx=reverb reverb_mix=0.2"),
-    ("analog_fm_bell", "a metallic analog bell: linear FM between cores, not through zero, with an exponential decay", "level=1.6 a_mode=analog a_saw=0 a_tri=1 a_fm=0.7 a_warp_src=b b_on=true b_mode=analog b_saw=0 b_tri=1 b_semi=19 b_level=0 env2_model=analog env2_attack=0.001 env2_decay=0.5 env2_sustain=0 env2_release=0.3 mod=env2,a_fm,0.3 f1_on=false env1_model=analog env1_attack=0.001 env1_decay=0.9 env1_sustain=0 env1_release=0.5 amp_type=analog amp_law=exponential amp_range=80 fx=reverb reverb_mix=0.3"),
-    ("analog_state_bass", "a rounder bass from the chip's state-variable wiring, its Q on the mod wheel", "level=1.2 a_mode=analog a_saw=0.7 a_pulse=0.5 a_oct=-1 f1_type=analog_sv_lp f1_cutoff=500 f1_res=0.35 mod=mod,f1_res,0.5 env1_model=analog env1_attack=0.002 env1_decay=0.3 env1_sustain=0.7 env1_release=0.06 env2_model=analog env2_attack=0.002 env2_decay=0.14 env2_sustain=0 env2_release=0.08 mod=env2,f1_cutoff,0.35 amp_type=analog amp_idle=30 mono=true"),
 ];
 
 /// A voice of the engine.
@@ -189,7 +176,6 @@ struct Voice {
     lfo: [Lfo; 8],
     vals: Box<[f32]>,
     amp: f32,
-    vca: Vca,
     dc: [DcBlock; 2],
     rng: Rng,
 }
@@ -215,12 +201,11 @@ impl Voice {
             osc: [Osc::new(seed * 3 + 1), Osc::new(seed * 3 + 2), Osc::new(seed * 3 + 3)],
             sub: Sub::default(),
             noise: NoiseOsc::new(seed.wrapping_mul(97) + 5),
-            filter: [Filter::new(seed * 5 + 1), Filter::new(seed * 5 + 2)],
-            env: std::array::from_fn(|e| Env::new(seed * 7 + e as u32)),
+            filter: [Filter::default(), Filter::default()],
+            env: [Env::default(); 4],
             lfo: std::array::from_fn(|i| Lfo::new(seed * 11 + i as u32 + 1)),
             vals: vec![0.0; nparams].into_boxed_slice(),
             amp: 0.0,
-            vca: Vca::new(seed),
             dc: [DcBlock::default(); 2],
             rng: Rng::new(seed.wrapping_mul(0x9e37_79b9) | 1),
         }
@@ -494,7 +479,6 @@ impl Morph {
                 f.reset();
             }
             v.amp = 0.0;
-            v.vca.reset();
             v.dc = [DcBlock::default(); 2];
             for e in v.env.iter_mut() {
                 e.kill();
@@ -719,13 +703,6 @@ impl Morph {
         v.amp = amp_to;
         let damp = (amp_to - amp_from) / BLOCK as f32;
         let mut amp = amp_from;
-        // The analog amplifier takes the envelope on one control and `gain`
-        // on the other, each cell its own; the plain one multiplies below.
-        let analog_amp = vals.index(ix.amp.kind) == 1;
-        if analog_amp {
-            let g = vca::law_gain(vals.index(ix.amp.law) as u8, amp_to, vals[ix.amp.range]) * vca::db_gain(vals[ix.amp.gain]);
-            v.vca.prepare(&VcaBlock::read(vals, &ix.amp), [g, g * vca::db_gain(vals[ix.amp.second])], BLOCK);
-        }
         let mut lasts = [v.osc[0].last, v.osc[1].last, v.osc[2].last, 0.0, 0.0];
         let gain = 0.5 * vel_gain;
         for i in 0..BLOCK {
@@ -757,11 +734,7 @@ impl Morph {
                 if !b.on {
                     continue;
                 }
-                let from = b.warp_src as usize % 5;
-                let m = lasts[from];
-                if b.mode == 4 && b.sync != 0 && from < 3 && from != o {
-                    v.osc[o].sync_in = v.osc[from].edges;
-                }
+                let m = lasts[b.warp_src as usize % 5];
                 let (l, r) = v.osc[o].tick(b, &src.osc[o], m, rate);
                 lasts[o] = v.osc[o].last;
                 let (pl, pr) = pan_gains(b.pan);
@@ -787,15 +760,9 @@ impl Morph {
                 if fb[1].on { v.filter[1].tick(x2) } else { x2 }
             };
             amp += damp;
-            let (yl, yr) = if analog_amp {
-                let [yl, yr] = v.vca.tick([(mixed[0] + direct[0]) * gain * vpl, (mixed[1] + direct[1]) * gain * vpr]);
-                (yl, yr)
-            } else {
-                let a = amp * gain;
-                ((mixed[0] + direct[0]) * a * vpl, (mixed[1] + direct[1]) * a * vpr)
-            };
-            out_l[i] += v.dc[0].process(yl);
-            out_r[i] += v.dc[1].process(yr);
+            let a = amp * gain;
+            out_l[i] += v.dc[0].process((mixed[0] + direct[0]) * a * vpl);
+            out_r[i] += v.dc[1].process((mixed[1] + direct[1]) * a * vpr);
         }
         if !v.env[0].active() {
             v.active = false;

@@ -94,7 +94,7 @@ pub struct Heard {
 /// The machines the master dials: every `nodes.conf` seed, then each heard node that is not one
 /// of them. Machines are matched by fleet identity (a seed's identity is what its certificate
 /// proved when it was dialled: `identity(addr)`), and by address before a seed was reached, so
-/// `n1` in nodes.conf and the node announcing itself as `100` are one machine.
+/// `n100` in nodes.conf and the node announcing itself as `100` are one machine.
 pub fn merge(seeds: &Hosts, heard: &[Heard], identity: &dyn Fn(&str) -> Option<String>) -> Hosts {
     let mut out = seeds.clone();
     let seed_ids: Vec<String> = seeds.hosts.iter().filter_map(|h| identity(fleet_addr(h))).collect();
@@ -383,9 +383,9 @@ mod tests {
 
     #[test]
     fn one_machine_one_host_by_fleet_identity() {
-        let seeds = Hosts { hosts: vec![Host { name: "n1".into(), via: Via::Fleet { addr: "192.0.2.38:8797".into() } }, Host { name: "mini".into(), via: Via::Fleet { addr: "192.0.2.92:8797".into() } }] };
+        let seeds = Hosts { hosts: vec![Host { name: "n100".into(), via: Via::Fleet { addr: "192.0.2.38:8797".into() } }, Host { name: "mac-b".into(), via: Via::Fleet { addr: "192.0.2.92:8797".into() } }] };
         let heard = vec![
-            // n1 announcing under its default name: same address
+            // n100 announcing under its default name: same address
             Heard { name: "100".into(), addr: "192.0.2.38:8797".into(), fleet: "a node".into() },
             // the mini on its Wi-Fi address: same fleet identity as the dialled seed
             Heard { name: "mini".into(), addr: "192.0.2.75:8797".into(), fleet: "mini".into() },
@@ -399,7 +399,7 @@ mod tests {
             _ => None,
         };
         let names: Vec<String> = merge(&seeds, &heard, &identity).hosts.into_iter().map(|h| h.name).collect();
-        assert_eq!(names, vec!["n1", "mini", "217"]);
+        assert_eq!(names, vec!["n100", "mac-b", "217"]);
     }
 
     /// The open fds of this process.

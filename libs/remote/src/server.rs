@@ -1017,8 +1017,8 @@ mod tests {
     #[test]
     fn limiter_bans_after_repeated_failures() {
         let l = Limiter::new();
-        let ip: IpAddr = "10.77.0.9".parse().unwrap();
-        let other: IpAddr = "10.77.0.10".parse().unwrap();
+        let ip: IpAddr = "192.0.2.23".parse().unwrap();
+        let other: IpAddr = "192.0.2.24".parse().unwrap();
         let t0 = Instant::now();
         for i in 0..MAX_FAILURES - 1 {
             assert!(!l.fail(ip, t0 + Duration::from_secs(i as u64)));
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn lan_scope() {
-        for ok in ["10.77.0.5", "192.168.77.2", "172.16.77.4", "127.0.0.1", "::1", "fd00::1", "fe80::1"] {
+        for ok in ["192.0.2.20", "198.51.100.22", "203.0.113.12", "127.0.0.1", "::1", "fd00::1", "fe80::1"] {
             assert!(is_lan(ok.parse().unwrap()), "{ok}");
         }
         for bad in ["8.8.8.8", "172.32.0.1", "2001:db8::1", "::ffff:8.8.8.8"] {

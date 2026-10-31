@@ -532,7 +532,7 @@ fn hosts(line: &str, found: &mut Vec<(&'static str, String)>) {
             found.push((PRIVATE_HOST, host.to_owned()));
         }
     }
-    // Private addresses outside URLs (ssh arch@10.77.0.2, a config value).
+    // Private addresses outside URLs (ssh arch@192.0.2.17, a config value).
     for word in line.split(|c: char| !(c.is_ascii_digit() || c == '.')) {
         if private_ipv4(word) && !found.iter().any(|(_, m)| m == word) {
             found.push((PRIVATE_HOST, word.to_owned()));

@@ -895,8 +895,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let check_restore = check && !watch && !root_only && !selftest && !workspace_check && session.is_none();
     if check_restore {
         let mut roots: Vec<String> = crate::reload::gandalf_app_roots(&units, &crate::unitgraph::manifest_dir_of(&g.crates[g.root].src_path));
-        let own_dir = &g.pkg[g.root].0;
-        roots.extend((0..g.crates.len()).filter(|&c| g.pkg[c].0 == *own_dir).map(|c| crate::vfs::normalize_path(&g.crates[c].src_path)));
+        roots.extend(g.bins.iter().chain(std::iter::once(&g.root)).map(|&b| crate::vfs::normalize_path(&g.crates[b].src_path)));
         let checked: Vec<(String, String)> = pre.iter().filter(|c| roots.contains(&crate::vfs::normalize_path(&c.root))).map(|c| (c.name.clone(), c.root.clone())).collect();
         if let Some(images) = front_images.as_ref() { images.reload_crates(checked); }
     }
@@ -920,19 +919,12 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let mut app_roots = crate::reload::gandalf_app_roots(&units, &root_dir);
     // a check of a package with several bins checks each of them
     app_roots.extend(g.bins.iter().map(|&b| crate::vfs::normalize_path(&g.crates[b].src_path)));
-    // a check of a package checks its lib too, wherever the package lives: the root of a package
-    // with bins is a bin, and a lib under libs/ is no app crate of its own
-    if check {
-        let own_dir = &g.pkg[g.root].0;
-        app_roots.extend((0..g.crates.len()).filter(|&c| g.pkg[c].0 == *own_dir).map(|c| crate::vfs::normalize_path(&g.crates[c].src_path)));
-    }
     if crate::borrowck::lazy::gandalf_enabled(options) {
         verbose!("makepad-run: gandalf app scope ({} crates): {}", app_roots.len(), app_roots.join(" "));
     }
     crate::borrowck::event::set_app_scope(app_roots);
-    // `makepad check` and `makepad test`'s up-front check borrow-check crates outside the app
-    // scope (a package under libs/): they keep their user-written types
-    if check || harness || plain_test.is_some() { crate::borrowck::event::set_check_scope(); }
+    // `makepad check` borrow-checks every crate it loads: all keep their user-written types
+    if check { crate::borrowck::event::set_check_scope(); }
     jit::settle_rebuild::remember_boot(&pre);
     prog.record_front = front_images.is_some();
     prog.front_sink = front_images.as_ref().and_then(|images| images.sink());

@@ -345,7 +345,7 @@ fn paired_listeners_bind_lan_or_loopback_only() {
         let e = lan_bind_addr(bad).expect_err(bad);
         assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{bad}");
     }
-    for ok in ["127.0.0.1:0", "10.77.0.5:7000", "192.168.77.2:7000", "[::1]:0", "[fd00::1]:7000"] {
+    for ok in ["127.0.0.1:0", "192.0.2.20:7000", "198.51.100.22:7000", "[::1]:0", "[fd00::1]:7000"] {
         lan_bind_addr(ok).expect(ok);
     }
 }
@@ -622,7 +622,7 @@ fn loopback_carrier_requires_its_token_and_end_lines_carry_host_fields() {
             _ => panic!("a peer without the token must be refused"),
         }
     }
-    assert!(crate::carrier::loopback::dial("10.77.0.3:80").is_err(), "only loopback is dialled");
+    assert!(crate::carrier::loopback::dial("192.0.2.96:80").is_err(), "only loopback is dialled");
 }
 
 #[test]

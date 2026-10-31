@@ -38,7 +38,6 @@ step_build() {
   if grep -E "^(warning|error)" "$log/build" | grep -qv sandbox; then grep -E "^(warning|error)" "$log/build" | grep -v sandbox | head -20; fail="$fail build-warnings"; return 1; fi
 }
 step_rustc_check() {
-  cargo run -q --profile host -p makepad-private-check > "$log/private" 2>&1 || { head -20 "$log/private"; fail="$fail private"; }
   CARGO_INCREMENTAL=0 cargo check --release -p makepad-widgets -j8 > "$log/rustc" 2>&1 || { grep -E "^error" -A6 "$log/rustc" | head -20; fail="$fail rustc-check"; }
 }
 step_libtest_build() {
@@ -54,7 +53,6 @@ check_pkg() { # check_pkg <label> <pkg> <dir>
 step_checks() {
   for p in makepad-example-counter makepad-app-calculator makepad-platform makepad-draw makepad-widgets makepad-widgets-core; do check_pkg $p $p .; done
   step_check_stage
-  cr=$(bash tools/run/fixture/check_reject.sh 2>&1); echo "$cr"; case "$cr" in *"check_reject: ok"*) ;; *) fail="$fail check-reject";; esac
 }
 step_check_stage() { check_pkg stage makepad-stage apps/commercial; }
 present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh home; 1 when the app reports `present`

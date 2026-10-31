@@ -2,7 +2,7 @@
 # The devhub NODE on a macOS box (the Mac mini), run as its desktop user in its login session (the Desk Host
 # pattern: a LaunchAgent, started at login and restarted when it dies). Never on the user's Mac: that one is
 # the master (the devhub Dock app: `makepad run makepad-app-devhub`, its "Open at login" LaunchAgent).
-#   tools/devhub/install-node-mac.sh [--tree <dir>] [--name mini] [--host <LAN address>]
+#   tools/devhub/install-node-mac.sh [--tree <dir>] [--name mac-b] [--host <LAN address>]
 # 1. writes ~/.makepad/devhub/node-start.sh: `cargo run --release -p makepad-app-devhub` in the node's one tree
 #    (--tree; default ~/devhub/tree when it exists, the tree the leases run in, else this checkout), so every
 #    restart runs the tree's current code (no installed copy goes stale);
@@ -13,7 +13,7 @@
 #    every exit (a clean one too: a restart for new code is a clean exit).
 # The node proves itself with the machine's fleet identity (~/.makepad/fleet, tools/fleet-identity.md);
 # without one it serves this machine's JITs locally only, and its log says so.
-# Role and budgets are the master's: `makepad devhub node mini role bench` (kept in lease.conf here).
+# Role and budgets are the master's: `makepad devhub node mac-b role bench` (kept in lease.conf here).
 # Undo: launchctl bootout gui/$(id -u)/nl.makepad.devhub-node; delete ~/Library/LaunchAgents/nl.makepad.devhub-node.plist
 # and ~/.makepad/devhub/node-start.sh.
 set -u

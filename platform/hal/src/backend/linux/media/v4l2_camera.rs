@@ -916,7 +916,7 @@ mod tests {
         VideoFormatInfo { id: 1, width: w, height: h, frame_rate: Some(30.0), pixel }
     }
 
-    /// The nodes of a pool node, with the card strings v4l2 returns (31 characters at most).
+    /// The nodes of a node, with the card strings v4l2 returns (31 characters at most).
     fn nodes() -> Vec<(&'static str, &'static str, u32, Vec<VideoFormatInfo>)> {
         let colour = vec![fmt(VideoPixel::MJPEG, 1920, 1080), fmt(VideoPixel::YUY2, 640, 480)];
         let grey = vec![fmt(VideoPixel::GRAY, 640, 360), fmt(VideoPixel::Unsupported(0x20363159), 640, 360)];

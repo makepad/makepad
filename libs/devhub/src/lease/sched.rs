@@ -1334,7 +1334,7 @@ mod tests {
     fn sched(nodes: &[(&str, Caps)]) -> Sched {
         let mut s = Sched::new("mac", 1);
         for (n, c) in nodes {
-            s.add_node(n, "192.0.2.1", None);
+            s.add_node(n, "192.0.2.16", None);
             s.set_caps(n, c.clone(), 0);
         }
         s

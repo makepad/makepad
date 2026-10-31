@@ -121,7 +121,7 @@ mod tests {
     fn hosts_come_out_of_urls() {
         assert_eq!(host_of("https://192.0.2.73:8123"), "192.0.2.73");
         assert_eq!(host_of("http://127.0.0.1:8123/"), "127.0.0.1");
-        assert_eq!(host_of("192.0.2.5:8785"), "192.0.2.5");
+        assert_eq!(host_of("192.0.2.20:8785"), "192.0.2.20");
         assert_eq!(host_of("https://[::1]:8123"), "::1");
     }
 
@@ -168,9 +168,9 @@ mod tests {
 
     #[test]
     fn pins_become_base_urls() {
-        std::env::set_var("MAKEPAD_AI_HUB", "192.0.2.73:8123, 192.0.2.9, https://h:1/");
+        std::env::set_var("MAKEPAD_AI_HUB", "192.0.2.73:8123, 192.0.2.23, https://h:1/");
         let b = pinned_bases();
         std::env::remove_var("MAKEPAD_AI_HUB");
-        assert_eq!(b, vec!["https://192.0.2.73:8123", "https://192.0.2.9:8123", "https://h:1"]);
+        assert_eq!(b, vec!["https://192.0.2.73:8123", "https://192.0.2.23:8123", "https://h:1"]);
     }
 }

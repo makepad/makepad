@@ -91,7 +91,7 @@ print these tables. The crate resolves offline from `vendor/` (its own `[patch.c
 
 ## Known results
 
-A pool node (x86-64 Linux, shared, NOT a quiet machine; frozen `relax-t19`):
+A node (x86-64 Linux, shared, NOT a quiet machine; frozen `relax-t19`):
 
 | workload | rustc steady ms | Relax steady ms | Relax/rustc | rustc time-to-steady ms | Relax time-to-steady ms | Relax first iter ms | Relax O3 coverage | checksums equal |
 |---|---:|---:|---:|---:|---:|---:|---|---|

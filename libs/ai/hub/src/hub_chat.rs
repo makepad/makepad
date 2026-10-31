@@ -1308,12 +1308,12 @@ mod tests {
         use crate::discovery::DiscoveredNode;
         let node = |base: &str| DiscoveredNode { base_url: base.into(), node_id: 1, fleet: "gen".into() };
         let bases = fleet_chat_bases(&[
-            node("http://192.0.2.9:8123"),
+            node("http://192.0.2.23:8123"),
             node("http://192.0.2.76:8123"),
             node("http://192.0.2.76:8123"),
         ]);
         // The default roles restrict .76 TO chat and leave others open.
-        assert_eq!(bases, vec!["http://192.0.2.76:8123", "http://192.0.2.9:8123"]);
+        assert_eq!(bases, vec!["http://192.0.2.76:8123", "http://192.0.2.23:8123"]);
     }
 
     #[test]

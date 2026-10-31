@@ -716,7 +716,7 @@ mod tests {
         assert!(!networkd_enables_ap(no_server));
         let inverted = "[Match]\nWLANInterfaceType=!ap\n[Network]\nAddress=192.168.77.1/24\nDHCPServer=yes\n";
         assert!(!networkd_enables_ap(inverted));
-        let other_net = "[Match]\nWLANInterfaceType=ap\n[Network]\nAddress=10.77.0.1/24\nDHCPServer=yes\n";
+        let other_net = "[Match]\nWLANInterfaceType=ap\n[Network]\nAddress=192.0.2.95/24\nDHCPServer=yes\n";
         assert!(!networkd_enables_ap(other_net));
         let commented = "[Match]\n# WLANInterfaceType=ap\n[Network]\nAddress=192.168.77.1/24\nDHCPServer=yes\n";
         assert!(!networkd_enables_ap(commented));
@@ -772,7 +772,7 @@ IP address       HW type     Flags       HW address            Mask     Device
 192.168.77.12    0x1         0x2         aa:bb:cc:dd:ee:01     *        wlan0
 192.168.77.9     0x1         0x2         aa:bb:cc:dd:ee:02     *        wlan0
 192.168.77.40    0x1         0x0         00:00:00:00:00:00     *        wlan0
-10.77.0.1         0x1         0x2         11:22:33:44:55:66     *        eth0
+192.0.2.16         0x1         0x2         11:22:33:44:55:66     *        eth0
 ";
         let c = parse_arp(table, "wlan0");
         assert_eq!(

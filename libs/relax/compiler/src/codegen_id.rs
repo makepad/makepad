@@ -15,7 +15,7 @@
 //! of that crate, whichever build wrote it, so a compiler change that leaves parsing alone parses
 //! nothing again. Their keys hold [`front_id`] instead: what decides a parsed tree's bytes. Without it
 //! a store of another rustc was read with this one's type layouts, and a check panicked on garbage
-//! tree ids after a rustc upgrade on a Mac node (2026-10-31).
+//! tree ids after a rustc upgrade on mac-a (2026-10-31).
 //!
 //! Anything else linked into the binary (devhub, platform glue, Desk Link, the loader's UI) is
 //! not in it: changing it keeps every stored build. Provided crates (provided.rs) are keyed by

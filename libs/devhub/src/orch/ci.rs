@@ -1248,14 +1248,13 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, _dir:
                 g = cv.wait_timeout(g, Duration::from_secs(5)).unwrap().0;
             }
         };
-        let (shard, prio) = {
+        let (shard, prio, second) = {
             let g = p.lock().unwrap();
-            (g.shards[i].clone(), g.prio)
+            (g.shards[i].clone(), g.prio, !g.state[i].failed_on.is_empty())
         };
         let spec = Spec {
-            // each box asks for itself: a soft pin could fall back to a twin, also one that failed
-            // the shard or called itself unfit for it
-            only: true,
+            // a second opinion is this box's: a soft pin could fall back to the box that failed it
+            only: second,
             lane: LANE.into(),
             agent: AGENT.into(),
             kind: shard.kind,
