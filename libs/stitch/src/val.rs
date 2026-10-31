@@ -1,6 +1,6 @@
 use {
     crate::{
-        decode::{Decode, DecodeError, Decoder},
+        
         extern_ref::{ExternRef, UnguardedExternRef},
         func_ref::{FuncRef, UnguardedFuncRef},
         ref_::{Ref, RefType, UnguardedRef},
@@ -334,7 +334,7 @@ impl From<UnguardedExternRef> for UnguardedVal {
 }
 
 /// The type of a [`Val`].
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ValType {
     I32,
     I64,
@@ -385,21 +385,6 @@ impl ValType {
             ValType::I32 | ValType::I64 | ValType::FuncRef | ValType::ExternRef => 0,
             ValType::F32 | ValType::F64 => 1,
             ValType::V128 => unreachable!("v128 values are never register-resident"),
-        }
-    }
-}
-
-impl Decode for ValType {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match decoder.read_byte()? {
-            0x6F => Ok(Self::ExternRef),
-            0x70 => Ok(Self::FuncRef),
-            0x7B => Ok(Self::V128),
-            0x7C => Ok(Self::F64),
-            0x7D => Ok(Self::F32),
-            0x7E => Ok(Self::I64),
-            0x7F => Ok(Self::I32),
-            _ => Err(DecodeError::new("malformed value type")),
         }
     }
 }

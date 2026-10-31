@@ -1,0 +1,65 @@
+// Karplus-Strong pluck, tuned: the loop length is the period minus the
+// averaging filter's half sample, the fraction is a first-order allpass,
+// the excitation is a noise burst minus itself delayed by the pluck
+// position (the comb a real pluck makes), and the loop loss gives the same
+// T60 at every pitch.
+let MAX = 4096
+let bright = param(0.6, 0, 1)
+let position = param(0.22, 0.05, 0.5)
+let t60 = param(3.0, 0.2, 12)
+
+var buf = [0.0; MAX]
+var ex = [0.0; MAX]
+var w = int(0)
+var len = int(1)
+var comb = int(1)
+var t = int(0)
+var c = 0.0
+var ap_x = 0.0
+var ap_y = 0.0
+var avg = 0.0
+var loss = 0.99
+var burst = 0.0
+var amp = 1.0
+
+fn voice() {
+    if trigger {
+        let p = sample_rate / freq - 0.5
+        let n = floor(p)
+        let d = p - n
+        len = int(n)
+        // Keep the allpass delay in [0.1, 1.1) where it is well behaved.
+        if d < 0.1 {
+            len = len - 1
+            d = d + 1.0
+        }
+        c = (1.0 - d) / (1.0 + d)
+        comb = max(int(position * p), 1)
+        loss = exp(-3.0 * log(10.0) / (freq * t60))
+        t = 0
+    }
+    // Excitation: filtered noise for one period, minus its comb copy.
+    let noise = if t < len { rand() } else { 0.0 }
+    burst = burst + (noise - burst) * (0.08 + 0.92 * bright)
+    let b = if t < len { burst } else { 0.0 }
+    ex[t] = b
+    let input = if t < len + comb { b - ex[t - comb] } else { 0.0 }
+    t = min(t + 1, MAX)
+    // The string loop.
+    let x0 = buf[w - len]
+    let y = c * (x0 - ap_y) + ap_x
+    ap_x = x0
+    ap_y = y
+    let s = (y + avg) * 0.5
+    avg = y
+    let out = s * loss + input
+    buf[w] = out
+    w = w + 1
+    if gate == 0.0 {
+        amp = amp * 0.9995
+        if amp < 0.0001 {
+            stop()
+        }
+    }
+    out * amp * velocity * 0.6
+}

@@ -1,15 +1,21 @@
+use makepad_relax_api::relax_api;
 use crate::heap::*;
 use crate::native::*;
-use crate::shader::*;
-use crate::shader_backend::*;
-use crate::trap::NoTrap;
 use crate::value::*;
 #[allow(unused)]
 use crate::*;
 use makepad_live_id::*;
 
+#[relax_api(plain)]
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct ShaderIoType(pub(crate) u32);
+
+impl ShaderIoType {
+    /// The io type's number, as the `SHADER_IO_*` constants define it.
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
 
 pub const SHADER_IO_RUST_INSTANCE: ShaderIoType = ShaderIoType(0);
 pub const SHADER_IO_DYN_INSTANCE: ShaderIoType = ShaderIoType(1);
@@ -37,9 +43,47 @@ pub const SHADER_IO_SCOPE_UNIFORM: ShaderIoType = ShaderIoType(22);
 pub const SHADER_IO_FRAGMENT_OUTPUT_0: ShaderIoType = ShaderIoType(23);
 pub const SHADER_IO_FRAGMENT_OUTPUT_MAX: ShaderIoType =
     ShaderIoType(SHADER_IO_FRAGMENT_OUTPUT_0.0 + 7);
+/// A compute kernel's workgroup-shared array (`shader.workgroup(T, len)`).
+pub const SHADER_IO_WORKGROUP: ShaderIoType = ShaderIoType(31);
+/// A compute-only type descriptor, never an IO global.
+pub const SHADER_COOPERATIVE_MATRIX: ShaderIoType = ShaderIoType(32);
+/// `shader.fragment_depth(@any|@greater|@less)`: the fragment's depth output
+/// (one id per conservative mode, in `FRAG_DEPTH_*` order).
+pub const SHADER_IO_FRAGMENT_DEPTH_ANY: ShaderIoType = ShaderIoType(33);
+pub const SHADER_IO_FRAGMENT_DEPTH_GREATER: ShaderIoType = ShaderIoType(34);
+pub const SHADER_IO_FRAGMENT_DEPTH_LESS: ShaderIoType = ShaderIoType(35);
+
+/// The depth mode of a fragment depth io type (`FRAG_DEPTH_*`), if it is one.
+pub fn fragment_depth_mode(io_type: ShaderIoType) -> Option<u8> {
+    (io_type.0 >= SHADER_IO_FRAGMENT_DEPTH_ANY.0 && io_type.0 <= SHADER_IO_FRAGMENT_DEPTH_LESS.0)
+        .then(|| (io_type.0 - SHADER_IO_FRAGMENT_DEPTH_ANY.0) as u8)
+}
 
 pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     let shader = heap.new_module(id!(shader));
+
+    // Narrow integer components are matrix-only; memory may be packed in
+    // u32/vec4u arrays. Offsets and strides use the array's element units.
+    heap.set_value(shader, id!(i8).into(), 0u32.into(), NoTrap);
+    heap.set_value(shader, id!(u8).into(), 1u32.into(), NoTrap);
+    heap.set_value(shader, id!(matrix_a).into(), 0u32.into(), NoTrap);
+    heap.set_value(shader, id!(matrix_b).into(), 1u32.into(), NoTrap);
+    heap.set_value(shader, id!(matrix_accumulator).into(), 2u32.into(), NoTrap);
+    heap.set_value(shader, id!(row_major).into(), 0u32.into(), NoTrap);
+    heap.set_value(shader, id!(column_major).into(), 1u32.into(), NoTrap);
+    native.add_method(heap, shader, id_lut!(coopmat),
+        script_args!(component = NIL, rows = NIL, cols = NIL, usage = NIL), |vm, args| {
+            let component = script_value!(vm, args.component);
+            let rows = script_value!(vm, args.rows);
+            let cols = script_value!(vm, args.cols);
+            let usage = script_value!(vm, args.usage);
+            let obj = vm.bx.heap.new_with_proto(component);
+            set_script_value!(vm, obj.rows = rows);
+            set_script_value!(vm, obj.cols = cols);
+            set_script_value!(vm, obj.usage = usage);
+            vm.bx.heap.set_shader_io(obj, SHADER_COOPERATIVE_MATRIX);
+            obj.into()
+        });
 
     native.add_method(
         heap,
@@ -88,6 +132,49 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             let value = script_value!(vm, args.value);
             let obj = vm.bx.heap.new_with_proto(value);
             vm.bx.heap.set_shader_io(obj, SHADER_IO_UNIFORM_BUFFER);
+            obj.into()
+        },
+    );
+
+    // Compute kernels: a device buffer of `value` elements, read-only or
+    // read-write, and a workgroup-shared array of `len` elements.
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(buffer),
+        script_args!(value = NIL),
+        |vm, args| {
+            let value = script_value!(vm, args.value);
+            let obj = vm.bx.heap.new_with_proto(value);
+            vm.bx.heap.set_shader_io(obj, SHADER_IO_BUFFER_R);
+            obj.into()
+        },
+    );
+
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(buffer_rw),
+        script_args!(value = NIL),
+        |vm, args| {
+            let value = script_value!(vm, args.value);
+            let obj = vm.bx.heap.new_with_proto(value);
+            vm.bx.heap.set_shader_io(obj, SHADER_IO_BUFFER_RW);
+            obj.into()
+        },
+    );
+
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(workgroup),
+        script_args!(value = NIL, len = 1.0),
+        |vm, args| {
+            let value = script_value!(vm, args.value);
+            let len = script_value!(vm, args.len);
+            let obj = vm.bx.heap.new_with_proto(value);
+            set_script_value!(vm, obj.len = len);
+            vm.bx.heap.set_shader_io(obj, SHADER_IO_WORKGROUP);
             obj.into()
         },
     );
@@ -293,104 +380,55 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         },
     );
 
+    // `depth: fragment_depth(@any)`: assigning `self.depth = z` in `fragment`
+    // replaces the rasterised depth with z (window-space, 0..1, the value
+    // `depth_of(world)` gives). `@greater` / `@less` promise z only moves
+    // that way from the rasterised depth (conservative depth: early depth
+    // tests stay on; a march from the front faces of its bounds writes
+    // `@greater`).
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(fragment_depth),
+        script_args!(mode = NIL),
+        |vm, args| {
+            let mode = script_value!(vm, args.mode);
+            let io = match mode.as_id() {
+                Some(m) if m == id!(greater) => SHADER_IO_FRAGMENT_DEPTH_GREATER,
+                Some(m) if m == id!(less) => SHADER_IO_FRAGMENT_DEPTH_LESS,
+                _ => SHADER_IO_FRAGMENT_DEPTH_ANY,
+            };
+            let f32_ty = vm.bx.heap.pod_type_ref(vm.bx.code.builtins.pod.pod_f32).object;
+            let obj = vm.bx.heap.new_with_proto(f32_ty.into());
+            vm.bx.heap.set_shader_io(obj, io);
+            obj.into()
+        },
+    );
+
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
+    define_shader_compile_natives(heap, native, shader);
+}
+
+/// The compile test seams (`mod.shader.test_compile_*`). They run the
+/// shader compiler, which a build on shader packs leaves out.
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
+fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNative, shader: ScriptObject) {
+    use crate::shader_backend::*;
+
     native.add_method(
         heap,
         shader,
         id_lut!(test_compile_draw),
         script_args!(io_self = NIL),
         |vm, args| {
-            // lets fetch the code
+            // Compiles a draw shader (Metal); the errors are reported.
             let io_self = script_value!(vm, args.io_self);
-
-            // ok we're going to take a function, and then call it to generate/typetrace it out
-            // for every function we make a 'shadercompiler'
             if let Some(io_self) = io_self.as_object() {
-                let mut output = ShaderOutput::default();
-                output.backend = ShaderBackend::Metal;
-                output.use_vulkan = false;
-
-                output.pre_collect_rust_instance_io(vm, io_self);
-                output.pre_collect_shader_io(vm, io_self);
-
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(
-                        io_self,
-                        id!(vertex).into(),
-                        vm.bx.threads.cur_ref().trap.pass(),
-                    )
-                    .as_object()
-                {
-                    output.mode = ShaderMode::Vertex;
-                    // Entry point shaders don't have script-level arguments to validate, use NoTrap
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        id!(vertex),
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
+                let output = test_ir_compile(vm, io_self, ShaderBackend::Metal);
+                if !output.has_errors {
+                    let _ = crate::shader_ir_metal::metal_draw_source(&output, vm, false);
                 }
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(
-                        io_self,
-                        id!(fragment).into(),
-                        vm.bx.threads.cur_ref().trap.pass(),
-                    )
-                    .as_object()
-                {
-                    output.mode = ShaderMode::Fragment;
-                    // Entry point shaders don't have script-level arguments to validate, use NoTrap
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        id!(fragment),
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
-                }
-
-                output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-
-                let mut out = String::new();
-                output.create_struct_defs(vm, &mut out);
-                output.metal_create_instance_struct(vm, &mut out);
-                output.metal_create_uniform_struct(vm, &mut out);
-                output.metal_create_scope_uniform_struct(vm, &mut out);
-                output.metal_create_io_struct(vm, &mut out);
-                output.metal_create_varying_struct(vm, &mut out);
-                output.metal_create_vertex_buffer_struct(vm, &mut out);
-                output.metal_create_sampler_decls(&mut out);
-                output.metal_create_helpers(&mut out);
-                output.metal_create_io_vertex_struct(vm, &mut out);
-                output.metal_create_vertex_fn(vm, &mut out);
-                output.metal_create_io_fragment_struct(vm, &mut out);
-                /*
-                output.metal_create_fragment_main_fn(vm, &mut out);
-                println!("Structs:\n{}", out);
-                for fns in &output.functions{
-                    println!("{}{{\n{}}}\n",fns.call_sig, fns.out);
-                }
-
-                // Print scope uniforms for debugging
-                if !output.scope_uniforms.is_empty() {
-                    println!("\nScope Uniforms ({} entries):", output.scope_uniforms.len());
-                    for su in &output.scope_uniforms {
-                        println!("  - source_obj: {}, key: {}, shader_name: {}",
-                            su.source_obj.index, su.key, su.shader_name);
-                    }
-                }*/
-
-                return NIL;
             }
-            // trap error
             NIL
         },
     );
@@ -401,86 +439,21 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         id_lut!(test_compile_draw_contains),
         script_args!(io_self = NIL, needle = NIL),
         |vm, args| {
+            // Whether the shader's Metal source contains `needle`.
             let io_self = script_value!(vm, args.io_self);
             let needle_val = script_value!(vm, args.needle);
             let Some(needle) = vm.bx.heap.string_with(needle_val, |_heap, s| s.to_string()) else {
                 return ScriptValue::from_bool(false);
             };
-
-            if let Some(io_self) = io_self.as_object() {
-                let mut output = ShaderOutput::default();
-                output.backend = ShaderBackend::Metal;
-                output.use_vulkan = false;
-
-                output.pre_collect_rust_instance_io(vm, io_self);
-                output.pre_collect_shader_io(vm, io_self);
-
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(
-                        io_self,
-                        id!(vertex).into(),
-                        vm.bx.threads.cur_ref().trap.pass(),
-                    )
-                    .as_object()
-                {
-                    output.mode = ShaderMode::Vertex;
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        id!(vertex),
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
-                }
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(
-                        io_self,
-                        id!(fragment).into(),
-                        vm.bx.threads.cur_ref().trap.pass(),
-                    )
-                    .as_object()
-                {
-                    output.mode = ShaderMode::Fragment;
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        id!(fragment),
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
-                }
-
-                output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-
-                let mut out = String::new();
-                output.create_struct_defs(vm, &mut out);
-                output.metal_create_instance_struct(vm, &mut out);
-                output.metal_create_uniform_struct(vm, &mut out);
-                output.metal_create_scope_uniform_struct(vm, &mut out);
-                output.metal_create_io_struct(vm, &mut out);
-                output.metal_create_varying_struct(vm, &mut out);
-                output.metal_create_vertex_buffer_struct(vm, &mut out);
-                output.metal_create_sampler_decls(&mut out);
-                output.metal_create_helpers(&mut out);
-                output.create_functions(&mut out);
-                output.metal_create_io_vertex_struct(vm, &mut out);
-                output.metal_create_io_framebuffer_struct(vm, &mut out);
-                output.metal_create_io_fragment_struct(vm, &mut out);
-                output.metal_create_vertex_fn(vm, &mut out);
-                output.metal_create_fragment_main_fn(vm, &mut out);
-
-                return ScriptValue::from_bool(out.contains(&needle));
+            let Some(io_self) = io_self.as_object() else {
+                return ScriptValue::from_bool(false);
+            };
+            let output = test_ir_compile(vm, io_self, ShaderBackend::Metal);
+            if output.has_errors {
+                return ScriptValue::from_bool(false);
             }
-
-            ScriptValue::from_bool(false)
+            let src = crate::shader_ir_metal::metal_draw_source(&output, vm, false);
+            ScriptValue::from_bool(src.contains(&needle))
         },
     );
 
@@ -490,69 +463,18 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         id_lut!(test_compile_draw_errors),
         script_args!(io_self = NIL),
         |vm, args| {
+            // Contract under test: every compile failure must surface a
+            // human-readable message — a silently failing shader (gray
+            // fallback, no log) is itself the bug.
             let io_self = script_value!(vm, args.io_self);
-
-            if let Some(io_self) = io_self.as_object() {
-                let mut output = ShaderOutput::default();
-                output.backend = ShaderBackend::Metal;
-                output.use_vulkan = false;
-
-                output.pre_collect_rust_instance_io(vm, io_self);
-                output.pre_collect_shader_io(vm, io_self);
-
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(
-                        io_self,
-                        id!(vertex).into(),
-                        vm.bx.threads.cur_ref().trap.pass(),
-                    )
-                    .as_object()
-                {
-                    output.mode = ShaderMode::Vertex;
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        id!(vertex),
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
-                }
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(
-                        io_self,
-                        id!(fragment).into(),
-                        vm.bx.threads.cur_ref().trap.pass(),
-                    )
-                    .as_object()
-                {
-                    output.mode = ShaderMode::Fragment;
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        id!(fragment),
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
-                }
-
-                // Contract under test: every compile failure must surface a
-                // human-readable message — a silently failing shader (gray
-                // fallback, no log) is itself the bug.
-                if output.has_errors {
-                    return output.error_report().script_to_value(vm);
-                }
-                return "".to_string().script_to_value(vm);
+            let Some(io_self) = io_self.as_object() else {
+                return "no shader object".to_string().script_to_value(vm);
+            };
+            let output = test_ir_compile(vm, io_self, ShaderBackend::Metal);
+            if output.has_errors {
+                return output.error_report().script_to_value(vm);
             }
-
-            "no shader object".to_string().script_to_value(vm)
+            "".to_string().script_to_value(vm)
         },
     );
 
@@ -581,6 +503,9 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                 "hlsl" => ShaderBackend::Hlsl,
                 "glsl" => ShaderBackend::Glsl,
                 "wgsl" => ShaderBackend::Wgsl,
+                // SPIR-V through the shader IR: the layout compile is GLSL,
+                // as the Vulkan renderer's.
+                "spirv" => ShaderBackend::Glsl,
                 other => {
                     return format!("unknown backend {}", other).script_to_value(vm);
                 }
@@ -588,62 +513,50 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             let Some(io_self) = io_self.as_object() else {
                 return "no shader object".to_string().script_to_value(vm);
             };
-            let mut output = ShaderOutput::default();
-            output.backend = backend;
-            output.use_vulkan = false;
-            output.const_table = const_table;
-            output.pre_collect_rust_instance_io(vm, io_self);
-            output.pre_collect_shader_io(vm, io_self);
-            for (entry, mode) in [(id!(vertex), ShaderMode::Vertex), (id!(fragment), ShaderMode::Fragment)] {
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(io_self, entry.into(), vm.bx.threads.cur_ref().trap.pass())
-                    .as_object()
-                {
-                    output.mode = mode;
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        entry,
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
+            // The IR backends: one compile, printed.
+            {
+                let opts = crate::shader_ir_draw::IrCompileOptions {
+                    const_table,
+                    backend: match backend {
+                        ShaderBackend::Hlsl | ShaderBackend::Metal => backend,
+                        _ => ShaderBackend::Glsl,
+                    },
+                    ..Default::default()
+                };
+                let mut output = crate::shader_ir_draw::compile_draw_shader_ir_with(vm, io_self, &opts);
+                if output.has_errors {
+                    return format!("ERRORS: {}", output.error_report()).script_to_value(vm);
                 }
-            }
-            if output.has_errors {
-                return format!("ERRORS: {}", output.error_report()).script_to_value(vm);
-            }
-            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-            let mut out = String::new();
-            match backend {
-                ShaderBackend::Metal => {
-                    output.create_struct_defs(vm, &mut out);
-                    output.metal_create_scope_uniform_struct(vm, &mut out);
-                }
-                ShaderBackend::Hlsl => {
-                    output.hlsl_create_scope_uniform_cbuffer(vm, &mut out);
-                }
-                ShaderBackend::Glsl => {
-                    let mut shared_defs = String::new();
-                    output.create_struct_defs(vm, &mut shared_defs);
-                    output.glsl_create_fragment_shader(vm, &shared_defs, &mut out);
-                }
-                ShaderBackend::Wgsl => {
-                    match crate::shader_wgsl::compile_draw_shader_wgsl_source(vm, io_self, &output, false) {
-                        Ok(src) => out.push_str(&src.wgsl),
-                        Err(e) => return format!("ERRORS: {}", e).script_to_value(vm),
+                let mut out = String::new();
+                match backend_name.as_str() {
+                    "glsl" => {
+                        let src = crate::shader_ir_glsl::glsl_draw_sources(&mut output, vm);
+                        out.push_str(&src.vertex);
+                        out.push_str(&src.fragment);
                     }
+                    "hlsl" => out.push_str(&crate::shader_ir_hlsl::hlsl_draw_source(&output, vm)),
+                    "metal" => out.push_str(&crate::shader_ir_metal::metal_draw_source(&output, vm, false)),
+                    "wgsl" => match crate::shader_ir_wgsl::draw_wgsl(&output, vm, false) {
+                        Ok((wgsl, _)) => out.push_str(&wgsl),
+                        Err(e) => return format!("ERRORS: {}", e).script_to_value(vm),
+                    },
+                    _ => match crate::shader_ir_draw::draw_spirv(&output, vm) {
+                        // The window variant's words, `v:` and `f:` lines of hex.
+                        Ok([window, _]) => {
+                            out.push_str("v:");
+                            for w in &window.vertex {
+                                out.push_str(&format!("{:08x}", w));
+                            }
+                            out.push_str("\nf:");
+                            for w in &window.fragment {
+                                out.push_str(&format!("{:08x}", w));
+                            }
+                        }
+                        Err(e) => return format!("ERRORS: {}", e).script_to_value(vm),
+                    },
                 }
-                _ => {}
+                out.script_to_value(vm)
             }
-            for f in &output.functions {
-                out.push_str(&f.out);
-                out.push('\n');
-            }
-            out.script_to_value(vm)
         },
     );
 
@@ -659,31 +572,12 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             let Some(io_self) = io_self.as_object() else {
                 return "no shader object".to_string().script_to_value(vm);
             };
-            let mut output = ShaderOutput::default();
-            output.backend = ShaderBackend::Metal;
-            output.use_vulkan = false;
-            output.const_table = true;
-            output.pre_collect_rust_instance_io(vm, io_self);
-            output.pre_collect_shader_io(vm, io_self);
-            for (entry, mode) in [(id!(vertex), ShaderMode::Vertex), (id!(fragment), ShaderMode::Fragment)] {
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(io_self, entry.into(), vm.bx.threads.cur_ref().trap.pass())
-                    .as_object()
-                {
-                    output.mode = mode;
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        entry,
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
-                }
-            }
+            let opts = crate::shader_ir_draw::IrCompileOptions {
+                const_table: true,
+                backend: ShaderBackend::Metal,
+                ..Default::default()
+            };
+            let output = crate::shader_ir_draw::compile_draw_shader_ir_with(vm, io_self, &opts);
             if output.has_errors {
                 return format!("ERRORS: {}", output.error_report()).script_to_value(vm);
             }
@@ -720,76 +614,28 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         id_lut!(test_compile_draw_rust_contains),
         script_args!(io_self = NIL, needle = NIL),
         |vm, args| {
+            // Whether the shader's generated Rust functions contain `needle`.
             let io_self = script_value!(vm, args.io_self);
             let needle_val = script_value!(vm, args.needle);
             let Some(needle) = vm.bx.heap.string_with(needle_val, |_heap, s| s.to_string()) else {
                 return ScriptValue::from_bool(false);
             };
-
-            if let Some(io_self) = io_self.as_object() {
-                let mut output = ShaderOutput::default();
-                output.backend = ShaderBackend::Rust;
-                output.use_vulkan = false;
-
-                output.pre_collect_rust_instance_io(vm, io_self);
-                output.pre_collect_shader_io(vm, io_self);
-
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(
-                        io_self,
-                        id!(vertex).into(),
-                        vm.bx.threads.cur_ref().trap.pass(),
-                    )
-                    .as_object()
-                {
-                    output.mode = ShaderMode::Vertex;
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        id!(vertex),
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
-                }
-                if let Some(fnobj) = vm
-                    .bx
-                    .heap
-                    .object_method(
-                        io_self,
-                        id!(fragment).into(),
-                        vm.bx.threads.cur_ref().trap.pass(),
-                    )
-                    .as_object()
-                {
-                    output.mode = ShaderMode::Fragment;
-                    ShaderFnCompiler::compile_shader_def(
-                        vm,
-                        &mut output,
-                        NoTrap,
-                        id!(fragment),
-                        fnobj,
-                        ShaderType::IoSelf(io_self),
-                        vec![],
-                    );
-                }
-
-                output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-
-                // The Rust backend has no monolithic module emitter here (the
-                // gpusim runtime owns that); struct defs plus the compiled
-                // function bodies cover everything expression codegen produces.
-                let mut out = String::new();
-                output.create_struct_defs(vm, &mut out);
-                output.create_functions(&mut out);
-
-                return ScriptValue::from_bool(out.contains(&needle));
+            let Some(io_self) = io_self.as_object() else {
+                return ScriptValue::from_bool(false);
+            };
+            let output = test_ir_compile(vm, io_self, ShaderBackend::Rust);
+            if output.has_errors {
+                return ScriptValue::from_bool(false);
             }
-
-            ScriptValue::from_bool(false)
+            let src = crate::shader_ir_rust::rust_shader_source(&output, vm).source;
+            ScriptValue::from_bool(src.contains(&needle))
         },
     );
+}
+
+/// A test seam's compile: the draw shader to IR for `backend`.
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
+fn test_ir_compile(vm: &mut ScriptVm, io_self: ScriptObject, backend: crate::shader_backend::ShaderBackend) -> crate::shader_output::ShaderOutput {
+    let opts = crate::shader_ir_draw::IrCompileOptions { backend, ..Default::default() };
+    crate::shader_ir_draw::compile_draw_shader_ir_with(vm, io_self, &opts)
 }

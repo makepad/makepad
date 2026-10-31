@@ -24,13 +24,21 @@
 //! - a doc that resolves to nothing (e.g. above an array element or at the
 //!   very end of a body) is dropped.
 //!
-//! `//` and `/* */` stay plain comments; `///` is NOT an annotation form.
+//! - before `let NAME` / `var NAME`: a LET doc naming that binding
+//!   (resolve_let_docs), the label an editor shows for it.
+//! - immediately before a `color(…)` call: a VALUE NAME for that colour (the
+//!   name's token is the call's `color`), as before a `#hex`.
+//!
+//! `///text` lines are the same annotation as `/**text*/` (Rust's doc line;
+//! `script_mod!` hands both on as written); `//`, `////` and `/* */` stay plain
+//! comments.
 //!
 //! The cascade query (`ScriptVm::construction_chain`) walks an object's
 //! proto chain and returns one level per prototype: where it was
 //! constructed, its docs, and the keys it sets itself. Rust-built objects
 //! (made_at == ScriptIp::UNKNOWN) appear as levels with no location — the
 //! tweaker renders those as "native".
+use makepad_relax_api::relax_api;
 
 use crate::makepad_live_id::*;
 use crate::opcode::*;
@@ -40,11 +48,38 @@ use crate::value::*;
 use crate::vm::ScriptCode;
 use crate::vm::ScriptLoc;
 use crate::vm::ScriptVm;
+use crate::vm_query::*;
 
 /// How many source tokens after a non-field doc line an object literal may
 /// begin and still claim the doc. Generous enough for
 /// `mod.widgets.X = set_type_default() do mod.widgets.XBase{`.
 const DOC_ATTACH_WINDOW: u32 = 256;
+
+/// A caller-owned `Vec<(LiveId, String)>` of field docs the VM appends to (as ScriptTextOut).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptFieldDocsOut<'a> {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, LiveId, *const u8, usize),
+    _out: std::marker::PhantomData<&'a mut Vec<(LiveId, String)>>,
+}
+
+impl<'a> ScriptFieldDocsOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<(LiveId, String)>) -> Self {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, id: LiveId, ptr: *const u8, len: usize) {
+            let out = &mut *(ctx as *mut Vec<(LiveId, String)>);
+            out.push((id, std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)).to_string()));
+        }
+        Self { ctx: out as *mut Vec<(LiveId, String)> as *mut u8, push, _out: std::marker::PhantomData }
+    }
+
+    /// Appends one field's doc.
+    #[inline]
+    pub fn push(&mut self, id: LiveId, text: &str) {
+        unsafe { (self.push)(self.ctx, id, text.as_ptr(), text.len()) }
+    }
+}
 
 /// Longest proto chain construction_chain will walk.
 const MAX_CHAIN: usize = 24;
@@ -65,7 +100,6 @@ pub struct ScriptDocEntry {
 
 /// One level of an object's construction chain (the object itself first,
 /// then its prototypes outward).
-#[derive(Debug)]
 pub struct ScriptChainLevel {
     /// The object at this level.
     pub object: ScriptObject,
@@ -79,6 +113,50 @@ pub struct ScriptChainLevel {
     pub field_docs: Vec<(LiveId, String)>,
     /// Keys this level sets itself: map keys plus named vec templates.
     pub own_keys: Vec<LiveId>,
+}
+
+impl Clone for ScriptChainLevel {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self { object: self.object, made_at: self.made_at, loc: self.loc.clone(), doc: self.doc.clone(), field_docs: self.field_docs.clone(), own_keys: self.own_keys.clone() }
+    }
+}
+
+impl std::fmt::Debug for ScriptChainLevel {
+    #[inline(always)]
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("ScriptChainLevel")
+            .field("object", &self.object).field("made_at", &self.made_at)
+            .field("loc", &self.loc).field("doc", &self.doc)
+            .field("field_docs", &self.field_docs).field("own_keys", &self.own_keys).finish()
+    }
+}
+
+/// Built by the caller's side (construction_chain is an inline shell): every accessor is inline
+/// too, so a ScriptChainLevel never reaches the VM's own code (loader-core.md section 8).
+impl ScriptChainLevel {
+    #[inline(always)]
+    pub fn field_docs(&self) -> Vec<(LiveId, String)> {
+        let mut out = Vec::new();
+        self.field_docs_into(&mut ScriptFieldDocsOut::new(&mut out));
+        out
+    }
+    #[inline(always)]
+    pub fn field_docs_into(&self, out: &mut ScriptFieldDocsOut) {
+        for (id, text) in &self.field_docs { out.push(*id, text); }
+    }
+    #[inline(always)]
+    pub fn field_doc(&self, key: LiveId) -> Option<&str> { self.field_docs.iter().find_map(|(id, text)| (*id == key).then_some(text.as_str())) }
+    #[inline(always)]
+    pub fn object(&self) -> ScriptObject { self.object }
+    #[inline(always)]
+    pub fn made_at(&self) -> ScriptIp { self.made_at }
+    #[inline(always)]
+    pub fn loc(&self) -> Option<&ScriptLoc> { self.loc.as_ref() }
+    #[inline(always)]
+    pub fn doc(&self) -> Option<&str> { self.doc.as_deref() }
+    #[inline(always)]
+    pub fn own_keys(&self) -> &[LiveId] { &self.own_keys }
 }
 
 fn is_field_op(id: LiveId) -> bool {
@@ -155,10 +233,13 @@ pub fn resolve_docs(
         let text = clean_block_text(&d.text);
         let toks = &tokenizer.tokens;
 
-        // VALUE NAME position (`/**name*/ 0.35`): resolve_value_names.
+        // VALUE NAME position (`/**name*/ 0.35`, `/**ember*/ color(…)`) and
+        // LET docs: resolve_value_names, resolve_let_docs.
         if toks
             .get(t as usize)
             .is_some_and(|tp| is_value_token(&tp.token))
+            || is_color_call(toks, t as usize)
+            || is_binding(toks, t as usize)
         {
             continue;
         }
@@ -253,6 +334,7 @@ pub fn resolve_docs(
 /// clamps: the UI may scrub past a bound (expanding it) or type anything.
 /// Unrecognized words stay part of the name. Applies to value-position
 /// annotations and to field/definition docs alike.
+#[relax_api(handle)]
 #[derive(Clone, Debug)]
 pub struct ScriptDocHint {
     pub name: String,
@@ -262,6 +344,7 @@ pub struct ScriptDocHint {
 }
 
 /// Parse the hint micro-grammar out of a doc text, leniently.
+#[relax_api]
 pub fn parse_doc_hint(text: &str) -> ScriptDocHint {
     let mut name_parts: Vec<&str> = Vec::new();
     let (mut min, mut max, mut step) = (None, None, None);
@@ -306,8 +389,54 @@ pub struct ScriptValueName {
     pub name: String,
 }
 
+/// Whether token `t` begins a `color(…)` call (a named colour's value).
+fn is_color_call(toks: &[crate::tokenizer::ScriptTokenPos], t: usize) -> bool {
+    toks.get(t).is_some_and(|tp| matches!(tp.token, ScriptToken::Identifier(id) if id == id!(color)))
+        && toks.get(t + 1).is_some_and(|tp| matches!(tp.token, ScriptToken::OpenRound))
+}
+
+/// Whether token `t` is `let` or `var` (a binding a doc names).
+fn is_binding(toks: &[crate::tokenizer::ScriptTokenPos], t: usize) -> bool {
+    toks.get(t).is_some_and(|tp| matches!(tp.token, ScriptToken::Identifier(id) if id == id!(let) || id == id!(var)))
+}
+
+/// A doc naming a `let` / `var` binding: its name and the doc's text.
+#[derive(Clone, Debug)]
+pub struct ScriptLetDoc {
+    /// Token index of the binding's name.
+    pub token: u32,
+    pub name: LiveId,
+    pub text: String,
+}
+
+/// The binding annotations of a tokenizer, in token order: docs whose next
+/// token is `let` or `var` (consecutive lines merged).
+pub fn resolve_let_docs(tokenizer: &ScriptTokenizer) -> Vec<ScriptLetDoc> {
+    let toks = &tokenizer.tokens;
+    let mut out: Vec<ScriptLetDoc> = Vec::new();
+    for d in &tokenizer.docs {
+        let t = d.next_token as usize;
+        if !is_binding(toks, t) {
+            continue;
+        }
+        let Some(ScriptToken::Identifier(name)) = toks.get(t + 1).map(|tp| tp.token) else {
+            continue;
+        };
+        let text = clean_block_text(&d.text);
+        match out.iter_mut().find(|e| e.token == t as u32 + 1) {
+            Some(e) => {
+                e.text.push('\n');
+                e.text.push_str(&text);
+            }
+            None => out.push(ScriptLetDoc { token: t as u32 + 1, name, text }),
+        }
+    }
+    out
+}
+
 /// The value-position annotations of a tokenizer, in token order: docs
-/// whose next token is a value literal (or `-` then one).
+/// whose next token is a value literal (or `-` then one), or a `color(…)`
+/// call (the name's token is `color`).
 pub fn resolve_value_names(tokenizer: &ScriptTokenizer) -> Vec<ScriptValueName> {
     let toks = &tokenizer.tokens;
     tokenizer
@@ -315,6 +444,9 @@ pub fn resolve_value_names(tokenizer: &ScriptTokenizer) -> Vec<ScriptValueName> 
         .iter()
         .filter_map(|d| {
             let t = d.next_token as usize;
+            if is_color_call(toks, t) {
+                return Some(ScriptValueName { token: d.next_token, name: clean_block_text(&d.text) });
+            }
             if toks.get(t).is_some_and(|tp| is_value_token(&tp.token)) {
                 return Some(ScriptValueName {
                     token: d.next_token,
@@ -383,6 +515,15 @@ impl ScriptCode {
         resolve_value_names(&body.tokenizer)
     }
 
+    /// The `let` / `var` annotations of one body.
+    pub fn resolve_body_let_docs(&self, body_index: u16) -> Vec<ScriptLetDoc> {
+        let bodies = self.bodies.borrow();
+        let Some(body) = bodies.get(body_index as usize) else {
+            return Vec::new();
+        };
+        resolve_let_docs(&body.tokenizer)
+    }
+
     /// Doc entries of one body, resolved fresh from its compile artifacts.
     pub fn resolve_body_docs(&self, body_index: u16) -> Vec<ScriptDocEntry> {
         let bodies = self.bodies.borrow();
@@ -402,6 +543,10 @@ impl<'a> ScriptVm<'a> {
     /// prototype outward. Each level resolves its `made_at` ip to a source
     /// location and its `///` docs. This is the tweaker cascade view's
     /// data source.
+    /// Built on the caller's side (an inline shell over the VM's bound accessors and
+    /// [`Self::site_docs_into`]): a ScriptChainLevel never passes through the VM's own code
+    /// (loader-core.md section 8).
+    #[inline(always)]
     pub fn construction_chain(&self, value: ScriptValue) -> Vec<ScriptChainLevel> {
         let mut out = Vec::new();
         let mut cur = value;
@@ -409,11 +554,10 @@ impl<'a> ScriptVm<'a> {
             if out.len() >= MAX_CHAIN {
                 break;
             }
-            let data = self.bx.heap.object_data(obj);
-            let made_at = data.made_at;
-            let mut own_keys: Vec<LiveId> =
-                data.map.keys().filter_map(|k| k.as_id()).collect();
-            for kv in &data.vec {
+            let heap = self.heap();
+            let made_at = heap.made_at(obj);
+            let mut own_keys: Vec<LiveId> = heap.map_entries(obj).iter().filter_map(|e| e.key.as_id()).collect();
+            for kv in heap.vec_ref(obj) {
                 if let Some(id) = kv.key.as_id() {
                     own_keys.push(id);
                 }
@@ -421,30 +565,64 @@ impl<'a> ScriptVm<'a> {
             let (loc, doc, field_docs) = if made_at.is_unknown() {
                 (None, None, Vec::new())
             } else {
-                let docs = self.bx.code.resolve_body_docs(made_at.body);
-                let mut doc = None;
+                let mut doc = String::new();
+                let mut has_doc = false;
                 let mut field_docs = Vec::new();
-                for e in docs {
-                    if e.begin_index != made_at.index {
-                        continue;
-                    }
-                    match e.field {
-                        None => doc = Some(e.text),
-                        Some(f) => field_docs.push((f, e.text)),
-                    }
-                }
-                (self.bx.code.ip_to_loc(made_at), doc, field_docs)
+                self.site_docs_into(made_at, &mut crate::vm_api::ScriptTextOut::new(&mut doc), &mut has_doc, &mut ScriptFieldDocsOut::new(&mut field_docs));
+                (self.ip_to_loc(made_at), has_doc.then_some(doc), field_docs)
             };
-            out.push(ScriptChainLevel {
-                object: obj,
-                made_at,
-                loc,
-                doc,
-                field_docs,
-                own_keys,
-            });
-            cur = data.proto;
+            out.push(ScriptChainLevel { object: obj, made_at, loc, doc, field_docs, own_keys });
+            cur = heap.proto(obj);
         }
         out
     }
+
+    /// The doc annotations of the object literal built at `made_at`: its own (into `doc`,
+    /// `has_doc` set) and its fields' (into `fields`).
+    #[inline(always)]
+    pub fn site_docs_into(&self, made_at: ScriptIp, doc: &mut crate::vm_api::ScriptTextOut, has_doc: &mut bool, fields: &mut ScriptFieldDocsOut) {
+        let mut sink = ScriptQuerySink::new();
+        sink.text0(doc);
+        sink.fields(fields);
+        let answer = self.bx.code_ref().query(QUERY_SITE_DOCS, &mut sink, |req| req.ip = made_at);
+        *has_doc = answer.flag;
+    }
+}
+
+/// What a [`ScriptDocHint`] holds, as plain data ([`ScriptDocHint::view`]); the min, max and
+/// step are valid where `has` has bit 0, 1 and 2 set.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ScriptDocHintView<'a> {
+    pub name: &'a str,
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    pub has: u32,
+}
+
+#[relax_api]
+impl ScriptDocHint {
+    #[relax_api]
+    pub fn view(&self) -> ScriptDocHintView<'_> {
+        ScriptDocHintView {
+            name: &self.name,
+            min: self.min.unwrap_or(0.0),
+            max: self.max.unwrap_or(0.0),
+            step: self.step.unwrap_or(0.0),
+            has: self.min.is_some() as u32 | (self.max.is_some() as u32) << 1 | (self.step.is_some() as u32) << 2,
+        }
+    }
+}
+
+impl ScriptDocHint {
+    #[inline(always)]
+    pub fn name(&self) -> &str { self.view().name }
+    #[inline(always)]
+    pub fn min(&self) -> Option<f64> { let v = self.view(); (v.has & 1 != 0).then_some(v.min) }
+    #[inline(always)]
+    pub fn max(&self) -> Option<f64> { let v = self.view(); (v.has & 2 != 0).then_some(v.max) }
+    #[inline(always)]
+    pub fn step(&self) -> Option<f64> { let v = self.view(); (v.has & 4 != 0).then_some(v.step) }
 }

@@ -1,0 +1,66 @@
+// Mono lead/bass: a polyBLEP saw through a zero-delay (TPT) state-variable
+// low-pass, with a filter envelope and an amp envelope.
+let cutoff = param(900, 30, 16000)
+let res = param(0.5, 0, 0.98)
+let env_amt = param(3000, 0, 12000)
+let decay = param(0.35, 0.01, 4)
+
+var phase = 0.0
+var amp = 0.0
+var fenv = 0.0
+var ic1 = 0.0
+var ic2 = 0.0
+var a1 = 0.0
+var a2 = 0.0
+var a3 = 0.0
+var fall = 0.0
+var rel = 0.0
+
+// The 2-sample polynomial band-limited step residual.
+fn blep(t, dt) {
+    if t < dt {
+        let x = t / dt
+        return x + x - x * x - 1.0
+    }
+    if t > 1.0 - dt {
+        let x = (t - 1.0) / dt
+        return x * x + x + x + 1.0
+    }
+    0.0
+}
+
+// Control rate: filter coefficients follow the envelope every 64 frames.
+fn block() {
+    let fc = clamp(cutoff + env_amt * fenv, 20.0, sample_rate * 0.45)
+    let g = tan(PI * fc / sample_rate)
+    let k = 2.0 - 2.0 * res
+    a1 = 1.0 / (1.0 + g * (g + k))
+    a2 = g * a1
+    a3 = g * a2
+    fall = exp(-1.0 / (decay * sample_rate))
+    rel = exp(-1.0 / (0.06 * sample_rate))
+}
+
+fn voice() {
+    if trigger {
+        fenv = 1.0
+    }
+    let dt = freq / sample_rate
+    phase = fract(phase + dt)
+    let saw = 2.0 * phase - 1.0 - blep(phase, dt)
+    let v3 = saw - ic2
+    let v1 = a1 * ic1 + a2 * v3
+    let v2 = ic2 + a2 * ic1 + a3 * v3
+    ic1 = 2.0 * v1 - ic1
+    ic2 = 2.0 * v2 - ic2
+    fenv = fenv * fall
+    if gate > 0.0 {
+        amp = min(amp + 330.0 / sample_rate, 1.0)
+    } else {
+        amp = amp * rel
+        if amp < 0.0001 {
+            stop()
+        }
+    }
+    v2 * amp * velocity * 0.5
+}

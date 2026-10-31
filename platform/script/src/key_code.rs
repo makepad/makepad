@@ -145,11 +145,11 @@ fn key_code_from_id(id: LiveId) -> Option<KeyCode> {
 }
 
 fn key_code_error(vm: &mut ScriptVm, message: String) {
-    if let ScriptTrap::Inner(trap) = vm.bx.threads.cur().trap.pass() {
+    if let ScriptTrap::Inner(trap) = ScriptTrap::Inner(vm.bx.parts().trap) {
         trap.push_err(
-            ScriptValue::script_err_unknown_type(trap.ip),
-            message,
-            file!().into(),
+            ScriptValue::script_err_unknown_type(trap.cur_ip()),
+            &message,
+            file!(),
             line!(),
         );
     }
@@ -161,11 +161,18 @@ impl ScriptHook for KeyCode {}
 
 impl ScriptNew for KeyCode {
     fn script_type_id_static() -> ScriptTypeId {
-        ScriptTypeId::of::<Self>()
+        ScriptTypeId::of_path("makepad_script::KeyCode")
     }
 
-    fn script_type_name() -> Option<LiveId> {
-        Some(LiveId::from_str_with_lut("KeyCode").unwrap())
+    fn script_proto(vm: &mut ScriptVm) -> ScriptValue {
+        script_proto_inner(
+            vm,
+            Self::script_type_id_static(),
+            script_proto_build_c::<Self>,
+            script_type_check_c::<Self>,
+            Some("KeyCode"),
+            false,
+        )
     }
 
     fn script_new(_vm: &mut ScriptVm) -> Self {
@@ -182,11 +189,7 @@ impl ScriptNew for KeyCode {
     }
 
     fn script_reload_default(vm: &mut ScriptVm) -> ScriptValue {
-        if vm
-            .bx
-            .heap
-            .type_default_for_id(Self::script_type_id_static())
-            .is_some()
+        if crate::traits::type_default_expanding(vm, Self::script_type_id_static()).is_some()
         {
             Self::script_new_with_default(vm).script_to_value(vm)
         } else {
@@ -207,25 +210,17 @@ impl ScriptNew for KeyCode {
     }
 
     fn script_proto_build(vm: &mut ScriptVm, _props: &mut ScriptTypeProps) -> ScriptValue {
-        let enum_object = vm.bx.heap.new_object();
+        let enum_object = vm.heap_mut().new_object();
         let enum_key = LiveId::from_str_with_lut("__enum").unwrap();
         let type_name = LiveId::from_str_with_lut("KeyCode").unwrap();
         for (key, id) in KEYCODE_VARIANTS.iter().zip(KEY_CODE_IDS) {
             let name = LiveId::from_str_with_lut(key_code_name(*key)).unwrap();
-            let bare = vm.bx.heap.new_with_proto(name.into());
-            vm.bx.heap.set_value(
-                enum_object,
-                id.into(),
-                bare.into(),
-                vm.bx.threads.cur().trap.pass(),
-            );
-            vm.bx.heap.set_value(
-                bare,
-                enum_key.into(),
-                type_name.into(),
-                vm.bx.threads.cur().trap.pass(),
-            );
-            vm.bx.heap.freeze(bare);
+            let bare = vm.heap_mut().new_with_proto(name.into());
+            let parts = vm.bx.parts_mut();
+            let trap = ScriptTrap::Inner(parts.trap);
+            parts.heap.set_value(enum_object, id.into(), bare.into(), trap);
+            parts.heap.set_value(bare, enum_key.into(), type_name.into(), trap);
+            parts.heap.freeze(bare);
         }
         enum_object.into()
     }
@@ -233,7 +228,7 @@ impl ScriptNew for KeyCode {
 
 impl ScriptApply for KeyCode {
     fn script_type_id(&self) -> ScriptTypeId {
-        ScriptTypeId::of::<Self>()
+        <Self as ScriptNew>::script_type_id_static()
     }
 
     fn script_apply(
@@ -247,7 +242,7 @@ impl ScriptApply for KeyCode {
             return;
         }
         if let Some(object) = value.as_object() {
-            if let Some(id) = vm.bx.heap.root_proto(object).as_id() {
+            if let Some(id) = vm.heap_mut().root_proto(object).as_id() {
                 if let Some(key) = key_code_from_id(id) {
                     *self = key;
                     return;

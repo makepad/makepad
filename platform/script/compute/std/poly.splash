@@ -1,0 +1,61 @@
+// Closed 2D polygons in buffers: `pts` holds n vec2 points (n <= 1024).
+
+// Signed area (positive counter-clockwise), the shoelace formula.
+fn area(pts, n) {
+    let s = 0.0
+    for k in 0..n {
+        let a = pts[k]
+        let b = pts[(k + 1) % n]
+        s = s + (a.x * b.y - b.x * a.y)
+    }
+    s * 0.5
+}
+
+// 1 counter-clockwise, -1 clockwise, 0 degenerate.
+fn winding(pts, n) {
+    let a = area(pts, n)
+    if a > 0.0 { 1 } elif a < 0.0 { -1 } else { 0 }
+}
+
+// Whether p is inside (even-odd rule; points on an edge may go either way).
+fn contains(pts, n, p) {
+    let inside = false
+    for k in 0..n {
+        let a = pts[k]
+        let b = pts[(k + n - 1) % n]
+        if (a.y > p.y) != (b.y > p.y) {
+            let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y)
+            if p.x < x { inside = !inside }
+        }
+    }
+    inside
+}
+
+// Perimeter.
+fn perimeter(pts, n) {
+    let s = 0.0
+    for k in 0..n { s = s + distance(pts[(k + 1) % n], pts[k]) }
+    s
+}
+
+// The centroid of the polygon's area.
+fn centroid(pts, n) {
+    let c = vec2(0.0)
+    let s = 0.0
+    for k in 0..n {
+        let a = pts[k]
+        let b = pts[(k + 1) % n]
+        let cr = a.x * b.y - b.x * a.y
+        s = s + cr
+        c = c + (a + b) * cr
+    }
+    if s != 0.0 { c / (3.0 * s) } else { pts[0] }
+}
+
+// Distance from p to segment a-b.
+fn seg_distance(p, a, b) {
+    let ab = b - a
+    let l = dot(ab, ab)
+    let t = if l > 0.0 { clamp(dot(p - a, ab) / l, 0.0, 1.0) } else { 0.0 }
+    distance(p, a + ab * t)
+}

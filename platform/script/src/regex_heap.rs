@@ -25,9 +25,8 @@ impl ScriptHeap {
             self.regexes[re] = Some(data);
             re
         } else {
-            let index = self.regexes.len();
-            self.regexes.push(Some(data));
-            ScriptRegex::new(index as u32, crate::value::GENERATION_ZERO)
+            let (index, generation) = self.regexes.push(Some(data));
+            ScriptRegex::new(index, generation)
         };
 
         self.regex_intern.insert(key, idx);

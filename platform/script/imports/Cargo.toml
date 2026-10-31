@@ -1,0 +1,12 @@
+[package]
+name = "makepad-script-imports"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Splash modules a document imports: scanning, resolving through a host's library and evaluating them in the document's VM, dependencies first"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-script = { path = "..", version = "1.0.0" }

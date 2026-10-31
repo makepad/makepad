@@ -1,17 +1,13 @@
+use makepad_relax_api::relax_api;
 use crate::base64;
 use crate::function::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::native::*;
-use crate::object::*;
 use crate::value::*;
 use crate::*;
 
-use std::cell::RefCell;
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 /// Appends `bytes` with the same replacement behavior as
 /// `String::from_utf8_lossy` without materializing an unbounded intermediate
@@ -46,9 +42,12 @@ pub(crate) fn append_utf8_lossy<S: ScriptStringSink>(mut bytes: &[u8], out: &mut
     }
 }
 
+/// A Rust-held reference to a script array: a GC root while it lives (roots.rs).
+#[relax_api(plain)]
 #[derive(Debug)]
+#[repr(C)]
 pub struct ScriptArrayRef {
-    pub(crate) roots: Rc<RefCell<HashMap<ScriptArray, usize>>>,
+    pub(crate) roots: *const crate::roots::ScriptRoots,
     pub(crate) array: ScriptArray,
 }
 
@@ -60,19 +59,10 @@ impl From<ScriptArrayRef> for ScriptValue {
 
 impl Clone for ScriptArrayRef {
     fn clone(&self) -> Self {
-        let mut roots = self.roots.borrow_mut();
-        match roots.entry(self.array) {
-            Entry::Occupied(mut occ) => {
-                let value = occ.get_mut();
-                *value += 1;
-            }
-            Entry::Vacant(_vac) => {
-                eprintln!("ScriptObjectRef root is vacant!");
-            }
-        }
+        crate::roots::script_root_retain(self.roots, crate::roots::ROOT_ARRAY, self.array.index);
         Self {
-            roots: self.roots.clone(),
-            array: self.array.clone(),
+            roots: self.roots,
+            array: self.array,
         }
     }
 }
@@ -85,27 +75,12 @@ impl ScriptArrayRef {
 
 impl Drop for ScriptArrayRef {
     fn drop(&mut self) {
-        let mut roots = self.roots.borrow_mut();
-        match roots.entry(self.array) {
-            Entry::Occupied(mut occ) => {
-                let value = occ.get_mut();
-                if *value >= 1 {
-                    *value -= 1;
-                } else {
-                    eprintln!("ScriptObjectRef is 0!");
-                }
-                if *value == 0 {
-                    occ.remove();
-                }
-            }
-            Entry::Vacant(_vac) => {
-                eprintln!("ScriptObjectRef root is vacant!");
-            }
-        }
+        crate::roots::script_root_release(self.roots, crate::roots::ROOT_ARRAY, self.array.index);
     }
 }
 
-#[derive(Default)]
+#[relax_api(plain)]
+#[derive(Default, Clone, Copy)]
 pub struct ScriptArrayTag(u64);
 
 impl ScriptArrayTag {
@@ -199,6 +174,7 @@ impl ScriptArrayTag {
     }
 }
 
+#[relax_api(handle)]
 #[derive(PartialEq)]
 pub enum ScriptArrayStorage {
     ScriptValue(VecDeque<ScriptValue>),
@@ -209,6 +185,8 @@ pub enum ScriptArrayStorage {
 }
 
 impl ScriptArrayStorage {
+    pub fn script_values() -> Self { Self::ScriptValue(Default::default()) }
+
     /// Backing allocation retained by this storage, excluding the enum
     /// itself. The retained-heap estimate uses capacity instead of logical
     /// length so a cleared or sparsely written collection cannot hide
@@ -332,35 +310,6 @@ impl ScriptArrayStorage {
             Self::U32(v) => v.push(value.as_f64().unwrap_or(0.0) as u32),
             Self::U16(v) => v.push(value.as_f64().unwrap_or(0.0) as u16),
             Self::U8(v) => v.push(value.as_f64().unwrap_or(0.0) as u8),
-        }
-    }
-    pub fn push_vec(&mut self, vec: &[ScriptVecValue]) {
-        match self {
-            Self::ScriptValue(v) => {
-                for a in vec {
-                    v.push_back(a.value)
-                }
-            }
-            Self::F32(v) => {
-                for a in vec {
-                    v.push(a.value.as_f64().unwrap_or(0.0) as f32)
-                }
-            }
-            Self::U32(v) => {
-                for a in vec {
-                    v.push(a.value.as_f64().unwrap_or(0.0) as u32)
-                }
-            }
-            Self::U16(v) => {
-                for a in vec {
-                    v.push(a.value.as_f64().unwrap_or(0.0) as u16)
-                }
-            }
-            Self::U8(v) => {
-                for a in vec {
-                    v.push(a.value.as_f64().unwrap_or(0.0) as u8)
-                }
-            }
         }
     }
     pub fn pop(&mut self) -> Option<ScriptValue> {
@@ -518,6 +467,7 @@ impl ScriptArrayStorage {
     }
 }
 
+#[relax_api(handle)]
 pub struct ScriptArrayData {
     pub tag: ScriptArrayTag,
     pub storage: ScriptArrayStorage,
@@ -788,6 +738,83 @@ impl ScriptArrayData {
                 )
             },
         );
+
+        // Iterator-style methods, as Rust's: `xs.map(f)` and `xs.filter(f)`
+        // make a new array, `xs.find(f)` gives the first item `f` accepts (or
+        // nil), `xs.any(f)` / `xs.all(f)` a bool, `xs.sum()` the numbers'
+        // sum. `f` is called with each item, in order.
+        for (name, kind) in [
+            (id!(map), IterKind::Map),
+            (id!(filter), IterKind::Filter),
+            (id!(find), IterKind::Find),
+            (id!(any), IterKind::Any),
+            (id!(all), IterKind::All),
+        ] {
+            native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, name, script_args!(f = NIL), move |vm, args| {
+                let Some(sself) = script_value!(vm, args.self).as_array() else {
+                    return script_err_unexpected!(vm.bx.threads.cur_ref().trap, "{} called on non-array value", name);
+                };
+                let f = script_value!(vm, args.f);
+                // The result is held while `f` runs (a collection may run in it).
+                let out = match kind {
+                    IterKind::Map | IterKind::Filter => Some(vm.bx.heap.new_array()),
+                    _ => None,
+                };
+                let _hold = out.map(|o| vm.bx.heap.new_array_ref(o));
+                let mut i = 0;
+                while i < vm.bx.heap.array_len(sself) {
+                    let value = script_array_index!(vm, sself[i]);
+                    let ret = vm.call(f, &[value]);
+                    if ret.is_err() {
+                        return ret;
+                    }
+                    let trap = vm.bx.threads.cur().trap.pass();
+                    match kind {
+                        IterKind::Map => vm.bx.heap.array_push(out.unwrap(), ret, trap),
+                        IterKind::Filter => {
+                            if vm.bx.heap.cast_to_bool(ret) {
+                                vm.bx.heap.array_push(out.unwrap(), value, trap)
+                            }
+                        }
+                        IterKind::Find => {
+                            if vm.bx.heap.cast_to_bool(ret) {
+                                return value;
+                            }
+                        }
+                        IterKind::Any => {
+                            if vm.bx.heap.cast_to_bool(ret) {
+                                return true.into();
+                            }
+                        }
+                        IterKind::All => {
+                            if !vm.bx.heap.cast_to_bool(ret) {
+                                return false.into();
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+                match kind {
+                    IterKind::Map | IterKind::Filter => out.unwrap().into(),
+                    IterKind::Find => NIL,
+                    IterKind::Any => false.into(),
+                    IterKind::All => true.into(),
+                }
+            });
+        }
+
+        native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(sum), &[], |vm, args| {
+            let Some(sself) = script_value!(vm, args.self).as_array() else {
+                return script_err_unexpected!(vm.bx.threads.cur_ref().trap, "sum called on non-array value");
+            };
+            let ip = vm.bx.threads.cur_ref().trap.ip;
+            let mut total = 0.0;
+            for i in 0..vm.bx.heap.array_len(sself) {
+                let value = script_array_index!(vm, sself[i]);
+                total += vm.bx.heap.cast_to_f64(value, ip);
+            }
+            total.into()
+        });
     }
 
     pub fn clear(&mut self) {
@@ -802,6 +829,16 @@ impl ScriptArrayData {
             false
         }
     }
+}
+
+/// What an iterator-style array method does with each answer of its function.
+#[derive(Clone, Copy)]
+enum IterKind {
+    Map,
+    Filter,
+    Find,
+    Any,
+    All,
 }
 
 #[cfg(test)]

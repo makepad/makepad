@@ -10,6 +10,7 @@
 
 use crate::makepad_live_id::LiveId;
 use crate::{array::ScriptArrayStorage, heap::ScriptHeap, value::ScriptValue};
+use makepad_relax_api::relax_api;
 use std::collections::HashSet;
 
 /// Independent ceiling on native comparison work and its temporary storage.
@@ -17,8 +18,11 @@ use std::collections::HashSet;
 /// so the worklist and the visited set can never hold more entries than this.
 pub const MAX_EQUALITY_WORK: usize = 65_536;
 
+#[relax_api(marked)]
 impl ScriptHeap {
-    /// Trusted host comparison without VM fuel. Still iterative and cycle-safe.
+    /// Trusted host comparison without VM fuel. Still iterative and cycle-safe. An op: the walk
+    /// reads the heap's containers, which rustc lays out.
+    #[relax_api]
     pub fn deep_eq(&self, a: ScriptValue, b: ScriptValue) -> bool {
         self.deep_eq_bounded(a, b, usize::MAX, || true)
             .unwrap_or(false)

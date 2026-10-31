@@ -1,0 +1,119 @@
+// Animation evaluated per element (AK1): tweens, keyframe tracks, springs,
+// pulses and event steps over time `t`. Tracks live in buffers: `times`
+// (ascending), `values`, n keys.
+use std.search.*
+use std.ease as ease
+
+// Progress of t through [t0, t1], 0..1 (0 before, 1 after).
+fn tween(t, t0, t1) { if t1 > t0 { clamp((t - t0) / (t1 - t0), 0.0, 1.0) } else { if t >= t1 { 1.0 } else { 0.0 } } }
+
+// A value between a and b over [t0, t1] (apply an ease to `tween` for
+// curves: `mix(a, b, ease.out_cubic(tween(t, t0, t1)))`).
+fn lerp_over(t, t0, t1, a, b) { mix(a, b, tween(t, t0, t1)) }
+
+// A keyframe track: linear between keys, held before the first and after
+// the last.
+fn keys(times, values, n, t) {
+    let k = last_le(times, n, t)
+    if k < 0 { values[0] }
+    elif k >= n - 1 { values[n - 1] }
+    else { mix(values[k], values[k + 1], tween(t, times[k], times[k + 1])) }
+}
+
+// A Motion key track (motion eval.rs sample_track) in f64: `times` (f64,
+// ascending), `values` (f64, `width` per key; this reads component
+// `comp`), per key an ease id (`eases`, i32: ease.apply_d's ids) and four
+// ease params (`eparams`, f64); key k's ease shapes the segment ending at
+// key k. The first key's value before it, the last one's after.
+fn track_d(times, values, width, comp, eases, eparams, n, t) {
+    let tt = f64(t)
+    if !(tt > times[0]) { values[comp] }
+    else {
+        let next = last_le(times, n, tt) + 1
+        if next >= n { values[(n - 1) * width + comp] }
+        else {
+            let a = next - 1
+            let span = times[next] - times[a]
+            let u = ease.apply_d(eases[next], (tt - times[a]) / max(span, f64(0.000000000001)), span, eparams[next * 4], eparams[next * 4 + 1], eparams[next * 4 + 2], eparams[next * 4 + 3])
+            values[a * width + comp] + (values[next * width + comp] - values[a * width + comp]) * u
+        }
+    }
+}
+
+// A precomputed history (render-kernels' `precompute`, AK5): record i of
+// step s at words (s * count + i) * stride; word `word` of element i at time
+// t, linear between steps and held at the ends.
+fn history_at(table, count, stride, word, i, t0, dt, steps, t) {
+    let last = steps - 1
+    let x = clamp((t - t0) / dt, 0.0, float(last))
+    let k = min(int(floor(x)), max(last - 1, 0))
+    let a = table[(k * count + i) * stride + word]
+    if last == 0 { a } else {
+        let b = table[((k + 1) * count + i) * stride + word]
+        a + (b - a) * (x - float(k))
+    }
+}
+
+// The index of the last event at or before t (-1: none yet), and how long
+// ago it was.
+fn step_index(times, n, t) { last_le(times, n, t) }
+fn since_last(times, n, t) {
+    let k = last_le(times, n, t)
+    if k < 0 { 1000000000.0 } else { t - times[k] }
+}
+
+// A value that jumps to values[k] at each event and settles there with a
+// spring from the previous value (frequency `freq` Hz, damping ratio `z`).
+fn stepped(times, values, n, t, freq, z) {
+    let k = last_le(times, n, t)
+    if k < 0 { values[0] }
+    else {
+        let prev = values[max(k - 1, 0)]
+        mix(prev, values[k], spring_to(t - times[k], freq, z))
+    }
+}
+
+// Step response of a spring (0 -> 1) after `age` seconds: `freq` Hz,
+// damping ratio `z` (under 1 overshoots).
+fn spring_to(age, freq, z) {
+    if age <= 0.0 { 0.0 }
+    else {
+        let w = TAU * freq
+        let zz = clamp(z, 0.0, 0.999)
+        let wd = w * sqrt(1.0 - zz * zz)
+        1.0 - exp(-zz * w * age) * (cos(wd * age) + zz * w / wd * sin(wd * age))
+    }
+}
+
+// (A decaying pulse from one event is the shared stdlib's `pulse(t, t0, half_life)`.)
+
+// Sum of the pulses of the (at most 32) latest events at or before t.
+fn pulse_sum(times, n, t, half_life) {
+    let k = last_le(times, n, t)
+    let s = 0.0
+    for j in 0..32 {
+        let e = k - j
+        if e >= 0 { s = s + pulse(t, times[e], half_life) }
+    }
+    s
+}
+
+// Exponential follow toward a target: the fraction covered after `dt`
+// with lag `lag` seconds (63% after one lag).
+fn follow(dt, lag) { if lag > 0.0 { 1.0 - exp(-dt / lag) } else { 1.0 } }
+
+// Distance travelled from rest under constant acceleration `a`, capped at
+// speed `vmax` (for launches and settles).
+fn accelerate(t, a, vmax) {
+    let t1 = if a > 0.0 { vmax / a } else { 0.0 }
+    if t <= 0.0 { 0.0 } elif t < t1 { 0.5 * a * t * t } else { 0.5 * a * t1 * t1 + vmax * (t - t1) }
+}
+
+// Birth-clock emitters (AK10): particles born at `rate` per second, each
+// living `life` seconds. A kernel runs `births_max(life, rate)` elements;
+// element e is birth `births_first(t, life, rate) + e`, born at
+// `birth_time(index, rate)` (dead when born after t). Thin with
+// `hash01(index, k) < keep` for a rate that varies.
+fn births_first(t, life, rate) { int(floor(max(t - life, 0.0) * rate)) }
+fn births_max(life, rate) { int(ceil(life * rate)) + 1 }
+fn birth_time(index, rate) { float(index) / rate }

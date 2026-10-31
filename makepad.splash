@@ -59,16 +59,24 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-aichat"}
     RunStudioRelease{name: "makepad-example-box3d"}
     RunStudioRelease{name: "makepad-example-browser"}
+    RunStudioRelease{name: "makepad-example-native-app-view"}
     RunStudioRelease{name: "makepad-example-charts"}
     RunStudioRelease{name: "makepad-example-windows-blur"}
     RunStudioRelease{name: "makepad-example-splash"}
     RunStudioRelease{name: "makepad-example-slides"}
     RunStudioRelease{name: "makepad-example-isolate"}
+    RunStudioRelease{name: "makepad-example-gl-interop"}
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-app-route"}
-    RunStudioRelease{name: "makepad-clock"}
-    RunStudioRelease{name: "makepad-weather"}
+    RunStudioRelease{name: "makepad-app-clock"}
+    RunStudioRelease{name: "makepad-app-desklink"}
+    RunStudioRelease{name: "makepad-app-xr-bridge"}
+    RunStudioRelease{name: "makepad-app-weather"}
+    RunStudioRelease{name: "makepad-app-translator"}
+    RunStudioRelease{name: "makepad-app-camera"}
+    RunStudioRelease{name: "makepad-app-amp"}
+    RunStudioRelease{name: "makepad-app-code"}
     RunStudioRelease{name: "makepad-example-todo"}
     RunStudioRelease{name: "makepad-example-glass"}
     RunStudioRelease{name: "makepad-example-skeuomorph"}
@@ -76,11 +84,13 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-move-after-draw"}
     RunStudioRelease{name: "makepad-example-scroll-containment"}
     RunStudioRelease{name: "makepad-example-render-to-texture"}
+    RunStudioRelease{name: "makepad-example-depth-mix"}
+    RunStudioRelease{name: "makepad-example-sdf-atlas"}
+    RunStudioRelease{name: "makepad-example-sdf-bake"}
     RunStudioRelease{name: "makepad-example-raytrace"}
     RunStudioRelease{name: "makepad-example-audio-playback-decode-probe"}
     RunStudioRelease{name: "makepad-studio"}
     RunStudioRelease{name: "makepad-example-xr"}
     RunStudioRelease{name: "makepad-example-cad"}
-    RunStudioRelease{name: "makepad-fab"}
-    RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
+    RunStudioRelease{name: "makepad-example-screen-span"}
 ])

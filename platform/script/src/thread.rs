@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::heap::*;
 use crate::json::*;
 use crate::makepad_live_id::*;
@@ -7,6 +8,7 @@ use crate::trap::*;
 use crate::value::*;
 use crate::*;
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StackBases {
     pub loops: usize,
@@ -17,6 +19,7 @@ pub struct StackBases {
     pub slots: usize,
 }
 
+#[relax_api(plain)]
 #[derive(Debug)]
 pub struct LoopValues {
     pub value_id: LiveId,
@@ -31,6 +34,7 @@ pub struct LoopValues {
     pub range_cache: Option<(f64, f64)>,
 }
 
+#[relax_api(plain)]
 #[derive(Debug)]
 pub struct TryFrame {
     pub push_nil: bool,
@@ -39,6 +43,7 @@ pub struct TryFrame {
     pub bases: StackBases,
 }
 
+#[relax_api(plain)]
 #[derive(Debug)]
 pub struct LoopFrame {
     pub values: Option<LoopValues>,
@@ -47,6 +52,7 @@ pub struct LoopFrame {
     pub bases: StackBases,
 }
 
+#[relax_api(plain)]
 pub struct CallFrame {
     pub bases: StackBases,
     pub args: OpcodeArgs,
@@ -55,6 +61,9 @@ pub struct CallFrame {
     /// The callee's own frame is established by SLOTS_FRAME (slot-compiled
     /// fns only); non-slotted fns never touch slot_base.
     pub prev_slot_base: usize,
+    /// The root frame of a script body run (not a host->fn call): its
+    /// return records the scope the body ended in (`ScriptBody::end_scope`).
+    pub body_root: bool,
 }
 
 #[derive(Debug)]
@@ -85,7 +94,9 @@ impl Into<ScriptValue> for ScriptMe {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Default, Debug, Clone, Copy)]
+#[repr(transparent)]
 pub struct ScriptThreadId(pub(crate) u32);
 
 impl ScriptThreadId {
@@ -94,6 +105,7 @@ impl ScriptThreadId {
     }
 }
 
+#[relax_api(handle)]
 #[allow(unused)]
 pub struct ScriptThread {
     pub(crate) is_paused: bool,
@@ -129,6 +141,9 @@ pub struct ScriptThread {
     //pub(crate) last_err: ScriptValue,
     pub(crate) json_parser: JsonParserThread,
     pub(crate) thread_id: ScriptThreadId,
+    /// Edit mode, while a program loads: the names read and where (see
+    /// `crate::literal::LoadTrace::name_reads`). None otherwise.
+    pub(crate) name_reads: Option<Box<crate::literal::NameReads>>,
 }
 
 impl ScriptThread {
@@ -155,6 +170,7 @@ impl ScriptThread {
             instruction_limit_remaining: None,
             trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
+            name_reads: None,
         }
     }
 
@@ -175,14 +191,25 @@ impl ScriptThread {
         self.thread_id
     }
 
+    #[inline]
     pub fn is_paused(&self) -> bool {
         self.is_paused
     }
 
+    /// What this thread is rooting for the collector, as sizes: the value
+    /// stack, the frame slots, the scope chain, the method contexts, the
+    /// loop frames. A leak hunt reads these across events.
+    #[inline]
+    pub fn root_footprint(&self) -> [usize; 5] {
+        [self.stack.len(), self.slots.len(), self.scopes.len(), self.mes.len(), self.loops.len()]
+    }
+
+    #[inline]
     pub fn thread_id(&self) -> ScriptThreadId {
         self.thread_id
     }
 
+    #[inline]
     pub fn truncate_bases(&mut self, bases: StackBases, heap: &mut ScriptHeap) {
         self.tries.truncate(bases.tries);
         self.loops.truncate(bases.loops);
@@ -196,6 +223,7 @@ impl ScriptThread {
     /// values and call-builder (`mes`) state. The loop frame itself and the
     /// scopes are left to the loop's own iteration-scope reset so a plain
     /// `loop` keeps its iteration scope and `for` can reuse its scope object.
+    #[inline]
     pub fn truncate_loop_iteration_bases(&mut self, bases: StackBases) {
         self.tries.truncate(bases.tries);
         self.stack.truncate(bases.stack);
@@ -209,7 +237,7 @@ impl ScriptThread {
         if let Some(v) = self.slots.get(self.slot_base + index as usize) {
             return *v;
         }
-        script_err_stack!(self.trap, "slot {} out of frame", index)
+        self.slot_out_of_frame(index)
     }
 
     #[inline]
@@ -218,10 +246,25 @@ impl ScriptThread {
         if let Some(v) = self.slots.get_mut(at) {
             *v = value;
         } else {
-            script_err_stack!(self.trap, "slot {} out of frame", index);
+            self.slot_out_of_frame(index);
         }
     }
 
+    // The error paths of the operand and slot accessors stay out of line,
+    // so the accessors themselves inline into every opcode handler.
+    #[cold]
+    #[inline(never)]
+    fn slot_out_of_frame(&mut self, index: u32) -> ScriptValue {
+        script_err_stack!(self.trap, "slot {} out of frame", index)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pop_empty_stack(&mut self, what: &'static str) -> ScriptValue {
+        script_err_stack!(self.trap, "{} on empty stack", what)
+    }
+
+    #[inline]
     pub fn free_unreffed_scopes(&mut self, bases: &StackBases, heap: &mut ScriptHeap) {
         while self.scopes.len() > bases.scope {
             let scope = self.scopes.pop().unwrap();
@@ -245,10 +288,11 @@ impl ScriptThread {
             }
             return val;
         } else {
-            script_err_stack!(self.trap, "pop_stack_resolved on empty stack")
+            self.pop_empty_stack("pop_stack_resolved")
         }
     }
 
+    #[inline]
     pub fn peek_stack_resolved(&mut self, heap: &ScriptHeap) -> ScriptValue {
         if let Some(val) = self.stack.last() {
             if let Some(id) = val.as_id() {
@@ -263,6 +307,7 @@ impl ScriptThread {
         }
     }
 
+    #[inline]
     pub fn peek_stack_value(&mut self) -> ScriptValue {
         if let Some(value) = self.stack.last() {
             return *value;
@@ -271,6 +316,7 @@ impl ScriptThread {
         }
     }
 
+    #[inline]
     pub fn peek_stack_value_at(&mut self, offset: usize) -> ScriptValue {
         let len = self.stack.len();
         if offset < len {
@@ -285,14 +331,16 @@ impl ScriptThread {
         }
     }
 
+    #[inline]
     pub fn pop_stack_value(&mut self) -> ScriptValue {
         if let Some(value) = self.stack.pop() {
             return value;
         } else {
-            script_err_stack!(self.trap, "pop_stack_value on empty stack")
+            self.pop_empty_stack("pop_stack_value")
         }
     }
 
+    #[inline]
     pub fn push_stack_value(&mut self, value: ScriptValue) {
         self.push_stack_unchecked(value);
     }
@@ -309,6 +357,7 @@ impl ScriptThread {
         self.stack.push(value);
     }
 
+    #[inline]
     pub(crate) fn push_call_frame(&mut self, call: CallFrame) -> bool {
         if self
             .call_frame_limit
@@ -321,18 +370,22 @@ impl ScriptThread {
         true
     }
 
+    #[inline]
     pub(crate) fn take_stack_limit_exceeded(&mut self) -> bool {
         std::mem::take(&mut self.stack_limit_exceeded)
     }
 
+    #[inline]
     pub(crate) fn take_call_frame_limit_exceeded(&mut self) -> bool {
         std::mem::take(&mut self.call_frame_limit_exceeded)
     }
 
+    #[inline]
     pub(crate) fn has_execution_limit_exceeded(&self) -> bool {
         self.stack_limit_exceeded || self.call_frame_limit_exceeded
     }
 
+    #[inline]
     pub fn call_has_me(&self) -> bool {
         self.calls
             .last()
@@ -340,6 +393,7 @@ impl ScriptThread {
             .unwrap_or(false)
     }
 
+    #[inline]
     pub fn call_has_try(&self) -> bool {
         self.calls
             .last()
@@ -355,6 +409,7 @@ impl ScriptThread {
     /// the Rust stack under a native call (`array.retain(fn)` calls back on
     /// this same thread); unwinding into them from here would pop frames that
     /// outer loop is still executing.
+    #[inline]
     pub(crate) fn call_stack_has_try(&self) -> bool {
         for call in self.calls.iter().rev() {
             if self.tries.len() > call.bases.tries {
@@ -368,10 +423,15 @@ impl ScriptThread {
     }
 
     // lets resolve an id to a ScriptValue
+    #[inline]
     pub fn scope_value(&mut self, heap: &ScriptHeap, id: LiveId) -> ScriptValue {
+        if let Some(reads) = &mut self.name_reads {
+            reads.record(id, self.trap.ip.body, self.trap.ip.index);
+        }
         heap.scope_value(*self.scopes.last().unwrap(), id.into(), self.trap.pass())
     }
 
+    #[inline]
     pub fn set_scope_value(
         &mut self,
         heap: &mut ScriptHeap,
@@ -386,6 +446,7 @@ impl ScriptThread {
         )
     }
 
+    #[inline]
     pub fn def_scope_value(&mut self, heap: &mut ScriptHeap, id: LiveId, value: ScriptValue) {
         // alright if we are shadowing a value, we need to make a new scope
         if let Some(new_scope) = heap.def_scope_value(*self.scopes.last().unwrap(), id, value) {
@@ -397,6 +458,7 @@ impl ScriptThread {
 /// Wrapper around Vec<ScriptThread> with a current thread index.
 /// This allows accessing the current thread without borrowing the entire container,
 /// enabling split borrows between threads and other fields like heap/code.
+#[relax_api(handle)]
 pub struct ScriptThreads {
     threads: Vec<ScriptThread>,
     current: usize,
@@ -437,7 +499,7 @@ impl ScriptThreads {
 
     /// Get a mutable reference to the current thread using cached pointer
     /// SAFETY: The pointer is kept in sync with the current index and thread vector
-    #[inline(always)]
+    #[inline]
     pub fn cur(&mut self) -> &mut ScriptThread {
         assert!(
             !self.cur_ptr.is_null(),
@@ -456,7 +518,7 @@ impl ScriptThreads {
 
     /// Get an immutable reference to the current thread using cached pointer
     /// SAFETY: The pointer is kept in sync with the current index and thread vector
-    #[inline(always)]
+    #[inline]
     pub fn cur_ref(&self) -> &ScriptThread {
         assert!(
             !self.cur_ptr.is_null(),

@@ -1,7 +1,7 @@
 use {
     crate::{
         code::{Code, UncompiledCode},
-        decode::{Decode, DecodeError, Decoder},
+        
         error::Error,
         exec,
         instance::Instance,
@@ -173,25 +173,6 @@ impl FuncType {
     /// [`StackSlot`]s.
     pub(crate) fn call_frame_size(&self) -> usize {
         self.params().len().max(self.results().len()) + 4
-    }
-}
-
-impl Decode for FuncType {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        if decoder.read_byte()? != 0x60 {
-            return Err(DecodeError::new("malformed function type"))?;
-        }
-        let mut param_result_types: Vec<_> = decoder.decode_iter()?.collect::<Result<_, _>>()?;
-        let param_count = param_result_types.len();
-        let result_types = decoder.decode_iter()?;
-        param_result_types.reserve(result_types.size_hint().0);
-        for result_type in result_types {
-            param_result_types.push(result_type?);
-        }
-        Ok(Self {
-            params_results: param_result_types.into(),
-            param_count,
-        })
     }
 }
 

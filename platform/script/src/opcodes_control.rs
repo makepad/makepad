@@ -28,7 +28,18 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub(crate) fn handle_if_else(&mut self, opargs: OpcodeArgs) {
+        // NEED_NIL: the true arm left no value but the if's value is used
+        if opargs.is_need_nil() {
+            self.bx.threads.cur().push_stack_unchecked(NIL);
+        }
         self.bx.threads.cur().trap.goto_rel(opargs.to_u32());
+    }
+
+    /// The value of an if/match arm that leaves none (see the parser's
+    /// close_if_else).
+    pub(crate) fn handle_nil_arm(&mut self) {
+        self.bx.threads.cur().push_stack_unchecked(NIL);
+        self.bx.threads.cur().trap.goto_next();
     }
 
     // RETURN handlers
@@ -44,9 +55,11 @@ impl<'a> ScriptVm<'a> {
             return;
         };
         self.bx.threads.cur().slot_base = call.prev_slot_base;
-        // A root frame's last scope holds everything the body defined after
-        // a shadowing let; keep it for host->script lookups.
-        if call.return_ip.is_none() {
+        // A body run's last scope holds everything the body defined after
+        // a shadowing let; keep it for host->script lookups. Only a body
+        // root: pinning a host->fn call's scope would defeat its eager free
+        // (one leaked scope per host tick until GC).
+        if call.body_root {
             let end = self.bx.threads.cur_ref().scopes.last().copied();
             self.bx.threads.cur().root_end_scope = end.map(|s| self.bx.heap.new_object_ref(s));
         }

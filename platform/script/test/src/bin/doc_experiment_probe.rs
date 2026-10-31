@@ -18,7 +18,7 @@ use makepad_script::*;
 fn new_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     }
 }
@@ -121,7 +121,7 @@ fn main() {
     assert!(chain[0].loc.is_some(), "made_at resolves to a source loc");
 
     println!("--- value-position names ---");
-    let body = vm.bx.heap.made_at(obj).body;
+    let body = vm.heap().made_at(obj).body;
     let names = vm.bx.code.resolve_body_value_names(body);
     for vn in &names {
         println!("value-name @tok{}: {}", vn.token, vn.name);

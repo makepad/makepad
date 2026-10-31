@@ -1,0 +1,273 @@
+//! Hostile shader source: the emitters clamp every dynamic index (reads,
+//! assignments and compound assignments), refuse out-of-range literal
+//! indices, keep loop variables immutable, and bound nested and called loops
+//! by one static per-invocation budget (KERNELS.md §5.2, P0-S). The GPU half
+//! of the suite (the same shaders compiled and run on Metal) is in
+//! platform/src/os/apple/metal_gpu_tests.rs.
+
+use makepad_script::*;
+
+fn test_vm() -> ScriptVm<'static> {
+    let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
+}
+
+/// Compile `fragment_body` (plus `extra` members) as a draw shader for
+/// `backend` and return the emitted functions, or `ERRORS: …`.
+fn compile(backend: &str, extra: &str, fragment_body: &str) -> String {
+    let mut vm = test_vm();
+    vm.bx.captured_errors = Some(Vec::new());
+    let code = format!(
+        "use mod.pod.*\nuse mod.math.*\nuse mod.shader\nlet sh = {{\n\
+         vertex_pos: shader.vertex_position(vec4f)\n\
+         pixel: shader.fragment_output(0, vec4f)\n\
+         u_n: shader.uniform(0.0)\n\
+         {extra}\n\
+         vertex: fn() {{ self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0) }}\n\
+         fragment: fn() {{\n{fragment_body}\n}}\n\
+         }}\nshader.test_compile_draw_source(sh, \"{backend}\", false)"
+    );
+    let value = vm.with_instruction_limit(5_000_000, |vm| {
+        vm.eval(ScriptMod::new("", "", "shader_hostile", 0, 0, &code, &[]))
+    });
+    vm.bx.heap.string_with(value, |_, s| s.to_string()).unwrap_or_else(|| format!("ERRORS: not a string: {value:?}"))
+}
+
+fn ok(backend: &str, extra: &str, body: &str) -> String {
+    let src = compile(backend, extra, body);
+    assert!(!src.starts_with("ERRORS") && !src.starts_with("unknown") && !src.starts_with("no shader"), "{backend}: {src}");
+    wgsl_plain(&src)
+}
+
+/// The IR printers' locals (`l3_f`) and WGSL's typed literals (`2.0f`, `0i`)
+/// as the other emitters spell them (`l_f`, `2.0`, `0`), so one needle checks
+/// every backend.
+fn wgsl_plain(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let prev_ident = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        // `l<digits>_` at the start of an identifier.
+        if c == b'l' && !prev_ident {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < b.len() && b[j] == b'_' {
+                out.push_str("l_");
+                i = j + 1;
+                continue;
+            }
+        }
+        // A number's `f` / `i` suffix.
+        if (c == b'f' || c == b'i') && i > 0 && b[i - 1].is_ascii_digit() && !(i + 1 < b.len() && (b[i + 1].is_ascii_alphanumeric() || b[i + 1] == b'_')) {
+            let mut j = i;
+            while j > 0 && (b[j - 1].is_ascii_digit() || b[j - 1] == b'.' || b[j - 1] == b'e' || b[j - 1] == b'-') {
+                j -= 1;
+            }
+            let starts_number = j == 0 || !(b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_');
+            if starts_number {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    out
+}
+
+fn fails(backend: &str, extra: &str, body: &str, needle: &str) {
+    let src = compile(backend, extra, body);
+    assert!(src.starts_with("ERRORS") && src.contains(needle), "{backend}: expected an error with {needle:?}, got:\n{src}");
+}
+
+const BACKENDS: [&str; 4] = ["metal", "hlsl", "glsl", "wgsl"];
+
+#[test]
+fn dynamic_array_indices_are_clamped_for_read_assign_and_compound_assign() {
+    let body = "var arr = array(1f, 2f, 3f, 4f)\n\
+                var i = int(self.u_n) + 1000000\n\
+                let a = arr[i]\n\
+                arr[i] = 5f\n\
+                arr[i] += 1f\n\
+                arr[i] *= 2f\n\
+                self.pixel = vec4(a, arr[0], 0.0, 1.0)";
+    for backend in BACKENDS {
+        let src = ok(backend, "", body);
+        let clamped = "clamp(l_i, 0, 3)]";
+        let n = src.matches(clamped).count();
+        assert!(n >= 4 && n % 4 == 0, "{backend}: every dynamic index is clamped:\n{src}");
+        assert!(!src.contains("[l_i]") && !src.contains("[i]"), "{backend}: an unclamped index:\n{src}");
+        // The local array is declared with the backend's array syntax.
+        let decl = match backend { "metal" => "array<float, 4> l_arr", "hlsl" => "float l_arr[4]", "glsl" => "float[4] l_arr", _ => "var l_arr" };
+        assert!(src.contains(decl), "{backend}:\n{src}");
+        // The literal index stays as written.
+        assert!(src.contains("[0]"), "{backend}:\n{src}");
+    }
+}
+
+#[test]
+fn unsigned_vector_and_matrix_indices_are_clamped() {
+    let body = "var v = vec3(1f, 2f, 3f)\n\
+                var m = mat4x4f(1.0)\n\
+                let k = uint(self.u_n) + 7u\n\
+                v[k] = 9f\n\
+                v[k] -= 1f\n\
+                let col = m[k]\n\
+                self.pixel = vec4(v[k], col.x, 0.0, 1.0)";
+    for backend in BACKENDS {
+        let src = ok(backend, "", body);
+        let (vec_clamp, mat_clamp) = ("min(l_k, ", "3u)]");
+        let n = src.matches(vec_clamp).count();
+        assert!(n >= 4 && n % 4 == 0, "{backend}:\n{src}");
+        assert!(!src.contains("[l_k]") && !src.contains("[k]"), "{backend}: an unclamped index:\n{src}");
+        assert!(src.contains(", 2u)]"), "{backend}: vec3 clamps to 2:\n{src}");
+        assert!(src.contains(mat_clamp), "{backend}: mat4 clamps to 3:\n{src}");
+    }
+}
+
+#[test]
+fn out_of_range_literal_indices_are_compile_errors() {
+    for backend in BACKENDS {
+        fails(backend, "", "var arr = array(1f, 2f)\nlet a = arr[2]\nself.pixel = vec4(a)", "out of bounds");
+        fails(backend, "", "var v = vec4(1f)\nv[4] = 1f\nself.pixel = v", "out of bounds");
+        fails(backend, "", "var v = vec2(1f)\nv[7] += 1f\nself.pixel = vec4(v.x)", "out of bounds");
+    }
+}
+
+#[test]
+fn loop_variables_cannot_be_reassigned() {
+    fails("metal", "", "var s = 0f\nfor i in 0..4 { i = 0\n s += 1f }\nself.pixel = vec4(s)", "cannot assign");
+    fails("metal", "", "var s = 0f\nfor i in 0..4 { i += 1\n s += 1f }\nself.pixel = vec4(s)", "");
+}
+
+#[test]
+fn runtime_bounded_loops_charge_the_shared_invocation_budget() {
+    // Every runtime loop keeps its per-loop cap and charges one body pass to
+    // the invocation's counter, which every function shares.
+    let src = ok("metal", "", "var s = 0f\nfor i in 0..uint(self.u_n) { s += 1f }\nself.pixel = vec4(s)");
+    assert!(src.contains("> 65536u) || (_mp._mp_iter > 4194304u))) { break; }"), "{src}");
+    assert!(src.contains("_mp._mp_iter = (_mp._mp_iter + 1u);"), "{src}");
+    // A runtime loop around a literal one charges the literal's whole cost
+    // per pass (1 + 1000 x 1).
+    let src = ok("metal", "", "var s = 0f\nfor i in 0..uint(self.u_n) { for j in 0..1000 { s += 1f } }\nself.pixel = vec4(s)");
+    assert!(src.contains("_mp._mp_iter = (_mp._mp_iter + 1001u);"), "{src}");
+    // Nested runtime loops each charge; `loop` too.
+    let src = ok("metal", "", "var s = 0f\nfor i in 0..uint(self.u_n) { loop { s += 1f\n if s > 1e30 { break } } }\nself.pixel = vec4(s)");
+    assert_eq!(src.matches("_mp._mp_iter > 4194304u").count(), 2, "{src}");
+    // The runtime bound is evaluated once, before the loop.
+    assert!(src.contains("_mp_end_") && src.contains(" = uint(_mp.u->uni_u_n);"), "{src}");
+    // No placeholder survives into the output.
+    assert!(!src.contains('\u{1}'), "{src}");
+    // Every GPU backend declares and charges its counter.
+    for (backend, needle) in [("hlsl", "_mp_iter = (_mp_iter + 1u);"), ("glsl", "_mp_iter = (_mp_iter + 1u);"), ("wgsl", "_mp_iter = (_mp_iter + 1u);")] {
+        let src = ok(backend, "", "var s = 0f\nfor i in 0..uint(self.u_n) { s += 1f }\nself.pixel = vec4(s)");
+        assert!(src.contains(needle) && src.contains("_mp_iter > 4194304u"), "{backend}:\n{src}");
+    }
+}
+
+#[test]
+fn loops_in_called_functions_charge_their_callers() {
+    let extra = "inner: fn() { var s = 0f\n for j in 0..64 { s += 1f }\n return s }";
+    let src = ok("metal", extra, "var s = 0f\nfor i in 0..uint(self.u_n) { s += self.inner() }\nself.pixel = vec4(s)");
+    // One pass of the caller's loop: 1 + the callee's 1 + 64.
+    assert!(src.contains("_mp._mp_iter = (_mp._mp_iter + 66u);"), "{src}");
+    // The callee's own runtime loop charges the same shared counter.
+    let extra = "inner: fn() { var s = 0f\n for j in 0..uint(self.u_n) { s += 1f }\n return s }";
+    let src = ok("metal", extra, "var s = 0f\nfor i in 0..uint(self.u_n) { s += self.inner() }\nself.pixel = vec4(s)");
+    assert_eq!(src.matches("_mp._mp_iter > 4194304u").count(), 2, "{src}");
+}
+
+#[test]
+fn literal_nesting_over_the_budget_is_refused() {
+    for backend in BACKENDS {
+        fails(backend, "", "var s = 0f\nfor i in 0..60000 { for j in 0..60000 { s += 1f } }\nself.pixel = vec4(s)", "loops too costly");
+    }
+    // Literal nesting through calls is refused too.
+    let extra = "inner: fn() { var s = 0f\n for j in 0..60000 { s += 1f }\n return s }";
+    fails("metal", extra, "var s = 0f\nfor i in 0..60000 { s += self.inner() }\nself.pixel = vec4(s)", "loops too costly");
+    // A modest literal nest is fine and gets no guard.
+    let src = ok("metal", "", "var s = 0f\nfor i in 0..64 { for j in 0..64 { s += 1f } }\nself.pixel = vec4(s)");
+    assert!(!src.contains("break;"), "{src}");
+}
+
+#[test]
+fn uint_operands_take_unsigned_literals_in_glsl_and_wgsl() {
+    let extra = "bump: fn(a: u32, b: u32) -> u32 { return a + b }";
+    let body = "var u = u32(self.u_n)\n\
+                var c = 0.0\n\
+                if u == 5 { c = 1.0 }\n\
+                if 7 != u { c = 2.0 }\n\
+                if u > 3 { c = 3.0 }\n\
+                var w = u + 1\n\
+                w = 2 * w\n\
+                w += 3\n\
+                w = w & 255\n\
+                w = w % 4\n\
+                w = 9\n\
+                w = self.bump(w, 6)\n\
+                self.pixel = vec4(c, float(w), 0.0, 1.0)";
+    for backend in ["glsl", "wgsl"] {
+        let src = ok(backend, extra, body);
+        for needle in ["== 5u", "7u !=", "> 3u", "+ 1u", "2u *", "+= 3u", "& 255u", "% 4u", "= 9u", ", 6u)"] {
+            if backend == "wgsl" && needle == ", 6u)" {
+                continue; // WGSL converts abstract-int call arguments itself
+            }
+            assert!(src.contains(needle), "{backend}: missing {needle:?} in\n{src}");
+        }
+    }
+    // an int next to an int stays unsuffixed
+    let src = ok("glsl", "", "var i = int(self.u_n)\nif i == 5 { i = 6 }\nself.pixel = vec4(float(i))");
+    assert!(src.contains("== 5)") && !src.contains("5u"), "{src}");
+}
+
+#[test]
+fn uint_literals_in_returns_and_index_assignments() {
+    let extra = "pick: fn(a: u32) -> u32 { if a > 3 { return a }\nreturn 0 }";
+    let body = "var u = u32(self.u_n)\n\
+                var v = vec2u(1u, 2u)\n\
+                v[1] = 7\n\
+                var arr = array(1u, 2u)\n\
+                arr[0] = 4\n\
+                u = self.pick(u)\n\
+                self.pixel = vec4(float(u), float(v.y), float(arr[0]), 1.0)";
+    for backend in ["glsl", "wgsl"] {
+        let src = ok(backend, extra, body);
+        for needle in ["return 0u", "[1] = 7u", "[0] = 4u"] {
+            assert!(src.contains(needle) || src.contains(&needle.replace("[1]", "[1u]")), "{backend}: missing {needle:?} in\n{src}");
+        }
+    }
+}
+
+#[test]
+fn int_literals_become_floats_where_a_float_is_expected() {
+    let extra = "half: fn(a: f32) -> f32 { return a * 0.5 }\nzero: fn(a: f32) -> f32 { if a > 1.0 { return a }\nreturn 0 }";
+    // (statement, text every emitter must contain)
+    let cases = [
+        ("f = 2", "l_f = 2.0;"),
+        ("f += 3", "l_f += 3.0;"),
+        ("f = f + 1", "(l_f + 1.0)"),
+        ("f = 4 - f", "(4.0 - l_f)"),
+        ("if f < 5 { f = 1 }", "(l_f < 5.0)"),
+        ("f = self.half(8)", "io_half(8.0)"),
+        ("f = self.zero(f)", "return 0.0;"),
+        ("var v = vec2(1f)\nv.x = 3\nf = v.x", "l_v.x = 3.0;"),
+        ("var v = vec2(1f)\nv[1] = 4\nf = v.y", "l_v[1] = 4.0;"),
+        ("var v = vec2(1f)\nv += 1\nf = v.x", "l_v += 1.0;"),
+        ("var a = array(1f, 2f)\na[0] = 5\nf = a[0]", "l_a[0] = 5.0;"),
+        ("f = f * 2", "(l_f * 2.0)"),
+    ];
+    for backend in ["glsl", "wgsl"] {
+        for (st, needle) in cases {
+            let body = format!("var f = self.u_n\n{st}\nself.pixel = vec4(f)");
+            let src = ok(backend, extra, &body);
+            assert!(src.contains(needle), "{backend}: `{}` should emit {needle:?}:\n{src}", st.replace('\n', "; "));
+        }
+    }
+}

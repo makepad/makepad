@@ -8,7 +8,7 @@ use makepad_script::*;
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new((), ())));
     let mut vm = ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     };
     vm.bx.captured_errors = Some(Vec::new());
@@ -17,11 +17,7 @@ fn test_vm() -> ScriptVm<'static> {
 
 fn eval(vm: &mut ScriptVm, name: &str, code: &str) -> ScriptValue {
     vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            file: format!("try_catch_{name}.octoscript"),
-            code: format!("{code}\n;"),
-            ..Default::default()
-        })
+        vm.eval(ScriptMod::new("", "", &format!("try_catch_{name}.octoscript"), 0, 0, &format!("{code}\n;"), &[]))
     })
 }
 
@@ -145,11 +141,7 @@ fn canonical_try_value_survives_end_of_source_auto_close() {
     let vm = &mut test_vm();
     // No trailing terminator: the parser's auto-close path must not discard
     // the fallback block's tail value either.
-    let value = vm.eval(ScriptMod {
-        file: "try_catch_auto_close.octoscript".to_owned(),
-        code: "use mod.std.assert\ntry {\n    assert(false)\n} catch {\n    42\n}".to_owned(),
-        ..Default::default()
-    });
+    let value = vm.eval(ScriptMod::new("", "", "try_catch_auto_close.octoscript", 0, 0, "use mod.std.assert\ntry {\n    assert(false)\n} catch {\n    42\n}", &[]));
     let errors = vm.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(value.as_number(), Some(42.0));

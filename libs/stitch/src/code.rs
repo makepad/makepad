@@ -1,8 +1,8 @@
 use {
     crate::{
         aliasable_box::AliasableBox,
-        config::Extensions,
-        decode::{Decode, DecodeError, Decoder},
+        binary::{self, Instr},
+        decode::DecodeError,
         exec::{self, ThreadedInstr},
         ref_::RefType,
         simd::V128,
@@ -21,29 +21,8 @@ pub(crate) enum Code {
 #[derive(Clone, Debug)]
 pub(crate) struct UncompiledCode {
     pub(crate) locals: Box<[ValType]>,
-    pub(crate) expr: Arc<[u8]>,
-}
-
-impl Decode for UncompiledCode {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        use std::iter;
-
-        let mut code_decoder = decoder.decode_decoder()?;
-        Ok(Self {
-            locals: {
-                let mut locals = Vec::new();
-                for _ in 0u32..code_decoder.decode()? {
-                    let count = code_decoder.decode()?;
-                    if count > usize::try_from(u32::MAX).unwrap() - locals.len() {
-                        return Err(DecodeError::new("too many locals"));
-                    }
-                    locals.extend(iter::repeat(code_decoder.decode::<ValType>()?).take(count));
-                }
-                locals.into()
-            },
-            expr: code_decoder.read_bytes_until_end().into(),
-        })
-    }
+    /// The decoded body, its final `End` included.
+    pub(crate) body: Arc<[Instr]>,
 }
 
 #[derive(Debug)]
@@ -177,84 +156,72 @@ pub(crate) enum BlockType {
     ValType(Option<ValType>),
 }
 
-impl Decode for BlockType {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        fn decode_i33_tail(decoder: &mut Decoder<'_>, mut value: i64) -> Result<i64, DecodeError> {
-            let mut shift = 0;
-            loop {
-                let byte = decoder.read_byte()?;
-                if shift >= 26 && byte >> 33 - shift != 0 {
-                    let sign = (byte << 1) as i8 >> (33 - shift);
-                    if byte & 0x80 != 0x00 || sign != 0 && sign != -1 {
-                        return Err(DecodeError::new("malformed s33"));
-                    }
-                }
-                value |= ((byte & 0x7F) as i64) << shift;
-                if byte & 0x80 == 0 {
-                    break;
-                }
-                shift += 7;
-            }
-            let shift = 58 - shift.min(26);
-            Ok(value << shift >> shift)
-        }
-
-        match decoder.read_byte()? {
-            0x40 => Ok(BlockType::ValType(None)),
-            0x7F => Ok(BlockType::ValType(Some(ValType::I32))),
-            0x7E => Ok(BlockType::ValType(Some(ValType::I64))),
-            0x7D => Ok(BlockType::ValType(Some(ValType::F32))),
-            0x7C => Ok(BlockType::ValType(Some(ValType::F64))),
-            0x7B => Ok(BlockType::ValType(Some(ValType::V128))),
-            0x70 => Ok(BlockType::ValType(Some(ValType::FuncRef))),
-            0x6F => Ok(BlockType::ValType(Some(ValType::ExternRef))),
-            byte => {
-                let value = (byte & 0x7F) as i64;
-                let value = if byte & 0x80 == 0x00 {
-                    value
-                } else {
-                    decode_i33_tail(decoder, value)?
-                };
-                if value < 0 {
-                    return Err(DecodeError::new(""));
-                }
-                Ok(BlockType::TypeIdx(value as u32))
-            }
-        }
+fn block_type(type_: binary::BlockType) -> BlockType {
+    match type_ {
+        binary::BlockType::Empty => BlockType::ValType(None),
+        binary::BlockType::Value(val_type) => BlockType::ValType(Some(val_type)),
+        binary::BlockType::Func(idx) => BlockType::TypeIdx(idx),
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MemArg {
-    pub(crate) align: u32,
     pub(crate) offset: u32,
 }
 
-impl Decode for MemArg {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            align: decoder.decode()?,
-            offset: decoder.decode()?,
-        })
+fn mem_arg(arg: &binary::MemArg) -> MemArg {
+    MemArg {
+        offset: arg.offset,
     }
+}
+
+/// The `0xfd` sub-opcodes without immediates that the engine runs (see
+/// `visit_simd_instr`).
+const SIMD_OPS: &[u16] = &[
+    19, 65, 66, 67, 68, 69, 70, 77, 78, 79, 80, 81, 82, 83, 103, 104, 105, 106, 224, 225, 227,
+    228, 229, 230, 231, 232, 233, 234, 235,
+];
+
+/// Refuses an instruction the engine cannot run: tail calls, atomics, the
+/// SIMD outside the `f32x4` subset, and memory indices other than 0. The
+/// module was validated before, so everything else is runnable.
+pub(crate) fn check_supported(instr: &Instr) -> Result<(), DecodeError> {
+    let ok = match instr {
+        Instr::ReturnCall(_)
+        | Instr::ReturnCallIndirect { .. }
+        | Instr::Atomic(..)
+        | Instr::AtomicFence => false,
+        Instr::Load(_, arg) | Instr::Store(_, arg) => arg.memory == 0,
+        Instr::MemorySize(memory) | Instr::MemoryGrow(memory) | Instr::MemoryFill(memory) => {
+            *memory == 0
+        }
+        Instr::MemoryInit { memory, .. } => *memory == 0,
+        Instr::MemoryCopy { dst, src } => *dst == 0 && *src == 0,
+        Instr::SimdMem(sub, arg) => matches!(sub, 0x00 | 0x0b) && arg.memory == 0,
+        Instr::SimdMemLane(..) => false,
+        Instr::SimdLane(sub, _) => matches!(sub, 0x1f | 0x20),
+        Instr::Simd(sub) => SIMD_OPS.contains(sub),
+        _ => true,
+    };
+    if !ok {
+        return Err(DecodeError::new("illegal opcode"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LoadInfo {
-    pub(crate) max_align: u32,
     pub(crate) op: UnOpInfo,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StoreInfo {
-    pub(crate) max_align: u32,
     pub(crate) op: BinOpInfo,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct UnOpInfo {
     pub(crate) _name: &'static str,
-    pub(crate) input_type: ValType,
     pub(crate) output_type: Option<ValType>,
     pub(crate) instr_s: ThreadedInstr,
     pub(crate) instr_r: ThreadedInstr,
@@ -264,8 +231,6 @@ pub(crate) struct UnOpInfo {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BinOpInfo {
     pub(crate) _name: &'static str,
-    pub(crate) input_type_0: ValType,
-    pub(crate) input_type_1: ValType,
     pub(crate) output_type: Option<ValType>,
     pub(crate) instr_ss: ThreadedInstr,
     pub(crate) instr_rs: ThreadedInstr,
@@ -278,64 +243,44 @@ pub(crate) struct BinOpInfo {
     pub(crate) instr_rr: Option<ThreadedInstr>,
 }
 
-pub(crate) fn decode_instr<V>(
-    decoder: &mut Decoder<'_>,
-    label_idxs: &mut Vec<u32>,
-    visitor: &mut V,
-    exts: Extensions,
-) -> Result<(), V::Error>
+/// Calls the visitor method for one decoded instruction. Instructions the
+/// engine does not run (see `supported`) are an error.
+pub(crate) fn visit_instr<V>(instr: &Instr, visitor: &mut V) -> Result<(), V::Error>
 where
     V: InstrVisitor,
     V::Error: From<DecodeError>,
 {
-    match decoder.read_byte()? {
-        0x00 => visitor.visit_unreachable(),
-        0x01 => visitor.visit_nop(),
-        0x02 => visitor.visit_block(decoder.decode()?),
-        0x03 => visitor.visit_loop(decoder.decode()?),
-        0x04 => visitor.visit_if(decoder.decode()?),
-        0x05 => visitor.visit_else(),
-        0x0B => visitor.visit_end(),
-        0x0C => visitor.visit_br(decoder.decode()?),
-        0x0D => visitor.visit_br_if(decoder.decode()?),
-        0x0E => {
-            label_idxs.clear();
-            for label_idx in decoder.decode_iter()? {
-                label_idxs.push(label_idx?);
-            }
-            visitor.visit_br_table(&label_idxs, decoder.decode()?)?;
-            Ok(())
+    match instr {
+        Instr::Unreachable => visitor.visit_unreachable(),
+        Instr::Nop => visitor.visit_nop(),
+        Instr::Block(type_) => visitor.visit_block(block_type(*type_)),
+        Instr::Loop(type_) => visitor.visit_loop(block_type(*type_)),
+        Instr::If(type_) => visitor.visit_if(block_type(*type_)),
+        Instr::Else => visitor.visit_else(),
+        Instr::End => visitor.visit_end(),
+        Instr::Br(label_idx) => visitor.visit_br(*label_idx),
+        Instr::BrIf(label_idx) => visitor.visit_br_if(*label_idx),
+        Instr::BrTable(label_idxs, default_label_idx) => {
+            visitor.visit_br_table(label_idxs, *default_label_idx)
         }
-        0x0F => visitor.visit_return(),
-        0x10 => visitor.visit_call(decoder.decode()?),
-        0x11 => {
-            let type_idx = decoder.decode()?;
-            let table_idx = decoder.decode()?;
-            visitor.visit_call_indirect(table_idx, type_idx)
-        }
-        0x1A => visitor.visit_drop(),
-        0x1B => visitor.visit_select(None),
-        0x1C => {
-            if decoder.decode::<u32>()? != 1 {
-                return Err(DecodeError::new(""))?;
-            }
-            visitor.visit_select(Some(decoder.decode()?))?;
-            Ok(())
-        }
-        0x20 => visitor.visit_local_get(decoder.decode()?),
-        0x21 => visitor.visit_local_set(decoder.decode()?),
-        0x22 => visitor.visit_local_tee(decoder.decode()?),
-        0x23 => visitor.visit_global_get(decoder.decode()?),
-        0x24 => visitor.visit_global_set(decoder.decode()?),
-        0x25 => visitor.visit_table_get(decoder.decode()?),
-        0x26 => visitor.visit_table_set(decoder.decode()?),
-        0x28 => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Return => visitor.visit_return(),
+        Instr::Call(func_idx) => visitor.visit_call(*func_idx),
+        Instr::CallIndirect { ty, table } => visitor.visit_call_indirect(*table, *ty),
+        Instr::Drop => visitor.visit_drop(),
+        Instr::Select => visitor.visit_select(None),
+        Instr::SelectT(type_) => visitor.visit_select(Some(*type_)),
+        Instr::LocalGet(idx) => visitor.visit_local_get(*idx),
+        Instr::LocalSet(idx) => visitor.visit_local_set(*idx),
+        Instr::LocalTee(idx) => visitor.visit_local_tee(*idx),
+        Instr::GlobalGet(idx) => visitor.visit_global_get(*idx),
+        Instr::GlobalSet(idx) => visitor.visit_global_set(*idx),
+        Instr::TableGet(idx) => visitor.visit_table_get(*idx),
+        Instr::TableSet(idx) => visitor.visit_table_set(*idx),
+        Instr::Load(0x28, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 2,
                 op: UnOpInfo {
                     _name: "i32_load",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I32),
                     instr_s: exec::i32_load_s,
                     instr_r: exec::i32_load_r,
@@ -343,13 +288,11 @@ where
                 },
             },
         ),
-        0x29 => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x29, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 3,
                 op: UnOpInfo {
                     _name: "i64_load",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I64),
                     instr_s: exec::i64_load_s,
                     instr_r: exec::i64_load_r,
@@ -357,13 +300,11 @@ where
                 },
             },
         ),
-        0x2A => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x2a, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 2,
                 op: UnOpInfo {
                     _name: "f32_load",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::F32),
                     instr_s: exec::f32_load_s,
                     instr_r: exec::f32_load_r,
@@ -371,13 +312,11 @@ where
                 },
             },
         ),
-        0x2B => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x2b, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 3,
                 op: UnOpInfo {
                     _name: "f64_load",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::F64),
                     instr_s: exec::f64_load_s,
                     instr_r: exec::f64_load_r,
@@ -385,13 +324,11 @@ where
                 },
             },
         ),
-        0x2C => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x2c, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 0,
                 op: UnOpInfo {
                     _name: "i32_load8_s",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I32),
                     instr_s: exec::i32_load8_s_s,
                     instr_r: exec::i32_load8_s_r,
@@ -399,13 +336,11 @@ where
                 },
             },
         ),
-        0x2D => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x2d, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 0,
                 op: UnOpInfo {
                     _name: "i32_load8_u",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I32),
                     instr_s: exec::i32_load8_u_s,
                     instr_r: exec::i32_load8_u_r,
@@ -413,13 +348,11 @@ where
                 },
             },
         ),
-        0x2E => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x2e, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 1,
                 op: UnOpInfo {
                     _name: "i32_load16_s",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I32),
                     instr_s: exec::i32_load16_s_s,
                     instr_r: exec::i32_load16_s_r,
@@ -427,13 +360,11 @@ where
                 },
             },
         ),
-        0x2F => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x2f, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 1,
                 op: UnOpInfo {
                     _name: "i32_load16_u",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I32),
                     instr_s: exec::i32_load16_u_s,
                     instr_r: exec::i32_load16_u_r,
@@ -441,13 +372,11 @@ where
                 },
             },
         ),
-        0x30 => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x30, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 0,
                 op: UnOpInfo {
                     _name: "i64_load8_s",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I64),
                     instr_s: exec::i64_load8_s_s,
                     instr_r: exec::i64_load8_s_r,
@@ -455,13 +384,11 @@ where
                 },
             },
         ),
-        0x31 => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x31, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 0,
                 op: UnOpInfo {
                     _name: "i64_load8_u",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I64),
                     instr_s: exec::i64_load8_u_s,
                     instr_r: exec::i64_load8_u_r,
@@ -469,13 +396,11 @@ where
                 },
             },
         ),
-        0x32 => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x32, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 1,
                 op: UnOpInfo {
                     _name: "i64_load16_s",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I64),
                     instr_s: exec::i64_load16_s_s,
                     instr_r: exec::i64_load16_s_r,
@@ -483,13 +408,11 @@ where
                 },
             },
         ),
-        0x33 => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x33, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 1,
                 op: UnOpInfo {
                     _name: "i64_load16_u",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I64),
                     instr_s: exec::i64_load16_u_s,
                     instr_r: exec::i64_load16_u_r,
@@ -497,13 +420,11 @@ where
                 },
             },
         ),
-        0x34 => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x34, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 2,
                 op: UnOpInfo {
                     _name: "i64_load32_s",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I64),
                     instr_s: exec::i64_load32_s_s,
                     instr_r: exec::i64_load32_s_r,
@@ -511,13 +432,11 @@ where
                 },
             },
         ),
-        0x35 => visitor.visit_load(
-            decoder.decode()?,
+        Instr::Load(0x35, arg) => visitor.visit_load(
+            mem_arg(arg),
             LoadInfo {
-                max_align: 2,
                 op: UnOpInfo {
                     _name: "i64_load32_u",
-                    input_type: ValType::I32,
                     output_type: Some(ValType::I64),
                     instr_s: exec::i64_load32_u_s,
                     instr_r: exec::i64_load32_u_r,
@@ -525,14 +444,11 @@ where
                 },
             },
         ),
-        0x36 => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x36, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 2,
                 op: BinOpInfo {
                     _name: "i32_store",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::I32,
                     output_type: None,
                     instr_ss: exec::i32_store_ss,
                     instr_rs: exec::i32_store_rs,
@@ -546,14 +462,11 @@ where
                 },
             },
         ),
-        0x37 => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x37, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 3,
                 op: BinOpInfo {
                     _name: "i64_store",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::I64,
                     output_type: None,
                     instr_ss: exec::i64_store_ss,
                     instr_rs: exec::i64_store_rs,
@@ -567,14 +480,11 @@ where
                 },
             },
         ),
-        0x38 => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x38, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 2,
                 op: BinOpInfo {
                     _name: "f32_store",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::F32,
                     output_type: None,
                     instr_ss: exec::f32_store_ss,
                     instr_rs: exec::f32_store_rs,
@@ -588,14 +498,11 @@ where
                 },
             },
         ),
-        0x39 => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x39, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 3,
                 op: BinOpInfo {
                     _name: "f64_store",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::F64,
                     output_type: None,
                     instr_ss: exec::f64_store_ss,
                     instr_rs: exec::f64_store_rs,
@@ -609,14 +516,11 @@ where
                 },
             },
         ),
-        0x3A => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x3a, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 0,
                 op: BinOpInfo {
                     _name: "i32_store8",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::I32,
                     output_type: None,
                     instr_ss: exec::i32_store8_ss,
                     instr_rs: exec::i32_store8_rs,
@@ -630,14 +534,11 @@ where
                 },
             },
         ),
-        0x3B => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x3b, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 1,
                 op: BinOpInfo {
                     _name: "i32_store16",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::I32,
                     output_type: None,
                     instr_ss: exec::i32_store16_ss,
                     instr_rs: exec::i32_store16_rs,
@@ -651,14 +552,11 @@ where
                 },
             },
         ),
-        0x3C => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x3c, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 0,
                 op: BinOpInfo {
                     _name: "i64_store8",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::I64,
                     output_type: None,
                     instr_ss: exec::i64_store8_ss,
                     instr_rs: exec::i64_store8_rs,
@@ -672,14 +570,11 @@ where
                 },
             },
         ),
-        0x3D => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x3d, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 1,
                 op: BinOpInfo {
                     _name: "i64_store16",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::I64,
                     output_type: None,
                     instr_ss: exec::i64_store16_ss,
                     instr_rs: exec::i64_store16_rs,
@@ -693,14 +588,11 @@ where
                 },
             },
         ),
-        0x3E => visitor.visit_store(
-            decoder.decode()?,
+        Instr::Store(0x3e, arg) => visitor.visit_store(
+            mem_arg(arg),
             StoreInfo {
-                max_align: 2,
                 op: BinOpInfo {
                     _name: "i64_store32",
-                    input_type_0: ValType::I32,
-                    input_type_1: ValType::I64,
                     output_type: None,
                     instr_ss: exec::i64_store32_ss,
                     instr_rs: exec::i64_store32_rs,
@@ -714,34 +606,21 @@ where
                 },
             },
         ),
-        0x3F => {
-            if decoder.read_byte()? != 0x00 {
-                return Err(DecodeError::new("expected zero byte"))?;
-            }
-            visitor.visit_memory_size()
-        }
-        0x40 => {
-            if decoder.read_byte()? != 0x00 {
-                return Err(DecodeError::new("expected zero byte"))?;
-            }
-            visitor.visit_memory_grow()
-        }
-        0x41 => visitor.visit_i32_const(decoder.decode()?),
-        0x42 => visitor.visit_i64_const(decoder.decode()?),
-        0x43 => visitor.visit_f32_const(decoder.decode()?),
-        0x44 => visitor.visit_f64_const(decoder.decode()?),
-        0x45 => visitor.visit_un_op(UnOpInfo {
+        Instr::MemorySize(0) => visitor.visit_memory_size(),
+        Instr::MemoryGrow(0) => visitor.visit_memory_grow(),
+        Instr::I32Const(val) => visitor.visit_i32_const(*val),
+        Instr::I64Const(val) => visitor.visit_i64_const(*val),
+        Instr::F32Const(bits) => visitor.visit_f32_const(f32::from_bits(*bits)),
+        Instr::F64Const(bits) => visitor.visit_f64_const(f64::from_bits(*bits)),
+        Instr::Num(0x45) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_eqz",
-            input_type: ValType::I32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_eqz_s,
             instr_r: exec::i32_eqz_r,
             instr_i: None,
         }),
-        0x46 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x46) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_eq",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_eq_ss,
             instr_rs: exec::i32_eq_rs,
@@ -753,10 +632,8 @@ where
             instr_ri: exec::i32_eq_ir,
             instr_rr: None,
         }),
-        0x47 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x47) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_ne",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_ne_ss,
             instr_rs: exec::i32_ne_rs,
@@ -768,10 +645,8 @@ where
             instr_ri: exec::i32_ne_ir,
             instr_rr: None,
         }),
-        0x48 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x48) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_lt_s",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_lt_s_ss,
             instr_rs: exec::i32_lt_s_rs,
@@ -783,10 +658,8 @@ where
             instr_ri: exec::i32_lt_s_ri,
             instr_rr: None,
         }),
-        0x49 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x49) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_lt_u",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_lt_u_ss,
             instr_rs: exec::i32_lt_u_rs,
@@ -798,10 +671,8 @@ where
             instr_ri: exec::i32_lt_u_ri,
             instr_rr: None,
         }),
-        0x4A => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x4a) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_gt_s",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_gt_s_ss,
             instr_rs: exec::i32_gt_s_rs,
@@ -813,10 +684,8 @@ where
             instr_ri: exec::i32_gt_s_ri,
             instr_rr: None,
         }),
-        0x4B => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x4b) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_gt_u",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_gt_u_ss,
             instr_rs: exec::i32_gt_u_rs,
@@ -828,10 +697,8 @@ where
             instr_ri: exec::i32_gt_u_ri,
             instr_rr: None,
         }),
-        0x4C => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x4c) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_le_s",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_le_s_ss,
             instr_rs: exec::i32_le_s_rs,
@@ -843,10 +710,8 @@ where
             instr_ri: exec::i32_le_s_ri,
             instr_rr: None,
         }),
-        0x4D => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x4d) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_le_u",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_le_u_ss,
             instr_rs: exec::i32_le_u_rs,
@@ -858,10 +723,8 @@ where
             instr_ri: exec::i32_le_u_ri,
             instr_rr: None,
         }),
-        0x4E => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x4e) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_ge_s",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_ge_s_ss,
             instr_rs: exec::i32_ge_s_rs,
@@ -873,10 +736,8 @@ where
             instr_ri: exec::i32_ge_s_ri,
             instr_rr: None,
         }),
-        0x4F => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x4f) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_ge_u",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_ge_u_ss,
             instr_rs: exec::i32_ge_u_rs,
@@ -888,18 +749,15 @@ where
             instr_ri: exec::i32_ge_u_ri,
             instr_rr: None,
         }),
-        0x50 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x50) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_eqz",
-            input_type: ValType::I64,
             output_type: Some(ValType::I32),
             instr_s: exec::i64_eqz_s,
             instr_r: exec::i64_eqz_r,
             instr_i: None,
         }),
-        0x51 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x51) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_eq",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_eq_ss,
             instr_rs: exec::i64_eq_rs,
@@ -911,10 +769,8 @@ where
             instr_ri: exec::i64_eq_ir,
             instr_rr: None,
         }),
-        0x52 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x52) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_ne",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_ne_ss,
             instr_rs: exec::i64_ne_rs,
@@ -926,10 +782,8 @@ where
             instr_ri: exec::i64_ne_ir,
             instr_rr: None,
         }),
-        0x53 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x53) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_lt_s",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_lt_s_ss,
             instr_rs: exec::i64_lt_s_rs,
@@ -941,10 +795,8 @@ where
             instr_ri: exec::i64_lt_s_ri,
             instr_rr: None,
         }),
-        0x54 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x54) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_lt_u",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_lt_u_ss,
             instr_rs: exec::i64_lt_u_rs,
@@ -956,10 +808,8 @@ where
             instr_ri: exec::i64_lt_u_ri,
             instr_rr: None,
         }),
-        0x55 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x55) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_gt_s",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_gt_s_ss,
             instr_rs: exec::i64_gt_s_rs,
@@ -971,10 +821,8 @@ where
             instr_ri: exec::i64_gt_s_ri,
             instr_rr: None,
         }),
-        0x56 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x56) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_gt_u",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_gt_u_ss,
             instr_rs: exec::i64_gt_u_rs,
@@ -986,10 +834,8 @@ where
             instr_ri: exec::i64_gt_u_ri,
             instr_rr: None,
         }),
-        0x57 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x57) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_le_s",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_le_s_ss,
             instr_rs: exec::i64_le_s_rs,
@@ -1001,10 +847,8 @@ where
             instr_ri: exec::i64_le_s_ri,
             instr_rr: None,
         }),
-        0x58 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x58) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_le_u",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_le_u_ss,
             instr_rs: exec::i64_le_u_rs,
@@ -1016,10 +860,8 @@ where
             instr_ri: exec::i64_le_u_ri,
             instr_rr: None,
         }),
-        0x59 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x59) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_ge_s",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_ge_s_ss,
             instr_rs: exec::i64_ge_s_rs,
@@ -1031,10 +873,8 @@ where
             instr_ri: exec::i64_ge_s_ri,
             instr_rr: None,
         }),
-        0x5A => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x5a) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_ge_u",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I32),
             instr_ss: exec::i64_ge_u_ss,
             instr_rs: exec::i64_ge_u_rs,
@@ -1046,10 +886,8 @@ where
             instr_ri: exec::i64_ge_u_ri,
             instr_rr: None,
         }),
-        0x5B => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x5b) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_eq",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::I32),
             instr_ss: exec::f32_eq_ss,
             instr_rs: exec::f32_eq_rs,
@@ -1061,10 +899,8 @@ where
             instr_ri: exec::f32_eq_ir,
             instr_rr: None,
         }),
-        0x5C => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x5c) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_ne",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::I32),
             instr_ss: exec::f32_ne_ss,
             instr_rs: exec::f32_ne_rs,
@@ -1076,10 +912,8 @@ where
             instr_ri: exec::f32_ne_ir,
             instr_rr: None,
         }),
-        0x5D => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x5d) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_lt",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::I32),
             instr_ss: exec::f32_lt_ss,
             instr_rs: exec::f32_lt_rs,
@@ -1091,10 +925,8 @@ where
             instr_ri: exec::f32_lt_ri,
             instr_rr: None,
         }),
-        0x5E => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x5e) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_gt",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::I32),
             instr_ss: exec::f32_gt_ss,
             instr_rs: exec::f32_gt_rs,
@@ -1106,10 +938,8 @@ where
             instr_ri: exec::f32_gt_ri,
             instr_rr: None,
         }),
-        0x5F => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x5f) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_le",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::I32),
             instr_ss: exec::f32_le_ss,
             instr_rs: exec::f32_le_rs,
@@ -1121,10 +951,8 @@ where
             instr_ri: exec::f32_le_ri,
             instr_rr: None,
         }),
-        0x60 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x60) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_ge",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::I32),
             instr_ss: exec::f32_ge_ss,
             instr_rs: exec::f32_ge_rs,
@@ -1136,10 +964,8 @@ where
             instr_ri: exec::f32_ge_ri,
             instr_rr: None,
         }),
-        0x61 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x61) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_eq",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::I32),
             instr_ss: exec::f64_eq_ss,
             instr_rs: exec::f64_eq_rs,
@@ -1151,10 +977,8 @@ where
             instr_ri: exec::f64_eq_ir,
             instr_rr: None,
         }),
-        0x62 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x62) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_ne",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::I32),
             instr_ss: exec::f64_ne_ss,
             instr_rs: exec::f64_ne_rs,
@@ -1166,10 +990,8 @@ where
             instr_ri: exec::f64_ne_ir,
             instr_rr: None,
         }),
-        0x63 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x63) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_lt",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::I32),
             instr_ss: exec::f64_lt_ss,
             instr_rs: exec::f64_lt_rs,
@@ -1181,10 +1003,8 @@ where
             instr_ri: exec::f64_lt_ri,
             instr_rr: None,
         }),
-        0x64 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x64) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_gt",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::I32),
             instr_ss: exec::f64_gt_ss,
             instr_rs: exec::f64_gt_rs,
@@ -1196,10 +1016,8 @@ where
             instr_ri: exec::f64_gt_ri,
             instr_rr: None,
         }),
-        0x65 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x65) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_le",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::I32),
             instr_ss: exec::f64_le_ss,
             instr_rs: exec::f64_le_rs,
@@ -1211,10 +1029,8 @@ where
             instr_ri: exec::f64_le_ri,
             instr_rr: None,
         }),
-        0x66 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x66) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_ge",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::I32),
             instr_ss: exec::f64_ge_ss,
             instr_rs: exec::f64_ge_rs,
@@ -1226,34 +1042,29 @@ where
             instr_ri: exec::f64_ge_ri,
             instr_rr: None,
         }),
-        0x67 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x67) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_clz",
-            input_type: ValType::I32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_clz_s,
             instr_r: exec::i32_clz_r,
             instr_i: None,
         }),
-        0x68 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x68) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_ctz",
-            input_type: ValType::I32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_ctz_s,
             instr_r: exec::i32_ctz_r,
             instr_i: None,
         }),
-        0x69 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x69) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_popcnt",
-            input_type: ValType::I32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_popcnt_s,
             instr_r: exec::i32_popcnt_r,
             instr_i: None,
         }),
-        0x6A => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x6a) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_add",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_add_ss,
             instr_rs: exec::i32_add_rs,
@@ -1265,10 +1076,8 @@ where
             instr_ri: exec::i32_add_ir,
             instr_rr: None,
         }),
-        0x6B => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x6b) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_sub",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_sub_ss,
             instr_rs: exec::i32_sub_rs,
@@ -1280,10 +1089,8 @@ where
             instr_ri: exec::i32_sub_ri,
             instr_rr: None,
         }),
-        0x6C => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x6c) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_mul",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_mul_ss,
             instr_rs: exec::i32_mul_rs,
@@ -1295,10 +1102,8 @@ where
             instr_ri: exec::i32_mul_ir,
             instr_rr: None,
         }),
-        0x6D => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x6d) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_div_s",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_div_s_ss,
             instr_rs: exec::i32_div_s_rs,
@@ -1310,10 +1115,8 @@ where
             instr_ri: exec::i32_div_s_ri,
             instr_rr: None,
         }),
-        0x6E => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x6e) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_div_u",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_div_u_ss,
             instr_rs: exec::i32_div_u_rs,
@@ -1325,10 +1128,8 @@ where
             instr_ri: exec::i32_div_u_ri,
             instr_rr: None,
         }),
-        0x6F => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x6f) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_rem_s",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_rem_s_ss,
             instr_rs: exec::i32_rem_s_rs,
@@ -1340,10 +1141,8 @@ where
             instr_ri: exec::i32_rem_s_ri,
             instr_rr: None,
         }),
-        0x70 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x70) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_rem_u",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_rem_u_ss,
             instr_rs: exec::i32_rem_u_rs,
@@ -1355,10 +1154,8 @@ where
             instr_ri: exec::i32_rem_u_ri,
             instr_rr: None,
         }),
-        0x71 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x71) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_and",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_and_ss,
             instr_rs: exec::i32_and_rs,
@@ -1370,10 +1167,8 @@ where
             instr_ri: exec::i32_and_ir,
             instr_rr: None,
         }),
-        0x72 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x72) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_or",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_or_ss,
             instr_rs: exec::i32_or_rs,
@@ -1385,10 +1180,8 @@ where
             instr_ri: exec::i32_or_ir,
             instr_rr: None,
         }),
-        0x73 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x73) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_xor",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_xor_ss,
             instr_rs: exec::i32_xor_rs,
@@ -1400,10 +1193,8 @@ where
             instr_ri: exec::i32_xor_ir,
             instr_rr: None,
         }),
-        0x74 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x74) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_shl",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_shl_ss,
             instr_rs: exec::i32_shl_rs,
@@ -1415,10 +1206,8 @@ where
             instr_ri: exec::i32_shl_ri,
             instr_rr: None,
         }),
-        0x75 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x75) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_shr_s",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_shr_s_ss,
             instr_rs: exec::i32_shr_s_rs,
@@ -1430,10 +1219,8 @@ where
             instr_ri: exec::i32_shr_s_ri,
             instr_rr: None,
         }),
-        0x76 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x76) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_shr_u",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_shr_u_ss,
             instr_rs: exec::i32_shr_u_rs,
@@ -1445,10 +1232,8 @@ where
             instr_ri: exec::i32_shr_u_ri,
             instr_rr: None,
         }),
-        0x77 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x77) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_rotl",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_rotl_ss,
             instr_rs: exec::i32_rotl_rs,
@@ -1460,10 +1245,8 @@ where
             instr_ri: exec::i32_rotl_ri,
             instr_rr: None,
         }),
-        0x78 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x78) => visitor.visit_bin_op(BinOpInfo {
             _name: "i32_rotr",
-            input_type_0: ValType::I32,
-            input_type_1: ValType::I32,
             output_type: Some(ValType::I32),
             instr_ss: exec::i32_rotr_ss,
             instr_rs: exec::i32_rotr_rs,
@@ -1475,34 +1258,29 @@ where
             instr_ri: exec::i32_rotr_ri,
             instr_rr: None,
         }),
-        0x79 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x79) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_clz",
-            input_type: ValType::I64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_clz_s,
             instr_r: exec::i64_clz_r,
             instr_i: None,
         }),
-        0x7A => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x7a) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_ctz",
-            input_type: ValType::I64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_ctz_s,
             instr_r: exec::i64_ctz_r,
             instr_i: None,
         }),
-        0x7B => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x7b) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_popcnt",
-            input_type: ValType::I64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_popcnt_s,
             instr_r: exec::i64_popcnt_r,
             instr_i: None,
         }),
-        0x7C => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x7c) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_add",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_add_ss,
             instr_rs: exec::i64_add_rs,
@@ -1514,10 +1292,8 @@ where
             instr_ri: exec::i64_add_ir,
             instr_rr: None,
         }),
-        0x7D => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x7d) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_sub",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_sub_ss,
             instr_rs: exec::i64_sub_rs,
@@ -1529,10 +1305,8 @@ where
             instr_ri: exec::i64_sub_ri,
             instr_rr: None,
         }),
-        0x7E => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x7e) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_mul",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_mul_ss,
             instr_rs: exec::i64_mul_rs,
@@ -1544,10 +1318,8 @@ where
             instr_ri: exec::i64_mul_ir,
             instr_rr: None,
         }),
-        0x7F => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x7f) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_div_s",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_div_s_ss,
             instr_rs: exec::i64_div_s_rs,
@@ -1559,10 +1331,8 @@ where
             instr_ri: exec::i64_div_s_ri,
             instr_rr: None,
         }),
-        0x80 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x80) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_div_u",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_div_u_ss,
             instr_rs: exec::i64_div_u_rs,
@@ -1574,10 +1344,8 @@ where
             instr_ri: exec::i64_div_u_ri,
             instr_rr: None,
         }),
-        0x81 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x81) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_rem_s",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_rem_s_ss,
             instr_rs: exec::i64_rem_s_rs,
@@ -1589,10 +1357,8 @@ where
             instr_ri: exec::i64_rem_s_ri,
             instr_rr: None,
         }),
-        0x82 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x82) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_rem_u",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_rem_u_ss,
             instr_rs: exec::i64_rem_u_rs,
@@ -1604,10 +1370,8 @@ where
             instr_ri: exec::i64_rem_u_ri,
             instr_rr: None,
         }),
-        0x83 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x83) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_and",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_and_ss,
             instr_rs: exec::i64_and_rs,
@@ -1619,10 +1383,8 @@ where
             instr_ri: exec::i64_and_ir,
             instr_rr: None,
         }),
-        0x84 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x84) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_or",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_or_ss,
             instr_rs: exec::i64_or_rs,
@@ -1634,10 +1396,8 @@ where
             instr_ri: exec::i64_or_ir,
             instr_rr: None,
         }),
-        0x85 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x85) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_xor",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_xor_ss,
             instr_rs: exec::i64_xor_rs,
@@ -1649,10 +1409,8 @@ where
             instr_ri: exec::i64_xor_ir,
             instr_rr: None,
         }),
-        0x86 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x86) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_shl",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_shl_ss,
             instr_rs: exec::i64_shl_rs,
@@ -1664,10 +1422,8 @@ where
             instr_ri: exec::i64_shl_ri,
             instr_rr: None,
         }),
-        0x87 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x87) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_shr_s",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_shr_s_ss,
             instr_rs: exec::i64_shr_s_rs,
@@ -1679,10 +1435,8 @@ where
             instr_ri: exec::i64_shr_s_ri,
             instr_rr: None,
         }),
-        0x88 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x88) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_shr_u",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_shr_u_ss,
             instr_rs: exec::i64_shr_u_rs,
@@ -1694,10 +1448,8 @@ where
             instr_ri: exec::i64_shr_u_ri,
             instr_rr: None,
         }),
-        0x89 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x89) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_rotl",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_rotl_ss,
             instr_rs: exec::i64_rotl_rs,
@@ -1709,10 +1461,8 @@ where
             instr_ri: exec::i64_rotl_ri,
             instr_rr: None,
         }),
-        0x8A => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x8a) => visitor.visit_bin_op(BinOpInfo {
             _name: "i64_rotr",
-            input_type_0: ValType::I64,
-            input_type_1: ValType::I64,
             output_type: Some(ValType::I64),
             instr_ss: exec::i64_rotr_ss,
             instr_rs: exec::i64_rotr_rs,
@@ -1724,66 +1474,57 @@ where
             instr_ri: exec::i64_rotr_ri,
             instr_rr: None,
         }),
-        0x8B => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x8b) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_abs",
-            input_type: ValType::F32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_abs_s,
             instr_r: exec::f32_abs_r,
             instr_i: None,
         }),
-        0x8C => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x8c) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_neg",
-            input_type: ValType::F32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_neg_s,
             instr_r: exec::f32_neg_r,
             instr_i: None,
         }),
-        0x8D => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x8d) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_ceil",
-            input_type: ValType::F32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_ceil_s,
             instr_r: exec::f32_ceil_r,
             instr_i: None,
         }),
-        0x8E => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x8e) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_floor",
-            input_type: ValType::F32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_floor_s,
             instr_r: exec::f32_floor_r,
             instr_i: None,
         }),
-        0x8F => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x8f) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_trunc",
-            input_type: ValType::F32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_trunc_s,
             instr_r: exec::f32_trunc_r,
             instr_i: None,
         }),
-        0x90 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x90) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_nearest",
-            input_type: ValType::F32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_nearest_s,
             instr_r: exec::f32_nearest_r,
             instr_i: None,
         }),
-        0x91 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x91) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_sqrt",
-            input_type: ValType::F32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_sqrt_s,
             instr_r: exec::f32_sqrt_r,
             instr_i: None,
         }),
-        0x92 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x92) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_add",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::F32),
             instr_ss: exec::f32_add_ss,
             instr_rs: exec::f32_add_rs,
@@ -1795,10 +1536,8 @@ where
             instr_ri: exec::f32_add_ir,
             instr_rr: None,
         }),
-        0x93 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x93) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_sub",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::F32),
             instr_ss: exec::f32_sub_ss,
             instr_rs: exec::f32_sub_rs,
@@ -1810,10 +1549,8 @@ where
             instr_ri: exec::f32_sub_ri,
             instr_rr: None,
         }),
-        0x94 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x94) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_mul",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::F32),
             instr_ss: exec::f32_mul_ss,
             instr_rs: exec::f32_mul_rs,
@@ -1825,10 +1562,8 @@ where
             instr_ri: exec::f32_mul_ir,
             instr_rr: None,
         }),
-        0x95 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x95) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_div",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::F32),
             instr_ss: exec::f32_div_ss,
             instr_rs: exec::f32_div_rs,
@@ -1840,10 +1575,8 @@ where
             instr_ri: exec::f32_div_ri,
             instr_rr: None,
         }),
-        0x96 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x96) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_min",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::F32),
             instr_ss: exec::f32_min_ss,
             instr_rs: exec::f32_min_rs,
@@ -1855,10 +1588,8 @@ where
             instr_ri: exec::f32_min_ir,
             instr_rr: None,
         }),
-        0x97 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x97) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_max",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::F32),
             instr_ss: exec::f32_max_ss,
             instr_rs: exec::f32_max_rs,
@@ -1870,10 +1601,8 @@ where
             instr_ri: exec::f32_max_ir,
             instr_rr: None,
         }),
-        0x98 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0x98) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_copysign",
-            input_type_0: ValType::F32,
-            input_type_1: ValType::F32,
             output_type: Some(ValType::F32),
             instr_ss: exec::f32_copysign_ss,
             instr_rs: exec::f32_copysign_rs,
@@ -1885,66 +1614,57 @@ where
             instr_ri: exec::f32_copysign_ri,
             instr_rr: None,
         }),
-        0x99 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x99) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_abs",
-            input_type: ValType::F64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_abs_s,
             instr_r: exec::f64_abs_r,
             instr_i: None,
         }),
-        0x9A => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x9a) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_neg",
-            input_type: ValType::F64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_neg_s,
             instr_r: exec::f64_neg_r,
             instr_i: None,
         }),
-        0x9B => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x9b) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_ceil",
-            input_type: ValType::F64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_ceil_s,
             instr_r: exec::f64_ceil_r,
             instr_i: None,
         }),
-        0x9C => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x9c) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_floor",
-            input_type: ValType::F64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_floor_s,
             instr_r: exec::f64_floor_r,
             instr_i: None,
         }),
-        0x9D => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x9d) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_trunc",
-            input_type: ValType::F64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_trunc_s,
             instr_r: exec::f64_trunc_r,
             instr_i: None,
         }),
-        0x9E => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x9e) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_nearest",
-            input_type: ValType::F64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_nearest_s,
             instr_r: exec::f64_nearest_r,
             instr_i: None,
         }),
-        0x9F => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0x9f) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_sqrt",
-            input_type: ValType::F64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_sqrt_s,
             instr_r: exec::f64_sqrt_r,
             instr_i: None,
         }),
-        0xA0 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0xa0) => visitor.visit_bin_op(BinOpInfo {
             _name: "f32_add",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::F64),
             instr_ss: exec::f64_add_ss,
             instr_rs: exec::f64_add_rs,
@@ -1956,10 +1676,8 @@ where
             instr_ri: exec::f64_add_ir,
             instr_rr: None,
         }),
-        0xA1 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0xa1) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_sub",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::F64),
             instr_ss: exec::f64_sub_ss,
             instr_rs: exec::f64_sub_rs,
@@ -1971,10 +1689,8 @@ where
             instr_ri: exec::f64_sub_ri,
             instr_rr: None,
         }),
-        0xA2 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0xa2) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_mul",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::F64),
             instr_ss: exec::f64_mul_ss,
             instr_rs: exec::f64_mul_rs,
@@ -1986,10 +1702,8 @@ where
             instr_ri: exec::f64_mul_ir,
             instr_rr: None,
         }),
-        0xA3 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0xa3) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_div",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::F64),
             instr_ss: exec::f64_div_ss,
             instr_rs: exec::f64_div_rs,
@@ -2001,10 +1715,8 @@ where
             instr_ri: exec::f64_div_ri,
             instr_rr: None,
         }),
-        0xA4 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0xa4) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_min",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::F64),
             instr_ss: exec::f64_min_ss,
             instr_rs: exec::f64_min_rs,
@@ -2016,10 +1728,8 @@ where
             instr_ri: exec::f64_min_ir,
             instr_rr: None,
         }),
-        0xA5 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0xa5) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_max",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::F64),
             instr_ss: exec::f64_max_ss,
             instr_rs: exec::f64_max_rs,
@@ -2031,10 +1741,8 @@ where
             instr_ri: exec::f64_max_ir,
             instr_rr: None,
         }),
-        0xA6 => visitor.visit_bin_op(BinOpInfo {
+        Instr::Num(0xa6) => visitor.visit_bin_op(BinOpInfo {
             _name: "f64_copysign",
-            input_type_0: ValType::F64,
-            input_type_1: ValType::F64,
             output_type: Some(ValType::F64),
             instr_ss: exec::f64_copysign_ss,
             instr_rs: exec::f64_copysign_rs,
@@ -2046,404 +1754,321 @@ where
             instr_ri: exec::f64_copysign_ri,
             instr_rr: None,
         }),
-        0xA7 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xa7) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_wrap_i64",
-            input_type: ValType::I64,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_wrap_i64_s,
             instr_r: exec::i32_wrap_i64_r,
             instr_i: None,
         }),
-        0xA8 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xa8) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_trunc_f32_s",
-            input_type: ValType::F32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_trunc_f32_s_s,
             instr_r: exec::i32_trunc_f32_s_r,
             instr_i: None,
         }),
-        0xA9 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xa9) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_trunc_f32_u",
-            input_type: ValType::F32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_trunc_f32_u_s,
             instr_r: exec::i32_trunc_f32_u_r,
             instr_i: None,
         }),
-        0xAA => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xaa) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_trunc_f64_s",
-            input_type: ValType::F64,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_trunc_f64_s_s,
             instr_r: exec::i32_trunc_f64_s_r,
             instr_i: None,
         }),
-        0xAB => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xab) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_trunc_f64_u",
-            input_type: ValType::F64,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_trunc_f64_u_s,
             instr_r: exec::i32_trunc_f64_u_r,
             instr_i: None,
         }),
-        0xAC => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xac) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_extend_i32_s",
-            input_type: ValType::I32,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_extend_i32_s_s,
             instr_r: exec::i64_extend_i32_s_r,
             instr_i: None,
         }),
-        0xAD => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xad) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_extend_i32_u",
-            input_type: ValType::I32,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_extend_i32_u_s,
             instr_r: exec::i64_extend_i32_u_r,
             instr_i: None,
         }),
-        0xAE => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xae) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_trunc_f32_s",
-            input_type: ValType::F32,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_trunc_f32_s_s,
             instr_r: exec::i64_trunc_f32_s_r,
             instr_i: None,
         }),
-        0xAF => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xaf) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_trunc_f32_u",
-            input_type: ValType::F32,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_trunc_f32_u_s,
             instr_r: exec::i64_trunc_f32_u_r,
             instr_i: None,
         }),
-        0xB0 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb0) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_trunc_f64_s",
-            input_type: ValType::F64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_trunc_f64_s_s,
             instr_r: exec::i64_trunc_f64_s_r,
             instr_i: None,
         }),
-        0xB1 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb1) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_trunc_f64_u",
-            input_type: ValType::F64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_trunc_f64_u_s,
             instr_r: exec::i64_trunc_f64_u_r,
             instr_i: None,
         }),
-        0xB2 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb2) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_convert_i32_s",
-            input_type: ValType::I32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_convert_i32_s_s,
             instr_r: exec::f32_convert_i32_s_r,
             instr_i: None,
         }),
-        0xB3 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb3) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_convert_i32_u",
-            input_type: ValType::I32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_convert_i32_u_s,
             instr_r: exec::f32_convert_i32_u_r,
             instr_i: None,
         }),
-        0xB4 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb4) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_convert_i64_s",
-            input_type: ValType::I64,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_convert_i64_s_s,
             instr_r: exec::f32_convert_i64_s_r,
             instr_i: None,
         }),
-        0xB5 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb5) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_convert_i64_u",
-            input_type: ValType::I64,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_convert_i64_u_s,
             instr_r: exec::f32_convert_i64_u_r,
             instr_i: None,
         }),
-        0xB6 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb6) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_demote_f64",
-            input_type: ValType::F64,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_demote_f64_s,
             instr_r: exec::f32_demote_f64_r,
             instr_i: None,
         }),
-        0xB7 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb7) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_convert_i32_s",
-            input_type: ValType::I32,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_convert_i32_s_s,
             instr_r: exec::f64_convert_i32_s_r,
             instr_i: None,
         }),
-        0xB8 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb8) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_convert_i32_u",
-            input_type: ValType::I32,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_convert_i32_u_s,
             instr_r: exec::f64_convert_i32_u_r,
             instr_i: None,
         }),
-        0xB9 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xb9) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_convert_i64_s",
-            input_type: ValType::I64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_convert_i64_s_s,
             instr_r: exec::f64_convert_i64_s_r,
             instr_i: None,
         }),
-        0xBA => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xba) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_convert_i64_u",
-            input_type: ValType::I64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_convert_i64_u_s,
             instr_r: exec::f64_convert_i64_u_r,
             instr_i: None,
         }),
-        0xBB => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xbb) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_promote_f32",
-            input_type: ValType::F32,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_promote_f32_s,
             instr_r: exec::f64_promote_f32_r,
             instr_i: None,
         }),
-        0xBC => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xbc) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_reinterpret_f32",
-            input_type: ValType::F32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_reinterpret_f32_s,
             instr_r: exec::i32_reinterpret_f32_r,
             instr_i: None,
         }),
-        0xBD => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xbd) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_reinterpret_f64",
-            input_type: ValType::F64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_reinterpret_f64_s,
             instr_r: exec::i64_reinterpret_f64_r,
             instr_i: None,
         }),
-        0xBE => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xbe) => visitor.visit_un_op(UnOpInfo {
             _name: "f32_reinterpret_i32",
-            input_type: ValType::I32,
             output_type: Some(ValType::F32),
             instr_s: exec::f32_reinterpret_i32_s,
             instr_r: exec::f32_reinterpret_i32_r,
             instr_i: None,
         }),
-        0xBF => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xbf) => visitor.visit_un_op(UnOpInfo {
             _name: "f64_reinterpret_i64",
-            input_type: ValType::I64,
             output_type: Some(ValType::F64),
             instr_s: exec::f64_reinterpret_i64_s,
             instr_r: exec::f64_reinterpret_i64_r,
             instr_i: None,
         }),
-        0xC0 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xc0) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_extend8_s",
-            input_type: ValType::I32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_extend8_s_s,
             instr_r: exec::i32_extend8_s_r,
             instr_i: None,
         }),
-        0xC1 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xc1) => visitor.visit_un_op(UnOpInfo {
             _name: "i32_extend16_s",
-            input_type: ValType::I32,
             output_type: Some(ValType::I32),
             instr_s: exec::i32_extend16_s_s,
             instr_r: exec::i32_extend16_s_r,
             instr_i: None,
         }),
-        0xC2 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xc2) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_extend8_s",
-            input_type: ValType::I64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_extend8_s_s,
             instr_r: exec::i64_extend8_s_r,
             instr_i: None,
         }),
-        0xC3 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xc3) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_extend16_s",
-            input_type: ValType::I64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_extend16_s_s,
             instr_r: exec::i64_extend16_s_r,
             instr_i: None,
         }),
-        0xC4 => visitor.visit_un_op(UnOpInfo {
+        Instr::Num(0xc4) => visitor.visit_un_op(UnOpInfo {
             _name: "i64_extend32_s",
-            input_type: ValType::I64,
             output_type: Some(ValType::I64),
             instr_s: exec::i64_extend32_s_s,
             instr_r: exec::i64_extend32_s_r,
             instr_i: None,
         }),
-        0xD0 => visitor.visit_ref_null(decoder.decode()?),
-        0xD1 => visitor.visit_ref_is_null(),
-        0xD2 => visitor.visit_ref_func(decoder.decode()?),
-        0xFC => match decoder.decode::<u32>()? {
-            0 => visitor.visit_un_op(UnOpInfo {
-                _name: "i32_trunc_sat_f32_s",
-                input_type: ValType::F32,
-                output_type: Some(ValType::I32),
-                instr_s: exec::i32_trunc_sat_f32_s_s,
-                instr_r: exec::i32_trunc_sat_f32_s_r,
-                instr_i: None,
-            }),
-            1 => visitor.visit_un_op(UnOpInfo {
-                _name: "i32_trunc_sat_f32_u",
-                input_type: ValType::F32,
-                output_type: Some(ValType::I32),
-                instr_s: exec::i32_trunc_sat_f32_u_s,
-                instr_r: exec::i32_trunc_sat_f32_u_r,
-                instr_i: None,
-            }),
-            2 => visitor.visit_un_op(UnOpInfo {
-                _name: "i32_trunc_sat_f64_s",
-                input_type: ValType::F64,
-                output_type: Some(ValType::I32),
-                instr_s: exec::i32_trunc_sat_f64_s_s,
-                instr_r: exec::i32_trunc_sat_f64_s_r,
-                instr_i: None,
-            }),
-            3 => visitor.visit_un_op(UnOpInfo {
-                _name: "i32_trunc_sat_f64_u",
-                input_type: ValType::F64,
-                output_type: Some(ValType::I32),
-                instr_s: exec::i32_trunc_sat_f64_u_s,
-                instr_r: exec::i32_trunc_sat_f64_u_r,
-                instr_i: None,
-            }),
-            4 => visitor.visit_un_op(UnOpInfo {
-                _name: "i64_trunc_sat_f32_s",
-                input_type: ValType::F32,
-                output_type: Some(ValType::I64),
-                instr_s: exec::i64_trunc_sat_f32_s_s,
-                instr_r: exec::i64_trunc_sat_f32_s_r,
-                instr_i: None,
-            }),
-            5 => visitor.visit_un_op(UnOpInfo {
-                _name: "i64_trunc_sat_f32_u",
-                input_type: ValType::F32,
-                output_type: Some(ValType::I64),
-                instr_s: exec::i64_trunc_sat_f32_u_s,
-                instr_r: exec::i64_trunc_sat_f32_u_r,
-                instr_i: None,
-            }),
-            6 => visitor.visit_un_op(UnOpInfo {
-                _name: "i64_trunc_sat_f64_s",
-                input_type: ValType::F64,
-                output_type: Some(ValType::I64),
-                instr_s: exec::i64_trunc_sat_f64_s_s,
-                instr_r: exec::i64_trunc_sat_f64_s_r,
-                instr_i: None,
-            }),
-            7 => visitor.visit_un_op(UnOpInfo {
-                _name: "i64_trunc_sat_f64_u",
-                input_type: ValType::F64,
-                output_type: Some(ValType::I64),
-                instr_s: exec::i64_trunc_sat_f64_u_s,
-                instr_r: exec::i64_trunc_sat_f64_u_r,
-                instr_i: None,
-            }),
-            8 => {
-                let data_idx = decoder.decode()?;
-                if decoder.read_byte()? != 0x00 {
-                    return Err(DecodeError::new("expected zero byte"))?;
-                }
-                visitor.visit_memory_init(data_idx)
-            }
-            9 => visitor.visit_data_drop(decoder.decode()?),
-            10 => {
-                if decoder.read_byte()? != 0x00 {
-                    return Err(DecodeError::new("expected zero byte"))?;
-                }
-                if decoder.read_byte()? != 0x00 {
-                    return Err(DecodeError::new("expected zero byte"))?;
-                }
-                visitor.visit_memory_copy()
-            }
-            11 => {
-                if decoder.read_byte()? != 0x00 {
-                    return Err(DecodeError::new("expected zero byte"))?;
-                }
-                visitor.visit_memory_fill()
-            }
-            12 => {
-                let elem_idx = decoder.decode()?;
-                let table_idx = decoder.decode()?;
-                visitor.visit_table_init(table_idx, elem_idx)
-            }
-            13 => visitor.visit_elem_drop(decoder.decode()?),
-            14 => visitor.visit_table_copy(decoder.decode()?, decoder.decode()?),
-            15 => visitor.visit_table_grow(decoder.decode()?),
-            16 => visitor.visit_table_size(decoder.decode()?),
-            17 => visitor.visit_table_fill(decoder.decode()?),
-            _ => Err(DecodeError::new("illegal opcode"))?,
-        },
-        0xFD => decode_simd_instr(decoder, visitor),
-        0xE0 => {
-            if !exts.ext_math {
-                return Err(DecodeError::new("illegal opcode"))?;
-            }
-            decode_ext_math_instr(decoder, visitor)
-        }
+        Instr::RefNull(type_) => visitor.visit_ref_null(type_.to_ref().unwrap()),
+        Instr::RefIsNull => visitor.visit_ref_is_null(),
+        Instr::RefFunc(func_idx) => visitor.visit_ref_func(*func_idx),
+        Instr::TruncSat(0) => visitor.visit_un_op(UnOpInfo {
+            _name: "i32_trunc_sat_f32_s",
+            output_type: Some(ValType::I32),
+            instr_s: exec::i32_trunc_sat_f32_s_s,
+            instr_r: exec::i32_trunc_sat_f32_s_r,
+            instr_i: None,
+        }),
+        Instr::TruncSat(1) => visitor.visit_un_op(UnOpInfo {
+            _name: "i32_trunc_sat_f32_u",
+            output_type: Some(ValType::I32),
+            instr_s: exec::i32_trunc_sat_f32_u_s,
+            instr_r: exec::i32_trunc_sat_f32_u_r,
+            instr_i: None,
+        }),
+        Instr::TruncSat(2) => visitor.visit_un_op(UnOpInfo {
+            _name: "i32_trunc_sat_f64_s",
+            output_type: Some(ValType::I32),
+            instr_s: exec::i32_trunc_sat_f64_s_s,
+            instr_r: exec::i32_trunc_sat_f64_s_r,
+            instr_i: None,
+        }),
+        Instr::TruncSat(3) => visitor.visit_un_op(UnOpInfo {
+            _name: "i32_trunc_sat_f64_u",
+            output_type: Some(ValType::I32),
+            instr_s: exec::i32_trunc_sat_f64_u_s,
+            instr_r: exec::i32_trunc_sat_f64_u_r,
+            instr_i: None,
+        }),
+        Instr::TruncSat(4) => visitor.visit_un_op(UnOpInfo {
+            _name: "i64_trunc_sat_f32_s",
+            output_type: Some(ValType::I64),
+            instr_s: exec::i64_trunc_sat_f32_s_s,
+            instr_r: exec::i64_trunc_sat_f32_s_r,
+            instr_i: None,
+        }),
+        Instr::TruncSat(5) => visitor.visit_un_op(UnOpInfo {
+            _name: "i64_trunc_sat_f32_u",
+            output_type: Some(ValType::I64),
+            instr_s: exec::i64_trunc_sat_f32_u_s,
+            instr_r: exec::i64_trunc_sat_f32_u_r,
+            instr_i: None,
+        }),
+        Instr::TruncSat(6) => visitor.visit_un_op(UnOpInfo {
+            _name: "i64_trunc_sat_f64_s",
+            output_type: Some(ValType::I64),
+            instr_s: exec::i64_trunc_sat_f64_s_s,
+            instr_r: exec::i64_trunc_sat_f64_s_r,
+            instr_i: None,
+        }),
+        Instr::TruncSat(7) => visitor.visit_un_op(UnOpInfo {
+            _name: "i64_trunc_sat_f64_u",
+            output_type: Some(ValType::I64),
+            instr_s: exec::i64_trunc_sat_f64_u_s,
+            instr_r: exec::i64_trunc_sat_f64_u_r,
+            instr_i: None,
+        }),
+        Instr::MemoryInit { data, memory: 0 } => visitor.visit_memory_init(*data),
+        Instr::DataDrop(data_idx) => visitor.visit_data_drop(*data_idx),
+        Instr::MemoryCopy { dst: 0, src: 0 } => visitor.visit_memory_copy(),
+        Instr::MemoryFill(0) => visitor.visit_memory_fill(),
+        Instr::TableInit { elem, table } => visitor.visit_table_init(*table, *elem),
+        Instr::ElemDrop(elem_idx) => visitor.visit_elem_drop(*elem_idx),
+        Instr::TableCopy { dst, src } => visitor.visit_table_copy(*dst, *src),
+        Instr::TableGrow(table_idx) => visitor.visit_table_grow(*table_idx),
+        Instr::TableSize(table_idx) => visitor.visit_table_size(*table_idx),
+        Instr::TableFill(table_idx) => visitor.visit_table_fill(*table_idx),
+        Instr::SimdMem(..)
+        | Instr::SimdMemLane(..)
+        | Instr::V128Const(_)
+        | Instr::I8x16Shuffle(_)
+        | Instr::SimdLane(..)
+        | Instr::Simd(_) => visit_simd_instr(instr, visitor),
+        Instr::ExtMath(sub) => visit_ext_math_instr(*sub, visitor),
         _ => Err(DecodeError::new("illegal opcode"))?,
     }
 }
 
-/// Decodes the subset of the Wasm SIMD proposal that stitch implements.
+/// Visits the subset of the Wasm SIMD proposal that stitch implements.
 ///
 /// This covers everything needed for packed `f32x4` math: `v128`
 /// load/store/const, `i8x16.shuffle`, `f32x4` splat/extract/replace lane,
 /// the `f32x4` comparisons and arithmetic (including `pmin`/`pmax` and the
 /// rounding instructions), and the `v128` bitwise instructions. All other
-/// SIMD instructions are rejected with "illegal opcode", exactly as before.
-fn decode_simd_instr<V>(decoder: &mut Decoder<'_>, visitor: &mut V) -> Result<(), V::Error>
+/// SIMD instructions are refused with "illegal opcode".
+fn visit_simd_instr<V>(instr: &Instr, visitor: &mut V) -> Result<(), V::Error>
 where
     V: InstrVisitor,
     V::Error: From<DecodeError>,
 {
-    fn decode_lane_idx<const MAX: u8>(decoder: &mut Decoder<'_>) -> Result<u8, DecodeError> {
-        let lane = decoder.read_byte()?;
-        if lane >= MAX {
-            return Err(DecodeError::new("invalid lane index"));
-        }
-        Ok(lane)
-    }
-
-    match decoder.decode::<u32>()? {
-        // v128.load
-        0 => visitor.visit_v128_load(decoder.decode()?),
-        // v128.store
-        11 => visitor.visit_v128_store(decoder.decode()?),
-        // v128.const
-        12 => {
-            let bytes: [u8; 16] = decoder.read_bytes(16)?.try_into().unwrap();
-            visitor.visit_v128_const(V128::from_bytes(bytes))
-        }
-        // i8x16.shuffle
-        13 => {
-            let lanes: [u8; 16] = decoder.read_bytes(16)?.try_into().unwrap();
-            if lanes.iter().any(|lane| *lane >= 32) {
-                return Err(DecodeError::new("invalid lane index"))?;
-            }
-            visitor.visit_i8x16_shuffle(lanes)
-        }
+    let sub = match instr {
+        Instr::SimdMem(0x00, arg) if arg.memory == 0 => return visitor.visit_v128_load(mem_arg(arg)),
+        Instr::SimdMem(0x0b, arg) if arg.memory == 0 => return visitor.visit_v128_store(mem_arg(arg)),
+        Instr::V128Const(bytes) => return visitor.visit_v128_const(V128::from_bytes(**bytes)),
+        Instr::I8x16Shuffle(lanes) => return visitor.visit_i8x16_shuffle(**lanes),
+        Instr::SimdLane(0x1f, lane) => return visitor.visit_f32x4_extract_lane(*lane),
+        Instr::SimdLane(0x20, lane) => return visitor.visit_f32x4_replace_lane(*lane),
+        Instr::Simd(sub) => *sub,
+        _ => return Err(DecodeError::new("illegal opcode"))?,
+    };
+    match sub {
         // f32x4.splat
         19 => visitor.visit_f32x4_splat(),
-        // f32x4.extract_lane
-        31 => visitor.visit_f32x4_extract_lane(decode_lane_idx::<4>(decoder)?),
-        // f32x4.replace_lane
-        32 => visitor.visit_f32x4_replace_lane(decode_lane_idx::<4>(decoder)?),
         // f32x4.eq/ne/lt/gt/le/ge
         65 => visitor.visit_v128_bin_op(V128BinOpInfo {
             _name: "f32x4_eq",
@@ -2558,8 +2183,8 @@ where
     }
 }
 
-/// Decodes the NONSTANDARD float math opcodes (prefix byte 0xE0, enabled
-/// via [`Extensions::ext_math`]).
+/// Visits the NONSTANDARD float math opcodes (prefix byte 0xE0, enabled
+/// via [`Extensions::ext_math`](crate::Extensions::ext_math)).
 ///
 /// Subopcode layout (one byte):
 /// - 0x00..=0x0C: scalar f32 sin, cos, tan, asin, acos, atan, exp, ln,
@@ -2567,7 +2192,7 @@ where
 /// - 0x10..=0x1C: scalar f64, same order
 /// - 0x20..=0x2C: packed f32x4, same order
 /// - 0x2D..=0x2F: packed dot-product reductions (dot2, dot3, dot4)
-fn decode_ext_math_instr<V>(decoder: &mut Decoder<'_>, visitor: &mut V) -> Result<(), V::Error>
+fn visit_ext_math_instr<V>(sub: u8, visitor: &mut V) -> Result<(), V::Error>
 where
     V: InstrVisitor,
     V::Error: From<DecodeError>,
@@ -2580,7 +2205,6 @@ where
     ) -> UnOpInfo {
         UnOpInfo {
             _name: name,
-            input_type: type_,
             output_type: Some(type_),
             instr_s,
             instr_r,
@@ -2596,8 +2220,6 @@ where
         let [ss, rs, is, ir, sr, si, ri] = instrs;
         BinOpInfo {
             _name: name,
-            input_type_0: type_,
-            input_type_1: type_,
             output_type: Some(type_),
             instr_ss: ss,
             instr_rs: rs,
@@ -2611,7 +2233,7 @@ where
         }
     }
 
-    match decoder.read_byte()? {
+    match sub {
         // Scalar f32
         0x00 => visitor.visit_un_op(un_op_info(
             "f32_sin",

@@ -1,0 +1,43 @@
+// Drive with 4x oversampling: zero-stuff to 4x, a 7-tap low-pass, the
+// shaper (tanh with a bias for even harmonics), the same low-pass, keep
+// every 4th sample. Clipping at 1x folds harmonics back as fizz; at 4x
+// most of them stay above the audio band and get filtered.
+let TAPS = [0.0135, 0.0976, 0.2356, 0.3066, 0.2356, 0.0976, 0.0135]
+let drive = param(4.0, 1, 40)
+let bias = param(0.1, -0.5, 0.5)
+let mix = param(1.0, 0, 1)
+
+struct Chan {
+    up: [0.0; 8]
+    dn: [0.0; 8]
+    w: int(0)
+}
+
+var ch = [Chan{}; 2]
+
+fn fir(buf, w) {
+    let s = 0.0
+    for t in 0..7 {
+        s = s + TAPS[t] * buf[w - t]
+    }
+    s
+}
+
+fn oversampled(c, x) {
+    let out = 0.0
+    let dc = tanh(bias * drive)
+    for k in 0..4 {
+        c.up[c.w] = if k == 0 { x * 4.0 } else { 0.0 }
+        let u = fir(c.up, c.w)
+        c.dn[c.w] = tanh((u + bias) * drive) - dc
+        out = fir(c.dn, c.w)
+        c.w = c.w + 1
+    }
+    out / tanh(drive)
+}
+
+fn effect(l, r) {
+    let yl = oversampled(ch[0], l)
+    let yr = oversampled(ch[1], r)
+    vec2(l + (yl - l) * mix, r + (yr - r) * mix)
+}
