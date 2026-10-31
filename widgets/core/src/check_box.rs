@@ -585,7 +585,7 @@ pub struct CheckBox {
     pub label_before: bool,
 
     /// The knob follows the pointer: a drag along the track moves it and a
-    /// release commits the side it is on. A plain click still flips on press.
+    /// release commits the side it is on. A plain click still flips it.
     #[live]
     pub draggable: bool,
 
@@ -898,6 +898,10 @@ impl Widget for CheckBox {
             self.draw_bg.redraw(cx);
         }
 
+        if let Event::ClearHover = event {
+            self.animator_cut(cx, ids!(hover.off));
+        }
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -914,37 +918,7 @@ impl Widget for CheckBox {
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                self.set_key_focus(cx);
-                // A mixed box resolves to On: it is not active, so the
-                // flip below lands there; only the dash needs clearing.
-                if self.animator_in_state(cx, ids!(mixed.on)) {
-                    self.animator_play(cx, ids!(mixed.off));
-                }
-                let new_active = if self.animator_in_state(cx, ids!(active.on)) {
-                    self.animator_play(cx, ids!(active.off));
-                    cx.widget_action_with_data(
-                        &self.action_data,
-                        uid,
-                        CheckBoxAction::Change(false),
-                    );
-                    false
-                } else {
-                    self.animator_play(cx, ids!(active.on));
-                    cx.widget_action_with_data(
-                        &self.action_data,
-                        uid,
-                        CheckBoxAction::Change(true),
-                    );
-                    true
-                };
-                self.state = if new_active { CheckState::On } else { CheckState::Off };
-                cx.widget_to_script_call(
-                    uid,
-                    NIL,
-                    self.source.clone(),
-                    self.on_click.clone(),
-                    &[ScriptValue::from_bool(new_active)],
-                );
+                self.animator_play(cx, ids!(hover.down));
                 self.animator_play(cx, ids!(press.on));
                 if self.draggable {
                     self.drag = Some(KnobDrag {
@@ -953,7 +927,6 @@ impl Widget for CheckBox {
                         pos: 0.0,
                         moved: false,
                     });
-                    cx.claim_finger_drag(fe.digit_id);
                 }
             }
             // A focused box flips on Space (and Return) the way a click does,
@@ -979,15 +952,61 @@ impl Widget for CheckBox {
                 );
                 self.draw_bg.redraw(cx);
             }
-            Hit::FingerUp(fe) => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 self.animator_play(cx, ids!(press.off));
-                if let Some(drag) = self.drag.take() {
-                    // A cancelled press leaves the switch where the press put it.
+                // Touch never gets a hover-out, so only a hovering pointer stays hovered here.
+                if fe.is_over && fe.device.has_hovers() {
+                    self.animator_play(cx, ids!(hover.on));
+                } else {
+                    self.animator_play(cx, ids!(hover.off));
+                }
+                let drag = self.drag.take();
+                if fe.is_over {
+                    self.set_key_focus(cx);
+                }
+                // We flip on release, so a press dragged off us, or taken over by a scroll, leaves us as we were.
+                if fe.is_over && !drag.is_some_and(|drag| drag.moved) {
+                    // A mixed box resolves to On: it is not active, so the
+                    // flip below lands there; only the dash needs clearing.
+                    if self.animator_in_state(cx, ids!(mixed.on)) {
+                        self.animator_play(cx, ids!(mixed.off));
+                    }
+                    let new_active = if self.animator_in_state(cx, ids!(active.on)) {
+                        self.animator_play(cx, ids!(active.off));
+                        cx.widget_action_with_data(
+                            &self.action_data,
+                            uid,
+                            CheckBoxAction::Change(false),
+                        );
+                        false
+                    } else {
+                        self.animator_play(cx, ids!(active.on));
+                        cx.widget_action_with_data(
+                            &self.action_data,
+                            uid,
+                            CheckBoxAction::Change(true),
+                        );
+                        true
+                    };
+                    self.state = if new_active { CheckState::On } else { CheckState::Off };
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[ScriptValue::from_bool(new_active)],
+                    );
+                }
+                if let Some(drag) = drag {
+                    // A cancelled press leaves the switch as it was.
                     if drag.moved && !fe.cancelled {
-                        // The side the knob was released on wins, which may
-                        // undo the flip the press made.
+                        // The side the knob was released on wins.
                         let on = drag.pos > 0.5;
-                        if on != self.animator_in_state(cx, ids!(active.on)) {
+                        let is_mixed = self.animator_in_state(cx, ids!(mixed.on));
+                        if is_mixed || on != self.animator_in_state(cx, ids!(active.on)) {
+                            if is_mixed {
+                                self.animator_play(cx, ids!(mixed.off));
+                            }
                             self.animator_play(cx, if on { ids!(active.on) } else { ids!(active.off) });
                             self.state = if on { CheckState::On } else { CheckState::Off };
                             cx.widget_action_with_data(
@@ -1010,7 +1029,9 @@ impl Widget for CheckBox {
             Hit::FingerMove(fe) => {
                 if let Some(mut drag) = self.drag {
                     if !drag.moved {
-                        if (fe.abs.x - drag.start_x).abs() < KNOB_DRAG_SLOP {
+                        let dx = (fe.abs.x - fe.abs_start.x).abs();
+                        let dy = (fe.abs.y - fe.abs_start.y).abs();
+                        if dx < KNOB_DRAG_SLOP || dx < dy {
                             return;
                         }
                         // The knob picks up from where the slide has taken it
@@ -1020,6 +1041,8 @@ impl Widget for CheckBox {
                         drag.moved = true;
                         drag.start_pos = active[0];
                         drag.start_x = fe.abs.x;
+                        // Claimed only once it's mostly sideways, so a drag down can still scroll the page around us.
+                        cx.claim_finger_drag(fe.digit_id);
                     }
                     let travel = self.knob_travel(cx);
                     let along = drag.start_pos as f64 + (fe.abs.x - drag.start_x) / travel;

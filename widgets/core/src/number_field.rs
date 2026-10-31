@@ -365,6 +365,7 @@ impl Widget for NumberSpin {
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
+                cx.claim_finger_drag(fe.digit_id);
                 let direction = self.half_at(fe.abs.y, fe.rect);
                 self.held = Some(direction);
                 self.drag = Some((fe.abs.y, 0.0));
