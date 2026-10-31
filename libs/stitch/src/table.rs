@@ -1,6 +1,6 @@
 use {
     crate::{
-        decode::{Decode, DecodeError, Decoder},
+        
         downcast::{DowncastMut, DowncastRef},
         elem::{Elem, ElemEntity, ElemEntityT},
         extern_ref::UnguardedExternRef,
@@ -228,14 +228,6 @@ impl TableType {
             return false;
         }
         true
-    }
-}
-
-impl Decode for TableType {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        let elem = decoder.decode()?;
-        let limits = decoder.decode()?;
-        Ok(Self { limits, elem })
     }
 }
 

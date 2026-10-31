@@ -1,0 +1,79 @@
+// Scalar fields on grids: `grid` is a row-major f32 buffer of w columns
+// and h rows (cell units). Isolines are marching squares, one cell per
+// element: a kernel emits `segments(..)` records per cell, deterministic
+// and element-local.
+
+// Bilinear sample and normal (the prelude's, under field names).
+fn sample(grid, w, h, x, z) { sample_grid(grid, w, h, x, z) }
+fn normal(grid, w, h, x, z, cell) { grid_normal(grid, w, h, x, z, cell) }
+
+// The gradient at (x, z) by central differences, per cell unit.
+fn grad(grid, w, h, x, z) {
+    let dx = sample_grid(grid, w, h, x + 1.0, z) - sample_grid(grid, w, h, x - 1.0, z)
+    let dz = sample_grid(grid, w, h, x, z + 1.0) - sample_grid(grid, w, h, x, z - 1.0)
+    vec2(dx, dz) * 0.5
+}
+
+// Marching-squares edges per case: two segments of (edge, edge), -1 for
+// none; edges 0: a-b (bottom), 1: b-c (right), 2: c-d (top), 3: d-a (left),
+// corners a (cx, cz), b (cx+1, cz), c (cx+1, cz+1), d (cx, cz+1); a corner
+// at or above the level sets its bit (a 1, b 2, c 4, d 8). The saddles 5
+// and 10 are resolved by the cell centre.
+let MS_EDGES: int = [
+    -1, -1, -1, -1,   3, 0, -1, -1,   0, 1, -1, -1,   3, 1, -1, -1,
+    1, 2, -1, -1,     3, 0, 1, 2,     0, 2, -1, -1,   3, 2, -1, -1,
+    2, 3, -1, -1,     0, 2, -1, -1,   0, 1, 2, 3,     1, 2, -1, -1,
+    1, 3, -1, -1,     0, 1, -1, -1,   3, 0, -1, -1,   -1, -1, -1, -1,
+]
+
+fn corner(grid, w, h, cx, cz, k) {
+    let x = min(cx + (if k == 1 || k == 2 { 1 } else { 0 }), w - 1)
+    let z = min(cz + (if k >= 2 { 1 } else { 0 }), h - 1)
+    grid[z * w + x]
+}
+
+// The case of cell (cx, cz), 0..15. A saddle whose centre is at or above
+// the level joins its two high corners, which is the other saddle's pair of
+// cuts (5 <-> 10).
+fn cell_case(grid, w, h, level, cx, cz) {
+    let a = corner(grid, w, h, cx, cz, 0)
+    let b = corner(grid, w, h, cx, cz, 1)
+    let c = corner(grid, w, h, cx, cz, 2)
+    let d = corner(grid, w, h, cx, cz, 3)
+    let m = (if a >= level { 1 } else { 0 }) + (if b >= level { 2 } else { 0 }) + (if c >= level { 4 } else { 0 }) + (if d >= level { 8 } else { 0 })
+    let centre = (a + b + c + d) * 0.25
+    if m == 5 && centre >= level { 10 } elif m == 10 && centre >= level { 5 } else { m }
+}
+
+// Isoline segments crossing cell (cx, cz) at `level`: 0, 1 or 2.
+fn segments(grid, w, h, level, cx, cz) {
+    let m = cell_case(grid, w, h, level, cx, cz)
+    if m == 0 || m == 15 { 0 } elif m == 5 || m == 10 { 2 } else { 1 }
+}
+
+// Where the level crosses edge e of the cell (cell units, x and z).
+fn edge_point(grid, w, h, level, cx, cz, e) {
+    let p = corner(grid, w, h, cx, cz, e)
+    let q = corner(grid, w, h, cx, cz, (e + 1) % 4)
+    let t = if q != p { clamp((level - p) / (q - p), 0.0, 1.0) } else { 0.5 }
+    let x0 = float(cx) + (if e == 1 || e == 2 { 1.0 } else { 0.0 })
+    let z0 = float(cz) + (if e >= 2 { 1.0 } else { 0.0 })
+    let x1 = float(cx) + (if e == 0 || e == 1 { 1.0 } else { 0.0 })
+    let z1 = float(cz) + (if e == 1 || e == 2 { 1.0 } else { 0.0 })
+    vec2(mix(x0, x1, t), mix(z0, z1, t))
+}
+
+// Segment k (0 or 1) of the cell: vec4(x0, z0, x1, z1) in cell units.
+fn segment(grid, w, h, level, cx, cz, k) {
+    let m = cell_case(grid, w, h, level, cx, cz)
+    let e0 = MS_EDGES[m * 4 + k * 2]
+    let e1 = MS_EDGES[m * 4 + k * 2 + 1]
+    let p = edge_point(grid, w, h, level, cx, cz, max(e0, 0))
+    let q = edge_point(grid, w, h, level, cx, cz, max(e1, 0))
+    vec4(p.x, p.y, q.x, q.y)
+}
+
+// The unit direction of a segment (a label's baseline) and its midpoint
+// (the label's anchor).
+fn segment_tangent(s) { normalize(vec2(s.z - s.x, s.w - s.y)) }
+fn segment_mid(s) { vec2(s.x + s.z, s.y + s.w) * 0.5 }

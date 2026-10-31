@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 // Makepad script streaming tokenizer
 
 use crate::colorhex::hex_bytes_to_u32;
@@ -6,6 +7,8 @@ use crate::makepad_live_id::LiveId;
 use crate::makepad_live_id_macros::*;
 use crate::value::*;
 
+#[relax_api(plain)]
+#[repr(C, u8)]
 #[derive(Copy, Clone, Debug)]
 pub enum ScriptToken {
     End,
@@ -29,6 +32,44 @@ pub enum ScriptToken {
     U40(u64),
     Color(u32),
     RustValue(u32),
+}
+
+#[relax_api(plain)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptTokenTag { End, StreamEnd, Identifier, Operator, Separator, OpenCurly, CloseCurly, OpenRound, CloseRound, OpenSquare, CloseSquare, StringUnfinished, String, F32, U32, I32, F16, F64, U40, Color, RustValue }
+
+impl ScriptToken {
+    pub fn number_f64(&self) -> Option<f64> {
+        match self { Self::U40(v) => Some(*v as f64), Self::F64(v) => Some(*v), Self::F32(v) | Self::F16(v) => Some(*v as f64), Self::U32(v) => Some(*v as f64), Self::I32(v) => Some(*v as f64), _ => None }
+    }
+    pub fn operator_or_separator(&self) -> Option<LiveId> { match self { Self::Operator(v) | Self::Separator(v) => Some(*v), _ => None } }
+    pub fn as_identifier(&self) -> Option<LiveId> { match self { Self::Identifier(v) => Some(*v), _ => None } }
+
+    pub fn kind(&self) -> ScriptTokenTag {
+        match self {
+            Self::End => ScriptTokenTag::End,
+            Self::StreamEnd => ScriptTokenTag::StreamEnd,
+            Self::Identifier(_) => ScriptTokenTag::Identifier,
+            Self::Operator(_) => ScriptTokenTag::Operator,
+            Self::Separator(_) => ScriptTokenTag::Separator,
+            Self::OpenCurly => ScriptTokenTag::OpenCurly,
+            Self::CloseCurly => ScriptTokenTag::CloseCurly,
+            Self::OpenRound => ScriptTokenTag::OpenRound,
+            Self::CloseRound => ScriptTokenTag::CloseRound,
+            Self::OpenSquare => ScriptTokenTag::OpenSquare,
+            Self::CloseSquare => ScriptTokenTag::CloseSquare,
+            Self::StringUnfinished => ScriptTokenTag::StringUnfinished,
+            Self::String(_) => ScriptTokenTag::String,
+            Self::F32(_) => ScriptTokenTag::F32,
+            Self::U32(_) => ScriptTokenTag::U32,
+            Self::I32(_) => ScriptTokenTag::I32,
+            Self::F16(_) => ScriptTokenTag::F16,
+            Self::F64(_) => ScriptTokenTag::F64,
+            Self::U40(_) => ScriptTokenTag::U40,
+            Self::Color(_) => ScriptTokenTag::Color,
+            Self::RustValue(_) => ScriptTokenTag::RustValue,
+        }
+    }
 }
 
 impl ScriptToken {
@@ -216,6 +257,8 @@ impl ScriptToken {
     }
 }
 
+#[relax_api(plain)]
+#[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct ScriptTokenPos {
     pub token: ScriptToken,
@@ -224,6 +267,90 @@ pub struct ScriptTokenPos {
     /// previous one. Lets the parser keep statements newline-delimited (a
     /// continuation token on a new line begins a new statement, Go/Swift-style).
     pub preceded_by_newline: bool,
+    /// True if any whitespace separated this token from the previous one.
+    /// Inside an array literal `[a] [b]` is two elements, `a[b]` an index.
+    pub preceded_by_space: bool,
+    /// The characters the token was written in, as char indices into the
+    /// source (`start` first character, `end` one past the last). Exact for
+    /// every token but an unterminated string.
+    start: u32,
+    end: u32,
+    /// The unit a number literal was written in (`0.12s`, `120ms`, `90deg`, `150mm`):
+    /// its value is already in the base unit; the unit says what it is.
+    pub unit: Option<ScriptUnit>,
+}
+
+/// The unit suffix of a number literal: what a value means (an editor picks its
+/// control by it). The token's value is in the base unit: seconds for time,
+/// radians for angles (`deg` and `°` are degrees), virtual pixels for screen
+/// lengths, metres for physical lengths (`m`, `cm`, `mm`).
+#[relax_api(plain)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ScriptUnit {
+    /// `0.12s`: seconds.
+    Seconds,
+    /// `120ms`: milliseconds, the value in seconds.
+    Millis,
+    /// `90deg`: degrees, the value in radians.
+    Degrees,
+    /// `1.5rad`: radians (the base unit of angles).
+    Radians,
+    /// `12px`: virtual (DPI-scaled) pixels, the base unit of lengths and positions.
+    Pixels,
+    /// `2m`: metres, the base unit of physical lengths (models).
+    Metres,
+    /// `5cm`: centimetres, the value in metres.
+    Centimetres,
+    /// `150mm`: millimetres, the value in metres.
+    Millimetres,
+}
+
+impl ScriptUnit {
+    pub fn parse(suffix: &str) -> Option<Self> {
+        match suffix {
+            "s" => Some(Self::Seconds),
+            "ms" => Some(Self::Millis),
+            "deg" | "°" => Some(Self::Degrees),
+            "rad" => Some(Self::Radians),
+            "px" => Some(Self::Pixels),
+            "m" => Some(Self::Metres),
+            "cm" => Some(Self::Centimetres),
+            "mm" => Some(Self::Millimetres),
+            _ => None,
+        }
+    }
+    /// The value of `v` written in this unit, in the base unit.
+    pub fn to_base(self, v: f64) -> f64 {
+        match self {
+            Self::Seconds | Self::Radians | Self::Pixels | Self::Metres => v,
+            Self::Millis | Self::Millimetres => v / 1000.0,
+            Self::Centimetres => v / 100.0,
+            Self::Degrees => v * std::f64::consts::PI / 180.0,
+        }
+    }
+}
+
+impl ScriptTokenPos {
+    /// Positions relative to the character `base` (a fn's first, when its
+    /// tokens move to a body of their own).
+    pub(crate) fn rebase(&mut self, base: usize) {
+        self.pos -= base.min(self.pos);
+        self.start -= (base as u32).min(self.start);
+        self.end -= (base as u32).min(self.end);
+    }
+
+    pub fn token(&self) -> &ScriptToken { &self.token }
+    pub fn preceded_by_newline(&self) -> bool { self.preceded_by_newline }
+    /// The token's characters in the source, as char indices.
+    #[inline(always)]
+    pub fn span(&self) -> std::ops::Range<usize> { self.start()..self.end() }
+    pub fn start(&self) -> usize { self.start as usize }
+    pub fn end(&self) -> usize { self.end as usize }
+
+    /// Where the token starts in its body's code (a character index).
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
 }
 
 /// One captured `/** ... */` doc annotation (see `ScriptTokenizer::docs`).
@@ -234,7 +361,7 @@ pub struct ScriptTokDoc {
     pub text: String,
 }
 
-#[derive(Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 enum State {
     #[default]
     Whitespace,
@@ -243,6 +370,16 @@ enum State {
     RustValue,
     String(bool),
     EscapeInString(bool),
+    /// `\` then a newline in a string: the newline and the next line's
+    /// leading whitespace are skipped (Rust's line continuation).
+    ContinueInString(bool),
+    /// `r` then this many `#`: a raw string opens at the `"`.
+    RawStringOpen(usize),
+    /// Inside `r#…"…"#…` with this many `#`: no escapes, any line.
+    RawString(usize),
+    /// A `"` inside a raw string with this many `#`, then `seen` of them:
+    /// the string ends when they match.
+    RawStringClose(usize, usize),
     UnicodeHexInString(bool),
     UnicodeCurlyInString(bool),
     AsciiHexInString(bool),
@@ -258,16 +395,64 @@ enum State {
     /// Saw `*` inside a block doc; `/` closes it.
     BlockDocMaybeEnd,
     LineComment,
+    /// Just after `//`: a third `/` makes a `///` doc line (a fourth, a plain comment).
+    LineCommentStart,
+    /// Just after `///`: a fourth `/` makes it plain (`////`), else the doc text begins.
+    LineDocStart,
+    /// Inside a `///` doc line: text accumulates into `temp`.
+    LineDoc,
     Number,
     Color,
 }
 
+impl State {
+    /// A token is being lexed (not whitespace or a comment).
+    fn lexing_token(&self) -> bool {
+        matches!(
+            self,
+            State::Identifier
+                | State::Operator
+                | State::RustValue
+                | State::Number
+                | State::Color
+                | State::String(_)
+                | State::EscapeInString(_)
+                | State::RawStringOpen(_)
+                | State::ContinueInString(_)
+                | State::RawString(_)
+                | State::RawStringClose(..)
+                | State::UnicodeHexInString(_)
+                | State::UnicodeCurlyInString(_)
+                | State::AsciiHexInString(_)
+        )
+    }
+
+    fn in_string(&self) -> bool {
+        matches!(
+            self,
+            State::String(_)
+                | State::EscapeInString(_)
+                | State::ContinueInString(_)
+                | State::RawString(_)
+                | State::RawStringClose(..)
+                | State::UnicodeHexInString(_)
+                | State::UnicodeCurlyInString(_)
+                | State::AsciiHexInString(_)
+        )
+    }
+}
+
+#[relax_api(handle, default)]
 #[derive(Default)]
 pub struct ScriptTokenizer {
     pos: usize,
     /// Set when a newline is consumed; stamped onto (and cleared by) the next
     /// emitted token as `preceded_by_newline`.
     newline_pending: bool,
+    /// Same for any whitespace (`preceded_by_space`).
+    space_pending: bool,
+    /// The last token is the provisional one `push_pending_token` added.
+    provisional: bool,
     pub tokens: Vec<ScriptTokenPos>,
     /// Captured `/** ... */` doc annotations, keyed by the index the NEXT
     /// token gets (`tokens.len()` at capture end). ONE form; position
@@ -278,9 +463,19 @@ pub struct ScriptTokenizer {
     /// `//` and `/* */` remain plain discarded comments.
     pub docs: Vec<ScriptTokDoc>,
     pub original: String,
+    /// The char index each line of `original` after the first starts at
+    /// (one past each `\n`): token positions to rows and columns by a
+    /// binary search, not a scan of the source.
+    line_starts: Vec<u32>,
     unfinished: String,
     temp: String,
+    /// Where a number's unit suffix starts in `temp` (`0.12s`), when it has one.
+    unit_start: Option<usize>,
     state: State,
+    /// First character of the token being lexed, and one past its last
+    /// when it is emitted (see `ScriptTokenPos::span`).
+    lex_start: usize,
+    tok_end: usize,
 }
 
 pub struct ScriptLoc {
@@ -288,16 +483,57 @@ pub struct ScriptLoc {
     pub col: usize,
 }
 
+#[relax_api]
 impl ScriptTokenizer {
+    /// A tokenizer holding tokens another VM read from `original` (their
+    /// positions are characters of `original`): what an adopted fn's body
+    /// reads ([`crate::vm::ScriptFnImage`]). Nothing is lexed again.
+    pub(crate) fn adopted(original: &str, tokens: Vec<ScriptTokenPos>) -> Self {
+        let mut line_starts = Vec::new();
+        let mut pos = 0usize;
+        for c in original.chars() {
+            pos += 1;
+            if c == '\n' {
+                line_starts.push(pos as u32);
+            }
+        }
+        Self { pos, tokens, original: original.to_string(), line_starts, ..Self::default() }
+    }
+
+    #[inline]
+    pub fn tokens_ref(&self) -> &[ScriptTokenPos] { self.view(0).tokens }
+
+    /// Reads the tokenizer: its tokens, and the zero-based row and column (characters) of token
+    /// `tok_index` (`found` false when it lies past the lexed source).
+    #[relax_api]
+    pub fn view(&self, tok_index: u32) -> TokenizerView<'_> {
+        let mut v = TokenizerView { tokens: &self.tokens, row: 0, col: 0, found: false };
+        if let Some(t) = self.tokens.get(tok_index as usize) {
+            let char_index = t.pos;
+            if char_index < self.pos {
+                let line = self.line_starts.partition_point(|&start| start as usize <= char_index);
+                let line_start = if line == 0 { 0 } else { self.line_starts[line - 1] as usize };
+                v.row = line as u32;
+                v.col = (char_index - line_start) as u32;
+                v.found = true;
+            }
+        }
+        v
+    }
     pub fn clear(&mut self) {
         self.pos = 0;
         self.newline_pending = false;
+        self.space_pending = false;
+        self.provisional = false;
         self.tokens.clear();
         self.docs.clear();
         self.original.clear();
+        self.line_starts.clear();
         self.unfinished.clear();
         self.temp.clear();
-        self.state = State::Whitespace
+        self.state = State::Whitespace;
+        self.lex_start = 0;
+        self.tok_end = 0;
     }
 
     /// Iterate over all string values in the token stream.
@@ -312,65 +548,54 @@ impl ScriptTokenizer {
         })
     }
 
+    /// The zero-based row and column (characters) of the first character
+    /// of token `tok_index`: where it is written, from its lexed span (a
+    /// token's `pos` may sit a character into it).
+    pub fn token_start_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
+        let char_index = self.tokens.get(tok_index as usize)?.start as usize;
+        if char_index >= self.pos {
+            return None;
+        }
+        let line = self.line_starts.partition_point(|&start| start as usize <= char_index);
+        let line_start = if line == 0 { 0 } else { self.line_starts[line - 1] as usize };
+        Some((line as u32, (char_index - line_start) as u32))
+    }
+
+    #[inline]
+    /// Where token `tok_index` starts, as a char index into the tokenized text.
+    pub fn token_char_pos(&self, tok_index: u32) -> Option<usize> {
+        self.tokens.get(tok_index as usize).map(|t| t.pos).filter(|&p| p < self.pos)
+    }
+
     pub fn token_index_to_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
-        // first find the real pos
-
-        let char_index = self.tokens[tok_index as usize].pos;
-
-        let mut line = 0;
-        let mut line_start = 0;
-        for (i, c) in self.original.chars().enumerate() {
-            if i >= char_index as usize {
-                return Some((line as u32, (i - line_start) as u32));
-            }
-            if c == '\n' {
-                line_start = i + 1;
-                line += 1;
-            }
-        }
-        None
+        // the index must name a token (a plain index panics past the end)
+        let v = self.view(tok_index);
+        assert!((tok_index as usize) < v.tokens.len());
+        v.found.then_some((v.row, v.col))
     }
 
-    pub fn dump_tokens(&self, heap: &ScriptHeap) {
-        for i in 0..self.tokens.len() {
-            match self.tokens[i].token {
-                ScriptToken::End => print!("End"),
-                ScriptToken::StreamEnd => print!("StreamEnd"),
-                ScriptToken::Identifier(id) => print!("{id}"),
-                ScriptToken::Operator(id) => print!("{id}"),
-                ScriptToken::Separator(id) => print!("{id}"),
-                ScriptToken::OpenCurly => print!("{{"),
-                ScriptToken::CloseCurly => print!("}}"),
-                ScriptToken::OpenRound => print!("("),
-                ScriptToken::CloseRound => print!(")"),
-                ScriptToken::OpenSquare => print!("["),
-                ScriptToken::CloseSquare => print!("]"),
-                ScriptToken::StringUnfinished => print!("\"\".."),
-                ScriptToken::String(v) => {
-                    let mut s = String::new();
-                    heap.cast_to_string(v, &mut s);
-                    print!("\"{}\"", s)
-                }
-                ScriptToken::U40(v) => print!("{v}"),
-                ScriptToken::F64(v) => print!("{v}"),
-                ScriptToken::F32(v) => print!("{v}"),
-                ScriptToken::I32(v) => print!("{v}"),
-                ScriptToken::U32(v) => print!("{v}"),
-                ScriptToken::F16(v) => print!("{v}"),
-                ScriptToken::Color(v) => print!("{:08x}", v),
-                ScriptToken::RustValue(v) => print!("#({v})"),
-            }
-            print!(" ");
-        }
-        print!("\n");
-    }
 
     /// Emits a token, stamping whether a newline preceded it (and clearing the
     /// pending flag). All token emission funnels through here.
     fn push_tok(&mut self, pos: usize, token: ScriptToken) {
         let preceded_by_newline = self.newline_pending;
+        let preceded_by_space = self.space_pending;
         self.newline_pending = false;
-        self.tokens.push(ScriptTokenPos { token, pos, preceded_by_newline });
+        self.space_pending = false;
+        self.tokens.push(ScriptTokenPos {
+            token,
+            pos,
+            preceded_by_newline,
+            preceded_by_space,
+            start: self.lex_start as u32,
+            end: self.tok_end as u32,
+            unit: None,
+        });
+    }
+
+    /// Whether token `i` was preceded by whitespace (see `preceded_by_space`).
+    pub fn token_preceded_by_space(&self, i: u32) -> bool {
+        self.tokens.get(i as usize).is_some_and(|t| t.preceded_by_space)
     }
 
     /// Whether token `i` was preceded by a newline (see `preceded_by_newline`).
@@ -396,6 +621,70 @@ impl ScriptTokenizer {
         None
     }
 
+    /// Whether lexing stopped inside a string literal.
+    fn in_string(&self) -> bool {
+        matches!(
+            self.state,
+            State::String(_)
+                | State::EscapeInString(_)
+                | State::UnicodeHexInString(_)
+                | State::UnicodeCurlyInString(_)
+                | State::AsciiHexInString(_)
+        )
+    }
+
+    /// The source is complete: emit the token still being lexed at its end.
+    /// A number, identifier, operator or color is only emitted by the
+    /// character after it, so a source ending in one without a trailing
+    /// newline lost it (`x * 100` parsed as `x *`). An unterminated string
+    /// stays StringUnfinished.
+    #[inline]
+    pub fn finish(&mut self, heap: &mut ScriptHeap) {
+        self.run(true, "", heap);
+    }
+
+    /// Streaming: push the token still being lexed at the end of the source
+    /// so far, lexed as if the source ended there, as a provisional last
+    /// token (more source may still extend it: `12`, then `3`). The next
+    /// `tokenize` drops it and lexes on; it stays until then so error
+    /// locations can still resolve it. Returns whether one was pushed. See
+    /// `finish`.
+    pub fn push_pending_token(&mut self, heap: &mut ScriptHeap) -> bool {
+        if self.provisional {
+            // no new source since the last push
+            return true;
+        }
+        if self.state == State::Whitespace || self.in_string() {
+            return false;
+        }
+        let pos = self.pos;
+        let newline_pending = self.newline_pending;
+        let space_pending = self.space_pending;
+        let temp = self.temp.clone();
+        let state = self.state.clone();
+        let (lex_start, tok_end) = (self.lex_start, self.tok_end);
+        let (tokens_len, docs_len, original_len, lines_len) =
+            (self.tokens.len(), self.docs.len(), self.original.len(), self.line_starts.len());
+        self.tokenize("\n", heap);
+        let token = self.tokens.get(tokens_len).copied();
+        self.pos = pos;
+        self.newline_pending = newline_pending;
+        self.space_pending = space_pending;
+        self.temp = temp;
+        self.state = state;
+        self.lex_start = lex_start;
+        self.tok_end = tok_end;
+        self.tokens.truncate(tokens_len);
+        self.docs.truncate(docs_len);
+        self.original.truncate(original_len);
+        self.line_starts.truncate(lines_len);
+        if let Some(token) = token {
+            self.tokens.push(token);
+            self.provisional = true;
+        }
+        self.provisional
+    }
+
     fn emit_rust_value(&mut self) {
         let number = if let Ok(v) = self.temp.parse::<u32>() {
             self.temp.clear();
@@ -411,6 +700,27 @@ impl ScriptTokenizer {
     }
 
     fn emit_f64(&mut self) {
+        if let Some(k) = self.unit_start.take() {
+            let suffix = self.temp.split_off(k);
+            match ScriptUnit::parse(&suffix) {
+                Some(unit) => {
+                    let len = self.temp.chars().count() + suffix.chars().count();
+                    let v = self.temp.parse::<f64>().unwrap_or(0.0);
+                    self.temp.clear();
+                    self.push_tok(self.pos - len, ScriptToken::F64(unit.to_base(v)));
+                    if let Some(t) = self.tokens.last_mut() {
+                        t.unit = Some(unit);
+                    }
+                }
+                None => {
+                    // not a unit: the number, then an identifier
+                    self.emit_f64();
+                    self.temp = suffix;
+                    self.emit_identifier();
+                }
+            }
+            return;
+        }
         // Measure before clearing: a float token's position was taken from
         // an already-emptied `temp`, so it pointed one past its terminator —
         // a float ending a line resolved to the NEXT line, column 0.
@@ -534,6 +844,8 @@ impl ScriptTokenizer {
         if self.temp.len() != 0 {
             panic!()
         }
+        self.lex_start = self.pos.saturating_sub(1);
+        self.tok_end = self.pos;
         self.temp.push(c);
         let id = match LiveId::from_str_with_lut(&self.temp) {
             Err(str) => {
@@ -564,8 +876,13 @@ impl ScriptTokenizer {
         self.push_tok(self.pos - len, ScriptToken::Color(color));
     }
 
+    /// A single-character token for the character just consumed. The loop
+    /// has already advanced `pos` past it, so its position is one back;
+    /// every other token records its first character the same way.
     fn emit_token_here(&mut self, token: ScriptToken) {
-        self.push_tok(self.pos, token)
+        self.lex_start = self.pos.saturating_sub(1);
+        self.tok_end = self.pos;
+        self.push_tok(self.pos.saturating_sub(1), token)
     }
 
     fn append_unfinished_string(&mut self, c: char) {
@@ -599,6 +916,7 @@ impl ScriptTokenizer {
     }
 
     fn finish_string(&mut self, heap: &mut ScriptHeap) {
+        self.tok_end = self.pos;
         if let Some(ScriptTokenPos {
             token: ScriptToken::StringUnfinished,
             ..
@@ -619,7 +937,29 @@ impl ScriptTokenizer {
         }
     }
 
+    #[inline]
     pub fn tokenize(&mut self, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
+        self.run(false, new_chars, heap)
+    }
+
+    /// Lexes `new_chars` (`tokenize`: the tokens it added), or with `finish` ends the source
+    /// (`finish`: no text, an empty slice).
+    #[relax_api]
+    pub fn run(&mut self, finish: bool, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
+        if finish {
+            if self.state != State::Whitespace && !self.in_string() {
+                self.tokenize_impl("\n", heap);
+            }
+            return &[];
+        }
+        self.tokenize_impl(new_chars, heap)
+    }
+
+    fn tokenize_impl(&mut self, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
+        if self.provisional {
+            self.provisional = false;
+            self.tokens.pop();
+        }
         let mut iter = new_chars.chars();
 
         fn is_operator(c: char) -> bool {
@@ -669,6 +1009,13 @@ impl ScriptTokenizer {
         while let Some(c) = iter.next() {
             self.original.push(c);
             self.pos += 1;
+            self.tok_end = self.pos - 1;
+            let was_lexing = self.state.lexing_token() && !(self.state == State::Operator && self.temp.is_empty());
+            let was_in_string = self.state.in_string();
+            let tokens_before = self.tokens.len();
+            if c == '\n' {
+                self.line_starts.push(self.pos as u32);
+            }
             match self.state {
                 State::Whitespace => {
                     if c.is_numeric() {
@@ -693,6 +1040,16 @@ impl ScriptTokenizer {
                     }
                 }
                 State::Identifier => {
+                    // `r"…"` / `r#"…"#`: a raw string, as in Rust
+                    if self.temp == "r" && (c == '"' || c == '#') {
+                        if c == '"' {
+                            self.temp.clear();
+                            self.state = State::RawString(0);
+                        } else {
+                            self.state = State::RawStringOpen(1);
+                        }
+                        continue;
+                    }
                     if c == '_' || c == '$' || c.is_alphanumeric() {
                         self.temp.push(c);
                     } else if c.is_whitespace() {
@@ -733,7 +1090,7 @@ impl ScriptTokenizer {
                             "!" | "~" | "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" |
                             "<" | ">" | "=" | "." | "?" | ":" | "@" |
                             // Double character operators
-                            "==" | "!=" | "<=" | ">=" | "&&" | "||" | "|?" |
+                            "==" | "!=" | "<=" | ">=" | "&&" | "||" | "|?" | "??" |
                             "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | ":=" |
                             "<<" | ">>" | ".." | "->" | ".?" | ">:" | "<:" | "^:" | "+:" | "?=" |
                             "++" | "-:" | "=>" |
@@ -762,7 +1119,7 @@ impl ScriptTokenizer {
                             "^" |  // ^=, ^:
                             ":" |  // :=
                             "." |  // .., .?, ...
-                            "?" |  // ?=
+                            "?" |  // ?=, ??
                             // Double chars that could become 3-char operators
                             "==" | // ===
                             "!=" | // !==
@@ -837,13 +1194,72 @@ impl ScriptTokenizer {
                         self.state = State::BlockCommentStart;
                         self.temp.clear();
                     } else if self.temp == "//" {
-                        self.state = State::LineComment;
+                        self.state = State::LineCommentStart;
                         self.temp.clear();
                     }
                     // Emit complete operators that can't be extended
                     else if is_valid_operator(&self.temp) && !could_be_operator_prefix(&self.temp)
                     {
+                        self.tok_end = self.pos;
                         self.emit_operator();
+                    }
+                }
+                State::RawStringOpen(hashes) => {
+                    if c == '#' {
+                        self.state = State::RawStringOpen(hashes + 1);
+                    } else if c == '"' {
+                        self.temp.clear();
+                        self.state = State::RawString(hashes);
+                    } else {
+                        // `r#x` is no raw string: the identifier `r`
+                        self.emit_identifier();
+                        self.state = State::Whitespace;
+                    }
+                }
+                State::RawString(hashes) => {
+                    if c == '"' {
+                        if hashes == 0 {
+                            self.finish_string(heap);
+                            self.state = State::Whitespace;
+                        } else {
+                            self.state = State::RawStringClose(hashes, 0);
+                        }
+                    } else {
+                        self.append_unfinished_string(c);
+                    }
+                }
+                State::RawStringClose(hashes, seen) => {
+                    if c == '#' && seen + 1 == hashes {
+                        self.finish_string(heap);
+                        self.state = State::Whitespace;
+                    } else if c == '#' {
+                        self.state = State::RawStringClose(hashes, seen + 1);
+                    } else {
+                        // not the closer: the `"` and the `#`s were text
+                        self.append_unfinished_string('"');
+                        for _ in 0..seen {
+                            self.append_unfinished_string('#');
+                        }
+                        if c == '"' {
+                            self.state = State::RawStringClose(hashes, 0);
+                        } else {
+                            self.append_unfinished_string(c);
+                            self.state = State::RawString(hashes);
+                        }
+                    }
+                }
+                State::ContinueInString(double) => {
+                    if !c.is_whitespace() {
+                        self.state = State::String(double);
+                        if c == '\\' {
+                            self.temp.clear();
+                            self.state = State::EscapeInString(double);
+                        } else if (double && c == '"') || (!double && c == '\'') {
+                            self.finish_string(heap);
+                            self.state = State::Whitespace;
+                        } else {
+                            self.append_unfinished_string(c);
+                        }
                     }
                 }
                 State::EscapeInString(double) => {
@@ -873,6 +1289,13 @@ impl ScriptTokenizer {
                         self.state = State::AsciiHexInString(double);
                     } else if c == 'u' {
                         self.state = State::UnicodeHexInString(double);
+                    } else if c == '\n' {
+                        self.state = State::ContinueInString(double);
+                    } else {
+                        // not an escape: the backslash and the char stay text
+                        self.append_unfinished_string('\\');
+                        self.append_unfinished_string(c);
+                        self.state = State::String(double);
                     }
                 }
                 State::AsciiHexInString(double) => {
@@ -952,6 +1375,39 @@ impl ScriptTokenizer {
                         self.state = State::Whitespace;
                     }
                 }
+                State::LineCommentStart => {
+                    self.state = if c == '/' {
+                        State::LineDocStart
+                    } else if c == '\n' {
+                        State::Whitespace
+                    } else {
+                        State::LineComment
+                    };
+                }
+                State::LineDocStart => {
+                    if c == '/' {
+                        self.state = State::LineComment;
+                    } else if c == '\n' {
+                        self.state = State::Whitespace;
+                    } else {
+                        self.temp.clear();
+                        self.temp.push(c);
+                        self.state = State::LineDoc;
+                    }
+                }
+                State::LineDoc => {
+                    if c == '\n' {
+                        // `///text`: a doc for what follows, as `/**text*/` (Rust's doc line)
+                        let text = self.temp.trim().to_string();
+                        if !text.is_empty() {
+                            self.docs.push(ScriptTokDoc { next_token: self.tokens.len() as u32, text });
+                        }
+                        self.temp.clear();
+                        self.state = State::Whitespace;
+                    } else {
+                        self.temp.push(c);
+                    }
+                }
                 State::BlockCommentStart => {
                     if c == '*' {
                         self.state = State::BlockDocStart;
@@ -1004,13 +1460,18 @@ impl ScriptTokenizer {
                     }
                 }
                 State::Number => {
-                    if c.is_numeric() {
+                    if self.unit_start.is_some() && c.is_alphabetic() && !self.temp.ends_with('°') {
+                        self.temp.push(c);
+                    } else if c.is_numeric() {
                         self.temp.push(c);
                     } else if c == '.' && self.temp.chars().last() == Some('.') {
                         self.temp.pop();
+                        self.tok_end = self.lex_start + self.temp.chars().count();
                         self.emit_f64();
                         self.temp.push('.');
                         self.temp.push('.');
+                        self.lex_start = self.pos - 2;
+                        self.tok_end = self.pos;
                         self.emit_operator();
                         self.state = State::Whitespace
                     } else if c == '.' && self.temp.chars().position(|v| v == '.').is_none() {
@@ -1037,15 +1498,19 @@ impl ScriptTokenizer {
                     {
                         self.temp.push(c);
                     } else if c == 'f' {
+                        self.tok_end = self.pos;
                         self.emit_f32();
                         self.state = State::Whitespace
                     } else if c == 'u' {
+                        self.tok_end = self.pos;
                         self.emit_u32();
                         self.state = State::Whitespace
                     } else if c == 'i' {
+                        self.tok_end = self.pos;
                         self.emit_i32();
                         self.state = State::Whitespace
                     } else if c == 'h' {
+                        self.tok_end = self.pos;
                         self.emit_f16();
                         self.state = State::Whitespace
                     } else if c == '_' {
@@ -1054,6 +1519,10 @@ impl ScriptTokenizer {
                         // Moving to Whitespace here left `temp` stale and let a
                         // later separator reach emit_separator and panic.
                         continue;
+                    } else if (c.is_alphabetic() || c == '°') && self.unit_start.is_none() && !self.temp.contains(['x', 'X']) {
+                        // a unit suffix (`0.12s`, `120ms`, `90deg`, `90°`, `150mm`)
+                        self.unit_start = Some(self.temp.len());
+                        self.temp.push(c);
                     } else if c == '$' || c.is_alphabetic() {
                         self.emit_f64();
                         self.state = State::Identifier;
@@ -1099,6 +1568,7 @@ impl ScriptTokenizer {
                     } else if c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' {
                         self.temp.push(c);
                         if self.temp.len() == 8 {
+                            self.tok_end = self.pos;
                             self.emit_color();
                             self.state = State::Whitespace
                         }
@@ -1135,14 +1605,125 @@ impl ScriptTokenizer {
                     }
                 }
             }
+            // A token begins at this character when none was being lexed, or
+            // when this character ended the one that was.
+            if self.state.lexing_token()
+                && !was_in_string
+                && (!was_lexing || self.tokens.len() != tokens_before)
+            {
+                self.lex_start = self.pos - 1;
+            }
             // Register the newline AFTER this char's token emission, so a token
             // terminated BY this newline keeps whatever preceded it, and the flag
             // attaches to the NEXT token instead.
             if c == '\n' {
                 self.newline_pending = true;
             }
+            if c.is_whitespace() {
+                self.space_pending = true;
+            }
         }
         &self.tokens[start..self.tokens.len()]
+    }
+}
+
+/// One token of a source as the real tokenizer reads it, with the bytes it
+/// was written in. Nothing is evaluated or parsed.
+#[relax_api(handle, clone)]
+#[derive(Clone, Debug)]
+pub struct LexedToken {
+    pub token: ScriptToken,
+    /// Byte range in the source.
+    pub span: std::ops::Range<usize>,
+    /// A string token's value, escapes resolved.
+    pub string: Option<String>,
+    pub preceded_by_newline: bool,
+    pub preceded_by_space: bool,
+}
+
+/// What a lexed token reads as (LexedToken::view).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct LexedTokenView<'a> {
+    pub token: &'a ScriptToken,
+    pub start: usize,
+    pub end: usize,
+    pub string: &'a str,
+    pub has_string: bool,
+    pub preceded_by_newline: bool,
+    pub preceded_by_space: bool,
+}
+
+/// What ScriptTokenizer::view answers.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct TokenizerView<'a> {
+    pub tokens: &'a [ScriptTokenPos],
+    pub row: u32,
+    pub col: u32,
+    pub found: bool,
+}
+
+#[relax_api(marked)]
+impl LexedToken {
+    #[relax_api]
+    pub fn view(&self) -> LexedTokenView<'_> {
+        LexedTokenView {
+            token: &self.token,
+            start: self.span.start,
+            end: self.span.end,
+            string: self.string.as_deref().unwrap_or(""),
+            has_string: self.string.is_some(),
+            preceded_by_newline: self.preceded_by_newline,
+            preceded_by_space: self.preceded_by_space,
+        }
+    }
+
+    #[inline(always)]
+    pub fn span(&self) -> std::ops::Range<usize> { self.start()..self.end() }
+
+    #[inline]
+    pub fn token(&self) -> &ScriptToken { self.view().token }
+    #[inline]
+    pub fn start(&self) -> usize { self.view().start }
+    #[inline]
+    pub fn end(&self) -> usize { self.view().end }
+    #[inline]
+    pub fn string(&self) -> Option<&str> { let v = self.view(); v.has_string.then_some(v.string) }
+    #[inline]
+    pub fn preceded_by_newline(&self) -> bool { self.view().preceded_by_newline }
+    #[inline]
+    pub fn preceded_by_space(&self) -> bool { self.view().preceded_by_space }
+}
+
+/// The tokens of `source`, each with its byte range. Comments are not
+/// tokens: they stay in the gaps between ranges, so a host that edits by
+/// range keeps them. This is the tokenizer a script runs on, so anything
+/// the language reads as one token is one token here.
+#[inline(always)]
+pub fn lex(source: &str) -> Vec<LexedToken> {
+    let mut out = Vec::new();
+    lex_into(source, &mut ScriptLexedOut::new(&mut out));
+    out
+}
+#[relax_api]
+pub fn lex_into(source: &str, out: &mut ScriptLexedOut) {
+    let mut heap = ScriptHeap::default();
+    let mut tokenizer = ScriptTokenizer::default();
+    tokenizer.tokenize(source, &mut heap);
+    tokenizer.finish(&mut heap);
+    let mut bytes: Vec<usize> = source.char_indices().map(|(at, _)| at).collect();
+    bytes.push(source.len());
+    for pos in &tokenizer.tokens {
+            let span = pos.span();
+            let string = pos.token.as_string().and_then(|value| heap.string_with(value, |_, text| text.to_string()));
+            out.push(&LexedToken {
+                token: pos.token,
+                span: bytes[span.start.min(bytes.len() - 1)]..bytes[span.end.min(bytes.len() - 1)],
+                string,
+                preceded_by_newline: pos.preceded_by_newline,
+                preceded_by_space: pos.preceded_by_space,
+            });
     }
 }
 
@@ -1165,6 +1746,37 @@ mod tests {
             tokenizer.token_index_to_row_col(0),
             ascii.token_index_to_row_col(0)
         );
+    }
+
+    #[test]
+    fn token_rows_and_columns_match_a_scan_of_the_source() {
+        // Rows and columns come from the line index; they are what a scan
+        // of the source up to the token gives, for a source streamed in
+        // pieces (a provisional last token in between) too.
+        fn scan(source: &str, at: usize) -> Option<(u32, u32)> {
+            let (mut line, mut start) = (0, 0);
+            for (i, c) in source.chars().enumerate() {
+                if i >= at {
+                    return Some((line, (i - start) as u32));
+                }
+                if c == '\n' {
+                    start = i + 1;
+                    line += 1;
+                }
+            }
+            None
+        }
+        let mut heap = ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        let source = "let a = 1\n\n  b: \u{540d}+ 2\nc(3, 4)\n   x";
+        for piece in ["let a = 1\n", "\n  b: \u{540d}", "+ 2\nc(3, 4)\n   x"] {
+            tokenizer.tokenize(piece, &mut heap);
+            tokenizer.push_pending_token(&mut heap);
+        }
+        assert!(tokenizer.tokens.len() > 8);
+        for (i, token) in tokenizer.tokens.iter().enumerate() {
+            assert_eq!(tokenizer.token_index_to_row_col(i as u32), scan(source, token.pos), "token {i}");
+        }
     }
 
     #[test]
@@ -1208,5 +1820,48 @@ mod tests {
         assert_eq!(tokenizer.tokens[0].token.as_u40(), Some(1));
         assert_eq!(tokenizer.tokens[1].token.as_u40(), Some(2));
         assert!(matches!(tokenizer.tokens[2].token, ScriptToken::Separator(_)));
+    }
+
+    #[test]
+    fn tokens_carry_the_exact_characters_they_were_written_in() {
+        let source = "Rect{a:-1.5 b: @ease_out c: #ff5a36, d: \"h\\\"i\" // note\n e: vec2(1..2) f: 1.0f g: x->y}\n";
+        let mut heap = ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        tokenizer.tokenize(source, &mut heap);
+        tokenizer.finish(&mut heap);
+        let chars: Vec<char> = source.chars().collect();
+        let texts: Vec<String> = tokenizer
+            .tokens
+            .iter()
+            .map(|token| chars[token.span()].iter().collect())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Rect", "{", "a", ":", "-", "1.5", "b", ":", "@", "ease_out", "c", ":", "#ff5a36", ",", "d", ":",
+                "\"h\\\"i\"", "e", ":", "vec2", "(", "1", "..", "2", ")", "f", ":", "1.0f", "g", ":", "x", "->", "y", "}"
+            ]
+        );
+    }
+}
+
+/// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptLexedOut<'a> {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, *const LexedToken),
+    _out: std::marker::PhantomData<&'a mut Vec<LexedToken>>,
+}
+impl<'a> ScriptLexedOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<LexedToken>) -> Self {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, value: *const LexedToken) {
+            (&mut *(ctx as *mut Vec<LexedToken>)).push((&*value).clone());
+        }
+        Self { ctx: out as *mut _ as *mut u8, push, _out: std::marker::PhantomData }
+    }
+    pub fn push(&mut self, value: &LexedToken) {
+        unsafe { (self.push)(self.ctx, value) }
     }
 }

@@ -1,14 +1,60 @@
+use makepad_relax_api::relax_api;
 use crate::{vm, ScriptStd, ScriptVmStdExt};
 use makepad_script::id;
 use makepad_script::*;
-use std::any::Any;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-pub type ScriptTaskOnThreadCompletedHook = fn(&mut dyn Any, ScriptThreadId, ScriptValue) -> bool;
-pub type ScriptTaskPumpHook = fn(&mut dyn Any) -> bool;
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ScriptTaskOnThreadCompletedHook {
+    context: *mut u8,
+    call: unsafe extern "C-unwind" fn(
+        *mut u8,
+        &mut ScriptHostContext,
+        ScriptThreadId,
+        ScriptValue,
+    ) -> bool,
+}
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ScriptTaskPumpHook {
+    context: *mut u8,
+    call: unsafe extern "C-unwind" fn(*mut u8, &mut ScriptHostContext) -> bool,
+}
 
+impl ScriptTaskOnThreadCompletedHook {
+    /// # Safety
+    /// The callback must accept every host/thread/result supplied by this VM.
+    /// Its context and code must remain valid until the host is dropped.
+    pub unsafe fn new(
+        context: *mut u8,
+        call: unsafe extern "C-unwind" fn(
+            *mut u8,
+            &mut ScriptHostContext,
+            ScriptThreadId,
+            ScriptValue,
+        ) -> bool,
+    ) -> Self {
+        Self { context, call }
+    }
+}
+impl ScriptTaskPumpHook {
+    /// # Safety
+    /// The callback must accept the host supplied by this VM. Its context and
+    /// code must remain valid until the host is dropped.
+    pub unsafe fn new(
+        context: *mut u8,
+        call: unsafe extern "C-unwind" fn(*mut u8, &mut ScriptHostContext) -> bool,
+    ) -> Self {
+        Self { context, call }
+    }
+}
+
+#[relax_api(handle, clone)]
 #[derive(Default, Clone)]
 pub struct ScriptTaskHooks {
     pub on_thread_completed: Vec<ScriptTaskOnThreadCompletedHook>,
@@ -26,6 +72,7 @@ pub struct ScriptTask {
     pub recv_pause: VecDeque<ScriptThreadId>,
 }
 
+#[relax_api(handle)]
 #[derive(Default)]
 pub struct ScriptTasks {
     pub tasks: Rc<RefCell<Vec<ScriptTask>>>,
@@ -48,6 +95,7 @@ impl ScriptHandleGc for ScriptTaskGc {
     }
 }
 
+#[relax_api]
 pub fn add_script_task_on_thread_completed_hook(
     std: &mut ScriptStd,
     hook: ScriptTaskOnThreadCompletedHook,
@@ -58,12 +106,13 @@ pub fn add_script_task_on_thread_completed_hook(
         .hooks
         .on_thread_completed
         .iter()
-        .any(|v| (*v as usize) == (hook as usize))
+        .any(|v| v.context == hook.context && (v.call as usize) == (hook.call as usize))
     {
         std.data.tasks.hooks.on_thread_completed.push(hook);
     }
 }
 
+#[relax_api]
 pub fn add_script_task_pump_hook(std: &mut ScriptStd, hook: ScriptTaskPumpHook) {
     if !std
         .data
@@ -71,12 +120,13 @@ pub fn add_script_task_pump_hook(std: &mut ScriptStd, hook: ScriptTaskPumpHook) 
         .hooks
         .pump
         .iter()
-        .any(|v| (*v as usize) == (hook as usize))
+        .any(|v| v.context == hook.context && (v.call as usize) == (hook.call as usize))
     {
         std.data.tasks.hooks.pump.push(hook);
     }
 }
 
+#[relax_api]
 pub fn queue_script_thread_resume(std: &mut ScriptStd, thread_id: ScriptThreadId) {
     std.data.tasks.pending_resumes.push_back(thread_id);
 }
@@ -84,13 +134,12 @@ pub fn queue_script_thread_resume(std: &mut ScriptStd, thread_id: ScriptThreadId
 pub fn set_script_task_trace(_std: &mut ScriptStd, _enabled: bool) {}
 
 fn run_script_task_thread_completed_hooks(
-    host: &mut dyn ScriptHost,
+    host: &mut ScriptHostContext,
     thread_id: ScriptThreadId,
     result: ScriptValue,
 ) -> bool {
     let hooks = host
-        .script_std()
-        .downcast_ref::<ScriptStd>()
+        .std_ref::<ScriptStd>()
         .unwrap()
         .data
         .tasks
@@ -99,15 +148,14 @@ fn run_script_task_thread_completed_hooks(
         .clone();
     let mut consumed = false;
     for hook in hooks {
-        consumed |= hook(host.as_any_mut(), thread_id, result);
+        consumed |= unsafe { (hook.call)(hook.context, host, thread_id, result) };
     }
     consumed
 }
 
-fn run_script_task_pump_hooks(host: &mut dyn ScriptHost) -> bool {
+fn run_script_task_pump_hooks(host: &mut ScriptHostContext) -> bool {
     let hooks = host
-        .script_std()
-        .downcast_ref::<ScriptStd>()
+        .std_ref::<ScriptStd>()
         .unwrap()
         .data
         .tasks
@@ -116,12 +164,13 @@ fn run_script_task_pump_hooks(host: &mut dyn ScriptHost) -> bool {
         .clone();
     let mut progressed = false;
     for hook in hooks {
-        progressed |= hook(host.as_any_mut());
+        progressed |= unsafe { (hook.call)(hook.context, host) };
     }
     progressed
 }
 
-pub fn handle_script_tasks(host: &mut dyn ScriptHost) {
+#[relax_api]
+pub fn handle_script_tasks(host: &mut ScriptHostContext) {
     loop {
         let mut progressed = false;
 
@@ -129,8 +178,7 @@ pub fn handle_script_tasks(host: &mut dyn ScriptHost) {
         let mut start_task = None;
 
         if let Some(thread_id) = host
-            .script_std()
-            .downcast_mut::<ScriptStd>()
+            .std_mut::<ScriptStd>()
             .unwrap()
             .data
             .tasks
@@ -140,8 +188,7 @@ pub fn handle_script_tasks(host: &mut dyn ScriptHost) {
             next_thread = Some(thread_id);
         } else {
             let tasks = host
-                .script_std()
-                .downcast_ref::<ScriptStd>()
+                .std_ref::<ScriptStd>()
                 .unwrap()
                 .data
                 .tasks
@@ -150,12 +197,7 @@ pub fn handle_script_tasks(host: &mut dyn ScriptHost) {
             let mut tasks = tasks.borrow_mut();
             for task in tasks.iter_mut() {
                 let queue = task.queue.as_array();
-                let queue_len = host
-                    .script_vm_slot()
-                    .as_ref()
-                    .unwrap()
-                    .heap
-                    .array_len(queue);
+                let queue_len = host.vm_base().unwrap().heap_ref().array_len(queue);
                 if let Some(st) = task.start_task.take() {
                     start_task = Some((st, task.handle));
                     break;
@@ -181,10 +223,8 @@ pub fn handle_script_tasks(host: &mut dyn ScriptHost) {
             let result = vm::with_vm_thread(host, next_thread, |vm| vm.resume());
 
             let is_paused = host
-                .script_vm_slot()
-                .as_ref()
-                .and_then(|bx| bx.threads.get(next_thread.to_index()))
-                .map(|thread| thread.is_paused())
+                .vm_base()
+                .and_then(|bx| bx.thread_is_paused(next_thread.to_index()))
                 .unwrap_or(true);
 
             if !is_paused {
@@ -215,23 +255,21 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 let mut tasks = tasks.borrow_mut();
                 if let Some(task) = tasks.iter_mut().find(|v| v.handle == handle) {
                     let queue = task.queue.as_array();
-                    let array_len = vm.bx.heap.array_len(queue);
+                    let array_len = vm.heap().array_len(queue);
 
                     if task.max_depth == 0 || array_len < task.max_depth {
                         let value = {
-                            let vec_len = vm.bx.heap.vec_len(args.into());
+                            let vec_len = vm.heap().vec_len(args.into());
                             if vec_len == 0 {
                                 NIL
                             } else if vec_len == 1 {
-                                vm.bx
-                                    .heap
-                                    .vec_value(args, 0, vm.bx.threads.cur().trap.pass())
+                                vm.vec_value_trap(args, 0)
                             } else {
-                                vm.bx.heap.set_reffed(args);
+                                vm.heap_mut().set_reffed(args);
                                 args.into()
                             }
                         };
-                        vm.bx.heap.array_push(queue, value, vm.bx.threads.trap());
+                        vm.array_push_trap(queue, value);
                         if end_on_send {
                             task.ended = true;
                         }
@@ -239,9 +277,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     }
 
                     if task.send_pause.len() > 100 {
-                        return script_err_limit!(vm.bx.threads.trap(), "too many paused calls");
+                        return script_err_limit!(vm.trap(), "too many paused calls");
                     }
-                    task.send_pause.push_front(vm.bx.threads.cur().pause());
+                    task.send_pause.push_front(vm.pause());
                     return NIL;
                 }
             }
@@ -260,7 +298,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 let tasks = vm.std_ref::<ScriptStd>().data.tasks.tasks.clone();
                 let mut tasks = tasks.borrow_mut();
                 if let Some(task) = tasks.iter_mut().find(|v| v.handle == handle) {
-                    if let Some(value) = vm.bx.heap.array_pop_front_option(task.queue.as_array()) {
+                    if let Some(value) = vm.heap_mut().array_pop_front_option(task.queue.as_array()) {
                         if !wait_for_end || task.ended {
                             return value;
                         }
@@ -269,9 +307,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         return NIL;
                     }
                     if task.recv_pause.len() > 100 {
-                        return script_err_limit!(vm.bx.threads.trap(), "too many paused calls");
+                        return script_err_limit!(vm.trap(), "too many paused calls");
                     }
-                    task.recv_pause.push_front(vm.bx.threads.cur().pause());
+                    task.recv_pause.push_front(vm.pause());
                     return NIL;
                 }
             }
@@ -305,9 +343,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
             tasks: tasks.clone(),
             handle: ScriptHandle::ZERO,
         };
-        let handle = vm.bx.heap.new_handle(handle_type, Box::new(handle_gc));
-        let array = vm.bx.heap.new_array();
-        let queue = vm.bx.heap.new_array_ref(array);
+        let handle = vm.heap_mut().new_handle(handle_type, Box::new(handle_gc));
+        let array = vm.heap_mut().new_array();
+        let queue = vm.heap_mut().new_array_ref(array);
         tasks.borrow_mut().push(ScriptTask {
             max_depth,
             start_task,
@@ -340,11 +378,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_args_def!(start_fn_or_depth = NIL),
         move |vm, args| {
             let start_fn_or_depth = script_value!(vm, args.start_fn_or_depth);
-            let (start_task, max_depth) = if vm.bx.heap.is_fn(start_fn_or_depth.into()) {
+            let (start_task, max_depth) = if vm.is_fn(start_fn_or_depth.into()) {
                 (
                     Some(
-                        vm.bx
-                            .heap
+                        vm.heap_mut()
                             .new_fn_ref(start_fn_or_depth.as_object().unwrap()),
                     ),
                     1,
@@ -364,8 +401,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let start_fn = script_value!(vm, args.start_fn);
             let start_task = if start_fn.is_nil() {
                 None
-            } else if vm.bx.heap.is_fn(start_fn.into()) {
-                Some(vm.bx.heap.new_fn_ref(start_fn.as_object().unwrap()))
+            } else if vm.is_fn(start_fn.into()) {
+                Some(vm.heap_mut().new_fn_ref(start_fn.as_object().unwrap()))
             } else {
                 return script_err_wrong_value!(vm.trap(), "std.promise expects fn or nil");
             };

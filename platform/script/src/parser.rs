@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::makepad_error_log::*;
 use crate::makepad_live_id::live_id::*;
 use crate::makepad_live_id::makepad_live_id_macros::*;
@@ -49,6 +50,8 @@ enum State {
     ForBody {
         idents: u32,
         index: u32,
+        /// Code index where the source expression starts.
+        expr_start: u32,
     },
     ForExpr {
         code_start: u32,
@@ -66,29 +69,44 @@ enum State {
         code_start: u32,
     },
 
+    // `stmt`: the if sits in statement position (its value is only popped
+    // to `me`, or kept as the block's value when last), so when no arm
+    // leaves a value the if leaves none either. In expression position a
+    // valueless arm yields nil. `true_valued`: the true arm left a value.
     IfTest {
         index: u32,
+        stmt: bool,
     },
     IfTrueExpr {
         if_start: u32,
+        stmt: bool,
     },
     IfTrueBlock {
         if_start: u32,
         last_was_sep: bool,
+        stmt: bool,
     },
     IfMaybeElse {
         if_start: u32,
         was_block: bool,
+        stmt: bool,
+        true_valued: bool,
     },
     IfElse {
         else_start: u32,
+        stmt: bool,
+        true_valued: bool,
     },
     IfElseExpr {
         else_start: u32,
+        stmt: bool,
+        true_valued: bool,
     },
     IfElseBlock {
         else_start: u32,
         last_was_sep: bool,
+        stmt: bool,
+        true_valued: bool,
     },
 
     OkTest {
@@ -200,6 +218,9 @@ enum State {
         what_op: LiveId,
         index: u32,
         slot_assign: Option<LiveId>,
+        /// Where the right operand's code starts: an operand that is one
+        /// constant push (and only that) folds into the op's immediate.
+        rhs_start: u32,
     },
     EmitFieldAssign {
         what_op: LiveId,
@@ -212,6 +233,8 @@ enum State {
 
     EndBare,
     EndBareSquare,
+    /// Closes the list a `for` in value position collects into.
+    EndForList,
     EndProto,
     EndProtoInherit,
     EndScopeInherit,
@@ -401,6 +424,7 @@ enum State {
     },
     VarDynOrTyped {
         index: u32,
+        name: LiveId,
     },
     VarType {
         index: u32,
@@ -410,6 +434,7 @@ enum State {
     },
     EmitVarDyn {
         index: u32,
+        name: LiveId,
     },
     EmitVarTyped {
         index: u32,
@@ -519,14 +544,14 @@ impl State {
     }
 
     fn is_short_circuit_op(op: LiveId) -> bool {
-        op == id!(&&) || op == id!(||) || op == id!(|?)
+        op == id!(&&) || op == id!(||) || op == id!(|?) || op == id!(??)
     }
 
     fn short_circuit_opcode(op: LiveId) -> Opcode {
         match op {
             id!(&&) => Opcode::LOGIC_AND_TEST,
             id!(||) => Opcode::LOGIC_OR_TEST,
-            id!(|?) => Opcode::NIL_OR_TEST,
+            id!(|?) | id!(??) => Opcode::NIL_OR_TEST,
             _ => Opcode::NOP,
         }
     }
@@ -574,7 +599,7 @@ impl State {
             id!(===) | id!(!==) | id!(==) | id!(!=) => 15,
             id!(is) => 15,
             id!(&&) => 16,
-            id!(||) | id!(|?) => 17,
+            id!(||) | id!(|?) | id!(??) => 17,
             id!(..) => 18,
             id!(:)
             | id!(:=)
@@ -636,6 +661,16 @@ impl State {
         }
     }
 
+    /// The read half of a field-inherit write: `obj.f += {..}` reads the field's value, a path
+    /// `a.b +: {..}` builds on the instance copy of the named child or property.
+    fn field_inherit_read(op: LiveId) -> Opcode {
+        if op == id!(+:) {
+            Opcode::FIELD_SLOT_READ
+        } else {
+            Opcode::FIELD_INHERIT_READ
+        }
+    }
+
     fn operator_to_field_assign(op: LiveId) -> ScriptValue {
         match op {
             id!(=) | id!(:) => Opcode::ASSIGN_FIELD,
@@ -650,6 +685,7 @@ impl State {
             id!(<<=) => Opcode::ASSIGN_FIELD_SHL,
             id!(>>=) => Opcode::ASSIGN_FIELD_SHR,
             id!(?=) => Opcode::ASSIGN_FIELD_IFNIL,
+            id!(:=) => Opcode::ASSIGN_FIELD_VEC,
             _ => Opcode::NOP,
         }
         .into()
@@ -711,7 +747,7 @@ impl State {
             // &&, ||, |? are handled specially for short-circuit evaluation
             id!(&&) => Opcode::LOGIC_AND_TEST,
             id!(||) => Opcode::LOGIC_OR_TEST,
-            id!(|?) => Opcode::NIL_OR_TEST,
+            id!(|?) | id!(??) => Opcode::NIL_OR_TEST,
             id!(:) => Opcode::ASSIGN_ME,
             id!(:=) => Opcode::ASSIGN_ME_VEC,
             id!(<:) => Opcode::ASSIGN_ME_BEFORE,
@@ -785,17 +821,34 @@ pub(crate) struct SlotCtx {
     /// Slots are resolved at log time — a name sealed at loop exit (or
     /// reused in a sibling loop with a fresh slot) keeps correct candidates.
     reads: Vec<(u32, LiveId, u32)>,
-    /// LET_DYN positions to become LET_SLOT: (position, name, slot)
+    /// reads inside an object literal's statement list: a bare `{x}` there
+    /// pops the id to the object as its key and value
+    keyed_reads: Vec<(u32, LiveId)>,
+    /// LET_DYN / VAR_DYN positions to become LET_SLOT: (position, name, slot)
     lets: Vec<(u32, LiveId, u32)>,
+    /// the positions in `lets` that are VAR_DYN (become VAR_SLOT)
+    vars: Vec<u32>,
+    /// every bare identifier read or assigned in the body so far, in order
+    /// (slotted or not): a let in a while/loop body may slot only when no
+    /// read of its name since the loop's start (condition included) could
+    /// see the previous iteration's binding in the persisting loop scope.
+    seen: Vec<LiveId>,
     /// assign reduce positions to become STORE_SLOT / ASSIGN_SLOT_*
     assigns: Vec<(u32, LiveId, u32, Opcode)>,
     /// enclosing loop kinds, innermost last (true = for, false = while/loop).
     /// for-loops reset their iteration scope, so lets inside them can be
     /// slotted; while/loop bodies keep shadow chains and stay dynamic.
     loop_kinds: Vec<bool>,
+    /// `seen.len()` when each enclosing loop opened, parallel to loop_kinds
+    loop_marks: Vec<usize>,
 }
 
+#[relax_api(handle)]
 pub struct ScriptParser {
+    /// Keep every number literal a pushed value of its own (no folding into
+    /// an operator's argument): a host can then set one in place while the
+    /// code runs (an editor dragging a value).
+    pub keep_numbers: bool,
     pub index: u32,
     pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
@@ -839,6 +892,12 @@ pub struct ScriptParser {
     /// executes the commit.
     last_jump_target: u32,
 
+    /// Code position right after a statement-position if whose arms all
+    /// left no value: the statement ending here leaves nothing to pop to
+    /// `me` (see `last_stmt_leaves_no_value`), and an arm or `else if`
+    /// ending here counts as valueless.
+    valueless_end: u32,
+
     // Storage for nested patterns during parsing
     // Each entry is (pattern_info). The index into this vec is encoded in the ids list.
     nested_patterns: Vec<NestedPattern>,
@@ -854,9 +913,12 @@ pub struct ScriptParser {
     pub(crate) slot_frames: Vec<(u32, Vec<LiveId>)>,
 }
 
+#[relax_api]
 impl Default for ScriptParser {
+    #[relax_api]
     fn default() -> Self {
         Self {
+            keep_numbers: false,
             index: 0,
             opcodes: Default::default(),
             source_map: Default::default(),
@@ -876,6 +938,7 @@ impl Default for ScriptParser {
             slot_ctxs: Default::default(),
             slot_frames: Default::default(),
             last_jump_target: u32::MAX,
+            valueless_end: u32::MAX,
         }
     }
 }
@@ -893,16 +956,23 @@ pub struct ParserCheckpoint {
     /// The last opcode before the checkpoint, saved because auto-close's
     /// set_pop_to_me() mutates it in place. Must be restored on continuation.
     last_opcode: Option<ScriptValue>,
-    /// Auto-close patches pending logical jumps in place, not just the tail;
-    /// the original TEST opcodes are restored on continuation.
-    short_circuit_opcodes: Vec<(u32, ScriptValue)>,
+    /// Auto-close patches pending jumps in place (logical TESTs, and the
+    /// IF_TEST/IF_ELSE of an if still open), not just the tail; the
+    /// original opcodes are restored on continuation.
+    patched_opcodes: Vec<(u32, ScriptValue)>,
     /// Open slot contexts at checkpoint time; restored wholesale so slot
     /// candidates logged after the checkpoint die with the restore.
     slot_ctxs: Vec<SlotCtx>,
     slot_frames_len: usize,
 }
 
+#[relax_api]
 impl ScriptParser {
+    /// A parser that keeps number literals as values of their own, or not
+    /// ([`Self::keep_numbers`]).
+    pub fn keeping_numbers(keep: bool) -> Self {
+        Self { keep_numbers: keep, ..Self::default() }
+    }
     /// Controls whether parser errors are forwarded to Makepad's global log.
     /// Diagnostics remain available through [`Self::diagnostics`] and
     /// `parse_errors` either way.
@@ -1011,18 +1081,32 @@ impl ScriptParser {
             names: Vec::new(),
             poisoned: Vec::new(),
             reads: Vec::new(),
+            keyed_reads: Vec::new(),
             lets: Vec::new(),
+            vars: Vec::new(),
+            seen: Vec::new(),
             assigns: Vec::new(),
             loop_kinds: Vec::new(),
+            loop_marks: Vec::new(),
         });
     }
 
     /// Close the innermost body: rewrite logged candidates with slot ops if
     /// the body stayed eligible. All rewrites are 1:1 in stream shape.
     fn slot_body_close(&mut self) {
-        let Some(ctx) = self.slot_ctxs.pop() else {
+        let Some(mut ctx) = self.slot_ctxs.pop() else {
             return;
         };
+        // `{x}` pops the bare id to the object as its key AND its value: a
+        // slot read would push the value alone and lose the key (the
+        // object got an unkeyed entry, or the read failed), so such a name
+        // stays dynamic.
+        for (at, name) in &ctx.keyed_reads {
+            let next = self.opcodes.get(*at as usize + 1).and_then(|v| v.as_opcode());
+            if matches!(next, Some((Opcode::POP_TO_ME, _))) && !ctx.poisoned.contains(name) {
+                ctx.poisoned.push(*name);
+            }
+        }
         if !ctx.eligible || ctx.names.is_empty() {
             // Nothing will be rewritten: remove the SLOTS_FRAME placeholder
             // so dynamic bodies pay zero dispatch. Safe: every intra-body
@@ -1031,6 +1115,16 @@ impl ScriptParser {
             // placeholder and is resolved against post-removal lengths.
             self.opcodes.remove(ctx.slots_frame_at as usize);
             self.source_map.remove(ctx.slots_frame_at as usize);
+            // The position markers past the placeholder shift with the code.
+            // Left as they were, a marker for the body's end (a statement if
+            // closing the body) lands on the code that follows the body: the
+            // fn literal after it then reads as "leaves no value" and a call
+            // argument `g(|a| { if c { for … {} } })` loses its function.
+            for marker in [&mut self.valueless_end, &mut self.last_jump_target] {
+                if *marker != u32::MAX && *marker > ctx.slots_frame_at {
+                    *marker -= 1;
+                }
+            }
             return;
         }
         let ok = |name: &LiveId| !ctx.poisoned.contains(name);
@@ -1047,8 +1141,13 @@ impl ScriptParser {
                 // preserve flag bits (pop_to_me/need_nil set post-emission)
                 let flags = self.opcodes[*at as usize].raw() as u32
                     & (OpcodeArgs::POP_TO_ME_FLAG | OpcodeArgs::NEED_NIL_FLAG);
+                let op = if ctx.vars.contains(at) {
+                    Opcode::VAR_SLOT
+                } else {
+                    Opcode::LET_SLOT
+                };
                 self.opcodes[*at as usize] = ScriptValue::from_opcode_args(
-                    Opcode::LET_SLOT,
+                    op,
                     OpcodeArgs(OpcodeArgs::from_u32(slot).raw() | flags),
                 );
             }
@@ -1138,6 +1237,7 @@ impl ScriptParser {
                     what_op,
                     index,
                     slot_assign,
+                    ..
                 }) if self.unary_pending_under_tight_ops() => {
                     let (what_op, index, slot_assign) = (*what_op, *index, *slot_assign);
                     self.state.pop();
@@ -1175,16 +1275,54 @@ impl ScriptParser {
             return;
         }
         let at = self.code_len();
+        let in_object = !self.slot_ctxs.is_empty() && self.in_object_literal();
         if let Some(ctx) = self.slot_ctxs.last_mut() {
+            if !ctx.loop_kinds.is_empty() {
+                ctx.seen.push(name);
+            }
             if let Some((_, slot, _)) = ctx.names.iter().find(|(n, _, _)| *n == name) {
                 let slot = *slot;
                 ctx.reads.push((at, name, slot));
+                if in_object {
+                    ctx.keyed_reads.push((at, name));
+                }
             }
         }
     }
 
+    /// Whether statements parsed now pop their values into an object
+    /// literal (where a bare id is a key), not a call, array or fn body.
+    fn in_object_literal(&self) -> bool {
+        for st in self.state.iter().rev() {
+            match st {
+                State::EndBare
+                | State::EndProto
+                | State::EndProtoInherit
+                | State::EndScopeInherit
+                | State::EndFieldInherit
+                | State::EndIndexInherit => return true,
+                State::EndBareSquare
+                | State::EndForList
+                | State::EndCall { .. }
+                | State::EndFnBlock { .. }
+                | State::EndFnExpr { .. } => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// `let name = expr` about to emit LET_DYN at code_len.
     fn slot_note_let(&mut self, name: LiveId) {
+        self.slot_note_binding(name, false);
+    }
+
+    /// `var name = expr` about to emit VAR_DYN at code_len: binds like a let.
+    fn slot_note_var(&mut self, name: LiveId) {
+        self.slot_note_binding(name, true);
+    }
+
+    fn slot_note_binding(&mut self, name: LiveId, is_var: bool) {
         if Self::is_reserved_binding(name) || name == id!(_) {
             return;
         }
@@ -1198,10 +1336,16 @@ impl ScriptParser {
                 }
                 return;
             }
-            // inside a while/loop body the iteration shadow chain persists —
-            // only for-loop bodies (scope reset per iteration) can slot lets
+            // A while/loop body keeps its iteration scope across passes: a
+            // read of the name earlier in the loop (its condition, or code
+            // before this let) sees the previous pass's binding there. Such
+            // a name stays dynamic; otherwise the slot, which also persists
+            // across passes, reads exactly what the loop scope would.
             if ctx.loop_kinds.last() == Some(&false) {
-                return;
+                let mark = *ctx.loop_marks.last().unwrap_or(&0);
+                if ctx.seen[mark.min(ctx.seen.len())..].contains(&name) {
+                    return;
+                }
             }
             let slot = ctx
                 .lets
@@ -1213,6 +1357,9 @@ impl ScriptParser {
             let depth = ctx.loop_kinds.len() as u32;
             ctx.names.push((name, slot, depth));
             ctx.lets.push((at, name, slot));
+            if is_var {
+                ctx.vars.push(at);
+            }
         }
     }
 
@@ -1275,12 +1422,14 @@ impl ScriptParser {
     fn slot_loop_enter(&mut self, is_for: bool) {
         if let Some(ctx) = self.slot_ctxs.last_mut() {
             ctx.loop_kinds.push(is_for);
+            ctx.loop_marks.push(ctx.seen.len());
         }
     }
 
     fn slot_loop_exit(&mut self) {
         if let Some(ctx) = self.slot_ctxs.last_mut() {
             ctx.loop_kinds.pop();
+            ctx.loop_marks.pop();
             // seal names defined inside the exited loop: reads after the
             // loop must resolve dynamically (outer scope or not-found),
             // not to the leftover slot value. Their in-loop candidates
@@ -1296,6 +1445,24 @@ impl ScriptParser {
 
     fn code_last(&self) -> Option<&ScriptValue> {
         self.opcodes.last()
+    }
+
+    /// Mark the reads ending the code emitted so far as optional: the
+    /// trailing field reads (`a.b.c` is `a b FIELD c FIELD`) and the index
+    /// read before them (`a[1].c`), FIELD and ARRAY_INDEX with the argument
+    /// [`OpcodeArgs::OPTIONAL_FIELD`].
+    fn quiet_trailing_field_reads(&mut self) {
+        let mut i = self.opcodes.len();
+        while i >= 2
+            && self.opcodes[i - 1] == Opcode::FIELD.into()
+            && self.opcodes[i - 2].is_id()
+        {
+            self.opcodes[i - 1].set_opcode_args(OpcodeArgs::OPTIONAL_FIELD);
+            i -= 2;
+        }
+        if i >= 1 && self.opcodes[i - 1] == Opcode::ARRAY_INDEX.into() {
+            self.opcodes[i - 1].set_opcode_args(OpcodeArgs::OPTIONAL_FIELD);
+        }
     }
 
     fn pop_code(&mut self) {
@@ -1324,6 +1491,19 @@ impl ScriptParser {
                 return true;
             }
             if state.is_statement_container() {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// Whether the nearest enclosing container is an array literal's `[ ]`.
+    fn inside_array_literal(&self) -> bool {
+        for state in self.state.iter().rev() {
+            if matches!(state, State::EndBareSquare) {
+                return true;
+            }
+            if state.is_round_square_container() || state.is_statement_container() {
                 return false;
             }
         }
@@ -1363,7 +1543,75 @@ impl ScriptParser {
         }
     }
 
+    /// Whether the statement that just ended leaves no value on the stack:
+    /// a loop (FOR_END), a `me` assignment, `break`/`continue`, a splat into
+    /// `me` or a `let`. Such a statement is not popped to `me`, both while
+    /// parsing and when the source ends on it (auto-close).
+    fn last_stmt_leaves_no_value(&self) -> bool {
+        let Some(code) = self.opcodes.last() else {
+            return false;
+        };
+        let Some((opcode, _)) = code.as_opcode() else {
+            return false;
+        };
+        opcode == Opcode::FOR_END
+            || opcode == Opcode::ASSIGN_ME
+            || opcode == Opcode::ASSIGN_ME_VEC
+            || opcode == Opcode::BREAK
+            || opcode == Opcode::CONTINUE
+            || opcode == Opcode::ME_SPLAT
+            || code.is_let_opcode()
+            || self.code_len() == self.valueless_end
+    }
+
+    /// Close the block arm of an if/match at its `}`: the last statement's
+    /// value stays on the stack as the arm's value (its pop to `me` is
+    /// undone). Returns false when the arm leaves no value: it is empty,
+    /// ends in `;`, or ends in a statement that leaves none (a loop, a
+    /// `let`, a valueless statement if).
+    fn close_arm_block(&mut self, last_was_sep: bool) -> bool {
+        if !last_was_sep && self.has_pop_to_me() {
+            self.clear_pop_to_me();
+            return true;
+        }
+        false
+    }
+
+    /// Finish an if/else once its else arm is parsed: make both arms agree.
+    /// Both valued: the if's value is theirs. A statement if whose arms left
+    /// no value leaves none. Otherwise (one arm valued, or expression
+    /// position) each valueless arm yields nil: the true arm through its
+    /// IF_ELSE jump (NEED_NIL), the else arm through a trailing NIL_ARM.
+    /// Both are invisible to the shader compiler, whose ifs are statements.
+    fn close_if_else(
+        &mut self,
+        else_start: u32,
+        stmt: bool,
+        true_valued: bool,
+        else_valued: bool,
+    ) {
+        let valueless = stmt && !true_valued && !else_valued;
+        if !valueless && !else_valued {
+            self.push_code(Opcode::NIL_ARM.into(), self.index);
+        }
+        self.last_jump_target = self.code_len();
+        let args = OpcodeArgs::from_u32(self.code_len() as u32 - else_start);
+        if !valueless && !true_valued {
+            self.set_opcode_args(else_start, args.set_need_nil());
+        } else {
+            self.set_opcode_args(else_start, args);
+        }
+        if valueless {
+            self.valueless_end = self.code_len();
+        }
+    }
+
     fn has_pop_to_me(&self) -> bool {
+        // A valueless statement if ends here: the flag on its last arm's
+        // last statement is that arm's own, not the if's.
+        if self.code_len() == self.valueless_end {
+            return false;
+        }
         if let Some(code) = self.opcodes.last() {
             if let Some((opcode, args)) = code.as_opcode() {
                 if opcode == Opcode::POP_TO_ME {
@@ -1384,6 +1632,50 @@ impl ScriptParser {
                 }
             }
             code.clear_opcode_args_pop_to_me();
+        }
+    }
+
+    /// A `for` source that is exactly a range literal (`for i in a..b`): its
+    /// code ends in RANGE and no branch in it can jump past that RANGE to the
+    /// `for` with another value. Mark the RANGE, so the loop knows it holds
+    /// the only reference to the range object.
+    fn mark_range_for_source(&mut self, expr_start: u32) {
+        let end = self.opcodes.len();
+        if end == 0 || (expr_start as usize) >= end || self.opcodes[end - 1] != Opcode::RANGE.into() {
+            return;
+        }
+        let branches = self.opcodes[expr_start as usize..end - 1].iter().any(|code| {
+            matches!(
+                code.as_opcode(),
+                Some((
+                    Opcode::LOGIC_AND_TEST
+                        | Opcode::LOGIC_OR_TEST
+                        | Opcode::NIL_OR_TEST
+                        | Opcode::IF_TEST
+                        | Opcode::IF_ELSE
+                        | Opcode::TRY_TEST
+                        | Opcode::TRY_ERR
+                        | Opcode::TRY_OK
+                        | Opcode::OK_TEST
+                        | Opcode::OK_END
+                        | Opcode::RETURN
+                        | Opcode::RETURN_IF_ERR
+                        | Opcode::FOR_1
+                        | Opcode::FOR_2
+                        | Opcode::FOR_3
+                        | Opcode::LOOP
+                        | Opcode::BREAKIFNOT
+                        | Opcode::FOR_END
+                        | Opcode::BREAK
+                        | Opcode::CONTINUE
+                        | Opcode::FN_BODY_DYN
+                        | Opcode::FN_BODY_TYPED,
+                    _
+                ))
+            )
+        });
+        if !branches {
+            self.set_opcode_args(end as u32 - 1, OpcodeArgs::RANGE_FOR_SOURCE);
         }
     }
 
@@ -1411,7 +1703,8 @@ impl ScriptParser {
                 if id.not_empty() {
                     if id == id!(in) {
                         // alright we move on to parsing the range expr
-                        self.state.push(State::ForBody { idents, index });
+                        let expr_start = self.code_len();
+                        self.state.push(State::ForBody { idents, index, expr_start });
                         self.state.push(State::BeginExpr { required: true });
                         return 1;
                     } else if idents < 3 {
@@ -1443,9 +1736,9 @@ impl ScriptParser {
                 }
                 error!(self, tokenizer, "Unexpected state in parsing for");
             }
-            State::ForBody { idents, index } => {
+            State::ForBody { idents, index, expr_start } => {
                 // alright lets emit a for instruction
-
+                self.mark_range_for_source(expr_start);
                 let code_start = self.code_len();
                 if idents == 1 {
                     self.slot_loop_enter(true);
@@ -1635,8 +1928,10 @@ impl ScriptParser {
             } => {
                 // Block body done, expect }
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
+                    // A match is an expression: a valueless arm yields nil
+                    // like a missing `_` arm does.
+                    if !self.close_arm_block(last_was_sep) {
+                        self.push_code(Opcode::NIL_ARM.into(), self.index);
                     }
                     self.state.push(State::MatchMaybeArm {
                         temp_id,
@@ -1699,8 +1994,8 @@ impl ScriptParser {
             } => {
                 // Wildcard block body done, expect }
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
+                    if !self.close_arm_block(last_was_sep) {
+                        self.push_code(Opcode::NIL_ARM.into(), self.index);
                     }
                     self.state.push(State::MatchWildcardEnd {
                         prev_else_start,
@@ -2960,29 +3255,30 @@ impl ScriptParser {
                             id
                         );
                     }
-                    // var stays dynamic; a slotted name may not be re-bound
-                    self.slot_poison(id);
                     // lets expect an assignment expression
                     // push the id on to the stack
                     self.push_code(id.into(), self.index);
-                    self.state.push(State::VarDynOrTyped { index });
+                    self.state.push(State::VarDynOrTyped { index, name: id });
                     return 1;
                 } else {
                     // unknown
                     error!(self, tokenizer, "Var expected identifier");
                 }
             }
-            State::VarDynOrTyped { index } => {
+            State::VarDynOrTyped { index, name } => {
                 if op == id!(=) {
                     // assignment following
-                    self.state.push(State::EmitVarDyn { index });
+                    self.state.push(State::EmitVarDyn { index, name });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 } else if op == id!(:) {
-                    // type following
+                    // typed var: stays dynamic; the name must too
+                    self.slot_poison(name);
                     self.state.push(State::VarType { index });
                     return 1;
                 } else {
+                    // `var x` without value: stays dynamic; the name must too
+                    self.slot_poison(name);
                     self.push_code(
                         ScriptValue::from_opcode_args(Opcode::VAR_DYN, OpcodeArgs::NIL),
                         index,
@@ -3014,7 +3310,10 @@ impl ScriptParser {
                     );
                 }
             }
-            State::EmitVarDyn { index } => {
+            State::EmitVarDyn { index, name } => {
+                // VAR_DYN binds exactly like LET_DYN; it slots like a let
+                // (VAR_SLOT keeps the var-ness for the shader compiler)
+                self.slot_note_var(name);
                 self.push_code(Opcode::VAR_DYN.into(), index);
             }
             State::EmitVarTyped { index } => {
@@ -3304,8 +3603,16 @@ impl ScriptParser {
                 what_op,
                 index,
                 slot_assign,
+                rhs_start,
             } => {
-                if State::operator_supports_inline_number(what_op) {
+                // Only a right operand that is exactly one constant folds: the
+                // last code can also be the tail of an if, match or `||` whose
+                // jumps land after it (`z * (if c { x } else { 2.0 })`), and
+                // popping it moved those targets.
+                if State::operator_supports_inline_number(what_op)
+                    && !self.keep_numbers
+                    && self.code_len() == rhs_start + 1
+                {
                     if let Some(code) = self.code_last() {
                         if let Some(vf64) = code.as_f64() {
                             let num = vf64 as u64;
@@ -3372,6 +3679,11 @@ impl ScriptParser {
             }
             State::EmitContinue { index } => {
                 self.push_code(Opcode::CONTINUE.into(), index);
+                return 0;
+            }
+            State::EndForList => {
+                self.push_code(Opcode::END_ARRAY.into(), self.index);
+                self.state.push(State::EndExpr);
                 return 0;
             }
             State::EndBareSquare => {
@@ -3762,13 +4074,14 @@ impl ScriptParser {
                     return 0;
                 }
             }
-            State::IfTest { index } => {
+            State::IfTest { index, stmt } => {
                 let if_start = self.code_len() as _;
                 self.push_code(Opcode::IF_TEST.into(), index);
                 if tok.is_open_curly() {
                     self.state.push(State::IfTrueBlock {
                         if_start,
                         last_was_sep: false,
+                        stmt,
                     });
                     self.state.push(State::BeginStmt {
                         last_was_sep: false,
@@ -3779,28 +4092,31 @@ impl ScriptParser {
                     error!(self, tokenizer, "Unexpected else, use {{}} to disambiguate");
                     return 1;
                 }
-                self.state.push(State::IfTrueExpr { if_start });
+                self.state.push(State::IfTrueExpr { if_start, stmt });
                 self.state.push(State::BeginExpr { required: true });
                 return 0;
             }
-            State::IfTrueExpr { if_start } => {
+            State::IfTrueExpr { if_start, stmt } => {
                 self.state.push(State::IfMaybeElse {
                     if_start,
                     was_block: false,
+                    stmt,
+                    true_valued: true,
                 });
                 return 0;
             }
             State::IfTrueBlock {
                 if_start,
                 last_was_sep,
+                stmt,
             } => {
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
-                    }
+                    let true_valued = self.close_arm_block(last_was_sep);
                     self.state.push(State::IfMaybeElse {
                         if_start,
                         was_block: true,
+                        stmt,
+                        true_valued,
                     });
                     return 1;
                 } else {
@@ -3812,6 +4128,8 @@ impl ScriptParser {
             State::IfMaybeElse {
                 if_start,
                 was_block,
+                stmt,
+                true_valued,
             } => {
                 if id == id!(elif) {
                     // Desugar `elif ...` as `else { if ... }`: the rest of the
@@ -3827,8 +4145,15 @@ impl ScriptParser {
                         OpcodeArgs::from_u32(self.code_len() as u32 - if_start),
                     );
 
-                    self.state.push(State::IfElseExpr { else_start });
-                    self.state.push(State::IfTest { index: self.index });
+                    self.state.push(State::IfElseExpr {
+                        else_start,
+                        stmt,
+                        true_valued,
+                    });
+                    self.state.push(State::IfTest {
+                        index: self.index,
+                        stmt,
+                    });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
@@ -3839,56 +4164,78 @@ impl ScriptParser {
                         if_start,
                         OpcodeArgs::from_u32(self.code_len() as u32 - if_start),
                     );
-                    self.state.push(State::IfElse { else_start });
+                    self.state.push(State::IfElse {
+                        else_start,
+                        stmt,
+                        true_valued,
+                    });
                     return 1;
                 }
+                // No else: the missing arm is worth nil (IF_TEST's NEED_NIL).
+                // A statement if whose true arm leaves no value leaves none
+                // at all; in expression position that arm yields nil too.
+                let valueless = stmt && !true_valued;
+                if !true_valued && !stmt {
+                    self.push_code(Opcode::NIL_ARM.into(), self.index);
+                }
                 self.last_jump_target = self.code_len();
-                self.set_opcode_args(
-                    if_start,
-                    OpcodeArgs::from_u32(self.code_len() as u32 - if_start).set_need_nil(),
-                );
-                // self.push_code_none(NIL);
+                let args = OpcodeArgs::from_u32(self.code_len() as u32 - if_start);
+                if valueless {
+                    self.set_opcode_args(if_start, args);
+                    self.valueless_end = self.code_len();
+                } else {
+                    self.set_opcode_args(if_start, args.set_need_nil());
+                }
                 if was_block {
                     // allow expression to chain
                     self.state.push(State::EndExpr)
                 }
             }
-            State::IfElse { else_start } => {
+            State::IfElse {
+                else_start,
+                stmt,
+                true_valued,
+            } => {
                 if tok.is_open_curly() {
                     self.state.push(State::IfElseBlock {
                         else_start,
                         last_was_sep: false,
+                        stmt,
+                        true_valued,
                     });
                     self.state.push(State::BeginStmt {
                         last_was_sep: false,
                     });
                     return 1;
                 }
-                self.state.push(State::IfElseExpr { else_start });
+                self.state.push(State::IfElseExpr {
+                    else_start,
+                    stmt,
+                    true_valued,
+                });
                 self.state.push(State::BeginExpr { required: true });
                 return 0;
             }
-            State::IfElseExpr { else_start } => {
-                self.last_jump_target = self.code_len();
-                self.set_opcode_args(
-                    else_start,
-                    OpcodeArgs::from_u32(self.code_len() as u32 - else_start),
-                );
+            State::IfElseExpr {
+                else_start,
+                stmt,
+                true_valued,
+            } => {
+                // An expression arm leaves a value, except an `else if`
+                // chain in statement position whose arms left none.
+                let else_valued = self.valueless_end != self.code_len();
+                self.close_if_else(else_start, stmt, true_valued, else_valued);
                 return 0;
             }
             State::IfElseBlock {
                 else_start,
                 last_was_sep,
+                stmt,
+                true_valued,
             } => {
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
-                    }
-                    self.last_jump_target = self.code_len();
-                    self.set_opcode_args(
-                        else_start,
-                        OpcodeArgs::from_u32(self.code_len() as u32 - else_start),
-                    );
+                    let else_valued = self.close_arm_block(last_was_sep);
+                    self.close_if_else(else_start, stmt, true_valued, else_valued);
                     self.state.push(State::EndExpr);
                     return 1;
                 } else {
@@ -3962,15 +4309,17 @@ impl ScriptParser {
                         });
                         return 1;
                     }
-                    // Check if there's a pending field += for field-inherit
+                    // Check if there's a pending field += or path +: for field-inherit
                     if let Some(State::EmitFieldAssign {
-                        what_op: id!(+=), ..
+                        what_op: field_op @ (id!(+=) | id!(+:)),
+                        ..
                     }) = self.state.last()
                     {
+                        let read = State::field_inherit_read(*field_op);
                         self.state.pop();
-                        // Field-inherit operator: obj.field += { ... }
-                        // Emit FIELD_INHERIT_READ to read field and push proto value
-                        self.push_code(Opcode::FIELD_INHERIT_READ.into(), self.index);
+                        // Field-inherit operator: obj.field += { ... } / a.b.c +: { ... }
+                        // Emit the read of the field and push proto value
+                        self.push_code(read.into(), self.index);
                         self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
                         self.state.push(State::EndFieldInherit);
                         self.state.push(State::BeginStmt {
@@ -4046,8 +4395,17 @@ impl ScriptParser {
                     return 1;
                 }
                 if id == id!(if) {
-                    // do if as an expression
-                    self.state.push(State::IfTest { index: self.index });
+                    // do if as an expression; a statement's own expression
+                    // (or the `else if` of one) is in statement position
+                    let stmt = match self.state.last() {
+                        Some(State::EndStmt { .. }) => true,
+                        Some(State::IfElseExpr { stmt, .. }) => *stmt,
+                        _ => false,
+                    };
+                    self.state.push(State::IfTest {
+                        index: self.index,
+                        stmt,
+                    });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
@@ -4062,6 +4420,16 @@ impl ScriptParser {
                     return 1;
                 }
                 if id == id!(for) {
+                    // A `for` in value position (`let bolts = for i in 0..4 { .. }`) is the
+                    // list of its body's values, as `[for ..]` is.
+                    // Call arguments are statements popped into the call: a `for` that starts one
+                    // is a value too (`m.instance(post, for x in xs { .. })`).
+                    let statement = matches!(self.state.last(), Some(State::EndStmt { .. }));
+                    let call_arg = statement && matches!(self.state.iter().rev().nth(1), Some(State::EndCall { .. }));
+                    if !statement || call_arg {
+                        self.push_code(Opcode::BEGIN_ARRAY.into(), self.index);
+                        self.state.push(State::EndForList);
+                    }
                     self.state.push(State::ForIdent {
                         idents: 0,
                         index: self.index,
@@ -4214,6 +4582,7 @@ impl ScriptParser {
                         what_op: id!(me.),
                         index: self.index,
                         slot_assign: None,
+                        rhs_start: self.code_len(),
                     });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
@@ -4265,6 +4634,15 @@ impl ScriptParser {
                 {
                     return 0;
                 }
+                // Array literal elements may be space separated, so there a
+                // `[` after whitespace starts the next element: `[[1 2] [3 4]]`
+                // is two rows, not a row indexed by `[3 4]`. `a[i]` indexes.
+                if tok.is_open_square()
+                    && tokenizer.token_preceded_by_space(self.index)
+                    && self.inside_array_literal()
+                {
+                    return 0;
+                }
                 if op == id!(~) {
                     return 0;
                 }
@@ -4305,6 +4683,7 @@ impl ScriptParser {
                             what_op,
                             index,
                             slot_assign,
+                            ..
                         } = last
                         {
                             if State::operator_order(*what_op) <= op_order {
@@ -4337,6 +4716,13 @@ impl ScriptParser {
                         } else {
                             break;
                         }
+                    }
+
+                    // `a.b.c ?? d`: the field reads ending the left operand
+                    // are optional, a missing field (or a nil object) reads
+                    // as nil without an error, so `??` gives `d`.
+                    if op == id!(??) {
+                        self.quiet_trailing_field_reads();
                     }
 
                     // Emit the TEST opcode with placeholder jump
@@ -4423,6 +4809,7 @@ impl ScriptParser {
                         what_op: op,
                         index: self.index,
                         slot_assign,
+                        rhs_start: self.code_len(),
                     };
                     // check if we have a ..[] =
                     if Some(&Opcode::ARRAY_INDEX.into()) == self.code_last() {
@@ -4445,8 +4832,10 @@ impl ScriptParser {
                         {
                             if State::is_assign_operator(op) {
                                 // For : operator with field chain like field.sub: value
-                                // transform to me.field.sub = value
-                                if op == id!(:) {
+                                // transform to me.field.sub = value. `+:` and `:=` take the
+                                // same path (`a.b.c +: {..}` is `a +: { b +: { c +: {..} } }`,
+                                // `a.b.c := v` is `a +: { b +: { c := v } }`).
+                                if op == id!(:) || op == id!(+:) || op == id!(:=) {
                                     // Find the start of the field chain by walking backwards
                                     // The chain structure is: [id, id, (FIELD, id)*]
                                     // e.g. field.sub -> [id(field), id(sub)]
@@ -4560,6 +4949,7 @@ impl ScriptParser {
                                     what_op: op,
                                     index: self.index,
                                     slot_assign,
+                                    rhs_start: self.code_len(),
                                 },
                             );
                             return 1;
@@ -4571,6 +4961,7 @@ impl ScriptParser {
                         what_op: op,
                         index: self.index,
                         slot_assign,
+                        rhs_start: self.code_len(),
                     });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
@@ -4643,12 +5034,13 @@ impl ScriptParser {
                             });
                             return 1;
                         } else if let State::EmitFieldAssign {
-                            what_op: id!(+=), ..
+                            what_op: field_op @ (id!(+=) | id!(+:)),
+                            ..
                         } = last
                         {
-                            // Field-inherit operator: obj.field += Proto { ... }
-                            // Emit FIELD_INHERIT_READ to read field and push proto value
-                            self.push_code(Opcode::FIELD_INHERIT_READ.into(), self.index);
+                            // Field-inherit operator: obj.field += Proto { ... } / a.b +: Proto { ... }
+                            // Emit the read of the field and push proto value
+                            self.push_code(State::field_inherit_read(field_op).into(), self.index);
                             self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
                             self.state.push(State::EndFieldInherit);
                             self.state.push(State::BeginStmt {
@@ -4780,6 +5172,16 @@ impl ScriptParser {
                         {
                             *last_was_sep = true
                         }
+                        if let Some(State::MatchArmBlock { last_was_sep, .. }) =
+                            self.state.last_mut()
+                        {
+                            *last_was_sep = true
+                        }
+                        if let Some(State::MatchWildcardBlock { last_was_sep, .. }) =
+                            self.state.last_mut()
+                        {
+                            *last_was_sep = true
+                        }
                         if let Some(State::EndFnBlock { last_was_sep, .. }) = self.state.last_mut()
                         {
                             *last_was_sep = true
@@ -4806,43 +5208,11 @@ impl ScriptParser {
                 }
                 // in a function call we need the
 
-                if let Some(code) = self.opcodes.last_mut() {
-                    if let Some((opcode, _)) = code.as_opcode() {
-                        if opcode == Opcode::FOR_END {
-                            //code.set_opcode_is_statement();
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                        if opcode == Opcode::ASSIGN_ME || opcode == Opcode::ASSIGN_ME_VEC {
-                            //code.set_opcode_is_statement();
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                        if opcode == Opcode::BREAK || opcode == Opcode::CONTINUE {
-                            //code.set_opcode_is_statement();
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                        if opcode == Opcode::ME_SPLAT {
-                            // ME_SPLAT already handles merging into me, no pop_to_me needed
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                        if code.is_let_opcode() {
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                    }
+                if self.last_stmt_leaves_no_value() {
+                    self.state.push(State::BeginStmt {
+                        last_was_sep: false,
+                    });
+                    return 0;
                 }
                 // otherwise pop to me
                 self.set_pop_to_me();
@@ -4856,6 +5226,7 @@ impl ScriptParser {
         0
     }
 
+    #[relax_api]
     pub fn parse(
         &mut self,
         tokenizer: &ScriptTokenizer,
@@ -4928,8 +5299,9 @@ impl ScriptParser {
                 State::EndStmt { .. } => {
                     // The EndStmt of an auto-closed `let` must NOT mark a
                     // statement value: LET consumed it, the final RETURN
-                    // would pop an empty stack.
-                    if !let_closed {
+                    // would pop an empty stack. Same for a statement that
+                    // leaves no value, such as a loop ending the source.
+                    if !let_closed && !self.last_stmt_leaves_no_value() {
                         self.set_pop_to_me();
                     }
                     let_closed = false;
@@ -4938,6 +5310,7 @@ impl ScriptParser {
                     what_op,
                     index,
                     slot_assign,
+                    ..
                 } => {
                     if let Some(name) = slot_assign {
                         self.slot_poison(name);
@@ -4946,6 +5319,22 @@ impl ScriptParser {
                 }
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
+                }
+                // `use mod.x.*` as the source's last statement: the import, not a field read.
+                State::Use { index } => {
+                    if let Some((Opcode::FIELD, _)) = self.opcodes.last().and_then(|c| c.as_opcode()) {
+                        self.pop_code();
+                        self.slot_disqualify_body();
+                        self.push_code(Opcode::USE.into(), index);
+                    }
+                    let_closed = true;
+                }
+                // `a.b = v` / `a[i] = v` as the source's last statement.
+                State::EmitFieldAssign { what_op, index } => {
+                    self.push_code(State::operator_to_field_assign(what_op), index);
+                }
+                State::EmitIndexAssign { what_op, index } => {
+                    self.push_code(State::operator_to_index_assign(what_op), index);
                 }
                 State::CallMaybeDo { is_method, index } => {
                     // A call as the final tokens of the source: no next token
@@ -4961,6 +5350,22 @@ impl ScriptParser {
                     // A short-circuit op at end of source: patch its jump so a
                     // taken test doesn't land on a stale zero offset.
                     self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                    self.last_jump_target = self.code_len();
+                }
+                // An if still open at end of source (`if c { 1 } else`): a
+                // zero jump offset loops forever, so jump to the end. The
+                // arms may not agree on a value; streamed runs are silenced.
+                State::IfTrueExpr { if_start, .. }
+                | State::IfTrueBlock { if_start, .. }
+                | State::IfMaybeElse { if_start, .. } => {
+                    let args = OpcodeArgs::from_u32(self.code_len() - if_start).set_need_nil();
+                    self.set_opcode_args(if_start, args);
+                    self.last_jump_target = self.code_len();
+                }
+                State::IfElse { else_start, .. }
+                | State::IfElseExpr { else_start, .. }
+                | State::IfElseBlock { else_start, .. } => {
+                    self.set_opcode_args(else_start, OpcodeArgs::from_u32(self.code_len() - else_start));
                     self.last_jump_target = self.code_len();
                 }
                 // A fn/lambda body still open at end of source: close it the
@@ -4993,6 +5398,10 @@ impl ScriptParser {
                         fn_slot as _,
                         OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
                     );
+                }
+                // `let xs = for .. { .. }` as the source's last statement: close its list.
+                State::EndForList => {
+                    self.push_code(Opcode::END_ARRAY.into(), last_index);
                 }
                 State::EmitLetDyn { index, name } => {
                     self.slot_note_let(name);
@@ -5051,15 +5460,21 @@ impl ScriptParser {
             destruct_defaults_len: self.destruct_defaults.len(),
             nested_patterns_len: self.nested_patterns.len(),
             last_opcode: self.opcodes.last().copied(),
-            short_circuit_opcodes: self
+            patched_opcodes: self
                 .state
                 .iter()
                 .filter_map(|state| {
-                    if let State::ShortCircuitEnd { test_slot, .. } = state {
-                        Some((*test_slot, self.opcodes[*test_slot as usize]))
-                    } else {
-                        None
-                    }
+                    let slot = match state {
+                        State::ShortCircuitEnd { test_slot, .. } => *test_slot,
+                        State::IfTrueExpr { if_start, .. }
+                        | State::IfTrueBlock { if_start, .. }
+                        | State::IfMaybeElse { if_start, .. } => *if_start,
+                        State::IfElse { else_start, .. }
+                        | State::IfElseExpr { else_start, .. }
+                        | State::IfElseBlock { else_start, .. } => *else_start,
+                        _ => return None,
+                    };
+                    Some((slot, self.opcodes[slot as usize]))
                 })
                 .collect(),
             slot_ctxs: self.slot_ctxs.clone(),
@@ -5080,7 +5495,7 @@ impl ScriptParser {
         }
         // Auto-close patched the pending short-circuit jumps in place; put
         // the original TEST opcodes back so continuation re-patches them.
-        for (slot, opcode) in cp.short_circuit_opcodes {
+        for (slot, opcode) in cp.patched_opcodes {
             self.opcodes[slot as usize] = opcode;
         }
         self.index = cp.token_index;
@@ -5105,6 +5520,7 @@ impl ScriptParser {
         offsets: (usize, usize),
         values: &[ScriptValue],
         unfinished_string: Option<ScriptValue>,
+        provisional_last: bool,
     ) -> ParserCheckpoint {
         self.file = file.to_string();
         self.line_offset = offsets.0;
@@ -5122,11 +5538,14 @@ impl ScriptParser {
             } else {
                 ScriptToken::StreamEnd
             };
-            // When we hit StringUnfinished: save checkpoint BEFORE it so the
-            // parser re-processes this token next time (with updated content).
-            // Substitute the interned value for the current execution, then
-            // consume remaining tokens and auto-close.
-            if let ScriptToken::StringUnfinished = &tok {
+            // When we hit StringUnfinished, or the provisional last token
+            // (ScriptTokenizer::pending_token, which more source may still
+            // extend): save checkpoint BEFORE it so the parser re-processes
+            // this token next time (with updated content). Substitute the
+            // interned value for the current execution, then consume
+            // remaining tokens and auto-close.
+            let provisional = provisional_last && self.index as usize + 1 == tokens.len();
+            if matches!(tok, ScriptToken::StringUnfinished) || provisional {
                 let checkpoint_before = self.save_checkpoint();
                 let tok = if let Some(v) = unfinished_string {
                     ScriptToken::String(v)
@@ -5136,6 +5555,7 @@ impl ScriptParser {
                 let step = self.parse_step(tokenizer, tok, values);
                 self.index += step;
                 // Continue parsing any remaining tokens after the string
+                let mut steps_zero = 0;
                 while self.index < tokens.len() as u32 && self.state.len() > 0 {
                     let tok2 = if let Some(tok2) = tokens.get(self.index as usize) {
                         tok2.token.clone()
@@ -5143,6 +5563,11 @@ impl ScriptParser {
                         ScriptToken::StreamEnd
                     };
                     let step2 = self.parse_step(tokenizer, tok2, values);
+                    // same stuck guard as the main loop
+                    steps_zero = if step2 == 0 { steps_zero + 1 } else { 0 };
+                    if steps_zero > 1000 {
+                        break;
+                    }
                     self.index += step2;
                 }
                 return self.auto_close(checkpoint_before, max_token_index);
@@ -5213,8 +5638,9 @@ impl ScriptParser {
                 State::EndStmt { .. } => {
                     // The EndStmt of an auto-closed `let` must NOT mark a
                     // statement value: LET consumed it, the final RETURN
-                    // would pop an empty stack.
-                    if !let_closed {
+                    // would pop an empty stack. Same for a statement that
+                    // leaves no value, such as a loop ending the source.
+                    if !let_closed && !self.last_stmt_leaves_no_value() {
                         self.set_pop_to_me();
                     }
                     let_closed = false;
@@ -5223,6 +5649,7 @@ impl ScriptParser {
                     what_op,
                     index,
                     slot_assign,
+                    ..
                 } => {
                     if let Some(name) = slot_assign {
                         self.slot_poison(name);
@@ -5231,6 +5658,13 @@ impl ScriptParser {
                 }
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
+                }
+                // `a.b = v` / `a[i] = v` as the source's last statement.
+                State::EmitFieldAssign { what_op, index } => {
+                    self.push_code(State::operator_to_field_assign(what_op), index);
+                }
+                State::EmitIndexAssign { what_op, index } => {
+                    self.push_code(State::operator_to_index_assign(what_op), index);
                 }
                 State::CallMaybeDo { is_method, index } => {
                     // A call as the final tokens of the source: no next token
@@ -5247,6 +5681,22 @@ impl ScriptParser {
                     // A short-circuit op at end of source: patch its jump so a
                     // taken test doesn't land on a stale zero offset.
                     self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                    self.last_jump_target = self.code_len();
+                }
+                // An if still open at end of source (`if c { 1 } else`): a
+                // zero jump offset loops forever, so jump to the end. The
+                // arms may not agree on a value; streamed runs are silenced.
+                State::IfTrueExpr { if_start, .. }
+                | State::IfTrueBlock { if_start, .. }
+                | State::IfMaybeElse { if_start, .. } => {
+                    let args = OpcodeArgs::from_u32(self.code_len() - if_start).set_need_nil();
+                    self.set_opcode_args(if_start, args);
+                    self.last_jump_target = self.code_len();
+                }
+                State::IfElse { else_start, .. }
+                | State::IfElseExpr { else_start, .. }
+                | State::IfElseBlock { else_start, .. } => {
+                    self.set_opcode_args(else_start, OpcodeArgs::from_u32(self.code_len() - else_start));
                     self.last_jump_target = self.code_len();
                 }
                 // A fn/lambda body still open at end of source: close it the
@@ -5279,6 +5729,10 @@ impl ScriptParser {
                         fn_slot as _,
                         OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
                     );
+                }
+                // `let xs = for .. { .. }` as the source's last statement: close its list.
+                State::EndForList => {
+                    self.push_code(Opcode::END_ARRAY.into(), last_index);
                 }
                 State::EmitLetDyn { index, name } => {
                     self.slot_note_let(name);
@@ -5448,7 +5902,7 @@ mod tests {
         // char arrives, and the separator must be consumed in this pass.
         tokenizer.tokenize("let catch = 1\ntry { 2 } catch ", &mut heap);
         let mut parser = ScriptParser::default();
-        let cp = parser.parse_streaming(&tokenizer, "checkpoint.octoscript", (0, 0), &[], None);
+        let cp = parser.parse_streaming(&tokenizer, "checkpoint.octoscript", (0, 0), &[], None, false);
         parser.restore_checkpoint(cp);
 
         assert!(
@@ -5473,4 +5927,26 @@ mod tests {
         assert!(State::operator_order(id!(==)) < State::operator_order(id!(&&)));
         assert!(State::operator_order(id!(&&)) < State::operator_order(id!(||)));
     }
+}
+
+/// What ScriptParser::errors answers.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ParserErrors<'a> {
+    pub had_error: bool,
+    pub first: &'a str,
+    pub has_first: bool,
+}
+
+#[relax_api(marked)]
+impl ScriptParser {
+    #[relax_api]
+    pub fn errors(&self) -> ParserErrors<'_> {
+        let first = self.parse_errors.first().map(String::as_str);
+        ParserErrors { had_error: self.had_error, first: first.unwrap_or(""), has_first: first.is_some() }
+    }
+    #[inline]
+    pub fn had_error(&self) -> bool { self.errors().had_error }
+    #[inline]
+    pub fn first_error(&self) -> Option<&str> { let e = self.errors(); e.has_first.then_some(e.first) }
 }

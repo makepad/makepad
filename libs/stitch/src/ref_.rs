@@ -1,5 +1,5 @@
 use crate::{
-    decode::{Decode, DecodeError, Decoder},
+    
     extern_ref::{ExternRef, UnguardedExternRef},
     func_ref::{FuncRef, UnguardedFuncRef},
     store::StoreId,
@@ -118,12 +118,3 @@ pub enum RefType {
     ExternRef,
 }
 
-impl Decode for RefType {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match decoder.read_byte()? {
-            0x6F => Ok(Self::ExternRef),
-            0x70 => Ok(Self::FuncRef),
-            _ => Err(DecodeError::new("malformed reference type")),
-        }
-    }
-}

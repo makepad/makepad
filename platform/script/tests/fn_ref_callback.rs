@@ -7,7 +7,7 @@ use makepad_script::*;
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     }
 }
@@ -38,19 +38,10 @@ fn stored_fn_ref_calls_back_with_built_object() {
 
     vm.bx.captured_errors = Some(Vec::new());
     vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: "fn_ref_callback".to_string(),
-            line: 0,
-            column: 0,
-            // `is_ok`, not `ok`: `ok` is the ok-test keyword and `r.ok` does
-            // not parse as field access — the exact bug that motivated the
-            // bridge's result-field name.
-            code: "let got = {value: -1}\nlet _rid = mod.hostx.request(\"svc\", {}, fn(r) { got.value = r.is_ok })\n(got)"
-                .to_string(),
-            values: vec![],
-        })
+        // `is_ok`, not `ok`: `ok` is the ok-test keyword and `r.ok` does
+        // not parse as field access — the exact bug that motivated the
+        // bridge's result-field name.
+        vm.eval(ScriptMod::new("", "", "fn_ref_callback", 0, 0, "let got = {value: -1}\nlet _rid = mod.hostx.request(\"svc\", {}, fn(r) { got.value = r.is_ok })\n(got)", &[]))
     });
 
     // The host answers later: build {ok: true, ...} and invoke the callback,
@@ -121,15 +112,7 @@ let run = || {
 }
 run()";
     vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: "nested_fn_cb".to_string(),
-            line: 0,
-            column: 0,
-            code: code.to_string(),
-            values: vec![],
-        })
+        vm.eval(ScriptMod::new("", "", "nested_fn_cb", 0, 0, &code, &[]))
     });
     let callback = STORED.with(|s| s.borrow_mut().take()).expect("stored");
     let obj = vm.bx.heap.new_object();

@@ -84,13 +84,35 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
 
             tb.stream(Some(js.end()));
 
-            tb.add("};");
+            tb.add("}");
+
+            // the page's reader (host.rs FromWasmRead): the fields in writing order
+            tb.add("impl FromWasmRead for").ident(&name).add("{");
+            tb.add("    fn read_from_wasm(inp:&mut ToWasmMsgRef)->Self{");
+            if let Some(types) = &types {
+                tb.add("Self(");
+                for _ in types.iter() {
+                    tb.add("FromWasmRead::read_from_wasm(inp),");
+                }
+                tb.add(")");
+            } else if let Some(fields) = &fields {
+                tb.add("Self{");
+                for field in fields {
+                    tb.ident(&field.name).add(":FromWasmRead::read_from_wasm(inp),");
+                }
+                tb.add("}");
+            }
+            tb.add("}}");
             return tb.end();
         }
     } else if parser.eat_ident("enum") {
         if let Some(name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(Some("FromWasm"));
+            let mut rd = TokenBuilder::new();
+            rd.add("impl FromWasmRead for").ident(&name).add("{");
+            rd.add("    fn read_from_wasm(inp:&mut ToWasmMsgRef)->Self{");
+            rd.add("        match inp.read_u32() {");
 
             tb.add("impl").stream(generic.clone());
             tb.add("FromWasm for")
@@ -158,6 +180,11 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
                             tb.ident(&format!("n{}", i)).add(".from_wasm_inner(out);");
                         }
                         tb.add("}");
+                        rd.unsuf_usize(index as usize).add("=> Self::").ident(&variant).add("(");
+                        for _ in types.iter() {
+                            rd.add("FromWasmRead::read_from_wasm(inp),");
+                        }
+                        rd.add("),");
                     } else if let Some(fields) = parser.eat_all_struct_fields() {
                         // named variant
                         tb.add("Self ::").ident(&variant).add("{");
@@ -174,14 +201,18 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
                         tb.add("} => {")
                             .suf_u32(index)
                             .add(".from_wasm_inner(out);");
-                        for field in fields {
+                        rd.unsuf_usize(index as usize).add("=> Self::").ident(&variant).add("{");
+                        for field in &fields {
                             tb.ident(&field.name).add(".from_wasm_inner(out);");
+                            rd.ident(&field.name).add(":FromWasmRead::read_from_wasm(inp),");
                         }
+                        rd.add("},");
                         tb.add("}");
                     } else if parser.is_punct_alone(',') || parser.is_eot() {
                         // bare variant
                         tb.add("Self ::").ident(&variant).add("=> {");
                         tb.suf_u32(index).add(".from_wasm_inner(out); }");
+                        rd.unsuf_usize(index as usize).add("=> Self::").ident(&variant).add(",");
                     } else {
                         return parser.unexpected();
                     }
@@ -200,7 +231,9 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
 
             tb.stream(Some(js.end()));
 
-            tb.add("};");
+            tb.add("}");
+            rd.add("_ => panic!(").string("enum variant invalid").add(")}}}");
+            tb.stream(Some(rd.end()));
 
             return tb.end();
         }
@@ -290,7 +323,21 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
 
             tb.stream(Some(js.end()));
             tb.stream(Some(sz.end()));
-            tb.add("};");
+            tb.add("}");
+
+            // the page's writer (host.rs ToWasmWrite): the fields in reading order
+            tb.add("impl ToWasmWrite for").ident(&name).add("{");
+            tb.add("    fn write_to_wasm(&self, out:&mut ToWasmWriter){");
+            if let Some(types) = &types {
+                for index in 0..types.len() {
+                    tb.add("ToWasmWrite::write_to_wasm(&self.").unsuf_usize(index).add(", out);");
+                }
+            } else if let Some(fields) = &fields {
+                for field in fields {
+                    tb.add("ToWasmWrite::write_to_wasm(&self.").ident(&field.name).add(", out);");
+                }
+            }
+            tb.add("}}");
             return tb.end();
         }
     } else if parser.eat_ident("enum") {
@@ -327,6 +374,10 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                 .add(",temp));");
 
             sz.add("    fn u32_size()->usize{ 0");
+            let mut wr = TokenBuilder::new();
+            wr.add("impl ToWasmWrite for").ident(&name).add("{");
+            wr.add("    fn write_to_wasm(&self, out:&mut ToWasmWriter){");
+            wr.add("        match self {");
 
             if !parser.open_brace() {
                 return parser.unexpected();
@@ -348,6 +399,15 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     tb.add("Self::");
                     if let Some(types) = parser.eat_all_types() {
                         tb.ident(&variant).add("(");
+                        wr.add("Self::").ident(&variant).add("(");
+                        for i in 0..types.len() {
+                            wr.ident(&format!("n{}", i)).add(",");
+                        }
+                        wr.add(") => { out.push_u32(").suf_u32(index).add(");");
+                        for i in 0..types.len() {
+                            wr.add("ToWasmWrite::write_to_wasm(").ident(&format!("n{}", i)).add(", out);");
+                        }
+                        wr.add("}");
                         for (index, ty) in types.iter().enumerate() {
                             js.add("let new_temp = out.alloc_temp();");
                             js.add("<")
@@ -365,6 +425,15 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     } else if let Some(fields) = parser.eat_all_struct_fields() {
                         // named variant
                         tb.ident(&variant).add("{");
+                        wr.add("Self::").ident(&variant).add("{");
+                        for field in &fields {
+                            wr.ident(&field.name).add(",");
+                        }
+                        wr.add("} => { out.push_u32(").suf_u32(index).add(");");
+                        for field in &fields {
+                            wr.add("ToWasmWrite::write_to_wasm(").ident(&field.name).add(", out);");
+                        }
+                        wr.add("}");
                         for field in fields {
                             js.add("let new_temp = out.alloc_temp();");
                             js.add("<")
@@ -383,6 +452,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     } else if parser.is_punct_alone(',') || parser.is_eot() {
                         // bare variant
                         tb.ident(&variant);
+                        wr.add("Self::").ident(&variant).add("=> out.push_u32(").suf_u32(index).add("),");
                     } else {
                         return parser.unexpected();
                     }
@@ -406,6 +476,8 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             tb.stream(Some(js.end()));
             tb.stream(Some(sz.end()));
             tb.add("}");
+            wr.add("}}}");
+            tb.stream(Some(wr.end()));
             return tb.end();
         }
     }

@@ -1,4 +1,5 @@
 #![allow(unused)]
+use makepad_relax_api::relax_api;
 use crate::heap::*;
 use crate::native::*;
 use crate::numeric::NumericValue;
@@ -19,7 +20,9 @@ macro_rules! script_pod_def {
     }};
 }
 
-#[derive(Default)]
+#[relax_api(plain)]
+#[derive(Default, Clone)]
+#[repr(C)]
 pub struct ScriptPodBuiltins {
     pub pod_void: ScriptPodType,
     pub pod_struct: ScriptPodType,

@@ -1,0 +1,79 @@
+// Wavetable morph pad: init() builds 8 band-limited frames additively
+// (saw -> square -> thinner), three detuned unison oscillators read two
+// neighbouring frames each and crossfade as a slow LFO sweeps the table.
+let SIZE = 2048
+let FRAMES = 8
+let table = [0.0; 16384]
+let morph = param(0.15, 0, 4)
+let detune = param(0.12, 0, 1)
+let attack = param(0.4, 0.001, 4)
+let release = param(1.2, 0.01, 8)
+
+var ph = [0.0; 3]
+var lfo = 0.0
+var amp = 0.0
+var up = 0.0
+var down = 0.0
+var spread = 1.0
+
+fn init() {
+    for f in 0..FRAMES {
+        let t = f / (FRAMES - 1)
+        for i in 0..SIZE {
+            let x = f32(i) / SIZE
+            let s = 0.0
+            for h in 1..17 {
+                let saw = 1.0 / h
+                let sq = if h % 2 == 1 { 1.0 / h } else { 0.0 }
+                let thin = if h % 3 == 0 { 0.0 } else { 1.0 / (h * h) }
+                let a = if t < 0.5 { mix(saw, sq, t * 2.0) } else { mix(sq, thin, t * 2.0 - 1.0) }
+                s = s + sin(TAU * x * h) * a
+            }
+            table[f * SIZE + i] = s * 0.5
+        }
+    }
+}
+
+fn frame_read(f, p) {
+    let pos = p * SIZE
+    let i = int(floor(pos))
+    let fr = pos - floor(pos)
+    let a = table[f * SIZE + (i & (SIZE - 1))]
+    let b = table[f * SIZE + ((i + 1) & (SIZE - 1))]
+    a + (b - a) * fr
+}
+
+fn osc(p, m) {
+    let f = int(floor(m))
+    let k = m - floor(m)
+    let f1 = min(f + 1, FRAMES - 1)
+    mix(frame_read(f, p), frame_read(f1, p), k)
+}
+
+fn block() {
+    up = 1.0 / (attack * sample_rate)
+    down = exp(-1.0 / (release * sample_rate))
+    spread = exp2(detune / 12.0)
+}
+
+fn voice() {
+    lfo = fract(lfo + morph / sample_rate)
+    let m = (0.5 - 0.5 * cos(TAU * lfo)) * (FRAMES - 1) * 0.999
+    let base = freq / sample_rate
+    ph[0] = fract(ph[0] + base)
+    ph[1] = fract(ph[1] + base * spread)
+    ph[2] = fract(ph[2] + base / spread)
+    let c = osc(ph[0], m)
+    let hi = osc(ph[1], m)
+    let lo = osc(ph[2], m)
+    if gate > 0.0 {
+        amp = min(amp + up, 1.0)
+    } else {
+        amp = amp * down
+        if amp < 0.0001 {
+            stop()
+        }
+    }
+    let g = amp * velocity * 0.25
+    vec2(c + hi * 0.8 + lo * 0.4, c + hi * 0.4 + lo * 0.8) * g
+}

@@ -150,6 +150,13 @@ export class WasmBridge {
         this.wasm._bridge = this;
         this.dispatch = dispatch;
         this.exports = wasm.exports;
+        // The browser's main thread may not block: its waits on the shared
+        // memory spin (the optimiser's `waits` pass reads this flag).
+        // @section threads
+        if (wasm.exports.__makepad_cannot_block instanceof WebAssembly.Global) {
+            wasm.exports.__makepad_cannot_block.value = 1;
+        }
+        // @end threads
         this.memory = wasm._memory;
         this.wasm_url = wasm._wasm_url;
         this.buffer_ref_len_check = 0;
@@ -167,6 +174,26 @@ export class WasmBridge {
         msg.free();
         // this class can also be loaded from file.
         this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
+        this.stub_missing_handlers(code);
+    }
+
+    // A runtime may be built without the handlers of features its app does
+    // not use (a film's stripped runtime: `// @section` markers). A message
+    // for a missing handler then warns once instead of throwing mid-pump.
+    stub_missing_handlers(code) {
+        for (const match of code.matchAll(/\bapp\.(FromWasm\w+)\(/g)) {
+            const name = match[1];
+            if (typeof this[name] === "function") {
+                continue;
+            }
+            let warned = false;
+            this[name] = () => {
+                if (!warned) {
+                    warned = true;
+                    console.warn(`makepad: ${name} is not in this runtime; ignored`);
+                }
+            };
+        }
     }
 
     clear_memory_refs() {
@@ -327,7 +354,8 @@ export class WasmBridge {
         const declared_max = (limits && typeof limits.max === "number") ? limits.max : null;
         let mem = null;
         let used_maximum = null;
-        const candidates = this.is_phone() ? [8192, 4096] : [65536, 32768, 16384];
+        // No device guesses: ask for the most and step down only when the engine refuses.
+        const candidates = [65536, 32768, 16384, 8192, 4096];
         for (const candidate of candidates) {
             const maximum = declared_max != null ? Math.min(declared_max, candidate) : candidate;
             if (maximum < initial) {
@@ -765,14 +793,17 @@ export class WasmBridge {
 
         return WebAssembly.instantiate(module, { env }).then(async wasm => {
             set_wasm(wasm);
-            wasm._has_thread_support = env.memory !== undefined;
-            wasm._memory = env.memory ? env.memory : wasm.exports.memory;
+            wasm._memory = wasm.exports.memory || env.memory;
+            wasm._has_thread_support = typeof SharedArrayBuffer !== "undefined"
+                && wasm._memory.buffer instanceof SharedArrayBuffer;
             wasm._memory_max_pages = wasm._memory._makepad_maximum_pages || 16384;
             wasm._module = module;
             wasm._env = env;
             return wasm
         }, error => {
-            if (error.name == "LinkError") { // retry as multithreaded
+            if (error.name == "LinkError" && limits && limits.shared
+                && WebAssembly.Module.imports(module).some(i => i.kind === "memory")) {
+                // Only a module importing shared memory can require this retry.
                 let pages = null;
                 try {
                     env.memory = this.create_shared_memory(limits);
@@ -787,9 +818,10 @@ export class WasmBridge {
                 }
                 return WebAssembly.instantiate(module, { env }).then(async wasm => {
                     set_wasm(wasm);
-                    wasm._has_thread_support = true;
-                    wasm._memory = env.memory;
-                    wasm._memory_max_pages = env.memory._makepad_maximum_pages || 16384;
+                    wasm._memory = wasm.exports.memory || env.memory;
+                    wasm._has_thread_support = typeof SharedArrayBuffer !== "undefined"
+                        && wasm._memory.buffer instanceof SharedArrayBuffer;
+                    wasm._memory_max_pages = wasm._memory._makepad_maximum_pages || 16384;
                     wasm._module = module;
                     wasm._env = env;
                     return wasm
@@ -881,6 +913,11 @@ export class ToWasmMsg {
 
     reserve_u32(u32_capacity) {
         let app = this.app;
+        // Wasm may have grown its memory since this message was started
+        // (any export call can allocate: an HTTP body handed over, a
+        // signal check): views over the old buffer are detached and drop
+        // writes silently, so the message would be read back as garbage.
+        app.update_array_buffer_refs();
 
         this.u32_needed_capacity += u32_capacity;
         let u64_needed_capacity = ((this.u32_needed_capacity & 1) + this.u32_needed_capacity) >> 1;
@@ -917,6 +954,7 @@ export class ToWasmMsg {
             throw new Error("double finalise")
         }
         let app = this.app;
+        app.update_array_buffer_refs();
         let ptr = this.ptr;
         let offset = this.u32_offset - this.u32_ptr;
 

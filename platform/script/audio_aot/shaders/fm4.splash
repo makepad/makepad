@@ -1,0 +1,51 @@
+// 4-operator FM: a stack op3 -> op2 -> op1 -> op0 (carrier). Modulators
+// decay faster than the carrier and velocity scales the index, so louder
+// notes are brighter.
+let N = 4
+let RATIO = [1.0, 2.0, 3.0, 7.0]
+let index = param(2.2, 0, 10)
+let decay = param(1.2, 0.05, 8)
+
+struct Op {
+    phase: 0.0
+    env: 0.0
+    fall: 0.0
+}
+
+var ops = [Op{}; N]
+var amp = 0.0
+var rel = 0.0
+
+fn block() {
+    for i in 0..N {
+        // Operator i decays (1 + 2i) times faster than the carrier.
+        ops[i].fall = exp(-(1.0 + 2.0 * i) / (decay * sample_rate))
+    }
+    rel = exp(-1.0 / (0.08 * sample_rate))
+}
+
+fn voice() {
+    if trigger {
+        for i in 0..N {
+            ops[i].env = 1.0
+        }
+    }
+    let m = 0.0
+    for j in 0..N {
+        let i = N - 1 - j
+        let op = ops[i]
+        op.phase = fract(op.phase + freq * RATIO[i] / sample_rate)
+        let depth = if i == 0 { 1.0 } else { index * velocity }
+        m = sin(TAU * op.phase + m * depth) * op.env
+        op.env = op.env * op.fall
+    }
+    if gate > 0.0 {
+        amp = min(amp + 400.0 / sample_rate, 1.0)
+    } else {
+        amp = amp * rel
+        if amp < 0.0001 {
+            stop()
+        }
+    }
+    m * amp * velocity * 0.4
+}

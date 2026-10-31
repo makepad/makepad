@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, marker::PhantomData, str, sync::Arc};
+use std::{error::Error, fmt};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Decoder<'a> {
@@ -14,6 +14,24 @@ impl<'a> Decoder<'a> {
     #[inline]
     pub(crate) fn is_at_end(&self) -> bool {
         self.position == self.bytes.len()
+    }
+
+    #[inline]
+    pub(crate) fn position(&self) -> usize {
+        self.position
+    }
+
+    #[inline]
+    pub(crate) fn remaining(&self) -> usize {
+        self.bytes.len() - self.position
+    }
+
+    #[inline]
+    pub(crate) fn peek_byte(&self) -> Result<u8, DecodeError> {
+        self.bytes
+            .get(self.position)
+            .copied()
+            .ok_or_else(|| DecodeError::new("unexpected end"))
     }
 
     #[inline]
@@ -37,75 +55,11 @@ impl<'a> Decoder<'a> {
         Ok(bytes)
     }
 
-    #[inline]
-    pub(crate) fn read_bytes_until_end(&mut self) -> &'a [u8] {
-        let bytes = &self.bytes[self.position..];
-        self.position = self.bytes.len();
-        bytes
-    }
-
-    #[inline]
-    pub(crate) fn decode_bytes(&mut self) -> Result<&'a [u8], DecodeError> {
-        let len: u32 = self.decode()?;
-        Ok(self.read_bytes(len as usize)?)
-    }
-
-    #[inline]
-    pub(crate) fn decode_string(&mut self) -> Result<&'a str, DecodeError> {
-        let len: u32 = self.decode()?;
-        Ok(str::from_utf8(self.read_bytes(len as usize)?)
-            .map_err(|_| DecodeError::new("malformed string"))?)
-    }
-
-    pub(crate) fn decode_iter<T>(&mut self) -> Result<DecodeIter<'_, 'a, T>, DecodeError>
-    where
-        T: Decode,
-    {
-        let count: u32 = self.decode()?;
-        Ok(DecodeIter {
-            decoder: self,
-            count: count as usize,
-            phantom: PhantomData,
-        })
-    }
-
-    pub(crate) fn decode_decoder(&mut self) -> Result<Decoder<'a>, DecodeError> {
-        let count: u32 = self.decode()?;
-        Ok(Decoder::new(self.read_bytes(count as usize)?))
-    }
-
     pub(crate) fn decode<T>(&mut self) -> Result<T, DecodeError>
     where
         T: Decode,
     {
         T::decode(self)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct DecodeIter<'a, 'b, T> {
-    decoder: &'a mut Decoder<'b>,
-    count: usize,
-    phantom: PhantomData<T>,
-}
-
-impl<'a, 'b, T> Iterator for DecodeIter<'a, 'b, T>
-where
-    T: Decode,
-{
-    type Item = Result<T, DecodeError>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.count == 0 {
-            return None;
-        }
-        self.count -= 1;
-        Some(self.decoder.decode())
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.count, Some(self.count))
     }
 }
 
@@ -205,43 +159,6 @@ impl Decode for i64 {
         } else {
             decode_i64_tail(decoder, val)
         }
-    }
-}
-
-impl Decode for usize {
-    #[inline]
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(usize::try_from(decoder.decode::<u32>()?).unwrap())
-    }
-}
-
-impl Decode for f32 {
-    #[inline]
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(Self::from_le_bytes(
-            decoder.read_bytes(4)?.try_into().unwrap(),
-        ))
-    }
-}
-
-impl Decode for f64 {
-    #[inline]
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(Self::from_le_bytes(
-            decoder.read_bytes(8)?.try_into().unwrap(),
-        ))
-    }
-}
-
-impl Decode for Arc<[u8]> {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(decoder.decode_bytes()?.into())
-    }
-}
-
-impl Decode for Arc<str> {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(decoder.decode_string()?.into())
     }
 }
 

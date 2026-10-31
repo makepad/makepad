@@ -1,28 +1,54 @@
+use makepad_relax_api::relax_api;
 use std::any::Any;
 
 // ============================================================================
 // ScopeDataRef / ScopeDataMut - Type-erased data containers for scope
 // ============================================================================
 
+/// The scope's props: laid out the same by rustc and Rapid (a provided VM's apply impls read
+/// the scope Rapid-compiled widgets built), so the trait object rides in a repr(C) struct.
+#[relax_api(plain)]
 #[derive(Default)]
-pub struct ScopeDataRef<'a>(Option<&'a dyn Any>);
+#[repr(transparent)]
+pub struct ScopeDataRef<'a>(Option<ScopeAnyRef<'a>>);
 
+/// The scope's data (see ScopeDataRef).
+#[relax_api(plain)]
 #[derive(Default)]
-pub struct ScopeDataMut<'a>(Option<&'a mut dyn Any>);
+#[repr(transparent)]
+pub struct ScopeDataMut<'a>(Option<ScopeAnyMut<'a>>);
+
+/// A borrowed trait object carried through the native boundary without calling its vtable.
+/// Downcasting stays on the caller side, where that vtable was made.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ScopeAnyRef<'a> { value: &'a dyn Any }
+
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScopeAnyMut<'a> { value: &'a mut dyn Any }
 
 impl<'a> ScopeDataRef<'a> {
+    pub fn from_any(value: ScopeAnyRef<'a>) -> Self { Self(Some(value)) }
+    pub fn any_ref(&self) -> Option<ScopeAnyRef<'_>> { self.0 }
+
     pub fn get<T: Any>(&self) -> Option<&T> {
-        self.0.as_ref().and_then(|r| r.downcast_ref())
+        self.0.and_then(|r| r.value.downcast_ref())
     }
 }
 
 impl<'a> ScopeDataMut<'a> {
+    pub fn from_any(value: ScopeAnyMut<'a>) -> Self { Self(Some(value)) }
+    pub fn any_ref(&self) -> Option<ScopeAnyRef<'_>> { self.0.as_ref().map(|r| ScopeAnyRef { value: &*r.value }) }
+    pub fn any_mut(&mut self) -> Option<ScopeAnyMut<'_>> { self.0.as_mut().map(|r| ScopeAnyMut { value: &mut *r.value }) }
+
     pub fn get<T: Any>(&mut self) -> Option<&T> {
-        self.0.as_ref().and_then(|r| r.downcast_ref())
+        self.0.as_ref().and_then(|r| r.value.downcast_ref())
     }
 
     pub fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
-        self.0.as_mut().and_then(|r| r.downcast_mut())
+        self.0.as_mut().and_then(|r| r.value.downcast_mut())
     }
 }
 
@@ -30,7 +56,9 @@ impl<'a> ScopeDataMut<'a> {
 // Scope - Context passed during apply operations
 // ============================================================================
 
+#[relax_api(plain)]
 #[derive(Default)]
+#[repr(C)]
 pub struct Scope<'a, 'b> {
     pub data: ScopeDataMut<'a>,
     pub props: ScopeDataRef<'b>,
@@ -38,52 +66,34 @@ pub struct Scope<'a, 'b> {
 }
 
 impl<'a, 'b> Scope<'a, 'b> {
+    pub fn props(&self) -> &ScopeDataRef<'b> { &self.props }
+    pub fn index(&self) -> usize { self.index }
+    pub fn data_mut(&mut self) -> &mut ScopeDataMut<'a> { &mut self.data }
+
+    pub fn new(data: ScopeDataMut<'a>, props: ScopeDataRef<'b>, index: usize) -> Self { Self { data, props, index } }
+
     pub fn with_data<T: Any>(v: &'a mut T) -> Self {
-        Self {
-            data: ScopeDataMut(Some(v)),
-            props: ScopeDataRef(None),
-            index: 0,
-        }
+        Self::new(ScopeDataMut::from_any(ScopeAnyMut { value: v }), ScopeDataRef::default(), 0)
     }
 
     pub fn with_data_props<T: Any + Sized, U: Any + Sized>(v: &'a mut T, w: &'b U) -> Self {
-        Self {
-            data: ScopeDataMut(Some(v)),
-            props: ScopeDataRef(Some(w)),
-            index: 0,
-        }
+        Self::new(ScopeDataMut::from_any(ScopeAnyMut { value: v }), ScopeDataRef::from_any(ScopeAnyRef { value: w }), 0)
     }
 
     pub fn with_props<T: Any>(w: &'b T) -> Self {
-        Self {
-            data: ScopeDataMut(None),
-            props: ScopeDataRef(Some(w)),
-            index: 0,
-        }
+        Self::new(ScopeDataMut::default(), ScopeDataRef::from_any(ScopeAnyRef { value: w }), 0)
     }
 
     pub fn with_data_index<T: Any>(v: &'a mut T, index: usize) -> Self {
-        Self {
-            data: ScopeDataMut(Some(v)),
-            props: ScopeDataRef(None),
-            index,
-        }
+        Self::new(ScopeDataMut::from_any(ScopeAnyMut { value: v }), ScopeDataRef::default(), index)
     }
 
     pub fn with_data_props_index<T: Any>(v: &'a mut T, w: &'b T, index: usize) -> Self {
-        Self {
-            data: ScopeDataMut(Some(v)),
-            props: ScopeDataRef(Some(w)),
-            index,
-        }
+        Self::new(ScopeDataMut::from_any(ScopeAnyMut { value: v }), ScopeDataRef::from_any(ScopeAnyRef { value: w }), index)
     }
 
     pub fn with_props_index<T: Any>(w: &'b T, index: usize) -> Self {
-        Self {
-            data: ScopeDataMut(None),
-            props: ScopeDataRef(Some(w)),
-            index,
-        }
+        Self::new(ScopeDataMut::default(), ScopeDataRef::from_any(ScopeAnyRef { value: w }), index)
     }
 
     pub fn empty() -> Self {
@@ -98,7 +108,7 @@ impl<'a, 'b> Scope<'a, 'b> {
     where
         F: FnOnce(&mut Scope) -> R,
     {
-        let mut props = ScopeDataRef(Some(props));
+        let mut props = ScopeDataRef(Some(ScopeAnyRef { value: props }));
         std::mem::swap(&mut self.props, &mut props);
         let r = f(self);
         std::mem::swap(&mut self.props, &mut props);
@@ -109,7 +119,7 @@ impl<'a, 'b> Scope<'a, 'b> {
     where
         F: FnOnce(&mut Scope) -> R,
     {
-        let mut props = ScopeDataRef(Some(props));
+        let mut props = ScopeDataRef(Some(ScopeAnyRef { value: props }));
         let old_index = self.index;
         self.index = index;
         std::mem::swap(&mut self.props, &mut props);
@@ -124,7 +134,9 @@ impl<'a, 'b> Scope<'a, 'b> {
 // Apply - Source of apply operation
 // ============================================================================
 
+#[relax_api(plain)]
 #[derive(Debug, Clone, Default)]
+#[repr(C, u8)]
 pub enum Apply {
     #[default]
     New,

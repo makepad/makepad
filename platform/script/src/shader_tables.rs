@@ -84,6 +84,8 @@ pub fn type_table_float_arithmetic(
         ShaderType::AbstractInt => match rhs {
             ShaderType::AbstractFloat => ShaderType::AbstractFloat,
             ShaderType::AbstractInt => ShaderType::AbstractInt,
+            ShaderType::Pod(x) if *x == builtins.pod_f32 => ShaderType::Pod(builtins.pod_f32),
+            ShaderType::Pod(x) if *x == builtins.pod_f16 => ShaderType::Pod(builtins.pod_f16),
             ShaderType::Pod(x) if *x == builtins.pod_u32 => ShaderType::Pod(builtins.pod_u32),
             ShaderType::Pod(x) if *x == builtins.pod_i32 => ShaderType::Pod(builtins.pod_i32),
             ShaderType::Pod(x) if *x == builtins.pod_vec2f => ShaderType::Pod(builtins.pod_vec2f),

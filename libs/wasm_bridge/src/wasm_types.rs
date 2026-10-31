@@ -1,5 +1,6 @@
 use crate::from_wasm::*;
 use crate::to_wasm::*;
+use crate::host::*;
 pub struct WasmDataU8(Vec<u8>);
 use crate::{live_id, LiveId};
 use makepad_derive_wasm_bridge::*;
@@ -33,6 +34,10 @@ impl WasmDataU8 {
 
     pub fn into_vec_u8(self) -> Vec<u8> {
         self.0
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
     }
 
     pub fn into_utf8(self) -> String {
@@ -106,8 +111,8 @@ impl FromWasm for WasmDataU8 {
 
 #[derive(FromWasm)]
 pub struct WasmPtrF32 {
-    ptr: u32,
-    len: usize,
+    pub ptr: u32,
+    pub len: usize,
 }
 
 impl WasmPtrF32 {

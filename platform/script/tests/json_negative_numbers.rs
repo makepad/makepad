@@ -13,22 +13,14 @@ use makepad_script::*;
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     }
 }
 
 fn eval_str(vm: &mut ScriptVm, code: &str) -> String {
     let v = vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: "json_negative".to_string(),
-            line: 0,
-            column: 0,
-            code: code.to_string(),
-            values: vec![],
-        })
+        vm.eval(ScriptMod::new("", "", "json_negative", 0, 0, &code, &[]))
     });
     let mut out = String::new();
     vm.string_with(v, |_vm, s| out = s.to_string());

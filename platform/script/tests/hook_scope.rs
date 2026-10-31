@@ -8,7 +8,7 @@ use makepad_script::*;
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     }
 }
@@ -30,14 +30,7 @@ fn hooks_resolve_in_the_scope_the_body_ended_in() {
     // `fs` is defined twice: the second `let` shadows and opens a child scope.
     let code = "let fs = 1\n{height: 1, let fs = 2\nfn before(){ 7 }\nfn on_x(){ 42 }\n{}\n";
     vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: "hook_scope".to_string(),
-            line: 0, column: 0,
-            code: code.to_string(),
-            values: vec![],
-        })
+        vm.eval(ScriptMod::new("", "", "hook_scope", 0, 0, &code, &[]))
     });
     let errors = vm.take_errors();
     assert!(errors.is_empty(), "eval errored: {errors:?}");

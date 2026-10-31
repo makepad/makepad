@@ -1,0 +1,13 @@
+[package]
+name = "makepad-shader"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Makepad shader IR and backends"
+
+[dependencies]
+makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0" }
+makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }
+
+[features]
+host-shims = []

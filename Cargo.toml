@@ -83,6 +83,7 @@ workspace.members = [
     "libs/relax/codegen",
     "libs/relax/front",
     "tools/run/light_http",
+    "libs/relax/native_macros",
     "libs/relax/session",
     "libs/relax/types",
     "tools/run/fixture",
@@ -92,6 +93,12 @@ workspace.members = [
     "libs/relax/compiler/dsbench",
     # Send feedback: caption icon + panel (Amp, Scope)
     # === tests ===
+    "platform/shader",
+    "platform/script/audio_aot",
+    "platform/script/compute",
+    "platform/script/imports",
+    "platform/script/compute_sched",
+    "platform/script/census",
     # === makepad-widgets: the core and its family crates (widgets/ is the
     # front, a member through its dependents) ===
     # === private app repositories ===

@@ -1,0 +1,33 @@
+[package]
+name = "makepad-script-compute"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "The Splash compute core: a typed Splash subset with logic, compiled to a structured SSA IR with a reference interpreter and native ARM64 backends (scalar and 4-lane NEON); front ends for audio shaders and geometry kernels"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[features]
+host-shims = []
+# `module::register_shared_std`: the shared stdlib registered in a Splash VM
+# (effect and Motion documents, runtime-compiled shaders). Off by default,
+# so the compiler itself stays dependency-free.
+vm = ["dep:makepad-script"]
+
+[dependencies]
+makepad-relax-api = { path = "../../../libs/relax_api", version = "1.0.0" }
+makepad-script = { path = "..", optional = true }
+
+# The shared back end (Relax's RIR with vectors, tier-0 passes, register allocation, x64/arm64
+# emitters, executable memory): native kernels and audio programs, on the hosts it emits for
+# (a wasm build runs kernels as generated wasm and links neither).
+[target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
+relax-backend = { workspace = true }
+relax-session = { workspace = true }
+
+[dev-dependencies]
+makepad-script-compute-sched = { path = "../compute_sched" }
+makepad-csg-math = { path = "../../../libs/csg/csg_math" }
+# tests/wasm.rs runs the generated scalar wasm natively (a wasm interpreter).
+makepad-stitch = { path = "../../../libs/stitch" }

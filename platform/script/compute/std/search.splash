@@ -1,0 +1,18 @@
+// Bounded searches over sorted f32 buffers (32 halvings: any buffer a
+// kernel can bind).
+
+// The last index k in 0..n with buf[k] <= x, or -1 when buf[0] > x.
+fn last_le(buf, n, x) {
+    let lo: int = 0
+    let hi: int = n
+    for it in 0..32 {
+        if lo < hi {
+            let mid = (lo + hi) / 2
+            if buf[mid] <= x { lo = mid + 1 } else { hi = mid }
+        }
+    }
+    lo - 1
+}
+
+// The first index k in 0..n with buf[k] > x, or n.
+fn first_gt(buf, n, x) { last_le(buf, n, x) + 1 }

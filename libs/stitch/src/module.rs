@@ -1,16 +1,17 @@
 use {
     crate::{
-        code::UncompiledCode,
+        binary,
+        code::{self, UncompiledCode},
         config,
         const_expr::ConstExpr,
         data::Data,
-        decode::{Decode, DecodeError, Decoder},
+        decode::DecodeError,
         elem::{Elem, UnguardedElems},
         engine::Engine,
         error::Error,
-        extern_val::{ExternType, ExternTypeDesc, ExternVal, ExternValDesc},
+        extern_val::{ExternType, ExternVal, ExternValDesc},
         func::{Func, FuncType},
-        global::{Global, GlobalType},
+        global::{Global, GlobalType, Mut},
         instance::{Instance, InstanceIniter},
         linker::{InstantiateError, Linker},
         mem::{Mem, MemType},
@@ -21,7 +22,7 @@ use {
         val::ValType,
     },
     std::{
-        collections::{hash_map, HashMap, HashSet},
+        collections::{hash_map, HashMap},
         slice,
         sync::Arc,
     },
@@ -55,114 +56,17 @@ impl Module {
     ///
     /// - If the [`Module`] is malformed.
     /// - If the [`Module`] is invalid.
+    /// - If the [`Module`] uses features the engine does not run.
     pub fn new(engine: &Engine, bytes: &[u8]) -> Result<Module, DecodeError> {
-        const MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D];
-        const VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
-        const EXPECTED_SECTION_IDS: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 10, 11];
-
-        let mut decoder = Decoder::new(bytes);
-        let magic = decoder.read_bytes(4)?;
-        if magic != MAGIC {
-            return Err(DecodeError::new(""))?;
-        }
-        let version = decoder.read_bytes(4)?;
-        if version != VERSION {
-            return Err(DecodeError::new(""))?;
-        }
-        let mut builder = ModuleBuilder::new();
-        let mut expected_section_ids = EXPECTED_SECTION_IDS.iter().copied();
-        while !decoder.is_at_end() {
-            let section_id = decoder.read_byte()?;
-            if section_id != 0 {
-                if !expected_section_ids
-                    .any(|expected_section_id| expected_section_id == section_id)
-                {
-                    return Err(DecodeError::new("section id mismatch"))?;
-                }
-            }
-            let mut section_decoder = decoder.decode_decoder()?;
-            match section_id {
-                // Custom section
-                0 => {
-                    section_decoder.decode_string()?;
-                    section_decoder.read_bytes_until_end();
-                }
-                // Type section
-                1 => {
-                    for type_ in section_decoder.decode_iter()? {
-                        builder.push_type(type_?)?;
-                    }
-                }
-                // Import section
-                2 => {
-                    for import in section_decoder.decode_iter()? {
-                        builder.push_import(import?)?;
-                    }
-                }
-                // Function section
-                3 => {
-                    for type_idx in section_decoder.decode_iter()? {
-                        builder.push_func(type_idx?)?;
-                    }
-                }
-                // Table section
-                4 => {
-                    for table in section_decoder.decode_iter()? {
-                        builder.push_table(table?)?;
-                    }
-                }
-                // Memory section
-                5 => {
-                    for mem in section_decoder.decode_iter()? {
-                        builder.push_memory(mem?)?;
-                    }
-                }
-                // Global section
-                6 => {
-                    for global in section_decoder.decode_iter()? {
-                        builder.push_global(global?)?;
-                    }
-                }
-                // Export section
-                7 => {
-                    for export in section_decoder.decode_iter()? {
-                        builder.push_export(export?)?;
-                    }
-                }
-                // Start section
-                8 => {
-                    builder.set_start(section_decoder.decode()?)?;
-                }
-                // Element section
-                9 => {
-                    for elem in section_decoder.decode_iter()? {
-                        builder.push_elem(elem?)?;
-                    }
-                }
-                // Code section
-                10 => {
-                    for code in section_decoder.decode_iter()? {
-                        builder.push_code(code?)?;
-                    }
-                }
-                // Data section
-                11 => {
-                    for data in section_decoder.decode_iter()? {
-                        builder.push_data(data?)?;
-                    }
-                }
-                // Data count section
-                12 => {
-                    let data_count = section_decoder.decode()?;
-                    builder.set_data_count(data_count);
-                }
-                _ => unreachable!(),
-            }
-            if !section_decoder.is_at_end() {
-                return Err(DecodeError::new(""))?;
-            }
-        }
-        builder.finish(engine)
+        let module = binary::Module::decode_with(
+            bytes,
+            binary::Features {
+                multi_memory: false,
+                ext_math: engine.extensions().ext_math,
+            },
+        )?;
+        binary::validate(&module)?;
+        ModuleBuilder::build(module)
     }
 
     /// Returns an iterator over the imports in this [`Module`].
@@ -465,9 +369,10 @@ impl<'a> Iterator for ModuleExports<'a> {
     }
 }
 
-/// A builder for a [`Module`].
+/// Builds the engine's [`Module`] from a decoded, validated module,
+/// refusing what the engine does not run and modules beyond its limits.
 #[derive(Debug)]
-pub(crate) struct ModuleBuilder {
+struct ModuleBuilder {
     types: Vec<FuncType>,
     imports: Vec<((Arc<str>, Arc<str>), ImportKind)>,
     imported_func_count: usize,
@@ -480,17 +385,42 @@ pub(crate) struct ModuleBuilder {
     global_types: Vec<GlobalType>,
     global_vals: Vec<ConstExpr>,
     exports: HashMap<Arc<str>, ExternValDesc>,
-    start: Option<u32>,
     codes: Vec<UncompiledCode>,
     elems: Vec<ElemDef>,
     datas: Vec<DataDef>,
-    data_count: Option<u32>,
-    refs: HashSet<u32>,
+}
+
+fn table_type(type_: binary::TableType) -> TableType {
+    TableType {
+        limits: type_.limits,
+        elem: type_.elem.to_ref().unwrap(),
+    }
+}
+
+fn mem_type(type_: binary::MemType) -> Result<MemType, DecodeError> {
+    if type_.shared {
+        return Err(DecodeError::new("shared memories are not supported"));
+    }
+    Ok(MemType {
+        limits: type_.limits,
+    })
+}
+
+fn global_type(type_: binary::GlobalType) -> Result<GlobalType, DecodeError> {
+    // v128 globals are not supported: a v128 value cannot flow through
+    // the global entity storage or the global.get/set register paths.
+    if type_.ty == ValType::V128 {
+        return Err(DecodeError::new("v128 globals are not supported"));
+    }
+    Ok(GlobalType {
+        val: type_.ty,
+        mut_: if type_.mutable { Mut::Var } else { Mut::Const },
+    })
 }
 
 impl ModuleBuilder {
-    fn new() -> Self {
-        Self {
+    fn build(module: binary::Module) -> Result<Module, DecodeError> {
+        let mut builder = ModuleBuilder {
             types: Vec::new(),
             imports: Vec::new(),
             imported_func_count: 0,
@@ -503,148 +433,159 @@ impl ModuleBuilder {
             global_types: Vec::new(),
             global_vals: Vec::new(),
             exports: HashMap::new(),
-            start: None,
             codes: Vec::new(),
             elems: Vec::new(),
             datas: Vec::new(),
-            data_count: None,
-            refs: HashSet::new(),
-        }
-    }
-
-    pub(crate) fn type_(&self, idx: u32) -> Result<&FuncType, DecodeError> {
-        let idx = usize::try_from(idx).unwrap();
-        self.types
-            .get(idx)
-            .ok_or_else(|| DecodeError::new("unknown type"))
-    }
-
-    pub(crate) fn func(&self, idx: u32) -> Result<&FuncType, DecodeError> {
-        let idx = usize::try_from(idx).unwrap();
-        self.func_types
-            .get(idx)
-            .ok_or_else(|| DecodeError::new("unknown function"))
-    }
-
-    pub(crate) fn table(&self, idx: u32) -> Result<TableType, DecodeError> {
-        let idx = usize::try_from(idx).unwrap();
-        self.table_types
-            .get(idx)
-            .copied()
-            .ok_or_else(|| DecodeError::new("unknown table"))
-    }
-
-    pub(crate) fn memory(&self, idx: u32) -> Result<MemType, DecodeError> {
-        let idx = usize::try_from(idx).unwrap();
-        self.memory_types
-            .get(idx)
-            .copied()
-            .ok_or_else(|| DecodeError::new("unknown memory"))
-    }
-
-    pub(crate) fn imported_global(&self, idx: u32) -> Result<GlobalType, DecodeError> {
-        let idx = usize::try_from(idx).unwrap();
-        self.global_types[..self.imported_global_count]
-            .get(idx)
-            .copied()
-            .ok_or_else(|| DecodeError::new("unknown global"))
-    }
-
-    pub(crate) fn global(&self, idx: u32) -> Result<GlobalType, DecodeError> {
-        let idx = usize::try_from(idx).unwrap();
-        self.global_types
-            .get(idx)
-            .copied()
-            .ok_or_else(|| DecodeError::new("unknown global"))
-    }
-
-    pub(crate) fn elem(&self, idx: u32) -> Result<RefType, DecodeError> {
-        let idx = usize::try_from(idx).unwrap();
-        self.elems
-            .get(idx)
-            .map(|elem| elem.type_)
-            .ok_or_else(|| DecodeError::new("unknown element segment"))
-    }
-
-    pub(crate) fn data(&self, idx: u32) -> Result<(), DecodeError> {
-        if let Some(data_count) = self.data_count {
-            if idx >= data_count {
-                return Err(DecodeError::new("unknown data segment"));
-            }
-            Ok(())
-        } else {
-            Err(DecodeError::new("missing data count section"))
-        }
-    }
-
-    pub(crate) fn ref_(&self, func_idx: u32) -> Result<(), DecodeError> {
-        if !self.refs.contains(&func_idx) {
-            return Err(DecodeError::new("undeclared reference"));
-        }
-        Ok(())
-    }
-
-    fn push_type(&mut self, type_: FuncType) -> Result<(), DecodeError> {
-        if self.types.len() == config::MAX_TYPE_COUNT {
+        };
+        if module.types.len() > config::MAX_TYPE_COUNT {
             return Err(DecodeError::new("too many types"));
         }
-        self.types.push(type_);
-        Ok(())
-    }
-
-    fn push_import(&mut self, import: ImportDef) -> Result<(), DecodeError> {
-        if self.imports.len() == config::MAX_IMPORT_COUNT {
+        for type_ in &module.types {
+            builder.types.push(FuncType::new(
+                type_.params.iter().copied(),
+                type_.results.iter().copied(),
+            ));
+        }
+        if module.imports.len() > config::MAX_IMPORT_COUNT {
             return Err(DecodeError::new("too many imports"));
         }
-        let key = (import.module, import.name);
-        match import.desc {
-            ExternTypeDesc::Func(type_idx) => {
-                if self.func_types.len() == config::MAX_FUNC_COUNT {
-                    return Err(DecodeError::new("too many functions"));
+        for import in &module.imports {
+            let key = (import.module.as_str().into(), import.name.as_str().into());
+            match import.desc {
+                binary::ImportDesc::Func(type_idx) => {
+                    builder.imports.push((key, ImportKind::Func));
+                    builder.imported_func_count += 1;
+                    builder.push_func(type_idx)?;
                 }
-                self.imports.push((key, ImportKind::Func));
-                self.imported_func_count += 1;
-                self.func_types.push(self.type_(type_idx).cloned()?);
-            }
-            ExternTypeDesc::Table(type_) => {
-                if self.table_types.len() == config::MAX_TABLE_COUNT {
-                    return Err(DecodeError::new("too many tables"));
+                binary::ImportDesc::Table(type_) => {
+                    builder.imports.push((key, ImportKind::Table));
+                    builder.imported_table_count += 1;
+                    builder.push_table(table_type(type_))?;
                 }
-                if !type_.is_valid() {
-                    return Err(DecodeError::new("invalid table type"))?;
+                binary::ImportDesc::Memory(type_) => {
+                    builder.imports.push((key, ImportKind::Mem));
+                    builder.imported_memory_count += 1;
+                    builder.push_memory(mem_type(type_)?)?;
                 }
-                self.imports.push((key, ImportKind::Table));
-                self.imported_table_count += 1;
-                self.table_types.push(type_);
-            }
-            ExternTypeDesc::Memory(type_) => {
-                if self.memory_types.len() == config::MAX_MEMORY_COUNT {
-                    return Err(DecodeError::new("too many memories"));
+                binary::ImportDesc::Global(type_) => {
+                    builder.imports.push((key, ImportKind::Global));
+                    builder.imported_global_count += 1;
+                    builder.push_global_type(global_type(type_)?)?;
                 }
-                if !type_.is_valid() {
-                    return Err(DecodeError::new("invalid memory type"));
-                }
-                self.imports.push((key, ImportKind::Mem));
-                self.imported_memory_count += 1;
-                self.memory_types.push(type_);
-            }
-            ExternTypeDesc::Global(type_) => {
-                if self.global_types.len() == config::MAX_GLOBAL_COUNT {
-                    return Err(DecodeError::new("too many globals"));
-                }
-                self.imports.push((key, ImportKind::Global));
-                self.imported_global_count += 1;
-                self.global_types.push(type_);
             }
         }
-        Ok(())
+        for func in &module.funcs {
+            builder.push_func(func.ty)?;
+        }
+        for type_ in &module.tables {
+            builder.push_table(table_type(*type_))?;
+        }
+        for type_ in &module.memories {
+            builder.push_memory(mem_type(*type_)?)?;
+        }
+        for global in &module.globals {
+            builder.push_global_type(global_type(global.ty)?)?;
+            builder.global_vals.push(ConstExpr::from_expr(&global.init)?);
+        }
+        if module.exports.len() > config::MAX_EXPORT_COUNT {
+            return Err(DecodeError::new("too many exports"));
+        }
+        for export in &module.exports {
+            let desc = match export.kind {
+                binary::ExternKind::Func => ExternValDesc::Func(export.index),
+                binary::ExternKind::Table => ExternValDesc::Table(export.index),
+                binary::ExternKind::Memory => ExternValDesc::Memory(export.index),
+                binary::ExternKind::Global => ExternValDesc::Global(export.index),
+            };
+            builder.exports.insert(export.name.as_str().into(), desc);
+        }
+        if module.elems.len() > config::MAX_ELEM_COUNT {
+            return Err(DecodeError::new("too many element segments"));
+        }
+        for elem in &module.elems {
+            if elem.items.len() > config::MAX_ELEM_SIZE {
+                return Err(DecodeError::new("element segment too large"));
+            }
+            builder.elems.push(ElemDef {
+                kind: match &elem.mode {
+                    binary::ElemMode::Passive => ElemKind::Passive,
+                    binary::ElemMode::Declarative => ElemKind::Declarative,
+                    binary::ElemMode::Active { table, offset } => ElemKind::Active {
+                        table_idx: *table,
+                        offset: ConstExpr::from_expr(offset)?,
+                    },
+                },
+                type_: elem.items.elem_type().to_ref().unwrap(),
+                elems: match &elem.items {
+                    binary::ElemItems::Funcs(funcs) => funcs
+                        .iter()
+                        .map(|func_idx| ConstExpr::new_ref_func(*func_idx))
+                        .collect(),
+                    binary::ElemItems::Exprs(_, exprs) => exprs
+                        .iter()
+                        .map(|expr| ConstExpr::from_expr(expr))
+                        .collect::<Result<_, _>>()?,
+                },
+            });
+        }
+        for func in module.funcs {
+            if func.locals.len() > config::MAX_FUNC_LOCAL_COUNT {
+                return Err(DecodeError::new("too many function locals"));
+            }
+            if func.body.len() > config::MAX_FUNC_BODY_SIZE {
+                return Err(DecodeError::new("function body too large"));
+            }
+            for instr in &func.body {
+                code::check_supported(instr)?;
+            }
+            builder.codes.push(UncompiledCode {
+                locals: func.locals.into(),
+                body: func.body.into(),
+            });
+        }
+        if module.datas.len() > config::MAX_DATA_COUNT {
+            return Err(DecodeError::new("too many data segments"));
+        }
+        for data in module.datas {
+            if data.bytes.len() > config::MAX_DATA_SIZE {
+                return Err(DecodeError::new("data segment too large"));
+            }
+            builder.datas.push(DataDef {
+                kind: match &data.mode {
+                    binary::DataMode::Passive => DataKind::Passive,
+                    binary::DataMode::Active { memory, offset } => DataKind::Active {
+                        mem_idx: *memory,
+                        offset: ConstExpr::from_expr(offset)?,
+                    },
+                },
+                bytes: data.bytes.into(),
+            });
+        }
+        Ok(Module {
+            types: builder.types.into(),
+            imports: builder.imports.into(),
+            imported_func_count: builder.imported_func_count,
+            imported_table_count: builder.imported_table_count,
+            imported_memory_count: builder.imported_memory_count,
+            imported_global_count: builder.imported_global_count,
+            func_types: builder.func_types.into(),
+            table_types: builder.table_types.into(),
+            memory_types: builder.memory_types.into(),
+            global_types: builder.global_types.into(),
+            global_vals: builder.global_vals.into(),
+            exports: builder.exports,
+            start: module.start,
+            codes: builder.codes.into(),
+            elems: builder.elems.into(),
+            datas: builder.datas.into(),
+        })
     }
 
     fn push_func(&mut self, type_idx: u32) -> Result<(), DecodeError> {
         if self.func_types.len() == config::MAX_FUNC_COUNT {
             return Err(DecodeError::new("too many functions"));
         }
-        let type_ = self.type_(type_idx).cloned()?;
+        let type_ = self.types[type_idx as usize].clone();
         if type_.params().len() > config::MAX_FUNC_PARAM_COUNT {
             return Err(DecodeError::new("too many function parameters"));
         }
@@ -655,190 +596,28 @@ impl ModuleBuilder {
         Ok(())
     }
 
-    fn push_table(&mut self, table: TableDef) -> Result<(), DecodeError> {
+    fn push_table(&mut self, type_: TableType) -> Result<(), DecodeError> {
         if self.table_types.len() == config::MAX_TABLE_COUNT {
             return Err(DecodeError::new("too many tables"));
         }
-        if !table.type_.is_valid() {
-            return Err(DecodeError::new("invalid table type"))?;
-        }
-        self.table_types.push(table.type_);
+        self.table_types.push(type_);
         Ok(())
     }
 
-    fn push_memory(&mut self, memory: MemDef) -> Result<(), DecodeError> {
+    fn push_memory(&mut self, type_: MemType) -> Result<(), DecodeError> {
         if self.memory_types.len() == config::MAX_MEMORY_COUNT {
             return Err(DecodeError::new("too many memories"));
         }
-        if !memory.type_.is_valid() {
-            return Err(DecodeError::new("invalid memory type"));
-        }
-        self.memory_types.push(memory.type_);
+        self.memory_types.push(type_);
         Ok(())
     }
 
-    fn push_global(&mut self, global: GlobalDef) -> Result<(), DecodeError> {
+    fn push_global_type(&mut self, type_: GlobalType) -> Result<(), DecodeError> {
         if self.global_types.len() == config::MAX_GLOBAL_COUNT {
             return Err(DecodeError::new("too many globals"));
         }
-        if global.val.validate(self)? != global.type_.val {
-            return Err(DecodeError::new("type mismatch"));
-        }
-        if let Some(func_idx) = global.val.func_idx() {
-            self.refs.insert(func_idx);
-        }
-        self.global_types.push(global.type_);
-        self.global_vals.push(global.val);
+        self.global_types.push(type_);
         Ok(())
-    }
-
-    fn push_export(&mut self, export: ExportDef) -> Result<(), DecodeError> {
-        if self.exports.len() == config::MAX_EXPORT_COUNT {
-            return Err(DecodeError::new("too many exports"));
-        }
-        match export.desc {
-            ExternValDesc::Func(idx) => {
-                self.refs.insert(idx);
-                self.func(idx)?;
-            }
-            ExternValDesc::Table(idx) => {
-                self.table(idx)?;
-            }
-            ExternValDesc::Memory(idx) => {
-                self.memory(idx)?;
-            }
-            ExternValDesc::Global(idx) => {
-                self.global(idx)?;
-            }
-        }
-        if self.exports.contains_key(&export.name) {
-            return Err(DecodeError::new("duplicate export name"));
-        }
-        self.exports.insert(export.name, export.desc);
-        Ok(())
-    }
-
-    fn set_start(&mut self, start: u32) -> Result<(), DecodeError> {
-        let type_ = self.func(start)?;
-        if type_ != &FuncType::from_val_type(None) {
-            return Err(DecodeError::new("type mismatch"));
-        }
-        self.start = Some(start);
-        Ok(())
-    }
-
-    fn push_code(&mut self, code: UncompiledCode) -> Result<(), DecodeError> {
-        if self.codes.len() == self.func_types.len() - self.imported_func_count {
-            return Err(DecodeError::new(
-                "function and code section have inconsistent sizes",
-            ))?;
-        }
-        if code.locals.len() > config::MAX_FUNC_LOCAL_COUNT {
-            return Err(DecodeError::new("too many function locals"));
-        }
-        if code.expr.len() > config::MAX_FUNC_BODY_SIZE {
-            return Err(DecodeError::new("function body too large"));
-        }
-        self.codes.push(code);
-        Ok(())
-    }
-
-    fn push_elem(&mut self, elem: ElemDef) -> Result<(), DecodeError> {
-        if self.elems.len() == config::MAX_ELEM_COUNT {
-            return Err(DecodeError::new("too many element segments"));
-        }
-        if elem.elems.len() > config::MAX_ELEM_SIZE {
-            return Err(DecodeError::new("element segment too large"));
-        }
-        if let ElemKind::Active {
-            table_idx,
-            ref offset,
-        } = elem.kind
-        {
-            let table = self.table(table_idx)?;
-            if elem.type_ != table.elem {
-                return Err(DecodeError::new("type mismatch"));
-            }
-            if offset.validate(self)? != ValType::I32 {
-                return Err(DecodeError::new("type mismatch"));
-            }
-        }
-        for expr in &*elem.elems {
-            if expr.validate(self)? != elem.type_.into() {
-                return Err(DecodeError::new("type mismatch"));
-            }
-        }
-        for elem in elem.elems.iter() {
-            if let Some(func_idx) = elem.func_idx() {
-                self.refs.insert(func_idx);
-            }
-        }
-        self.elems.push(elem);
-        Ok(())
-    }
-
-    fn push_data(&mut self, data: DataDef) -> Result<(), DecodeError> {
-        if self.datas.len() == config::MAX_DATA_COUNT {
-            return Err(DecodeError::new("too many data segments"));
-        }
-        if data.bytes.len() > config::MAX_DATA_SIZE {
-            return Err(DecodeError::new("data segment too large"));
-        }
-        if let DataKind::Active {
-            mem_idx,
-            ref offset,
-        } = data.kind
-        {
-            self.memory(mem_idx)?;
-            if offset.validate(self)? != ValType::I32 {
-                return Err(DecodeError::new("type mismatch"));
-            }
-        }
-        self.datas.push(data);
-        Ok(())
-    }
-
-    fn set_data_count(&mut self, data_count: u32) {
-        self.data_count = Some(data_count);
-    }
-
-    fn finish(self, engine: &Engine) -> Result<Module, DecodeError> {
-        if self.func_types.len() - self.imported_func_count > self.codes.len() {
-            return Err(DecodeError::new(
-                "function and code section have inconsistent sizes",
-            ))?;
-        }
-        for (type_, code) in self.func_types[self.imported_func_count..]
-            .iter()
-            .zip(self.codes.iter())
-        {
-            engine.validate(type_, &self, code)?;
-        }
-        if let Some(data_count) = self.data_count {
-            if data_count != u32::try_from(self.datas.len()).unwrap() {
-                return Err(DecodeError::new(
-                    "data count and data section have inconsistent sizes",
-                ))?;
-            }
-        }
-        Ok(Module {
-            types: self.types.into(),
-            imports: self.imports.into(),
-            imported_func_count: self.imported_func_count,
-            imported_table_count: self.imported_table_count,
-            imported_memory_count: self.imported_memory_count,
-            imported_global_count: self.imported_global_count,
-            func_types: self.func_types.into(),
-            table_types: self.table_types.into(),
-            memory_types: self.memory_types.into(),
-            global_types: self.global_types.into(),
-            global_vals: self.global_vals.into(),
-            exports: self.exports,
-            start: self.start,
-            codes: self.codes.into(),
-            elems: self.elems.into(),
-            datas: self.datas.into(),
-        })
     }
 }
 
@@ -851,136 +630,12 @@ enum ImportKind {
     Global,
 }
 
-/// A definition for an import.
-#[derive(Clone, Debug)]
-struct ImportDef {
-    module: Arc<str>,
-    name: Arc<str>,
-    desc: ExternTypeDesc,
-}
-
-impl Decode for ImportDef {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(ImportDef {
-            module: decoder.decode()?,
-            name: decoder.decode()?,
-            desc: decoder.decode()?,
-        })
-    }
-}
-
-/// A definition for a [`Table`].
-#[derive(Debug)]
-struct TableDef {
-    type_: TableType,
-}
-
-impl Decode for TableDef {
-    fn decode(decoder: &mut Decoder) -> Result<Self, DecodeError> {
-        Ok(Self {
-            type_: decoder.decode()?,
-        })
-    }
-}
-
-/// A definition for a [`Mem`].
-#[derive(Debug)]
-struct MemDef {
-    type_: MemType,
-}
-
-impl Decode for MemDef {
-    fn decode(decoder: &mut Decoder) -> Result<Self, DecodeError> {
-        Ok(Self {
-            type_: decoder.decode()?,
-        })
-    }
-}
-
-/// A definition for a [`Global`].
-#[derive(Clone, Debug)]
-struct GlobalDef {
-    type_: GlobalType,
-    val: ConstExpr,
-}
-
-impl Decode for GlobalDef {
-    fn decode(decoder: &mut Decoder) -> Result<Self, DecodeError> {
-        Ok(Self {
-            type_: decoder.decode()?,
-            val: decoder.decode()?,
-        })
-    }
-}
-
-/// A definition for an [`Export`].
-#[derive(Clone, Debug)]
-struct ExportDef {
-    name: Arc<str>,
-    desc: ExternValDesc,
-}
-
-impl Decode for ExportDef {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            name: decoder.decode()?,
-            desc: decoder.decode()?,
-        })
-    }
-}
-
 /// A definition for an [`Elem`].
 #[derive(Clone, Debug)]
 struct ElemDef {
     kind: ElemKind,
     type_: RefType,
     elems: Arc<[ConstExpr]>,
-}
-
-impl Decode for ElemDef {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        let flags: u32 = decoder.decode()?;
-        Ok(Self {
-            kind: if flags & 0x01 != 0 {
-                if flags & 0x02 != 0 {
-                    ElemKind::Declarative
-                } else {
-                    ElemKind::Passive
-                }
-            } else {
-                ElemKind::Active {
-                    table_idx: if flags & 0x02 != 0 {
-                        decoder.decode()?
-                    } else {
-                        0
-                    },
-                    offset: decoder.decode()?,
-                }
-            },
-            type_: if flags & 0x03 != 0 {
-                if flags & 0x04 != 0 {
-                    decoder.decode()?
-                } else {
-                    match decoder.decode()? {
-                        0x00 => RefType::FuncRef,
-                        _ => {
-                            return Err(DecodeError::new("malformed element kind"));
-                        }
-                    }
-                }
-            } else {
-                RefType::FuncRef
-            },
-            elems: if flags & 0x04 != 0 {
-                decoder.decode_iter()?.collect::<Result<_, _>>()?
-            } else {
-                decoder
-                    .decode_iter::<u32>()?
-                    .map(|func_idx| func_idx.map(|func_idx| ConstExpr::new_ref_func(func_idx)))
-                    .collect::<Result<_, _>>()?
-            },
-        })
-    }
 }
 
 /// The kind of an [`Elem`].
@@ -999,29 +654,6 @@ enum ElemKind {
 pub(crate) struct DataDef {
     kind: DataKind,
     bytes: Arc<[u8]>,
-}
-
-impl Decode for DataDef {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            kind: {
-                let flags: u32 = decoder.decode()?;
-                if flags & 0x1 != 0 {
-                    DataKind::Passive
-                } else {
-                    DataKind::Active {
-                        mem_idx: if flags & 0x02 != 0 {
-                            decoder.decode()?
-                        } else {
-                            0
-                        },
-                        offset: decoder.decode()?,
-                    }
-                }
-            },
-            bytes: decoder.decode_decoder()?.read_bytes_until_end().into(),
-        })
-    }
 }
 
 /// The kind of a [`Data`].

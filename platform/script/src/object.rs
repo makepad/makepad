@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::function::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
@@ -7,33 +8,115 @@ use crate::traits::*;
 use crate::value::*;
 use crate::value_map::*;
 use crate::*;
-use ::std::cell::RefCell;
-use ::std::collections::hash_map::Entry;
-use ::std::collections::HashMap;
 use ::std::fmt;
-use ::std::rc::Rc;
 //use std::collections::btree_map::BTreeMap;
 
-#[derive(Default)]
+#[relax_api(plain)]
+#[derive(Default, Clone, Copy)]
 pub struct ScriptObjectTag(u64);
 
 pub type ScriptObjectMap = ValueMap<ScriptValue, ScriptMapValue>;
 
+/// One `key: value` of an object's map as it crosses out of the VM (C-shaped: the VM is the
+/// rustc-built part of the makepad loader, loader-core.md section 8).
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptMapEntry {
+    pub key: ScriptValue,
+    pub value: ScriptValue,
+}
+
+/// A caller-owned `Vec<ScriptObject>` the VM appends to (as ScriptEntriesOut).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptObjectsOut<'a> {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, *const ScriptObject, usize),
+    _out: std::marker::PhantomData<&'a mut Vec<ScriptObject>>,
+}
+
+impl<'a> ScriptObjectsOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<ScriptObject>) -> Self {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, ptr: *const ScriptObject, len: usize) {
+            let out = &mut *(ctx as *mut Vec<ScriptObject>);
+            out.extend_from_slice(std::slice::from_raw_parts(ptr, len));
+        }
+        Self { ctx: out as *mut Vec<ScriptObject> as *mut u8, push, _out: std::marker::PhantomData }
+    }
+
+    /// Appends `objects` to the caller's vector.
+    #[inline]
+    pub fn push(&mut self, objects: &[ScriptObject]) {
+        unsafe { (self.push)(self.ctx, objects.as_ptr(), objects.len()) }
+    }
+}
+
+/// A caller-owned `Vec<ScriptMapEntry>` the VM appends to through a C call made on the
+/// caller's side ([`ScriptEntriesOut::new`] is inline), as ScriptTextOut does for text.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptEntriesOut<'a> {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, *const ScriptMapEntry, usize),
+    _out: std::marker::PhantomData<&'a mut Vec<ScriptMapEntry>>,
+}
+
+impl<'a> ScriptEntriesOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<ScriptMapEntry>) -> Self {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, ptr: *const ScriptMapEntry, len: usize) {
+            let out = &mut *(ctx as *mut Vec<ScriptMapEntry>);
+            out.extend_from_slice(std::slice::from_raw_parts(ptr, len));
+        }
+        unsafe { Self::from_callback(out as *mut Vec<ScriptMapEntry> as *mut u8, push) }
+    }
+
+    /// # Safety
+    /// The callback and context must remain valid for the adapter's lifetime.
+    pub unsafe fn from_callback(ctx: *mut u8, push: unsafe extern "C-unwind" fn(*mut u8, *const ScriptMapEntry, usize)) -> Self {
+        Self { ctx, push, _out: std::marker::PhantomData }
+    }
+
+    /// Appends `entries` to the caller's vector.
+    #[inline]
+    pub fn push(&mut self, entries: &[ScriptMapEntry]) {
+        unsafe { (self.push)(self.ctx, entries.as_ptr(), entries.len()) }
+    }
+}
+
+/// A Rust-held reference to a script object: a GC root while it lives (roots.rs). C-shaped:
+/// Clone and Drop are retain/release calls on the heap's root table.
+#[relax_api(plain)]
+#[repr(C)]
 pub struct ScriptObjectRef {
-    pub(crate) roots: Option<Rc<RefCell<HashMap<ScriptObject, usize>>>>,
+    /// the root table of the heap that made it; null: not a root
+    pub(crate) roots: *const crate::roots::ScriptRoots,
     pub(crate) obj: ScriptObject,
 }
 
 impl ScriptObjectRef {
+    /// A ref that is not a GC root: whoever holds it marks the object
+    /// itself (a transient script body's scope).
+    pub(crate) fn unrooted(obj: ScriptObject) -> Self {
+        Self { roots: std::ptr::null(), obj }
+    }
+
     pub fn is_zero(&self) -> bool {
         self.obj == ScriptObject::ZERO
+    }
+
+    /// Whether this ref is no GC root (see [`Self::unrooted`]).
+    pub(crate) fn is_unrooted(&self) -> bool {
+        self.roots.is_null()
     }
 }
 
 impl Default for ScriptObjectRef {
     fn default() -> Self {
         Self {
-            roots: None,
+            roots: std::ptr::null(),
             obj: ScriptObject::ZERO,
         }
     }
@@ -41,21 +124,10 @@ impl Default for ScriptObjectRef {
 
 impl Clone for ScriptObjectRef {
     fn clone(&self) -> Self {
-        if let Some(roots) = &self.roots {
-            let mut roots = roots.borrow_mut();
-            match roots.entry(self.obj) {
-                Entry::Occupied(mut occ) => {
-                    let value = occ.get_mut();
-                    *value += 1;
-                }
-                Entry::Vacant(_vac) => {
-                    eprintln!("ScriptObjectRef root is vacant!");
-                }
-            }
-        }
+        crate::roots::script_root_retain(self.roots, crate::roots::ROOT_OBJECT, self.obj.index);
         Self {
-            roots: self.roots.clone(),
-            obj: self.obj.clone(),
+            roots: self.roots,
+            obj: self.obj,
         }
     }
 }
@@ -71,15 +143,12 @@ impl ScriptObjectRef {
         self.obj
     }
 
-    /// A stable, unique identity for the heap that minted this ref. All refs from
-    /// the same heap share one `root_objects` `Rc`, so its pointer identifies the
-    /// heap for the heap's lifetime. Returns 0 for a heap-less (empty) ref. Use
+    /// A stable, unique identity for the heap that minted this ref (its root table, alive
+    /// while the heap or any of its refs is). Returns 0 for a heap-less (empty) ref. Use
     /// this to route a widget's script objects back to their owning VM instead of
     /// dereferencing them against the wrong heap.
     pub fn heap_key(&self) -> usize {
-        self.roots
-            .as_ref()
-            .map_or(0, |rc| Rc::as_ptr(rc) as *const () as usize)
+        self.roots as usize
     }
 }
 
@@ -98,25 +167,7 @@ impl ScriptRefOptionExt for Option<ScriptObjectRef> {
 
 impl Drop for ScriptObjectRef {
     fn drop(&mut self) {
-        if let Some(roots) = &self.roots {
-            let mut roots = roots.borrow_mut();
-            match roots.entry(self.obj) {
-                Entry::Occupied(mut occ) => {
-                    let value = occ.get_mut();
-                    if *value >= 1 {
-                        *value -= 1;
-                    } else {
-                        eprintln!("ScriptObjectRef is 0!");
-                    }
-                    if *value == 0 {
-                        occ.remove();
-                    }
-                }
-                Entry::Vacant(_vac) => {
-                    eprintln!("ScriptObjectRef root is vacant!");
-                }
-            }
-        }
+        crate::roots::script_root_release(self.roots, crate::roots::ROOT_OBJECT, self.obj.index);
     }
 }
 
@@ -188,37 +239,45 @@ impl ScriptObjectTag {
     pub const STORAGE_VEC2: u64 = 1 << Self::STORAGE_SHIFT;
     pub const STORAGE_MAP: u64 = 2 << Self::STORAGE_SHIFT;
 
+    #[inline]
     pub fn proto_fwd(&self) -> u64 {
         self.0 & Self::PROTO_FWD
     }
 
+    #[inline]
     pub fn set_proto_fwd(&mut self, fwd: u64) {
         self.0 = (self.0 & !Self::PROTO_FWD) | (fwd & Self::PROTO_FWD)
     }
 
     // STORAGE
 
+    #[inline]
     pub fn is_auto(&self) -> bool {
         self.0 & Self::STORAGE_MASK == Self::STORAGE_AUTO
     }
 
+    #[inline]
     pub fn is_vec2(&self) -> bool {
         self.0 & Self::STORAGE_MASK == Self::STORAGE_VEC2
     }
 
+    #[inline]
     pub fn is_map(&self) -> bool {
         self.0 & Self::STORAGE_MASK == Self::STORAGE_MAP
     }
 
+    #[inline]
     pub fn set_vec2(&mut self) {
         self.0 &= !Self::STORAGE_MASK;
         self.0 |= Self::STORAGE_VEC2;
     }
 
+    #[inline]
     pub fn set_auto(&mut self) {
         self.0 &= !Self::STORAGE_MASK;
     }
 
+    #[inline]
     pub fn set_map(&mut self) {
         self.0 &= !Self::STORAGE_MASK;
         self.0 |= Self::STORAGE_MAP;
@@ -226,27 +285,33 @@ impl ScriptObjectTag {
 
     // FLAGS
 
+    #[inline]
     pub fn set_first_applied_and_clean(&mut self) {
         self.0 &= !Self::DIRTY;
         self.0 |= Self::FIRST_APPLIED;
     }
 
+    #[inline]
     pub fn is_first_applied(&self) -> bool {
         self.0 & Self::FIRST_APPLIED != 0
     }
 
+    #[inline]
     pub fn set_tracked(&mut self) {
         self.0 |= Self::TRACKED
     }
 
+    #[inline]
     pub fn is_tracked(&self) -> bool {
         self.0 & Self::TRACKED != 0
     }
 
+    #[inline]
     pub fn set_dirty(&mut self) {
         self.0 |= Self::DIRTY
     }
 
+    #[inline]
     pub fn check_and_clear_dirty(&mut self) -> bool {
         if self.0 & Self::DIRTY != 0 {
             self.0 &= !Self::DIRTY;
@@ -256,38 +321,47 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn set_string_keys(&mut self) {
         self.0 |= Self::STRING_KEYS
     }
 
+    #[inline]
     pub fn is_string_keys(&self) -> bool {
         self.0 & Self::STRING_KEYS != 0
     }
 
+    #[inline]
     pub fn set_from_eval(&mut self) {
         self.0 |= Self::FROM_EVAL
     }
 
+    #[inline]
     pub fn is_from_eval(&self) -> bool {
         self.0 & Self::FROM_EVAL != 0
     }
 
+    #[inline]
     pub fn set_static(&mut self) {
         self.0 |= Self::STATIC
     }
 
+    #[inline]
     pub fn is_static(&self) -> bool {
         self.0 & Self::STATIC != 0
     }
 
+    #[inline]
     pub fn is_notproto(&self) -> bool {
         self.0 & Self::NOTPROTO != 0
     }
 
+    #[inline]
     pub fn set_notproto(&mut self) {
         self.0 |= Self::NOTPROTO
     }
 
+    #[inline]
     pub fn is_frozen(&self) -> bool {
         self.0 & Self::FROZEN != 0
     }
@@ -299,111 +373,141 @@ impl ScriptObjectTag {
         self.0 & (Self::FROZEN | Self::STATIC) != 0
     }
 
+    /// Frozen by [`Self::freeze_api`] (a host API object: a module or a kit instance).
+    #[inline]
+    pub fn is_api(&self) -> bool {
+        self.0 & Self::FREEZE_MASK == Self::FROZEN | Self::VALIDATED | Self::VEC_FROZEN
+    }
+
+    #[inline]
     pub fn is_validated(&self) -> bool {
         self.0 & Self::VALIDATED != 0
     }
 
+    #[inline]
     pub fn is_map_add(&self) -> bool {
         self.0 & Self::MAP_ADD != 0
     }
 
+    #[inline]
     pub fn set_reffed(&mut self) {
         self.0 |= Self::REFFED
     }
 
+    #[inline]
     pub fn is_reffed(&self) -> bool {
         self.0 & Self::REFFED != 0
     }
 
+    #[inline]
     pub fn set_deep(&mut self) {
         self.0 |= Self::DEEP
     }
 
+    #[inline]
     pub fn clear_deep(&mut self) {
         self.0 &= !Self::DEEP
     }
 
+    #[inline]
     pub fn is_deep(&self) -> bool {
         self.0 & Self::DEEP != 0
     }
 
+    #[inline]
     pub fn is_alloced(&self) -> bool {
         return self.0 & Self::ALLOCED != 0;
     }
 
+    #[inline]
     pub fn set_alloced(&mut self) {
         self.0 |= Self::ALLOCED
     }
 
+    #[inline]
     pub fn clear(&mut self) {
         self.0 = 0;
     }
 
+    #[inline]
     pub fn is_marked(&self) -> bool {
         self.0 & Self::MARK != 0
     }
 
+    #[inline]
     pub fn set_mark(&mut self) {
         self.0 |= Self::MARK
     }
 
+    #[inline]
     pub fn clear_mark(&mut self) {
         self.0 &= !Self::MARK
     }
 
     // FREEZE
 
+    #[inline]
     pub fn freeze(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN
     }
 
+    #[inline]
     pub fn freeze_type(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VEC_FROZEN
     }
 
+    #[inline]
     pub fn freeze_api(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VALIDATED | Self::VEC_FROZEN
     }
 
+    #[inline]
     pub fn freeze_module(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::MAP_ADD | Self::VEC_FROZEN | Self::NOTPROTO
     }
 
+    #[inline]
     pub fn freeze_component(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VALIDATED
     }
 
+    #[inline]
     pub fn freeze_shader(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VALIDATED | Self::MAP_ADD | Self::VEC_FROZEN
     }
 
+    #[inline]
     pub fn freeze_ext(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VALIDATED | Self::MAP_ADD
     }
 
+    #[inline]
     pub fn needs_checking(&self) -> bool {
         self.0 & (Self::NEED_CHECK_MASK) != 0
     }
 
+    #[inline]
     pub fn is_vec_frozen(&self) -> bool {
         self.0 & (Self::VEC_FROZEN | Self::FROZEN | Self::STATIC) != 0
     }
 
     // REF
 
+    #[inline]
     pub fn set_type_index(&mut self, ty: ScriptTypeIndex) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         self.0 |= ty.0 as u64 | Self::REF_KIND_TYPE_INDEX | Self::TYPE_CHECKED;
     }
 
+    #[inline]
     pub fn as_type_index(&self) -> Option<ScriptTypeIndex> {
         if self.is_type_index() {
             Some(ScriptTypeIndex(self.0 as u32))
@@ -412,16 +516,19 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_type_index(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_TYPE_INDEX
     }
 
+    #[inline]
     pub fn set_apply_transform(&mut self, ni: NativeId) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         self.0 |= (ni.index as u64) | Self::REF_KIND_APPLY_TRANSFORM;
     }
 
+    #[inline]
     pub fn as_apply_transform(&self) -> Option<NativeId> {
         if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_APPLY_TRANSFORM {
             Some(NativeId {
@@ -432,10 +539,12 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_apply_transform(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_APPLY_TRANSFORM
     }
 
+    #[inline]
     pub fn set_fn(&mut self, ptr: ScriptFnPtr) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
@@ -445,6 +554,17 @@ impl ScriptObjectTag {
         }
     }
 
+    /// The ip of a script fn's body; None for any other tag.
+    #[inline]
+    pub fn fn_script_ip(&self) -> Option<ScriptIp> {
+        if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN {
+            Some(ScriptIp::from_u40(self.0))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     pub fn as_fn(&self) -> Option<ScriptFnPtr> {
         if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN {
             Some(ScriptFnPtr::Script(ScriptIp::from_u40(self.0)))
@@ -457,24 +577,29 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_script_fn(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN
     }
 
+    #[inline]
     pub fn is_native_fn(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN
     }
 
+    #[inline]
     pub fn is_fn(&self) -> bool {
         self.is_script_fn() || self.is_native_fn()
     }
 
+    #[inline]
     pub fn set_pod_type(&mut self, ty: ScriptPodType) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         self.0 |= ty.index as u64 | Self::REF_KIND_POD_TYPE
     }
 
+    #[inline]
     pub fn as_pod_type(&self) -> Option<ScriptPodType> {
         if self.is_pod_type() {
             Some(ScriptPodType {
@@ -485,16 +610,19 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_pod_type(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_POD_TYPE
     }
 
+    #[inline]
     pub fn set_shader_io(&mut self, ty: ShaderIoType) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         self.0 |= ty.0 as u64 | Self::REF_KIND_SHADER_IO
     }
 
+    #[inline]
     pub fn as_shader_io(&self) -> Option<ShaderIoType> {
         if self.is_shader_io() {
             Some(ShaderIoType(self.0 as u32))
@@ -503,6 +631,7 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_shader_io(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SHADER_IO
     }
@@ -567,6 +696,7 @@ impl fmt::Display for ScriptObjectTag {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 pub struct ScriptMapTag(u64);
 
@@ -577,51 +707,62 @@ impl ScriptMapTag {
     const DIRTY: u64 = 1 << 32;
 
     #[allow(dead_code)]
+    #[inline]
     fn dirty() -> Self {
         Self(Self::DIRTY)
     }
 
+    #[inline]
     fn dirty_with_order(order: u32) -> Self {
         Self(Self::DIRTY | (order as u64))
     }
 
+    #[inline]
     fn get_and_clear_dirty(&mut self) -> bool {
         let ret = self.0 & Self::DIRTY != 0;
         self.0 &= !Self::DIRTY;
         ret
     }
 
+    #[inline]
     fn set_dirty(&mut self) {
         self.0 |= Self::DIRTY;
     }
 
+    #[inline]
     pub fn order(&self) -> u32 {
         (self.0 & Self::ORDER_MASK) as u32
     }
 
     #[allow(dead_code)]
+    #[inline]
     fn set_order(&mut self, order: u32) {
         self.0 = (self.0 & !Self::ORDER_MASK) | (order as u64);
     }
 
+    #[inline]
     fn with_order_offset(self, offset: u32) -> Self {
         let new_order = self.order() + offset;
         Self((self.0 & !Self::ORDER_MASK) | (new_order as u64))
     }
 }
 
+#[relax_api(plain)]
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 pub struct ScriptMapValue {
     pub tag: ScriptMapTag,
     pub value: ScriptValue,
 }
 
+#[relax_api(plain)]
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
+#[repr(C)]
 pub struct ScriptVecValue {
     pub key: ScriptValue,
     pub value: ScriptValue,
 }
 
+#[relax_api(handle)]
 #[derive(Debug)]
 pub struct ScriptObjectData {
     pub tag: ScriptObjectTag,
@@ -669,7 +810,10 @@ impl ScriptObjectData {
             &[],
             |vm, args| {
                 if let Some(sself) = script_value!(vm, args.self).as_object() {
-                    return vm.bx.heap.proto(sself);
+                    // The prototype object, nil at the root of a chain (a
+                    // type's own prototype is no object).
+                    let proto = vm.bx.heap.proto(sself);
+                    return if proto.as_object().is_some() { proto } else { NIL };
                 }
                 script_err_unexpected!(
                     vm.bx.threads.cur_ref().trap,
@@ -961,6 +1105,8 @@ impl ScriptObjectData {
         );
     }
 
+    pub fn vec_values(&self) -> &[ScriptVecValue] { &self.vec }
+
     pub fn map_insert(&mut self, key: ScriptValue, value: ScriptValue) {
         let order = self.map.len() as u32;
         if self.tag.is_tracked() {
@@ -997,6 +1143,20 @@ impl ScriptObjectData {
         }
     }
 
+    /// `map_insert` for an untracked object whose map is known not to hold
+    /// `key` (the caller just looked): no second scan.
+    #[inline]
+    pub(crate) fn map_insert_absent_untracked(&mut self, key: ScriptValue, value: ScriptValue) {
+        let order = self.map.len() as u32;
+        self.map.insert_absent(
+            key,
+            ScriptMapValue {
+                value,
+                tag: ScriptMapTag::dirty_with_order(order),
+            },
+        );
+    }
+
     pub fn map_set_if_exist(&mut self, key: ScriptValue, value: ScriptValue) -> bool {
         let tracked = self.tag.is_tracked();
         if let Some(old) = self.map.get_mut(&key) {
@@ -1015,6 +1175,7 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn map_get(&self, key: &ScriptValue) -> Option<ScriptValue> {
         if let Some(val) = self.map.get(key) {
             Some(val.value)
@@ -1023,6 +1184,7 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn map_get_if_dirty(&mut self, key: &ScriptValue) -> Option<ScriptValue> {
         if self.tag.is_tracked() {
             if let Some(val) = self.map.get_mut(key) {
@@ -1035,41 +1197,71 @@ impl ScriptObjectData {
         self.map_get(key)
     }
 
+    #[inline]
     pub fn map_delete(&mut self, key: &ScriptValue) -> Option<ScriptValue> {
         self.map.remove(key).map(|v| v.value)
     }
 
+    #[inline]
     pub fn map_len(&self) -> usize {
         self.map.len()
     }
 
+    #[inline(always)]
     pub fn map_iter_ret<T, F: FnMut(ScriptValue, ScriptValue) -> Option<T>>(
         &self,
-        mut f: F,
+        f: F,
     ) -> Option<T> {
+        unsafe extern "C-unwind" fn visit<T, F: FnMut(ScriptValue, ScriptValue) -> Option<T>>(ctx: *mut u8, key: ScriptValue, value: ScriptValue) -> bool {
+            let (f, out) = &mut *(ctx as *mut (F, Option<T>));
+            *out = f(key, value);
+            out.is_none()
+        }
+        let mut state = (f, None);
+        unsafe { self.map_iter_with(&mut state as *mut (F, Option<T>) as *mut u8, visit::<T, F>) }
+        state.1
+    }
+
+    #[inline(always)]
+    pub fn map_iter<F: FnMut(ScriptValue, ScriptValue)>(&self, mut f: F) {
+        unsafe extern "C-unwind" fn visit<F: FnMut(ScriptValue, ScriptValue)>(ctx: *mut u8, key: ScriptValue, value: ScriptValue) -> bool {
+            (&mut *(ctx as *mut F))(key, value);
+            true
+        }
+        unsafe { self.map_iter_with(&mut f as *mut F as *mut u8, visit::<F>) }
+    }
+
+    /// Visits map entries synchronously in map order while `visit` returns true.
+    /// # Safety
+    /// `ctx` must remain valid for `visit` throughout this call.
+    pub unsafe fn map_iter_with(&self, ctx: *mut u8, visit: unsafe extern "C-unwind" fn(*mut u8, ScriptValue, ScriptValue) -> bool) {
         for (key, val) in self.map.iter() {
-            let r = f(*key, val.value);
-            if r.is_some() {
-                return r;
+            if !unsafe { visit(ctx, *key, val.value) } {
+                return;
             }
         }
-        None
     }
 
-    pub fn map_iter<F: FnMut(ScriptValue, ScriptValue)>(&self, mut f: F) {
-        for (key, val) in self.map.iter() {
-            f(*key, val.value);
-        }
-    }
-
+    #[inline(always)]
     pub fn map_iter_ordered<F: FnMut(ScriptValue, ScriptValue)>(&self, mut f: F) {
+        unsafe extern "C-unwind" fn visit<F: FnMut(ScriptValue, ScriptValue)>(ctx: *mut u8, key: ScriptValue, value: ScriptValue) {
+            (&mut *(ctx as *mut F))(key, value);
+        }
+        unsafe { self.map_iter_ordered_with(&mut f as *mut F as *mut u8, visit::<F>) }
+    }
+
+    /// Visits map entries synchronously in insertion order.
+    /// # Safety
+    /// `ctx` must remain valid for `visit` throughout this call.
+    pub unsafe fn map_iter_ordered_with(&self, ctx: *mut u8, visit: unsafe extern "C-unwind" fn(*mut u8, ScriptValue, ScriptValue)) {
         let mut ordered: Vec<_> = self.map.iter().collect();
         ordered.sort_by_key(|(_, val)| val.tag.order());
         for (key, val) in ordered {
-            f(*key, val.value);
+            unsafe { visit(ctx, *key, val.value); }
         }
     }
 
+    #[inline]
     pub fn merge_map_from_other(&mut self, other: &ScriptObjectData) {
         let offset = self.map.len() as u32;
         for (k, v) in other.map.iter() {
@@ -1085,6 +1277,7 @@ impl ScriptObjectData {
 
     /// Merge map entries from other, but only if the key doesn't already exist in self.
     /// Used by the splat operator to not overwrite existing values.
+    #[inline]
     pub fn merge_map_from_other_no_overwrite(&mut self, other: &ScriptObjectData) {
         let offset = self.map.len() as u32;
         for (k, v) in other.map.iter() {
@@ -1100,11 +1293,13 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn push_vec_from_other(&mut self, other: &ScriptObjectData) {
         self.vec.extend_from_slice(&other.vec);
     }
 
     //const DONT_RECYCLE_WHEN: usize = 1000;
+    #[inline]
     pub fn with_proto(proto: ScriptValue) -> Self {
         Self {
             proto,
@@ -1112,6 +1307,7 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn clear(&mut self) {
         self.proto = NIL;
         self.tag.clear();

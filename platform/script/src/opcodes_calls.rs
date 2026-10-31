@@ -17,7 +17,12 @@ impl<'a> ScriptVm<'a> {
     // Calling handlers
 
     pub(crate) fn handle_call_args(&mut self) {
-        let fnobj = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let mut fnobj = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        // `mod(x, y)` is the modulo function; `mod` itself stays the module
+        // root (see `define_mod_call`).
+        if fnobj == self.bx.heap.modules.into() {
+            fnobj = self.bx.code.builtins.mod_call.into();
+        }
         if let Some(ty) = self.bx.heap.pod_type(fnobj) {
             let pod = self.bx.heap.new_pod(ty);
             self.bx.threads.cur().mes.push(ScriptMe::Pod {
@@ -77,21 +82,30 @@ impl<'a> ScriptVm<'a> {
         if let Some(method) = method {
             let sself = sself.unwrap_or(NIL);
             let type_index = sself.value_type().to_redux();
-            let call_ptr: Option<
-                *const dyn Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue,
-            > = {
-                let native = self.bx.code.native.borrow();
-                native
-                    .calls
-                    .get(type_index.to_index())
-                    .and_then(|c| c.as_ref().map(|f| &**f as *const _))
-            };
-            if let Some(call_ptr) = call_ptr {
+            let call = self
+                .bx
+                .code
+                .native
+                .borrow()
+                .calls
+                .get(type_index.to_index())
+                .and_then(|c| c.as_ref().map(|f| f.view()));
+            if let Some(call) = call {
                 let ip = self.bx.threads.cur_ref().trap.ip;
                 // Pause thread before native call so re-entrant calls get a different thread
                 self.bx.threads.cur().is_paused = true;
+                // makepad inspect `trace verbs`: the call with its arguments (one load when off)
+                let traced = if crate::inspect_query::trace_on() {
+                    let ty = crate::inspect_query::handle_type_name(&self.bx.code.native.borrow(), type_index);
+                    crate::inspect_query::trace_wants(&ty, method)
+                } else {
+                    None
+                };
                 // SAFETY: The call pointer is valid as long as native calls aren't removed during execution
-                let ret = unsafe { (*call_ptr)(self, args, method) };
+                let ret = unsafe { call.call(self, args, method) };
+                if let Some(verb) = traced {
+                    crate::inspect_query::trace_record(&self.bx, verb, ip, args, ret);
+                }
 
                 // Check if call explicitly paused (via pause() which sets trap.on to Pause)
                 if matches!(
@@ -139,14 +153,11 @@ impl<'a> ScriptVm<'a> {
                 ScriptFnPtr::Native(ni) => {
                     let ip = self.bx.threads.cur_ref().trap.ip;
                     // Get the function pointer and drop the borrow before calling
-                    let func_ptr: *const dyn Fn(&mut ScriptVm, ScriptObject) -> ScriptValue = {
-                        let native = self.bx.code.native.borrow();
-                        &*native.functions[ni.index as usize] as *const _
-                    };
+                    let func = self.bx.code.native.borrow().functions[ni.index as usize].view();
                     // Pause thread before native call so re-entrant calls get a different thread
                     self.bx.threads.cur().is_paused = true;
                     // SAFETY: The function pointer is valid as long as native functions aren't removed during execution
-                    let ret = unsafe { (*func_ptr)(self, args) };
+                    let ret = unsafe { func.call(self, args) };
 
                     // Check if native explicitly paused (via pause() which sets trap.on to Pause)
                     if matches!(
@@ -186,6 +197,7 @@ impl<'a> ScriptVm<'a> {
                             body: self.bx.threads.cur_ref().trap.ip.body,
                         }),
                         prev_slot_base: self.bx.threads.cur_ref().slot_base,
+                        body_root: false,
                     };
                     if !self.bx.threads.cur().push_call_frame(call) {
                         return false;

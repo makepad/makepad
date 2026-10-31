@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::base64;
 use crate::heap::*;
 use crate::makepad_live_id::*;
@@ -7,10 +8,18 @@ use crate::*;
 use ::std::borrow::Borrow;
 use ::std::sync::Arc;
 
+#[relax_api(handle, clone)]
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct ScriptRcString(pub Arc<String>);
 
+#[relax_api]
 impl ScriptRcString {
+    #[relax_api]
+    pub fn as_str(&self) -> &str { self.0.as_str() }
+
+    #[relax_api]
+    pub fn from_str(value: &str) -> Self { Self(Arc::new(value.to_owned())) }
+
     pub fn new(str: String) -> Self {
         Self(Arc::new(str))
     }
@@ -28,6 +37,7 @@ impl Borrow<String> for ScriptRcString {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Default)]
 pub struct StringTag(u64);
 
@@ -56,6 +66,7 @@ impl StringTag {
     }
 }
 
+#[relax_api(handle)]
 #[derive(Default)]
 pub struct ScriptStringData {
     pub tag: StringTag,
@@ -146,6 +157,20 @@ impl ScriptStringData {
                 result
             },
         );
+
+        // `to_upper()` / `to_lower()`: the string in Unicode upper or
+        // lower case.
+        for (name, upper) in [(id_lut!(to_upper), true), (id_lut!(to_lower), false)] {
+            native.add_type_method(heap, ScriptValueType::REDUX_STRING, name, script_args_def!(), move |vm, args| {
+                let sself = script_value!(vm, args.self);
+                if let Some(s) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
+                    heap.new_string_from_str(&if upper { sself.to_uppercase() } else { sself.to_lowercase() })
+                }) {
+                    return s.into();
+                }
+                script_err_unexpected!(vm.bx.threads.cur_ref().trap, "to_upper / to_lower called on non-string value")
+            });
+        }
 
         native.add_type_method(
             heap,

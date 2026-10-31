@@ -1,0 +1,9 @@
+[package]
+name = "makepad-script-compute-sched"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Caller-owned kernel scheduling, admission and zero-copy reusable jobs"
+
+[dependencies]
+makepad-script-compute = { path = "../compute" }

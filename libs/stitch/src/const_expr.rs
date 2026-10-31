@@ -1,12 +1,12 @@
 use crate::{
-    decode::{Decode, DecodeError, Decoder},
+    binary::Instr,
+    decode::DecodeError,
     func::Func,
     func_ref::FuncRef,
-    global::{Global, Mut},
-    module::ModuleBuilder,
+    global::Global,
     ref_::{Ref, RefType},
     store::Store,
-    val::{Val, ValType},
+    val::Val,
 };
 
 #[derive(Clone, Debug)]
@@ -18,34 +18,6 @@ impl ConstExpr {
     pub(crate) fn new_ref_func(func_idx: u32) -> Self {
         Self {
             instr: ConstInstr::RefFunc(func_idx),
-        }
-    }
-
-    pub(crate) fn func_idx(&self) -> Option<u32> {
-        match self.instr {
-            ConstInstr::RefFunc(func_idx) => Some(func_idx),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn validate(&self, module: &ModuleBuilder) -> Result<ValType, DecodeError> {
-        match self.instr {
-            ConstInstr::I32Const(_) => Ok(ValType::I32),
-            ConstInstr::I64Const(_) => Ok(ValType::I64),
-            ConstInstr::F32Const(_) => Ok(ValType::F32),
-            ConstInstr::F64Const(_) => Ok(ValType::F64),
-            ConstInstr::RefNull(type_) => Ok(type_.into()),
-            ConstInstr::RefFunc(func_idx) => {
-                module.func(func_idx)?;
-                Ok(ValType::FuncRef)
-            }
-            ConstInstr::GlobalGet(global_idx) => {
-                let type_ = module.imported_global(global_idx)?;
-                if type_.mut_ != Mut::Const {
-                    return Err(DecodeError::new("global is immutable"));
-                }
-                Ok(type_.val)
-            }
         }
     }
 
@@ -64,12 +36,24 @@ impl ConstExpr {
     }
 }
 
-impl Decode for ConstExpr {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        let instr = decoder.decode()?;
-        if decoder.read_byte()? != 0x0B {
-            return Err(DecodeError::new("expected end opcode"));
-        }
+impl ConstExpr {
+    /// The engine's form of a validated constant expression. It runs the
+    /// single-instruction ones; extended constant expressions and `v128`
+    /// constants are refused.
+    pub(crate) fn from_expr(expr: &[Instr]) -> Result<Self, DecodeError> {
+        let instr = match expr {
+            [instr, Instr::End] => match instr {
+                Instr::I32Const(val) => ConstInstr::I32Const(*val),
+                Instr::I64Const(val) => ConstInstr::I64Const(*val),
+                Instr::F32Const(bits) => ConstInstr::F32Const(f32::from_bits(*bits)),
+                Instr::F64Const(bits) => ConstInstr::F64Const(f64::from_bits(*bits)),
+                Instr::RefNull(type_) => ConstInstr::RefNull(type_.to_ref().unwrap()),
+                Instr::RefFunc(func_idx) => ConstInstr::RefFunc(*func_idx),
+                Instr::GlobalGet(global_idx) => ConstInstr::GlobalGet(*global_idx),
+                _ => return Err(DecodeError::new("unsupported constant expression")),
+            },
+            _ => return Err(DecodeError::new("unsupported constant expression")),
+        };
         Ok(Self { instr })
     }
 }
@@ -88,19 +72,4 @@ enum ConstInstr {
     RefNull(RefType),
     RefFunc(u32),
     GlobalGet(u32),
-}
-
-impl Decode for ConstInstr {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match decoder.read_byte()? {
-            0x23 => Ok(Self::GlobalGet(decoder.decode()?)),
-            0x41 => Ok(Self::I32Const(decoder.decode()?)),
-            0x42 => Ok(Self::I64Const(decoder.decode()?)),
-            0x43 => Ok(Self::F32Const(decoder.decode()?)),
-            0x44 => Ok(Self::F64Const(decoder.decode()?)),
-            0xD0 => Ok(Self::RefNull(decoder.decode()?)),
-            0xD2 => Ok(Self::RefFunc(decoder.decode()?)),
-            _ => Err(DecodeError::new("illegal const opcode")),
-        }
-    }
 }

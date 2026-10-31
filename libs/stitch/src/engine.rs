@@ -3,12 +3,9 @@ use {
         code::{CompiledCode, UncompiledCode},
         compile::Compiler,
         config::Extensions,
-        decode::DecodeError,
-        func::{Func, FuncType},
+        func::Func,
         instance::Instance,
-        module::ModuleBuilder,
         store::Store,
-        validate::Validator,
     },
     std::sync::{Arc, Mutex},
 };
@@ -31,7 +28,6 @@ impl Engine {
         Engine {
             inner: Arc::new(EngineInner {
                 extensions,
-                validators: Mutex::new(Pool::new()),
                 compilers: Mutex::new(Pool::new()),
             }),
         }
@@ -42,18 +38,6 @@ impl Engine {
         self.inner.extensions
     }
 
-    pub(crate) fn validate(
-        &self,
-        type_: &FuncType,
-        module: &ModuleBuilder,
-        code: &UncompiledCode,
-    ) -> Result<(), DecodeError> {
-        let mut validator = self.inner.validators.lock().unwrap().pop_or_default();
-        let result = validator.validate(type_, module, code, self.inner.extensions);
-        self.inner.validators.lock().unwrap().push(validator);
-        result
-    }
-
     pub(crate) fn compile(
         &self,
         store: &mut Store,
@@ -62,7 +46,7 @@ impl Engine {
         code: &UncompiledCode,
     ) -> CompiledCode {
         let mut compiler = self.inner.compilers.lock().unwrap().pop_or_default();
-        let result = compiler.compile(store, func, instance, code, self.inner.extensions);
+        let result = compiler.compile(store, func, instance, code);
         self.inner.compilers.lock().unwrap().push(compiler);
         result
     }
@@ -77,7 +61,6 @@ impl Default for Engine {
 #[derive(Debug)]
 struct EngineInner {
     extensions: Extensions,
-    validators: Mutex<Pool<Validator>>,
     compilers: Mutex<Pool<Compiler>>,
 }
 

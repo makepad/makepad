@@ -6,7 +6,6 @@ use {
             BinOpInfo, BlockType, CompiledCode, InstrSlot, InstrVisitor, LoadInfo, MemArg,
             StoreInfo, UnOpInfo, UncompiledCode, V128BinOpInfo, V128ReduceOpInfo, V128UnOpInfo,
         },
-        config::Extensions,
         decode::DecodeError,
         exec,
         exec::ThreadedInstr,
@@ -25,7 +24,6 @@ use {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Compiler {
-    label_idxs: Vec<u32>,
     locals: Vec<Local>,
     blocks: Vec<Block>,
     opds: Vec<Opd>,
@@ -35,7 +33,6 @@ pub(crate) struct Compiler {
 impl Compiler {
     pub(crate) fn new() -> Self {
         Self {
-            label_idxs: Vec::new(),
             locals: Vec::new(),
             blocks: Vec::new(),
             opds: Vec::new(),
@@ -49,10 +46,7 @@ impl Compiler {
         func: Func,
         instance: &Instance,
         code: &UncompiledCode,
-        exts: Extensions,
     ) -> CompiledCode {
-        use crate::decode::Decoder;
-
         self.locals.clear();
         self.blocks.clear();
         self.opds.clear();
@@ -101,9 +95,8 @@ impl Compiler {
                 .map(|mem| mem.to_unguarded(store.id())),
         );
 
-        let mut decoder = Decoder::new(&code.expr);
-        while !compile.blocks.is_empty() {
-            code::decode_instr(&mut decoder, &mut self.label_idxs, &mut compile, exts).unwrap();
+        for instr in code.body.iter() {
+            code::visit_instr(instr, &mut compile).unwrap();
         }
 
         for (result_idx, result_type) in type_.clone().results().iter().copied().enumerate().rev() {
@@ -202,10 +195,9 @@ impl<'a> Compile<'a> {
 
     /// Preserve the local with the given index by preserving every local operand that refers to it.
     fn preserve_local(&mut self, local_idx: usize) {
+        // Each preserved operand is unlinked, so the list's head moves on.
         while let Some(opd_idx) = self.locals[local_idx].first_opd_idx {
             self.preserve_local_opd(opd_idx);
-            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
-            self.opds[opd_idx].local_idx = None;
         }
     }
 
@@ -358,8 +350,8 @@ impl<'a> Compile<'a> {
             self.dealloc_reg(self.opd(0).type_.reg_idx());
         }
         let opd_idx = self.opds.len() - 1;
-        if let Some(local_idx) = self.opds[opd_idx].local_idx {
-            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
+        if self.opds[opd_idx].local_idx.is_some() {
+            self.remove_local_opd(opd_idx);
         }
         self.opds.pop().unwrap().type_
     }

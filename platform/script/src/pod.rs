@@ -1,4 +1,5 @@
 #![allow(unused)]
+use makepad_relax_api::relax_api;
 use crate::heap::*;
 use crate::mod_pod::*;
 use crate::trap::*;
@@ -6,20 +7,21 @@ use crate::value::*;
 use crate::value::*;
 use makepad_live_id::*;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[relax_api(handle)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ScriptPodField {
     pub name: LiveId,
     pub default: ScriptValue,
     pub ty: ScriptPodTypeInline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ScriptPodEnum {
     pub name: LiveId,
     pub variant: ScriptPodEnumVariant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ScriptPodEnumVariant {
     Bare,
     Tuple { items: Vec<ScriptPodTypeInline> },
@@ -27,7 +29,8 @@ pub enum ScriptPodEnumVariant {
 }
 
 // we're going to try to follow std140 datamapping for wgsl
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
+#[relax_api(handle)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct ScriptPodTypeData {
     pub name: Option<LiveId>,
     pub object: ScriptObject,
@@ -36,12 +39,80 @@ pub struct ScriptPodTypeData {
     pub ty: ScriptPodTy,
 }
 
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
+#[relax_api(handle)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct ScriptPodTypeInline {
     pub self_ref: ScriptPodType,
     pub data: ScriptPodTypeData,
 }
 
+/// A pod type's header (ScriptPodTypeData::view).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptPodTypeDataView<'a> {
+    pub name: LiveId,
+    pub has_name: bool,
+    pub object: ScriptObject,
+    pub default: ScriptValue,
+    pub ty: &'a ScriptPodTy,
+}
+
+/// An inline pod type (ScriptPodTypeInline::view).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptPodTypeInlineView<'a> {
+    pub self_ref: ScriptPodType,
+    pub data: &'a ScriptPodTypeData,
+}
+
+/// A struct field (ScriptPodField::view).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptPodFieldView<'a> {
+    pub name: LiveId,
+    pub default: ScriptValue,
+    pub ty: &'a ScriptPodTypeInline,
+}
+
+#[relax_api(marked)]
+impl ScriptPodTypeData {
+    #[relax_api]
+    pub fn view(&self) -> ScriptPodTypeDataView<'_> {
+        ScriptPodTypeDataView { name: self.name.unwrap_or(LiveId(0)), has_name: self.name.is_some(), object: self.object, default: self.default, ty: &self.ty }
+    }
+    #[inline]
+    pub fn ty(&self) -> &ScriptPodTy { self.view().ty }
+    #[inline]
+    pub fn name(&self) -> Option<LiveId> { let v = self.view(); v.has_name.then_some(v.name) }
+    #[inline]
+    pub fn object(&self) -> ScriptObject { self.view().object }
+    #[inline]
+    pub fn default_value(&self) -> ScriptValue { self.view().default }
+}
+
+#[relax_api(marked)]
+impl ScriptPodTypeInline {
+    #[relax_api]
+    pub fn view(&self) -> ScriptPodTypeInlineView<'_> { ScriptPodTypeInlineView { self_ref: self.self_ref, data: &self.data } }
+    #[inline]
+    pub fn data(&self) -> &ScriptPodTypeData { self.view().data }
+    #[inline]
+    pub fn self_ref(&self) -> ScriptPodType { self.view().self_ref }
+}
+
+#[relax_api(marked)]
+impl ScriptPodField {
+    #[relax_api]
+    pub fn view(&self) -> ScriptPodFieldView<'_> { ScriptPodFieldView { name: self.name, default: self.default, ty: &self.ty } }
+    #[inline]
+    pub fn name(&self) -> LiveId { self.view().name }
+    #[inline]
+    pub fn ty(&self) -> &ScriptPodTypeInline { self.view().ty }
+    #[inline]
+    pub fn default_value(&self) -> ScriptValue { self.view().default }
+}
+
+#[relax_api(plain)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodVec {
     Vec2f,
@@ -60,6 +131,7 @@ pub enum ScriptPodVec {
     Vec3b,
     Vec4b,
 }
+#[relax_api(plain)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodMat {
     Mat2x2f,
@@ -353,7 +425,8 @@ impl ScriptPodMat {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[relax_api(handle, clone, debug, default)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub enum ScriptPodTy {
     #[default]
     Void,
@@ -395,6 +468,7 @@ pub enum ScriptPodTy {
 }
 
 /// Compact GPU fetch formats used in `#[repr(C)]` vertex/instance structs.
+#[relax_api(plain)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodPacked {
     F16x2,
@@ -450,7 +524,54 @@ impl ScriptPodPacked {
     }
 }
 
+/// The data-free pod types, for building one without a variant literal (provided-crate
+/// boundary, loader-core.md section 8).
+#[relax_api(plain)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScriptPodScalar {
+    Void,
+    F32,
+    F16,
+    U32,
+    I32,
+    Bool,
+    AtomicU32,
+    AtomicI32,
+}
+
 impl ScriptPodTy {
+    /// A data-free pod type.
+    pub fn scalar(s: ScriptPodScalar) -> ScriptPodTy {
+        match s {
+            ScriptPodScalar::Void => Self::Void,
+            ScriptPodScalar::F32 => Self::F32,
+            ScriptPodScalar::F16 => Self::F16,
+            ScriptPodScalar::U32 => Self::U32,
+            ScriptPodScalar::I32 => Self::I32,
+            ScriptPodScalar::Bool => Self::Bool,
+            ScriptPodScalar::AtomicU32 => Self::AtomicU32,
+            ScriptPodScalar::AtomicI32 => Self::AtomicI32,
+        }
+    }
+}
+
+impl ScriptPodTy {
+    #[inline]
+    pub fn as_vec(&self) -> Option<ScriptPodVec> {
+        let v = self.view(POD_TY_VIEW_BASIC);
+        (v.tag == ScriptPodTyTag::Vec).then_some(v.vec)
+    }
+    #[inline]
+    pub fn as_mat(&self) -> Option<ScriptPodMat> {
+        let v = self.view(POD_TY_VIEW_BASIC);
+        (v.tag == ScriptPodTyTag::Mat).then_some(v.mat)
+    }
+    #[inline]
+    pub fn struct_fields(&self) -> Option<&[ScriptPodField]> {
+        let v = self.view(POD_TY_VIEW_BASIC);
+        (v.tag == ScriptPodTyTag::Struct).then_some(v.fields)
+    }
     pub fn is_number(&self) -> bool {
         match self {
             Self::F32 | Self::F16 | Self::U32 | Self::I32 => true,
@@ -468,20 +589,24 @@ impl ScriptPodTy {
         }
     }
 
+    #[inline]
     pub fn packed(&self) -> Option<ScriptPodPacked> {
-        match self {
-            Self::Packed(p) => Some(*p),
-            _ => None,
-        }
+        let v = self.view(POD_TY_VIEW_BASIC);
+        (v.tag == ScriptPodTyTag::Packed).then_some(v.packed)
     }
 
     /// True when this type (or any struct field) uses a compact fetch format.
+    #[inline]
     pub fn has_compact_format(&self) -> bool {
+        self.view(POD_TY_VIEW_COMPACT).compact
+    }
+
+    fn has_compact_format_impl(&self) -> bool {
         match self {
             Self::Packed(_) => true,
-            Self::Struct { fields, .. } => fields.iter().any(|f| f.ty.data.ty.has_compact_format()),
+            Self::Struct { fields, .. } => fields.iter().any(|f| f.ty.data.ty.has_compact_format_impl()),
             Self::FixedArray { ty, .. } | Self::VariableArray { ty, .. } => {
-                ty.data.ty.has_compact_format()
+                ty.data.ty.has_compact_format_impl()
             }
             _ => false,
         }
@@ -583,14 +708,60 @@ impl ScriptPodTy {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Debug, Default, Copy, Clone)]
 pub struct ScriptPodOffset {
     pub offset_of: usize,
     pub field_index: usize,
 }
 
+/// ScriptPodTy::view's mode: POD_TY_VIEW_COMPACT also works out `compact`.
+pub const POD_TY_VIEW_BASIC: u32 = 0;
+pub const POD_TY_VIEW_COMPACT: u32 = 1;
+
+/// What a pod type reads as (ScriptPodTy::view): its kind, the payload of a vec, mat or packed
+/// type (the others' fields are only meaningful for their kind), its layout and its fields.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptPodTyView<'a> {
+    pub tag: ScriptPodTyTag,
+    pub vec: ScriptPodVec,
+    pub mat: ScriptPodMat,
+    pub packed: ScriptPodPacked,
+    pub compact: bool,
+    pub align_of: usize,
+    pub size_of: usize,
+    pub slots: usize,
+    pub fields: &'a [ScriptPodField],
+}
+
+#[relax_api(marked)]
 impl ScriptPodTy {
-    pub fn align_of(&self) -> usize {
+    #[relax_api]
+    pub fn view(&self, mode: u32) -> ScriptPodTyView<'_> {
+        ScriptPodTyView {
+            tag: self.kind_impl(),
+            vec: if let Self::Vec(v) = self { *v } else { ScriptPodVec::Vec2f },
+            mat: if let Self::Mat(m) = self { *m } else { ScriptPodMat::Mat2x2f },
+            packed: if let Self::Packed(p) = self { *p } else { ScriptPodPacked::F16x2 },
+            compact: mode == POD_TY_VIEW_COMPACT && self.has_compact_format_impl(),
+            align_of: self.align_of_impl(),
+            size_of: self.size_of_impl(),
+            slots: self.slots_impl(),
+            fields: if let Self::Struct { fields, .. } = self { fields } else { &[] },
+        }
+    }
+
+    #[inline]
+    pub fn align_of(&self) -> usize { self.view(POD_TY_VIEW_BASIC).align_of }
+    #[inline]
+    pub fn size_of(&self) -> usize { self.view(POD_TY_VIEW_BASIC).size_of }
+    #[inline]
+    pub fn slots(&self) -> usize { self.view(POD_TY_VIEW_BASIC).slots }
+    #[inline]
+    pub fn kind(&self) -> ScriptPodTyTag { self.view(POD_TY_VIEW_BASIC).tag }
+
+    fn align_of_impl(&self) -> usize {
         match self {
             Self::Void | Self::ArrayBuilder | Self::UndefinedStruct => 0,
             Self::F32 => 4,
@@ -610,7 +781,7 @@ impl ScriptPodTy {
         }
     }
 
-    pub fn size_of(&self) -> usize {
+    pub(crate) fn size_of_impl(&self) -> usize {
         match self {
             Self::Void | Self::ArrayBuilder | Self::UndefinedStruct => 0,
             Self::F32 => 4,
@@ -634,17 +805,18 @@ impl ScriptPodTy {
     /// This is used for shader attribute/uniform layout calculations.
     /// Compact fetch formats report their *logical* f32 component count so
     /// reconstructed shader values stay vec2/vec4.
-    pub fn slots(&self) -> usize {
+    fn slots_impl(&self) -> usize {
         if let Self::Packed(p) = self {
             return p.logical_slots();
         }
         // Each slot is 4 bytes (size of f32)
         // For f16, we round up to 1 slot
-        let size = self.size_of();
+        let size = self.size_of_impl();
         (size + 3) / 4
     }
 }
 
+#[relax_api(plain)]
 #[derive(Default, Debug)]
 pub struct ScriptPodTag(u64);
 
@@ -700,6 +872,7 @@ impl ScriptPodTag {
     }
 }
 
+#[relax_api(handle)]
 #[derive(Default)]
 pub struct ScriptPodData {
     pub tag: ScriptPodTag,
@@ -711,5 +884,103 @@ impl ScriptPodData {
     pub fn clear(&mut self) {
         self.tag.clear();
         self.data.clear();
+    }
+}
+
+#[relax_api(plain)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptPodTyTag { Void, ArrayBuilder, UndefinedStruct, F32, F16, U32, I32, Bool, AtomicU32, AtomicI32, Vec, Mat, Struct, Enum, FixedArray, VariableArray, Packed }
+impl ScriptPodTy {
+    fn kind_impl(&self) -> ScriptPodTyTag {
+        match self {
+            Self::Void => ScriptPodTyTag::Void,
+            Self::ArrayBuilder => ScriptPodTyTag::ArrayBuilder,
+            Self::UndefinedStruct => ScriptPodTyTag::UndefinedStruct,
+            Self::F32 => ScriptPodTyTag::F32,
+            Self::F16 => ScriptPodTyTag::F16,
+            Self::U32 => ScriptPodTyTag::U32,
+            Self::I32 => ScriptPodTyTag::I32,
+            Self::Bool => ScriptPodTyTag::Bool,
+            Self::AtomicU32 => ScriptPodTyTag::AtomicU32,
+            Self::AtomicI32 => ScriptPodTyTag::AtomicI32,
+            Self::Vec(_) => ScriptPodTyTag::Vec,
+            Self::Mat(_) => ScriptPodTyTag::Mat,
+            Self::Struct { .. } => ScriptPodTyTag::Struct,
+            Self::Enum { .. } => ScriptPodTyTag::Enum,
+            Self::FixedArray { .. } => ScriptPodTyTag::FixedArray,
+            Self::VariableArray { .. } => ScriptPodTyTag::VariableArray,
+            Self::Packed(_) => ScriptPodTyTag::Packed,
+        }
+    }
+}
+
+impl ScriptPodTypeData {
+    pub fn new(name: Option<LiveId>, ty: ScriptPodTy) -> Self { Self { name, ty, ..Self::default() } }
+}
+impl ScriptPodTypeInline {
+    pub fn new(self_ref: ScriptPodType, data: ScriptPodTypeData) -> Self { Self { self_ref, data } }
+}
+impl ScriptPodField {
+    pub fn new(name: LiveId, default: ScriptValue, ty: ScriptPodTypeInline) -> Self { Self { name, default, ty } }
+}
+impl ScriptPodEnum { pub fn name(&self) -> LiveId { self.name } }
+impl ScriptPodTy {
+    pub fn vector(v: ScriptPodVec) -> Self { Self::Vec(v) }
+    pub fn matrix(v: ScriptPodMat) -> Self { Self::Mat(v) }
+    pub fn packed_type(v: ScriptPodPacked) -> Self { Self::Packed(v) }
+    pub fn structure(align_of: usize, size_of: usize) -> Self { Self::Struct { align_of, size_of, fields: Vec::new() } }
+    pub fn push_field(&mut self, field: ScriptPodField) {
+        if let Self::Struct { fields, .. } = self { fields.push(field); } else { panic!("expected a struct pod type"); }
+    }
+    pub fn fixed_array(align_of: usize, size_of: usize, len: usize, ty: ScriptPodTypeInline) -> Self { Self::FixedArray { align_of, size_of, len, ty: Box::new(ty) } }
+    pub fn variable_array(align_of: usize, ty: ScriptPodTypeInline) -> Self { Self::VariableArray { align_of, ty: Box::new(ty) } }
+    pub fn enum_variants(&self) -> Option<&[ScriptPodEnum]> { if let Self::Enum { variants, .. } = self { Some(variants) } else { None } }
+    pub fn array_element(&self) -> Option<&ScriptPodTypeInline> { match self { Self::FixedArray { ty, .. } | Self::VariableArray { ty, .. } => Some(ty), _ => None } }
+    pub fn array_len(&self) -> Option<usize> { if let Self::FixedArray { len, .. } = self { Some(*len) } else { None } }
+}
+
+impl ScriptPodEnum {
+    pub fn variant(&self) -> &ScriptPodEnumVariant { &self.variant }
+}
+impl ScriptPodEnumVariant {
+    pub fn tuple_items(&self) -> Option<&[ScriptPodTypeInline]> { if let Self::Tuple { items } = self { Some(items) } else { None } }
+    pub fn named_fields(&self) -> Option<&[ScriptPodField]> { if let Self::Named { fields } = self { Some(fields) } else { None } }
+}
+impl std::fmt::Debug for ScriptPodTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use ScriptPodTyTag::*;
+        match self.kind() {
+            Void => f.write_str("Void"), ArrayBuilder => f.write_str("ArrayBuilder"), UndefinedStruct => f.write_str("UndefinedStruct"),
+            F32 => f.write_str("F32"), F16 => f.write_str("F16"), U32 => f.write_str("U32"), I32 => f.write_str("I32"),
+            Bool => f.write_str("Bool"), AtomicU32 => f.write_str("AtomicU32"), AtomicI32 => f.write_str("AtomicI32"),
+            Vec => f.debug_tuple("Vec").field(&self.as_vec().unwrap()).finish(),
+            Mat => f.debug_tuple("Mat").field(&self.as_mat().unwrap()).finish(),
+            Packed => f.debug_tuple("Packed").field(&self.packed().unwrap()).finish(),
+            Struct => f.debug_struct("Struct").field("align_of", &self.align_of()).field("size_of", &self.size_of()).field("fields", &self.struct_fields().unwrap()).finish(),
+            Enum => f.debug_struct("Enum").field("align_of", &self.align_of()).field("size_of", &self.size_of()).field("variants", &self.enum_variants().unwrap()).finish(),
+            FixedArray => f.debug_struct("FixedArray").field("align_of", &self.align_of()).field("size_of", &self.size_of()).field("len", &self.array_len().unwrap()).field("ty", self.array_element().unwrap()).finish(),
+            VariableArray => f.debug_struct("VariableArray").field("align_of", &self.align_of()).field("ty", self.array_element().unwrap()).finish(),
+        }
+    }
+}
+impl std::fmt::Debug for ScriptPodTypeData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptPodTypeData").field("name", &self.name()).field("object", &self.object()).field("default", &self.default_value()).field("ty", self.ty()).finish()
+    }
+}
+impl std::fmt::Debug for ScriptPodTypeInline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("ScriptPodTypeInline").field("self_ref", &self.self_ref()).field("data", self.data()).finish() }
+}
+impl std::fmt::Debug for ScriptPodField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("ScriptPodField").field("name", &self.name()).field("default", &self.default_value()).field("ty", self.ty()).finish() }
+}
+impl std::fmt::Debug for ScriptPodEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("ScriptPodEnum").field("name", &self.name()).field("variant", self.variant()).finish() }
+}
+impl std::fmt::Debug for ScriptPodEnumVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(items) = self.tuple_items() { f.debug_struct("Tuple").field("items", &items).finish() }
+        else if let Some(fields) = self.named_fields() { f.debug_struct("Named").field("fields", &fields).finish() }
+        else { f.write_str("Bare") }
     }
 }

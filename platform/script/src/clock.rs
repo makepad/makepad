@@ -1,6 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
+use makepad_relax_api::relax_api;
+#[cfg(not(target_arch = "wasm32"))]
 // This native shim implements the script VM's portable monotonic clock.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[relax_api]
 pub(crate) fn monotonic_now() -> f64 {
     use std::sync::OnceLock;
     use std::time::Instant;

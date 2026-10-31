@@ -1,4 +1,3 @@
-use crate::decode::{Decode, DecodeError, Decoder};
 
 /// A size range.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -43,18 +42,3 @@ impl Limits {
     }
 }
 
-impl Decode for Limits {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match decoder.read_byte()? {
-            0x00 => Ok(Limits {
-                min: decoder.decode()?,
-                max: None,
-            }),
-            0x01 => Ok(Limits {
-                min: decoder.decode()?,
-                max: Some(decoder.decode()?),
-            }),
-            _ => Err(DecodeError::new("invalid limits")),
-        }
-    }
-}

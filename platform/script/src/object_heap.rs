@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::apply::Apply;
 use crate::heap::*;
 use crate::makepad_live_id::*;
@@ -8,6 +9,103 @@ use crate::trap::*;
 use crate::value::*;
 use crate::*;
 
+/// An object's header (obj_info): the tag, the prototype, the construction site and the sizes of
+/// its vec and map.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ObjInfo {
+    pub tag: ScriptObjectTag,
+    pub proto: ScriptValue,
+    pub made_at: ScriptIp,
+    pub vec_len: usize,
+    pub map_len: usize,
+}
+
+/// What obj_get answers: the value, and whether an optional lookup found anything.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ObjGot {
+    pub value: ScriptValue,
+    pub found: bool,
+}
+
+/// What obj_iter_at answers: the entry (when `found`) and the object's vec and map sizes.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ObjIterAt {
+    pub key: ScriptValue,
+    pub value: ScriptValue,
+    pub found: bool,
+    pub vec_len: usize,
+    pub map_len: usize,
+}
+
+// obj_get modes
+/// `value`: the key's value along the prototype chain.
+pub const OBJ_GET_VALUE: u32 = 0;
+/// `scope_value`: the key (an id) in a scope chain.
+pub const OBJ_GET_SCOPE: u32 = 1;
+/// `value_for_apply`: map lookup along the chain; `found` false when absent.
+pub const OBJ_GET_APPLY: u32 = 2;
+/// `value_for_apply` for an eval: the object's own map only.
+pub const OBJ_GET_APPLY_EVAL: u32 = 3;
+/// The object's own map value; `found` false when absent.
+pub const OBJ_GET_MAP_OWN: u32 = 4;
+/// The module registered under the key (an id); `obj` unused.
+pub const OBJ_GET_MODULE: u32 = 5;
+/// The root of the module tree (`mod`).
+pub const OBJ_GET_MODULES_ROOT: u32 = 6;
+/// A method of `obj` by name, the prototype chain included.
+pub const OBJ_GET_METHOD: u32 = 7;
+
+// obj_set modes
+pub const OBJ_SET_VALUE: u32 = 0;
+pub const OBJ_SET_VEC: u32 = 1;
+pub const OBJ_SET_MAP_OWN: u32 = 2;
+pub const OBJ_SET_MAP_CONVERTED: u32 = 3;
+pub const OBJ_SET_POKE_SCOPE: u32 = 4;
+pub const OBJ_SET_REBIND_SCOPE: u32 = 5;
+pub const OBJ_SET_VEC_PUSH: u32 = 6;
+pub const OBJ_SET_VEC_PUSH_UNCHECKED: u32 = 7;
+/// `value`: an object whose vector part is appended to `obj`'s.
+pub const OBJ_SET_VEC_PUSH_VEC: u32 = 8;
+/// `value`: an object whose fields are copied into `obj`.
+pub const OBJ_SET_MERGE: u32 = 9;
+/// Write `value` where the name `key` lives: a named child in `obj`'s own vec is replaced in
+/// place, anything else is `set_value`.
+pub const OBJ_SET_SLOT: u32 = 10;
+
+// obj_new modes
+pub const OBJ_NEW: u32 = 0;
+pub const OBJ_NEW_WITH_PROTO: u32 = 1;
+pub const OBJ_NEW_WITH_PROTO_NO_VEC: u32 = 2;
+pub const OBJ_NEW_MODULE: u32 = 3;
+/// A loop's scope: no vec copy, and its proto (the enclosing scope) is NOT tagged REFFED, so the
+/// enclosing call/iteration scope stays eagerly freeable. Escaping the loop scope later
+/// (`ScriptHeap::ref_object_chain`) tags the enclosing scopes then.
+pub const OBJ_NEW_LOOP_SCOPE: u32 = 4;
+
+// obj_mode modes
+pub const OBJ_MODE_FREEZE: u32 = 0;
+pub const OBJ_MODE_FREEZE_COMPONENT: u32 = 1;
+pub const OBJ_MODE_FREEZE_SHADER: u32 = 2;
+pub const OBJ_MODE_FREEZE_EXT: u32 = 3;
+pub const OBJ_MODE_FREEZE_API: u32 = 4;
+pub const OBJ_MODE_STORAGE_VEC2: u32 = 5;
+pub const OBJ_MODE_STORAGE_AUTO: u32 = 6;
+pub const OBJ_MODE_CLEAR_DEEP: u32 = 7;
+pub const OBJ_MODE_APPLY_TRANSFORM: u32 = 8;
+pub const OBJ_MODE_TYPE: u32 = 9;
+pub const OBJ_MODE_STRING_KEYS: u32 = 10;
+pub const OBJ_MODE_SHADER_IO: u32 = 11;
+pub const OBJ_MODE_MADE_AT: u32 = 12;
+pub const OBJ_MODE_REFFED: u32 = 13;
+pub const OBJ_MODE_TYPE_DEFAULT: u32 = 14;
+
+#[relax_api]
 impl ScriptHeap {
     // New objects
 
@@ -30,6 +128,15 @@ impl ScriptHeap {
         key: ScriptValue,
         operation: &'static str,
     ) -> bool {
+        self.heap_charge(HEAP_CHARGE_MAP_ENTRY, ptr, key, 0, operation)
+    }
+
+    pub(crate) fn charge_object_map_entry_impl(
+        &mut self,
+        ptr: ScriptObject,
+        key: ScriptValue,
+        operation: &'static str,
+    ) -> bool {
         if self.is_allocation_poison_object(ptr) {
             return false;
         }
@@ -44,7 +151,67 @@ impl ScriptHeap {
         self.charge_allocation(bytes, operation)
     }
 
-    pub fn new_object(&mut self) -> ScriptObject {
+    /// Insert an already converted Rust-map entry with the same budget charge
+    /// and string-key tag as ScriptApply's map conversion. Collection owners
+    /// can stream entries without exposing their Rust storage to the VM.
+    #[inline]
+    pub fn map_insert_converted(
+        &mut self,
+        object: ScriptObject,
+        key: ScriptValue,
+        value: ScriptValue,
+    ) {
+        self.obj_set(OBJ_SET_MAP_CONVERTED, object, key, value, NoTrap);
+    }
+
+    fn map_insert_converted_impl(
+        &mut self,
+        object: ScriptObject,
+        key: ScriptValue,
+        value: ScriptValue,
+    ) {
+        if self.charge_object_map_entry(object, key, "converting a Rust map to a script object") {
+            self.objects[object].map.insert(key, ScriptMapValue { tag: Default::default(), value });
+        }
+        if key.is_string_like() {
+            self.objects[object].tag.set_string_keys();
+        }
+    }
+
+    /// `charge_object_map_entry` then `map_insert`, with one scan of the map
+    /// for an untracked object: an existing key is updated in place (no
+    /// charge, order kept), an absent one is charged and appended.
+    #[inline]
+    pub(crate) fn bind_map_entry(
+        &mut self,
+        ptr: ScriptObject,
+        key: ScriptValue,
+        value: ScriptValue,
+        operation: &'static str,
+    ) {
+        if self.is_allocation_poison_object(ptr) {
+            return;
+        }
+        let object = &mut self.objects[ptr];
+        if object.tag.is_tracked() {
+            if self.charge_object_map_entry(ptr, key, operation) {
+                self.objects[ptr].map_insert(key, value);
+            }
+            return;
+        }
+        if let Some(existing) = object.map.get_mut(&key) {
+            existing.value = value;
+            return;
+        }
+        let bytes = std::mem::size_of::<(ScriptValue, ScriptMapValue)>()
+            .saturating_add(2 * std::mem::size_of::<usize>());
+        if !self.charge_allocation(bytes, operation) {
+            return;
+        }
+        self.objects[ptr].map_insert_absent_untracked(key, value);
+    }
+
+    fn new_object_impl(&mut self) -> ScriptObject {
         if let Some(obj) = self.objects_free.pop() {
             // obj already has the correct generation from gc.rs sweep
             let object = &mut self.objects[obj];
@@ -71,6 +238,227 @@ impl ScriptHeap {
         }
     }
 
+    // ---- the object core: the ops over the object store. Everything else on objects is ordinary
+    // code over these. Each op dispatches on a mode word to the body the method had; a
+    // constant mode folds away when the op is inlined natively, so the call costs what the
+    // method did.
+
+    /// Header of `obj`: its tag, proto, made_at and the sizes of its vec and map.
+    #[inline]
+    #[relax_api]
+    pub fn obj_info(&self, obj: ScriptObject) -> ObjInfo {
+        let object = &self.objects[obj];
+        ObjInfo {
+            tag: object.tag,
+            proto: object.proto,
+            made_at: object.made_at,
+            vec_len: object.vec.len(),
+            map_len: object.map.len(),
+        }
+    }
+
+    /// Reads from `obj` by `mode` (OBJ_GET_*): `found` is false when an optional lookup missed.
+    #[inline]
+    #[relax_api]
+    pub fn obj_get(&self, mode: u32, obj: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ObjGot {
+        let at = match &trap {
+            ScriptTrap::Inner(inner) => Some(inner.ip),
+            ScriptTrap::NoTrap => None,
+        };
+        let got = self.obj_get_untouched(mode, obj, key, trap);
+        let read = if mode == OBJ_GET_MODULE || mode == OBJ_GET_MODULES_ROOT { self.modules } else { obj };
+        self.touch_read(read, got.value, at);
+        got
+    }
+
+    #[inline(always)]
+    fn obj_get_untouched(&self, mode: u32, obj: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ObjGot {
+        match mode {
+            OBJ_GET_VALUE => ObjGot { value: self.value_impl(obj, key, trap), found: true },
+            OBJ_GET_SCOPE => ObjGot { value: self.scope_value_impl(obj, key, trap), found: true },
+            OBJ_GET_APPLY | OBJ_GET_APPLY_EVAL => {
+                let got = self.value_for_apply_impl(obj, key, mode == OBJ_GET_APPLY_EVAL);
+                ObjGot { value: got.unwrap_or(NIL), found: got.is_some() }
+            }
+            OBJ_GET_MAP_OWN => match {
+                self.touch_obj(obj);
+                self.objects[obj].map.get(&key)
+            } {
+                Some(v) => ObjGot { value: v.value, found: true },
+                None => ObjGot { value: NIL, found: false },
+            },
+            OBJ_GET_MODULE => ObjGot { value: self.value_impl(self.modules, key, NoTrap), found: true },
+            OBJ_GET_MODULES_ROOT => ObjGot { value: self.modules.into(), found: true },
+            OBJ_GET_METHOD => ObjGot { value: self.value_deep_map(obj, key, trap), found: true },
+            _ => unreachable!("obj_get mode"),
+        }
+    }
+
+    /// Writes to `obj` by `mode` (OBJ_SET_*). The result is the mode's: an error value or NIL, or
+    /// a bool for the poke and rebind modes.
+    #[inline]
+    #[relax_api]
+    pub fn obj_set(&mut self, mode: u32, obj: ScriptObject, key: ScriptValue, value: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        match mode {
+            OBJ_SET_VALUE => self.set_value_impl(obj, key, value, trap),
+            OBJ_SET_VEC => self.set_value_vec_impl(obj, key, value, trap),
+            OBJ_SET_SLOT => self.set_value_slot_impl(obj, key, value, trap),
+            OBJ_SET_MAP_OWN => {
+                self.objects[obj].map.insert(key, ScriptMapValue { tag: Default::default(), value });
+                NIL
+            }
+            OBJ_SET_MAP_CONVERTED => {
+                self.map_insert_converted_impl(obj, key, value);
+                NIL
+            }
+            OBJ_SET_POKE_SCOPE => ScriptValue::from_bool(self.poke_scope_value_impl(obj, key, value)),
+            OBJ_SET_REBIND_SCOPE => ScriptValue::from_bool(self.rebind_scope_value_impl(obj, key, value)),
+            OBJ_SET_VEC_PUSH => self.vec_push_impl(obj, key, value, trap),
+            OBJ_SET_VEC_PUSH_VEC => self.vec_push_vec_impl(obj, value.as_object().expect("vec_push_vec of an object"), trap),
+            OBJ_SET_MERGE => self.merge_object_impl(obj, value.as_object().expect("merge_object of an object"), trap),
+            OBJ_SET_VEC_PUSH_UNCHECKED => {
+                self.vec_push_unchecked_impl(obj, key, value);
+                NIL
+            }
+            _ => unreachable!("obj_set mode"),
+        }
+    }
+
+    /// The `index`-th entry of `obj` across its vec then its map (a `for k, v in obj` step).
+    #[inline]
+    #[relax_api]
+    pub fn obj_iter_at(&self, obj: ScriptObject, index: usize) -> ObjIterAt {
+        self.touch_obj(obj);
+        let object = &self.objects[obj];
+        let vec_len = object.vec.len();
+        if index < vec_len {
+            let kv = object.vec[index];
+            return ObjIterAt { key: kv.key, value: kv.value, found: true, vec_len, map_len: object.map.len() };
+        }
+        match object.map.iter().nth(index - vec_len) {
+            Some((key, map_val)) => ObjIterAt { key: *key, value: map_val.value, found: true, vec_len, map_len: object.map.len() },
+            None => ObjIterAt { key: NIL, value: NIL, found: false, vec_len, map_len: object.map.len() },
+        }
+    }
+
+    /// A new object by `mode` (OBJ_NEW*). `proto` is the prototype, or for OBJ_NEW_MODULE the
+    /// module's name as an id value.
+    #[inline]
+    #[relax_api]
+    pub fn obj_new(&mut self, mode: u32, proto: ScriptValue) -> ScriptObject {
+        match mode {
+            OBJ_NEW => self.new_object_impl(),
+            OBJ_NEW_WITH_PROTO => self.new_with_proto_impl(proto, true, true),
+            OBJ_NEW_WITH_PROTO_NO_VEC => self.new_with_proto_impl(proto, false, true),
+            OBJ_NEW_LOOP_SCOPE => self.new_with_proto_impl(proto, false, false),
+            OBJ_NEW_MODULE => {
+                let md = self.new_with_proto_impl(proto, true, true);
+                self.set_value_impl(self.modules, proto, md.into(), NoTrap);
+                md
+            }
+            _ => unreachable!("obj_new mode"),
+        }
+    }
+
+    /// Changes the tag or header of `obj` by `mode` (OBJ_MODE_*); `arg` is the mode's operand.
+    /// OBJ_MODE_TYPE_DEFAULT answers whether `obj` has a type (1) to be the default of.
+    #[inline]
+    #[relax_api]
+    pub fn obj_mode(&mut self, obj: ScriptObject, mode: u32, arg: u64) -> u64 {
+        let object = &mut self.objects[obj];
+        match mode {
+            OBJ_MODE_FREEZE => object.tag.freeze(),
+            OBJ_MODE_FREEZE_COMPONENT => object.tag.freeze_component(),
+            OBJ_MODE_FREEZE_SHADER => object.tag.freeze_shader(),
+            OBJ_MODE_FREEZE_EXT => object.tag.freeze_ext(),
+            OBJ_MODE_FREEZE_API => object.tag.freeze_api(),
+            OBJ_MODE_STORAGE_VEC2 => object.tag.set_vec2(),
+            OBJ_MODE_STORAGE_AUTO => object.tag.set_auto(),
+            OBJ_MODE_CLEAR_DEEP => object.tag.clear_deep(),
+            OBJ_MODE_APPLY_TRANSFORM => object.tag.set_apply_transform(NativeId { index: arg as u32 }),
+            OBJ_MODE_TYPE => object.tag.set_type_index(ScriptTypeIndex(arg as u32)),
+            OBJ_MODE_STRING_KEYS => object.tag.set_string_keys(),
+            OBJ_MODE_SHADER_IO => object.tag.set_shader_io(ShaderIoType(arg as u32)),
+            OBJ_MODE_MADE_AT => object.made_at = ScriptIp { body: (arg >> 32) as u16, index: arg as u32 },
+            OBJ_MODE_REFFED => {
+                self.ref_object_chain(obj);
+                return 0;
+            }
+            OBJ_MODE_TYPE_DEFAULT => {
+                if let Some(ty_index) = object.tag.as_type_index() {
+                    // Add to type_defaults mapping (GC will scan this table)
+                    self.type_defaults.insert(ty_index, obj);
+                    return 1;
+                }
+                return 0;
+            }
+            _ => unreachable!("obj_mode mode"),
+        }
+        0
+    }
+
+    /// The root of the module tree (`mod`).
+    #[inline]
+    pub fn modules_root(&self) -> ScriptObject {
+        self.obj_get(OBJ_GET_MODULES_ROOT, ScriptObject::ZERO, NIL, NoTrap).value.into()
+    }
+
+    #[inline]
+    pub fn module(&self, id: LiveId) -> ScriptObject {
+        self.obj_get(OBJ_GET_MODULE, ScriptObject::ZERO, id.into(), NoTrap).value.into()
+    }
+
+    #[inline]
+    pub fn new_module(&mut self, id: LiveId) -> ScriptObject {
+        self.obj_new(OBJ_NEW_MODULE, id.into())
+    }
+
+    #[inline]
+    pub fn value(&self, ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        self.obj_get(OBJ_GET_VALUE, ptr, key, trap).value
+    }
+
+    #[inline]
+    pub fn scope_value(&self, ptr: ScriptObject, key: LiveId, trap: ScriptTrap) -> ScriptValue {
+        self.obj_get(OBJ_GET_SCOPE, ptr, key.into(), trap).value
+    }
+
+    #[inline]
+    pub fn value_for_apply(&mut self, obj: ScriptValue, key: ScriptValue, apply: &Apply) -> Option<ScriptValue> {
+        let ptr = obj.as_object()?;
+        let mode = if apply.is_eval() { OBJ_GET_APPLY_EVAL } else { OBJ_GET_APPLY };
+        let got = self.obj_get(mode, ptr, key, NoTrap);
+        got.found.then_some(got.value)
+    }
+
+    #[inline]
+    pub fn set_value(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        self.obj_set(OBJ_SET_VALUE, ptr, key, value, trap)
+    }
+
+    #[inline]
+    pub fn set_value_vec(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        self.obj_set(OBJ_SET_VEC, ptr, key, value, trap)
+    }
+
+    /// Replace the value an existing binding holds, found as
+    /// [`Self::set_scope_value`] finds it, even in a frozen object: a host
+    /// editing the running code's values in place (an editor dragging a
+    /// constant). Whether the binding was found.
+    #[inline]
+    pub fn poke_scope_value(&mut self, ptr: ScriptObject, key: LiveId, value: ScriptValue) -> bool {
+        self.obj_set(OBJ_SET_POKE_SCOPE, ptr, key.into(), value, NoTrap).as_bool().unwrap_or(false)
+    }
+
+    /// The host rebinding `key` where a scope chain from `ptr` binds it (the
+    /// nearest scope that has it), past a frozen document: what a script
+    /// cannot do, a host does between runs (a value it recomputes per frame).
+    /// False when no scope in the chain binds `key`.
+    #[inline]
+    pub fn rebind_scope_value(&mut self, ptr: ScriptObject, key: LiveId, value: ScriptValue) -> bool {
+        self.obj_set(OBJ_SET_REBIND_SCOPE, ptr, key.into(), value, NoTrap).as_bool().unwrap_or(false)
+    }
+
     pub fn new_with_proto_checked(&mut self, proto: ScriptValue, trap: ScriptTrap) -> ScriptObject {
         if let Some(ptr) = proto.as_object() {
             let object = &mut self.objects[ptr];
@@ -82,25 +470,40 @@ impl ScriptHeap {
         self.new_with_proto(proto)
     }
 
-    pub fn new_with_proto(&mut self, proto: ScriptValue) -> ScriptObject {
-        self.new_with_proto_impl(proto, true)
+    #[inline]
+    pub fn new_object(&mut self) -> ScriptObject {
+        self.obj_new(OBJ_NEW, NIL)
     }
 
+    #[inline]
+    pub fn new_with_proto(&mut self, proto: ScriptValue) -> ScriptObject {
+        self.obj_new(OBJ_NEW_WITH_PROTO, proto)
+    }
+
+    #[inline]
     pub fn new_with_proto_no_vec(&mut self, proto: ScriptValue) -> ScriptObject {
-        self.new_with_proto_impl(proto, false)
+        self.obj_new(OBJ_NEW_WITH_PROTO_NO_VEC, proto)
+    }
+
+    /// A loop iteration scope under `parent` (see [`OBJ_NEW_LOOP_SCOPE`]).
+    #[inline]
+    pub fn new_loop_scope(&mut self, parent: ScriptObject) -> ScriptObject {
+        self.obj_new(OBJ_NEW_LOOP_SCOPE, parent.into())
     }
 
     fn new_with_proto_impl(
         &mut self,
         proto: ScriptValue,
         copy_vec_from_auto_proto: bool,
+        ref_proto: bool,
     ) -> ScriptObject {
         let (proto_fwd, proto_ptr) = if let Some(ptr) = proto.as_object() {
+            self.touch_obj(ptr);
             // Use checked access via ScriptObject. Do not mutate the
             // prototype until all script-controlled growth is preflighted.
             (self.objects[ptr].tag.proto_fwd(), ptr)
         } else {
-            let ptr = self.new_object();
+            let ptr = self.new_object_impl();
             if self.is_allocation_poison_object(ptr) {
                 return ptr;
             }
@@ -127,7 +530,9 @@ impl ScriptHeap {
         ) {
             return self.allocation_poison_object;
         }
-        self.objects[proto_ptr].tag.set_reffed();
+        if ref_proto {
+            self.ref_object_chain(proto_ptr);
+        }
 
         if let Some(obj) = self.objects_free.pop() {
             // obj already has the correct generation from gc.rs sweep
@@ -170,16 +575,19 @@ impl ScriptHeap {
     /// Record the ip of the BEGIN opcode that constructed this object.
     /// Set by handle_begin_proto / handle_begin_bare; stays
     /// ScriptIp::UNKNOWN for Rust-built objects.
+    #[inline]
     pub fn set_made_at(&mut self, ptr: ScriptObject, ip: ScriptIp) {
-        self.objects[ptr].made_at = ip;
+        self.obj_mode(ptr, OBJ_MODE_MADE_AT, ((ip.body as u64) << 32) | ip.index as u64);
     }
 
     /// The construction-site ip of this object (ScriptIp::UNKNOWN if it
     /// was not built by a script object literal).
+    #[inline]
     pub fn made_at(&self, ptr: ScriptObject) -> ScriptIp {
-        self.objects[ptr].made_at
+        self.obj_info(ptr).made_at
     }
 
+    #[inline]
     pub fn new_if_reffed(&mut self, ptr: ScriptObject) -> ScriptObject {
         let obj = &self.objects[ptr];
         if obj.tag.is_reffed() {
@@ -191,87 +599,104 @@ impl ScriptHeap {
 
     // Object flagv
 
+    #[inline]
     pub fn set_object_deep(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_deep()
     }
 
+    #[inline]
     pub fn set_object_storage_vec2(&mut self, ptr: ScriptObject) {
-        self.objects[ptr].tag.set_vec2()
+        self.obj_mode(ptr, OBJ_MODE_STORAGE_VEC2, 0);
     }
 
+    #[inline]
     pub fn set_object_storage_auto(&mut self, ptr: ScriptObject) {
-        self.objects[ptr].tag.set_auto()
+        self.obj_mode(ptr, OBJ_MODE_STORAGE_AUTO, 0);
     }
 
+    #[inline]
     pub fn set_object_pod_type(&mut self, ptr: ScriptObject, pt: ScriptPodType) {
         self.objects[ptr].tag.set_pod_type(pt)
     }
 
+    #[inline]
     pub fn set_first_applied_and_clean(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_first_applied_and_clean()
     }
 
+    #[inline]
     pub fn clear_object_deep(&mut self, ptr: ScriptObject) {
-        self.objects[ptr].tag.clear_deep()
+        self.obj_mode(ptr, OBJ_MODE_CLEAR_DEEP, 0);
     }
 
+    #[inline]
     pub fn freeze(&mut self, ptr: ScriptObject) {
-        self.objects[ptr].tag.freeze()
+        self.obj_mode(ptr, OBJ_MODE_FREEZE, 0);
     }
 
+    #[inline]
     pub fn set_notproto(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_notproto()
     }
 
+    #[inline]
     pub fn set_from_eval(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_from_eval()
     }
 
+    #[inline]
     pub fn is_from_eval(&self, ptr: ScriptObject) -> bool {
         self.objects[ptr].tag.is_from_eval()
     }
 
+    #[inline]
     pub fn freeze_module(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.freeze_module()
     }
 
+    #[inline]
     pub fn freeze_component(&mut self, ptr: ScriptObject) {
-        self.objects[ptr].tag.freeze_component()
+        self.obj_mode(ptr, OBJ_MODE_FREEZE_COMPONENT, 0);
     }
 
+    #[inline]
     pub fn freeze_shader(&mut self, ptr: ScriptObject) {
-        self.objects[ptr].tag.freeze_shader()
+        self.obj_mode(ptr, OBJ_MODE_FREEZE_SHADER, 0);
     }
 
+    #[inline]
     pub fn freeze_ext(&mut self, ptr: ScriptObject) {
-        self.objects[ptr].tag.freeze_ext()
+        self.obj_mode(ptr, OBJ_MODE_FREEZE_EXT, 0);
     }
 
+    #[inline]
     pub fn freeze_api(&mut self, ptr: ScriptObject) {
-        self.objects[ptr].tag.freeze_api()
+        self.obj_mode(ptr, OBJ_MODE_FREEZE_API, 0);
     }
 
+    #[inline]
     pub fn set_object_apply_transform(&mut self, ptr: ScriptObject, ni: NativeId) {
-        self.objects[ptr].tag.set_apply_transform(ni)
+        self.obj_mode(ptr, OBJ_MODE_APPLY_TRANSFORM, ni.index as u64);
     }
 
+    #[inline]
     pub fn set_type(&mut self, obj: ScriptObject, ty: ScriptTypeIndex) {
-        self.objects[obj].tag.set_type_index(ty);
+        self.obj_mode(obj, OBJ_MODE_TYPE, ty.0 as u64);
     }
 
+    #[inline]
     pub fn set_string_keys(&mut self, obj: ScriptObject) {
-        let object = &mut self.objects[obj];
-        object.tag.set_string_keys();
+        self.obj_mode(obj, OBJ_MODE_STRING_KEYS, 0);
     }
 
+    #[inline]
     pub fn set_shader_io(&mut self, obj: ScriptObject, io: ShaderIoType) {
-        let object = &mut self.objects[obj];
-        object.tag.set_shader_io(io);
+        self.obj_mode(obj, OBJ_MODE_SHADER_IO, io.0 as u64);
     }
 
+    #[inline]
     pub fn as_shader_io(&self, obj: ScriptObject) -> Option<ShaderIoType> {
-        let object = &self.objects[obj];
-        object.tag.as_shader_io()
+        self.obj_info(obj).tag.as_shader_io()
     }
 
     // Writing object values
@@ -321,7 +746,27 @@ impl ScriptHeap {
         return NIL;
     }
 
-    pub fn set_value_vec(
+    fn set_value_slot_impl(
+        &mut self,
+        ptr: ScriptObject,
+        key: ScriptValue,
+        value: ScriptValue,
+        trap: ScriptTrap,
+    ) -> ScriptValue {
+        // an instance holds its own copy of the template's vec, so its own vec is where a
+        // named child lives; a typed object's set_value routes a proto's vec child itself
+        if self.objects[ptr].vec.iter().any(|kv| kv.key == key) {
+            return self.set_value_vec_impl(ptr, key, value, trap);
+        }
+        self.set_value_impl(ptr, key, value, trap)
+    }
+
+    #[inline]
+    pub fn set_value_slot(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        self.obj_set(OBJ_SET_SLOT, ptr, key, value, trap)
+    }
+
+    fn set_value_vec_impl(
         &mut self,
         ptr: ScriptObject,
         key: ScriptValue,
@@ -403,6 +848,7 @@ impl ScriptHeap {
         NIL
     }
 
+    #[inline]
     fn validate_type(&self, lhs: ScriptValue, rhs: ScriptValue) -> bool {
         lhs.value_type().to_redux() == rhs.value_type().to_redux()
     }
@@ -470,12 +916,19 @@ impl ScriptHeap {
                     }
                 }
                 if found_in_vec {
-                    return self.set_value_vec(top_ptr, key, value, trap);
+                    return self.set_value_vec_impl(top_ptr, key, value, trap);
                 }
+                let type_name = check
+                    .object
+                    .as_ref()
+                    .and_then(|o| o.name)
+                    .and_then(|name| name.as_string(|s| s.map(|s| format!(" {s}"))))
+                    .unwrap_or_default();
                 return script_err_not_found!(
                     trap,
-                    "property {:?} not defined on type{}",
+                    "property {:?} not defined on type{}{}",
                     key_id,
+                    type_name,
                     suggest_property(self, top_ptr, key)
                 );
             }
@@ -523,7 +976,7 @@ impl ScriptHeap {
                 if !object.tag.is_vec2() {
                     for kv in object.vec.iter().rev() {
                         if kv.key == key {
-                            return self.set_value_vec(top_ptr, key, value, trap);
+                            return self.set_value_vec_impl(top_ptr, key, value, trap);
                         }
                     }
                 }
@@ -603,11 +1056,33 @@ impl ScriptHeap {
         NIL
     }
 
+    /// A loop variable bound into its iteration scope: `set_value_def`,
+    /// with the plain-scope case (an id key into an untracked map-storage
+    /// object with no type checks) taken without set_value's dispatch.
+    #[inline]
+    pub(crate) fn set_loop_binding(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
+        let tag = &self.objects[ptr].tag;
+        if key.as_id().is_none()
+            || key.is_escaped_id()
+            || tag.is_deep()
+            || tag.needs_checking()
+            || tag.is_string_keys()
+            || tag.is_vec2()
+            || tag.is_immutable()
+        {
+            self.set_value_def(ptr, key, value);
+            return;
+        }
+        self.escape_value(value);
+        self.bind_map_entry(ptr, key, value, "adding an object property");
+    }
+
+    #[inline]
     pub fn set_value_def(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
         self.set_value(ptr, key, value, NoTrap);
     }
 
-    pub fn set_value(
+    fn set_value_impl(
         &mut self,
         ptr: ScriptObject,
         key: ScriptValue,
@@ -615,6 +1090,7 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         self.escape_value(value);
+        let key = key.unescape_id();
         if let Some(key_id) = key.as_id() {
             let object = &self.objects[ptr];
             if !object.tag.is_deep() {
@@ -700,11 +1176,224 @@ impl ScriptHeap {
         )
     }
 
-    pub fn scope_value(&self, ptr: ScriptObject, key: LiveId, trap: ScriptTrap) -> ScriptValue {
+    fn poke_scope_value_impl(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) -> bool {
+        self.escape_value(value);
+        let mut ptr = ptr;
+        loop {
+            let object = &mut self.objects[ptr];
+            if let Some(set) = object.map.get_mut(&key) {
+                set.value = value;
+                return true;
+            }
+            match object.proto.as_object() {
+                Some(next) => ptr = next,
+                None => return false,
+            }
+        }
+    }
+
+    /// The construction sites (`Self::made_at`) in code body `body` that
+    /// live objects were built at, each once, in order.
+    #[inline(always)]
+    pub fn made_at_sites(&self, body: u16) -> Vec<ScriptIp> {
+        let mut out = Vec::new();
+        self.made_at_sites_into(body, &mut ScriptIpsOut::new(&mut out));
+        out
+    }
+    #[relax_api]
+    pub fn made_at_sites_into(&self, body: u16, sink: &mut ScriptIpsOut) {
+        let mut out: Vec<ScriptIp> = (0..self.objects.len())
+            .map(|i| self.objects.get_at(i))
+            .filter(|o| o.tag.is_alloced() && !o.made_at.is_unknown() && o.made_at.body == body)
+            .map(|o| o.made_at)
+            .collect();
+        out.sort();
+        out.dedup();
+        for ip in &out { sink.push(ip); }
+    }
+
+    /// Set own field `key` to `value`, in place (even in a frozen object),
+    /// in every live object built at `made_at` whose field holds `was` now:
+    /// a host editing the running code's literals (an editor's drag on a
+    /// record's field written as a literal), where the records that literal
+    /// built already exist. A field that holds something else (set again
+    /// since) is left. How many changed.
+    #[relax_api]
+    pub fn poke_made_at_field(&mut self, made_at: ScriptIp, key: LiveId, was: ScriptValue, value: ScriptValue) -> usize {
+        self.escape_value(value);
+        let key: ScriptValue = key.into();
+        let mut changed = 0;
+        for i in 0..self.objects.len() {
+            let object = self.objects.get_at_mut(i);
+            if !object.tag.is_alloced() || object.made_at != made_at {
+                continue;
+            }
+            if let Some(set) = object.map.get_mut(&key) {
+                if set.value == was {
+                    set.value = value;
+                    changed += 1;
+                }
+                continue;
+            }
+            for kv in object.vec.iter_mut() {
+                if kv.key == key && kv.value == was {
+                    kv.value = value;
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Every field, entry and list item that holds `was` now: where a value
+    /// was copied as data (`{sung: BONE}` holds BONE's colour, not BONE),
+    /// for a host to set in place with [`Self::set_places`] (a running
+    /// document recoloured as a colour is dragged, without a load). Plain
+    /// values compare by their bits.
+    #[inline(always)]
+    pub fn places_holding(&self, was: ScriptValue) -> Vec<ScriptValuePlace> {
+        let mut out = Vec::new();
+        self.places_holding_into(was, &mut ScriptPlacesOut::new(&mut out));
+        out
+    }
+    #[relax_api]
+    pub fn places_holding_into(&self, was: ScriptValue, out: &mut ScriptPlacesOut) {
+        for i in 0..self.objects.len() {
+            let object = self.objects.get_at(i);
+            if !object.tag.is_alloced() {
+                continue;
+            }
+            for (key, set) in object.map.iter() {
+                if set.value == was {
+                    out.push(&ScriptValuePlace::Field { object: i, made_at: object.made_at, key: *key });
+                }
+            }
+            for (slot, kv) in object.vec.iter().enumerate() {
+                if kv.value == was {
+                    out.push(&ScriptValuePlace::Entry { object: i, made_at: object.made_at, slot });
+                }
+            }
+        }
+        for i in 0..self.arrays.len() {
+            let array = self.arrays.get_at(i);
+            if !array.tag.is_alloced() {
+                continue;
+            }
+            if let crate::array::ScriptArrayStorage::ScriptValue(items) = &array.storage {
+                for (slot, item) in items.iter().enumerate() {
+                    if *item == was {
+                        out.push(&ScriptValuePlace::Item { array: i, slot });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set each of `places` ([`Self::places_holding`]) that still holds
+    /// `was` (and is still the object built where it was) to `value`, in
+    /// place, frozen objects too. A place that holds something else now
+    /// (set again, or its slot reused) is left. How many changed.
+    #[relax_api]
+    pub fn set_places(&mut self, places: &[ScriptValuePlace], was: ScriptValue, value: ScriptValue) -> usize {
+        self.escape_value(value);
+        let mut changed = 0;
+        for place in places {
+            match place {
+                ScriptValuePlace::Field { object, made_at, key } => {
+                    if *object >= self.objects.len() {
+                        continue;
+                    }
+                    let o = self.objects.get_at_mut(*object);
+                    if !o.tag.is_alloced() || o.made_at != *made_at {
+                        continue;
+                    }
+                    if let Some(set) = o.map.get_mut(key) {
+                        if set.value == was {
+                            set.value = value;
+                            changed += 1;
+                        }
+                    }
+                }
+                ScriptValuePlace::Entry { object, made_at, slot } => {
+                    if *object >= self.objects.len() {
+                        continue;
+                    }
+                    let o = self.objects.get_at_mut(*object);
+                    if !o.tag.is_alloced() || o.made_at != *made_at {
+                        continue;
+                    }
+                    if let Some(kv) = o.vec.get_mut(*slot) {
+                        if kv.value == was {
+                            kv.value = value;
+                            changed += 1;
+                        }
+                    }
+                }
+                ScriptValuePlace::Item { array, slot } => {
+                    if *array >= self.arrays.len() {
+                        continue;
+                    }
+                    let a = self.arrays.get_at_mut(*array);
+                    if !a.tag.is_alloced() {
+                        continue;
+                    }
+                    if let crate::array::ScriptArrayStorage::ScriptValue(items) = &mut a.storage {
+                        if let Some(item) = items.get_mut(*slot) {
+                            if *item == was {
+                                *item = value;
+                                changed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// A name's value as seen from scope `ptr`, or `None` when no scope in
+    /// its chain has it (no error raised).
+    pub fn scope_value_opt(&self, ptr: ScriptObject, key: LiveId) -> Option<ScriptValue> {
+        let mut ptr = ptr;
+        let key_sv: ScriptValue = key.into();
+        loop {
+            let object = &self.objects[ptr];
+            if let Some(set) = object.map.get(&key_sv) {
+                return Some(set.value);
+            }
+            if object.tag.is_vec2() {
+                for kv in object.vec.iter().rev() {
+                    if kv.key == key_sv {
+                        return Some(kv.value);
+                    }
+                }
+            }
+            ptr = object.proto.as_object()?;
+        }
+    }
+
+    fn rebind_scope_value_impl(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) -> bool {
+        self.escape_value(value);
+        let mut ptr = ptr;
+        loop {
+            let object = &mut self.objects[ptr];
+            if let Some(set) = object.map.get_mut(&key) {
+                set.value = value;
+                return true;
+            }
+            match object.proto.as_object() {
+                Some(next) => ptr = next,
+                None => return false,
+            }
+        }
+    }
+
+    fn scope_value_impl(&self, ptr: ScriptObject, key_sv: ScriptValue, trap: ScriptTrap) -> ScriptValue {
         let root_ptr = ptr;
         let mut ptr = ptr;
-        let key_sv = key.into();
+        let key = key_sv.as_id().unwrap_or_default();
         loop {
+            self.touch_obj(ptr);
             let object = &self.objects[ptr];
             if let Some(set) = object.map.get(&key_sv) {
                 return set.value;
@@ -722,13 +1411,55 @@ impl ScriptHeap {
                 break;
             }
         }
-        // alright nothing found
+        self.scope_value_not_found(root_ptr, key, trap)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scope_value_not_found(&self, root_ptr: ScriptObject, key: LiveId, trap: ScriptTrap) -> ScriptValue {
         script_err_not_found!(
             trap,
-            "variable {} not found in scope{}",
+            "variable {} not found in scope{}{}",
             key,
-            suggest_scope_var(self, root_ptr, key)
+            suggest_scope_var(self, root_ptr, key),
+            self.import_hint(key)
         )
+    }
+
+    /// Where a name that is not in scope lives among the system modules, as the `use` to add:
+    /// a document's domain brings some modules in by default, any other one is a `use` away.
+    /// Guidance only (an error path): it walks `mod` and one level below it.
+    #[cold]
+    pub fn import_hint(&self, key: LiveId) -> String {
+        let key_value: ScriptValue = key.into();
+        let modules = &self.objects[self.modules];
+        let mut found = Vec::new();
+        for (name, entry) in modules.map.iter() {
+            let (Some(name), Some(module)) = (name.as_id(), entry.value.as_object()) else { continue };
+            if !self.objects.is_valid(module) {
+                continue;
+            }
+            let module_data = &self.objects[module];
+            if module_data.map_get(&key_value).is_some() {
+                found.push(format!("`use mod.{name}.{key}`"));
+                continue;
+            }
+            for (sub, sub_entry) in module_data.map.iter() {
+                let (Some(sub), Some(sub_obj)) = (sub.as_id(), sub_entry.value.as_object()) else { continue };
+                if self.objects.is_valid(sub_obj) && self.objects[sub_obj].map_get(&key_value).is_some() {
+                    found.push(format!("`use mod.{name}.{sub}.*`"));
+                }
+            }
+            if found.len() >= 3 {
+                break;
+            }
+        }
+        if found.is_empty() {
+            String::new()
+        } else {
+            let domain = self.lazy.domain.map_or(String::new(), |d| format!(" ({} get {} by default; anything else is a `use` away)", d.what, if d.default_uses.is_empty() { "no `use` lines".to_string() } else { d.default_uses.join(", ") }));
+            format!(". It is a system module's: import it with {}{domain}", found.join(" or "))
+        }
     }
 
     /// Single chain-walk locate for compound scope assignment (`x += v`).
@@ -828,6 +1559,7 @@ impl ScriptHeap {
     // Reading object values
 
     fn value_index(&self, ptr: ScriptObject, index: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        self.touch_obj(ptr);
         let object = &self.objects[ptr];
         // most used path
         let index = index.as_index();
@@ -850,6 +1582,7 @@ impl ScriptHeap {
     ) -> ScriptValue {
         let mut ptr = obj_ptr;
         loop {
+            self.touch_obj(ptr);
             let object = &self.objects[ptr];
             if let Some(value) = object.map_get(&key) {
                 return value;
@@ -859,6 +1592,9 @@ impl ScriptHeap {
             } else {
                 break;
             }
+        }
+        if self.lazy.miss(obj_ptr, self.modules, key) {
+            return NIL;
         }
         script_err_not_found!(
             trap,
@@ -871,6 +1607,7 @@ impl ScriptHeap {
     fn value_deep(&self, obj_ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
         let mut ptr = obj_ptr;
         loop {
+            self.touch_obj(ptr);
             let object = &self.objects[ptr];
             if let Some(value) = object.map_get(&key) {
                 return value;
@@ -932,6 +1669,17 @@ impl ScriptHeap {
                 break;
             }
         }
+        if self.lazy.miss(obj_ptr, self.modules, key) {
+            return NIL;
+        }
+        if self.objects[obj_ptr].tag.is_api() {
+            return script_err_not_found!(
+                trap,
+                "no field `{}`{}",
+                key.as_id().and_then(|id| id.as_string(|s| s.map(|s| s.to_string()))).unwrap_or_else(|| format!("{:?}", key)),
+                api_own_keys(self, obj_ptr)
+            );
+        }
         script_err_not_found!(
             trap,
             "property {:?} not found in prototype chain{}",
@@ -940,13 +1688,14 @@ impl ScriptHeap {
         )
     }
 
+    #[inline]
     pub fn object_method(
         &self,
         ptr: ScriptObject,
         key: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        return self.value_deep_map(ptr, key, trap);
+        self.obj_get(OBJ_GET_METHOD, ptr, key, trap).value
     }
 
     pub fn value_path(&self, ptr: ScriptObject, keys: &[LiveId], trap: ScriptTrap) -> ScriptValue {
@@ -966,7 +1715,8 @@ impl ScriptHeap {
         value
     }
 
-    pub fn value(&self, ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+    fn value_impl(&self, ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        let key = key.unescape_id();
         if key.is_id() {
             return self.value_deep(ptr, key, trap);
         }
@@ -1007,9 +1757,8 @@ impl ScriptHeap {
         }
         script_err_not_found!(
             trap,
-            "field {:?} not found in type-check and has no default{}",
-            field_id,
-            suggest_scope_var(self, obj, field_id)
+            "{}",
+            slot_not_found_message(self, obj, field_id)
         )
     }
 
@@ -1056,8 +1805,8 @@ impl ScriptHeap {
             // Create a new object with the prototype value as its proto
             // Note: new_with_proto automatically copies type_index from prototype chain
             let new_obj = self.new_with_proto(value_obj.into());
-            // Set it on the current object
-            self.set_value(obj, field, new_obj.into(), trap);
+            // Set it on the current object, where the name lives (a named child keeps its vec position)
+            self.set_value_slot(obj, field, new_obj.into(), trap);
             return new_obj.into();
         }
 
@@ -1065,72 +1814,193 @@ impl ScriptHeap {
         value
     }
 
-    pub fn value_for_apply(
-        &mut self,
-        obj: ScriptValue,
+    /// The fields of one derived struct apply, resolved in one pass: `obj`'s own map, then (not
+    /// for `eval_only`) each prototype in turn, each object visited once. `fields` is sorted by id,
+    /// `.1` the slot in `out` (declaration order). A field takes the first value found along the
+    /// chain (value_for_apply's precedence); a field found nowhere keeps `ScriptValue::NOT_FOUND`,
+    /// which every slot starts as. A map with more entries than fields still open is probed by id
+    /// instead of walked, so a small apply block on a big struct walks the block.
+    pub fn resolve_fields(&self, obj: ScriptValue, eval_only: bool, fields: &[(LiveId, u32)], out: &mut [ScriptValue]) {
+        for v in out.iter_mut() {
+            *v = ScriptValue::NOT_FOUND;
+        }
+        let Some(mut ptr) = obj.as_object() else { return };
+        let mut open = fields.len();
+        loop {
+            self.touch_obj(ptr);
+            let object = &self.objects[ptr];
+            if object.map.len() <= open {
+                for (key, entry) in object.map.iter() {
+                    let Some(id) = key.as_id() else { continue };
+                    if let Ok(i) = fields.binary_search_by(|f| f.0.cmp(&id)) {
+                        let slot = &mut out[fields[i].1 as usize];
+                        if *slot == ScriptValue::NOT_FOUND && ScriptValue::from_id(id) == *key {
+                            *slot = entry.value;
+                            open -= 1;
+                        }
+                    }
+                }
+            } else {
+                for (id, slot) in fields {
+                    let slot = &mut out[*slot as usize];
+                    if *slot == ScriptValue::NOT_FOUND {
+                        if let Some(v) = object.map_get(&ScriptValue::from_id(*id)) {
+                            *slot = v;
+                            open -= 1;
+                        }
+                    }
+                }
+            }
+            if open == 0 || eval_only {
+                return;
+            }
+            match object.proto.as_object() {
+                Some(next) => ptr = next,
+                None => return,
+            }
+        }
+    }
+
+    fn value_for_apply_impl(
+        &self,
+        ptr: ScriptObject,
         key: ScriptValue,
-        apply: &Apply,
+        eval: bool,
     ) -> Option<ScriptValue> {
-        if let Some(ptr) = obj.as_object() {
-            // only do top level if dirty
-            let object = &mut self.objects[ptr];
+        // only do top level if dirty
+        self.touch_obj(ptr);
+        let object = &self.objects[ptr];
+        if let Some(value) = object.map_get(&key) {
+            return Some(value);
+        }
+        // For eval, only check the object's own map (no prototype chain)
+        if eval {
+            return None;
+        }
+        // if we havent been applied before apply prototype chain too
+        let mut ptr = object.proto.as_object()?;
+        loop {
+            self.touch_obj(ptr);
+            let object = &self.objects[ptr];
             if let Some(value) = object.map_get(&key) {
                 return Some(value);
             }
-            // For eval, only check the object's own map (no prototype chain)
-            if apply.is_eval() {
-                return None;
-            }
-            // if we havent been applied before apply prototype chain too
-            let mut ptr = if let Some(next_ptr) = object.proto.as_object() {
-                next_ptr
-            } else {
-                return None;
-            };
-            loop {
-                let object = &self.objects[ptr];
-                if let Some(value) = object.map_get(&key) {
-                    return Some(value);
-                }
-                if let Some(next_ptr) = object.proto.as_object() {
-                    ptr = next_ptr
-                } else {
-                    return None;
-                }
-            }
+            ptr = object.proto.as_object()?;
         }
-        None
     }
 
-    pub fn map_ref(&self, object: ScriptObject) -> &ScriptObjectMap {
+    #[inline]
+    pub(crate) fn map_ref(&self, object: ScriptObject) -> &ScriptObjectMap {
+        self.touch_obj(object);
         let object = &self.objects[object];
         &object.map
     }
 
-    pub fn map_mut_with<S, R, F: FnOnce(S, &mut ScriptObjectMap) -> R>(
-        &mut self,
-        s: S,
-        object: ScriptObject,
-        f: F,
-    ) -> R {
-        let mut map = ScriptObjectMap::default();
-        std::mem::swap(&mut map, &mut self.objects[object].map);
-        let r = f(s, &mut map);
-        std::mem::swap(&mut map, &mut self.objects[object].map);
-        r
+    /// `object`'s own map entries (no prototype chain) in map order, appended to `out`;
+    /// `ordered`: in definition order (the map tag's order) instead.
+    #[relax_api]
+    pub fn map_entries_into(&self, object: ScriptObject, ordered: bool, out: &mut ScriptEntriesOut) {
+        self.touch_obj(object);
+        let map = &self.objects[object].map;
+        let mut entries: Vec<(u32, ScriptMapEntry)> =
+            map.iter().map(|(k, v)| (v.tag.order(), ScriptMapEntry { key: *k, value: v.value })).collect();
+        if ordered {
+            entries.sort_by_key(|(order, _)| *order);
+        }
+        let entries: Vec<ScriptMapEntry> = entries.into_iter().map(|(_, e)| e).collect();
+        out.push(&entries);
+    }
+
+    /// `object`'s own map entries in map order.
+    #[inline(always)]
+    pub fn map_entries(&self, object: ScriptObject) -> Vec<ScriptMapEntry> {
+        let mut out = Vec::new();
+        self.map_entries_into(object, false, &mut ScriptEntriesOut::new(&mut out));
+        out
+    }
+
+    /// `object`'s own map entries in definition order.
+    #[inline(always)]
+    pub fn map_entries_ordered(&self, object: ScriptObject) -> Vec<ScriptMapEntry> {
+        let mut out = Vec::new();
+        self.map_entries_into(object, true, &mut ScriptEntriesOut::new(&mut out));
+        out
+    }
+
+    /// Visits `object`'s own map entries in definition order.
+    #[inline]
+    pub fn object_map_iter_ordered<F: FnMut(ScriptValue, ScriptValue)>(&self, object: ScriptObject, mut f: F) {
+        for entry in self.map_entries_ordered(object) {
+            f(entry.key, entry.value);
+        }
+    }
+
+    /// `object`'s own map entry for `key` (no prototype chain, no vec).
+    #[inline]
+    pub fn object_own_value(&self, object: ScriptObject, key: &ScriptValue) -> Option<ScriptValue> {
+        let got = self.obj_get(OBJ_GET_MAP_OWN, object, *key, NoTrap);
+        got.found.then_some(got.value)
+    }
+
+    /// The map entries of `object`'s prototype chain from the root (oldest ancestor) to
+    /// `object` itself, each object's in map order: a later entry overrides an earlier one.
+    pub fn proto_map_entries_into(&self, object: ScriptObject, out: &mut ScriptEntriesOut) {
+        let mut chain = vec![object];
+        while let Some(proto) = self.obj_info(*chain.last().unwrap()).proto.as_object() {
+            chain.push(proto);
+        }
+        for object in chain.into_iter().rev() {
+            self.map_entries_into(object, false, out);
+        }
+    }
+
+    /// See [`Self::proto_map_entries_into`].
+    #[inline(always)]
+    pub fn proto_map_entries(&self, object: ScriptObject) -> Vec<ScriptMapEntry> {
+        let mut out = Vec::new();
+        self.proto_map_entries_into(object, &mut ScriptEntriesOut::new(&mut out));
+        out
+    }
+
+    /// `object`'s own map value at `key` (no prototype chain) into `out`; false when absent.
+    pub fn map_own_value_into(&self, object: ScriptObject, key: ScriptValue, out: &mut ScriptValue) -> bool {
+        let got = self.obj_get(OBJ_GET_MAP_OWN, object, key, NoTrap);
+        if got.found {
+            *out = got.value;
+        }
+        got.found
+    }
+
+    /// `object`'s own map value at `key` (no prototype chain); None when absent.
+    #[inline(always)]
+    pub fn map_own_value(&self, object: ScriptObject, key: ScriptValue) -> Option<ScriptValue> {
+        let mut out = NIL;
+        self.map_own_value_into(object, key, &mut out).then_some(out)
+    }
+
+    /// Inserts `key: value` into `object`'s own map as is: no prototype, type or freeze checks.
+    #[inline]
+    pub fn map_insert_own(&mut self, object: ScriptObject, key: ScriptValue, value: ScriptValue) {
+        self.obj_set(OBJ_SET_MAP_OWN, object, key, value, NoTrap);
+    }
+
+    /// Whether `object` is frozen immutable.
+    #[inline]
+    pub fn is_immutable(&self, object: ScriptObject) -> bool {
+        self.obj_info(object).tag.is_immutable()
     }
 
     // Vec Reading
 
+    #[inline]
     pub fn vec_key_value(
         &self,
         ptr: ScriptObject,
         index: usize,
         trap: ScriptTrap,
     ) -> ScriptVecValue {
-        let object = &self.objects[ptr];
-
-        if let Some(value) = object.vec.get(index) {
+        let vec = self.vec_ref(ptr);
+        if let Some(value) = vec.get(index) {
             return *value;
         }
         ScriptVecValue {
@@ -1139,74 +2009,66 @@ impl ScriptHeap {
                 trap,
                 "vec index {} out of bounds (len={})",
                 index,
-                object.vec.len()
+                vec.len()
             ),
         }
     }
 
+    #[inline]
     pub fn vec_value(&self, ptr: ScriptObject, index: usize, trap: ScriptTrap) -> ScriptValue {
-        let object = &self.objects[ptr];
-        if let Some(kv) = object.vec.get(index) {
+        let vec = self.vec_ref(ptr);
+        if let Some(kv) = vec.get(index) {
             return kv.value;
         }
         script_err_out_of_bounds!(
             trap,
             "vec index {} out of bounds (len={})",
             index,
-            object.vec.len()
+            vec.len()
         )
     }
 
+    #[inline]
     pub fn vec_value_if_exist(&self, ptr: ScriptObject, index: usize) -> Option<ScriptValue> {
-        let object = &self.objects[ptr];
-        if let Some(kv) = object.vec.get(index) {
-            Some(kv.value)
-        } else {
-            None
-        }
+        self.vec_ref(ptr).get(index).map(|kv| kv.value)
     }
 
+    #[inline]
     pub fn vec_len(&self, ptr: ScriptObject) -> usize {
-        let object = &self.objects[ptr];
-        object.vec.len()
+        self.vec_ref(ptr).len()
     }
 
+    #[inline]
     pub fn map_delete(&mut self, ptr: ScriptObject, key: &ScriptValue) -> Option<ScriptValue> {
         let object = &mut self.objects[ptr];
-        object.map_delete(key)
+        object.map_delete(&key.unescape_id())
     }
 
+    #[inline]
     pub fn map_len(&self, ptr: ScriptObject) -> usize {
-        let object = &self.objects[ptr];
-        object.map_len()
+        self.obj_info(ptr).map_len
     }
 
     /// Total number of iterable entries: vec entries + map entries.
     /// Used by `for k, v in obj` to iterate all entries.
+    #[inline]
     pub fn iter_len(&self, ptr: ScriptObject) -> usize {
-        let object = &self.objects[ptr];
-        object.vec.len() + object.map_len()
+        let info = self.obj_info(ptr);
+        info.vec_len + info.map_len
     }
 
     /// Get key-value at an iteration index spanning both vec and map.
     /// Indices 0..vec_len come from vec, indices vec_len..vec_len+map_len come from map.
+    #[inline]
     pub fn iter_key_value(
         &self,
         ptr: ScriptObject,
         index: usize,
         trap: ScriptTrap,
     ) -> ScriptVecValue {
-        let object = &self.objects[ptr];
-        let vec_len = object.vec.len();
-        if index < vec_len {
-            return object.vec[index];
-        }
-        let map_index = index - vec_len;
-        if let Some((key, map_val)) = object.map.iter().nth(map_index) {
-            return ScriptVecValue {
-                key: *key,
-                value: map_val.value,
-            };
+        let at = self.obj_iter_at(ptr, index);
+        if at.found {
+            return ScriptVecValue { key: at.key, value: at.value };
         }
         ScriptVecValue {
             key: NIL,
@@ -1214,13 +2076,17 @@ impl ScriptHeap {
                 trap,
                 "iter index {} out of bounds (vec_len={}, map_len={})",
                 index,
-                vec_len,
-                object.map_len()
+                at.vec_len,
+                at.map_len
             ),
         }
     }
 
+    /// The vec part of `ptr`, a view into the heap.
+    #[inline]
+    #[relax_api]
     pub fn vec_ref(&self, ptr: ScriptObject) -> &[ScriptVecValue] {
+        self.touch_obj(ptr);
         let object = &self.objects[ptr];
         &object.vec
     }
@@ -1248,7 +2114,12 @@ impl ScriptHeap {
         NIL
     }
 
-    pub fn vec_push_vec(
+    #[inline]
+    pub fn vec_push_vec(&mut self, target: ScriptObject, source: ScriptObject, trap: ScriptTrap) -> ScriptValue {
+        self.obj_set(OBJ_SET_VEC_PUSH_VEC, target, NIL, source.into(), trap)
+    }
+
+    fn vec_push_vec_impl(
         &mut self,
         target: ScriptObject,
         source: ScriptObject,
@@ -1344,7 +2215,12 @@ impl ScriptHeap {
     /// Merges the vec and map parts of a source object into a target object.
     /// Used by the splat operator (..) to spread one object into another.
     /// Map entries from source are only added if they don't already exist in target.
-    pub fn merge_object(
+    #[inline]
+    pub fn merge_object(&mut self, target: ScriptObject, source: ScriptObject, trap: ScriptTrap) -> ScriptValue {
+        self.obj_set(OBJ_SET_MERGE, target, NIL, source.into(), trap)
+    }
+
+    fn merge_object_impl(
         &mut self,
         target: ScriptObject,
         source: ScriptObject,
@@ -1420,7 +2296,18 @@ impl ScriptHeap {
         NIL
     }
 
+    #[inline]
     pub fn vec_push(
+        &mut self,
+        ptr: ScriptObject,
+        key: ScriptValue,
+        value: ScriptValue,
+        trap: ScriptTrap,
+    ) -> ScriptValue {
+        self.obj_set(OBJ_SET_VEC_PUSH, ptr, key, value, trap)
+    }
+
+    fn vec_push_impl(
         &mut self,
         ptr: ScriptObject,
         key: ScriptValue,
@@ -1439,7 +2326,12 @@ impl ScriptHeap {
         NIL
     }
 
+    #[inline]
     pub fn vec_push_unchecked(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
+        self.obj_set(OBJ_SET_VEC_PUSH_UNCHECKED, ptr, key, value, NoTrap);
+    }
+
+    fn vec_push_unchecked_impl(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
         if self.is_allocation_poison_object(ptr) || self.allocation_exceeded() {
             return;
         }
@@ -1532,5 +2424,62 @@ mod tests {
         assert!(result.is_nil(), "{result:?}");
         assert!(heap.take_heap_limit_exceeded());
         assert!(heap.objects[object].vec.is_empty());
+    }
+}
+
+/// A place in the heap a value is held: an object's field (by key) or
+/// entry (by slot), or a list's item. See [`ScriptHeap::places_holding`].
+#[relax_api(plain)]
+#[derive(Clone, Debug)]
+#[repr(C, u8)]
+pub enum ScriptValuePlace {
+    Field { object: usize, made_at: ScriptIp, key: ScriptValue },
+    Entry { object: usize, made_at: ScriptIp, slot: usize },
+    Item { array: usize, slot: usize },
+}
+
+impl ScriptValuePlace {
+    pub fn field_key(&self) -> Option<ScriptValue> { match self { Self::Field { key, .. } => Some(*key), _ => None } }
+}
+
+/// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptPlacesOut<'a> {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, *const ScriptValuePlace),
+    _out: std::marker::PhantomData<&'a mut Vec<ScriptValuePlace>>,
+}
+impl<'a> ScriptPlacesOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<ScriptValuePlace>) -> Self {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, value: *const ScriptValuePlace) {
+            (&mut *(ctx as *mut Vec<ScriptValuePlace>)).push((&*value).clone());
+        }
+        Self { ctx: out as *mut _ as *mut u8, push, _out: std::marker::PhantomData }
+    }
+    pub fn push(&mut self, value: &ScriptValuePlace) {
+        unsafe { (self.push)(self.ctx, value) }
+    }
+}
+
+/// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptIpsOut<'a> {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, *const ScriptIp),
+    _out: std::marker::PhantomData<&'a mut Vec<ScriptIp>>,
+}
+impl<'a> ScriptIpsOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<ScriptIp>) -> Self {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, value: *const ScriptIp) {
+            (&mut *(ctx as *mut Vec<ScriptIp>)).push((&*value).clone());
+        }
+        Self { ctx: out as *mut _ as *mut u8, push, _out: std::marker::PhantomData }
+    }
+    pub fn push(&mut self, value: &ScriptIp) {
+        unsafe { (self.push)(self.ctx, value) }
     }
 }

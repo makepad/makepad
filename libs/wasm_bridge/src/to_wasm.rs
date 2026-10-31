@@ -176,6 +176,12 @@ impl ToWasmMsg {
 }
 
 impl<'a> ToWasmMsgRef<'a> {
+    /// A reader over message words the caller does not own (the page reading the program's
+    /// `FromWasmMsg` in its memory: host.rs), from u32 index `u32_offset`.
+    pub fn from_words(data: &'a [u64], u32_offset: usize) -> Self {
+        Self { data, u32_offset }
+    }
+
     pub fn read_u32(&mut self) -> u32 {
         let ret = if self.u32_offset & 1 != 0 {
             (self.data[self.u32_offset >> 1] >> 32) as u32
