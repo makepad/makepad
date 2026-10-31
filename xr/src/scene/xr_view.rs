@@ -239,7 +239,7 @@ impl XrView {
             )
         } else if let Some(pose) = self.world_pose_override {
             self.scaled_pose_matrix(pose)
-        } else if let Some(event_scope) = scope.data.get::<XrViewEventScopeData>() {
+        } else if let Some(event_scope) = scope.data_mut().get::<XrViewEventScopeData>() {
             Mat4f::mul(&event_scope.content_transform, &self.node.local_transform())
         } else {
             self.node.local_transform()
@@ -901,11 +901,9 @@ impl Widget for XrView {
         if method == live_id!(set_visible) {
             let mut visible = self.node.visible();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 visible = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 self.node.set_visible(cx, visible);

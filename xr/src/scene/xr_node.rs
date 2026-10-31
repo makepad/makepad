@@ -135,6 +135,14 @@ pub struct XrRuntimeBodyState {
     pub dynamic_body: bool,
     pub shadowed: bool,
     pub held_by: Option<XrSharedHand>,
+    /// the player whose hand holds it (0: the local one)
+    pub held_by_player: Option<u32>,
+    /// while held: the body is the holding hand's hold frame ([`crate::scene::xr_hold_frame`])
+    /// times this
+    pub grab_offset: Option<Pose>,
+    /// a two-handed hold's other hand and its offset (the body is then
+    /// [`crate::scene::xr_two_hand_hold_pose`] of both)
+    pub second_hold: Option<(XrSharedHand, Pose)>,
     pub linked_support_local_poses: [Option<Pose>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
     pub linked_support_spin_angles: [Option<f32>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
     pub linked_support_steer_angles: [Option<f32>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
@@ -178,8 +186,7 @@ pub struct XrDrawContext {
 impl XrDrawContext {
     pub fn from_scope(scope: &mut Scope) -> Self {
         Self {
-            scope_data: scope
-                .data
+            scope_data: scope.data_mut()
                 .get::<XrDrawScopeData>()
                 .cloned()
                 .unwrap_or_default(),
@@ -282,13 +289,13 @@ impl XrNode {
         }
 
         let source_obj = self.source.as_object();
-        let source_proto = vm.bx.heap.proto(source_obj);
+        let source_proto = vm.bx.heap_ref().proto(source_obj);
         let proto = if source_proto.as_object().is_some() {
             source_proto
         } else {
             source_obj.into()
         };
-        vm.bx.heap.new_with_proto_no_vec(proto).into()
+        vm.bx.heap_mut().new_with_proto_no_vec(proto).into()
     }
 
     pub fn local_transform(&self) -> Mat4f {
@@ -516,9 +523,7 @@ impl ScriptHook for XrNode {
         value: ScriptValue,
     ) {
         let physics_size_present = value.as_object().is_some_and(|obj| {
-            vm.bx
-                .heap
-                .value_for_apply(obj.into(), id!(physics_size).into(), &Apply::Eval)
+            vm.bx.heap_mut().value_for_apply(obj.into(), id!(physics_size).into(), &Apply::Eval)
                 .is_some()
         });
         if physics_size_present {
