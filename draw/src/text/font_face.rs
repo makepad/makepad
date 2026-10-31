@@ -91,6 +91,61 @@ mod mobile_font_tests {
     }
 }
 
+#[cfg(test)]
+mod shape_plan_tests {
+    use super::*;
+    use rustybuzz::Direction::{LeftToRight, RightToLeft};
+
+    fn assert_shape_matches_rustybuzz(
+        face: &FontFace,
+        text: &str,
+        direction: rustybuzz::Direction,
+        features: &[rustybuzz::Feature],
+    ) {
+        let build_buffer = || {
+            let mut buffer = rustybuzz::UnicodeBuffer::new();
+            buffer.set_direction(direction);
+            buffer.push_str(text);
+            buffer
+        };
+        // The glyph types don't implement `PartialEq`, so we compare their Debug output.
+        let format_glyphs = |glyphs: &rustybuzz::GlyphBuffer| {
+            format!("{:?} {:?}", glyphs.glyph_infos(), glyphs.glyph_positions())
+        };
+        let cached = face.shape(features, build_buffer());
+        let expected = face.with_rustybuzz_face(|f| rustybuzz::shape(f, features, build_buffer()));
+        assert_eq!(format_glyphs(&cached), format_glyphs(&expected), "{text}");
+    }
+
+    #[test]
+    fn shape_plan_cache_matches_rustybuzz() {
+        let bytes = include_bytes!("../../../widgets/resources/RobotoFlex.ttf");
+        let mut face = FontFace::from_data_and_index(FontData::from_vec(bytes.to_vec()), 0).unwrap();
+        let no_ligatures = [rustybuzz::Feature::new(ttf_parser::Tag::from_bytes(b"liga"), 0, ..)];
+        // Every case has its own plan key. The digits and punctuation leave the script unset.
+        let cases: [(&str, rustybuzz::Direction, &[rustybuzz::Feature]); 5] = [
+            ("office AVATAR To", LeftToRight, &[]),
+            ("office AVATAR To", LeftToRight, &no_ligatures),
+            ("12:34 $5.60 (7%)", LeftToRight, &[]),
+            ("12:34 $5.60 (7%)", RightToLeft, &[]),
+            ("Привет, мир", LeftToRight, &[]),
+        ];
+        for _ in 0..2 {
+            for (text, direction, features) in cases {
+                assert_shape_matches_rustybuzz(&face, text, direction, features);
+            }
+        }
+        assert_eq!(face.cached_shape_plans.borrow().len(), cases.len());
+
+        // A heavy weight swaps in a different `$` glyph, so a stale plan would show up here.
+        face.set_variations(&[(u32::from_be_bytes(*b"wght"), 1000.0)]);
+        assert!(face.cached_shape_plans.borrow().is_empty());
+        for (text, direction, features) in cases {
+            assert_shape_matches_rustybuzz(&face, text, direction, features);
+        }
+    }
+}
+
 struct ParsedFontFace {
     data: FontData,
     index: u32,
