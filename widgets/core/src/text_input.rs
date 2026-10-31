@@ -2911,7 +2911,8 @@ impl Widget for TextInput {
             } else {
                 self.animator_play(cx, ids!(blink.off));
             }
-            self.draw_cursor.redraw(cx);
+            // No redraw: the animator writes `blink` straight into the drawn cursor,
+            // so a blink repaints without re-running the draw code of everything around it.
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
 
@@ -3057,6 +3058,9 @@ impl Widget for TextInput {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
+                // Only `draw_walk` shows the IME (it knows where the caret is), so we redraw on focus.
+                // Focus set from a `draw_walk` arrives mid-draw, where a plain `redraw` gets dropped.
+                cx.redraw_area_in_draw(self.draw_bg.area());
                 // Sync text state to platform IME before keyboard shows
                 let sel_start_chars = self.text[..self.selection.start().index].chars().count();
                 let sel_end_chars = self.text[..self.selection.end().index].chars().count();
