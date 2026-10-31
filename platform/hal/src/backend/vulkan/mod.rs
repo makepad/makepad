@@ -189,10 +189,17 @@ impl Vulkan {
             let properties = dev.formats[f as usize];
             if properties.optimal_tiling_features.contains(makepad_vulkan::vk::FormatFeatureFlags::SAMPLED_IMAGE) { bits | (1u64 << f) } else { bits }
         });
-        let working_set = dev.memory.memory_heaps[..dev.memory.memory_heap_count as usize].iter().enumerate()
+        let heap_bytes: u64 = dev.memory.memory_heaps[..dev.memory.memory_heap_count as usize].iter().enumerate()
             .filter(|(heap, _)| dev.memory.memory_types[..dev.memory.memory_type_count as usize].iter().any(|ty|
                 ty.heap_index as usize == *heap && ty.property_flags.contains(makepad_vulkan::vk::MemoryPropertyFlags::DEVICE_LOCAL)))
             .map(|(_, h)| h.size).sum();
+        let budget_bytes = dev.memory_budget(true).map(|b| b.budget).filter(|&b| b != 0);
+        let unified = dev.properties.device_type == makepad_vulkan::vk::PhysicalDeviceType::INTEGRATED_GPU;
+        let working_set = if unified {
+            budget_bytes.map_or(heap_bytes / 2, |b| b.min(heap_bytes / 2))
+        } else {
+            budget_bytes.unwrap_or(heap_bytes)
+        };
         let info = HalInfo { backend: backend_id::VULKAN, dialect: dialect::SPIRV, formats, msaa: dev.msaa, dpi: 1.0,
             flags: if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 } | if dev.multiview { info_flags::MULTIVIEW } else { 0 },
             max_texture: dev.properties.limits.max_image_dimension2_d,
@@ -863,13 +870,52 @@ impl Gpu for Vulkan {
     }
     fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]) {
         let result = (|| {
-            let retained = self.buf.get_mut(&(s.id, id.index)).filter(|r| r.gen == id.gen).ok_or("missing retained buffer")?;
-            if Arc::strong_count(&retained.buffer) > 1 {
-                let fresh = Buffer::new(self.dev.clone(), b.size, buffer_usage())?;
-                if off != 0 || data.len() as u64 != b.size { fresh.write(0, &retained.buffer.read(b.size as usize)?)?; }
-                retained.buffer = fresh;
+            let end = off.checked_add(data.len() as u64).filter(|&end| end <= b.size).ok_or("buffer write exceeds storage")?;
+            let copy = {
+                let retained = self.buf.get_mut(&(s.id, id.index)).filter(|r| r.gen == id.gen).ok_or("missing retained buffer")?;
+                if Arc::strong_count(&retained.buffer) > 1 {
+                    let old = retained.buffer.clone();
+                    let fresh = Buffer::new(self.dev.clone(), b.size, buffer_usage())?;
+                    fresh.write(off, data)?;
+                    b.bytes = fresh.bytes;
+                    retained.buffer = fresh.clone();
+                    (off != 0 || end != b.size).then_some((old, fresh))
+                } else {
+                    retained.buffer.write(off, data)?;
+                    b.bytes = retained.buffer.bytes;
+                    None
+                }
+            };
+            if let Some((old, fresh)) = copy {
+                let batch = self.ensure_batch()?;
+                let mut regions = Vec::with_capacity(2);
+                if off > 0 {
+                    regions.push(makepad_vulkan::vk::BufferCopy { src_offset: 0, dst_offset: 0, size: off });
+                }
+                if end < b.size {
+                    regions.push(makepad_vulkan::vk::BufferCopy { src_offset: end, dst_offset: end, size: b.size - end });
+                }
+                unsafe {
+                    batch.dev.raw.cmd_copy_buffer(batch.cb, old.buffer, fresh.buffer, &regions);
+                    batch.dev.raw.cmd_pipeline_barrier(
+                        batch.cb,
+                        makepad_vulkan::vk::PipelineStageFlags::TRANSFER,
+                        makepad_vulkan::vk::PipelineStageFlags::ALL_COMMANDS,
+                        makepad_vulkan::vk::DependencyFlags::empty(),
+                        &[makepad_vulkan::vk::MemoryBarrier::default()
+                            .src_access_mask(makepad_vulkan::vk::AccessFlags::TRANSFER_WRITE)
+                            .dst_access_mask(
+                                makepad_vulkan::vk::AccessFlags::MEMORY_READ
+                                    | makepad_vulkan::vk::AccessFlags::MEMORY_WRITE,
+                            )],
+                        &[],
+                        &[],
+                    );
+                }
+                batch.buffers.push(old);
+                batch.buffers.push(fresh);
             }
-            retained.buffer.write(off, data)?; b.bytes = retained.buffer.bytes; Ok::<_, String>(())
+            Ok::<_, String>(())
         })();
         if let Err(e) = result { eprintln!("[hal-vulkan] buffer update: {e}"); s.bad(); }
     }

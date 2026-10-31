@@ -62,7 +62,7 @@ impl Vulkan {
         let buffer = if let Some(buffer) = pool.iter().find(|b| Arc::strong_count(b) == 1) {
             buffer.clone()
         } else {
-            let buffer = Buffer::new(
+            let buffer = Buffer::scratch(
                 batch.dev.clone(),
                 length,
                 vk::BufferUsageFlags::TRANSFER_DST,

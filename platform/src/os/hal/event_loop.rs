@@ -99,7 +99,20 @@ impl Cx {
         };
         crate::gpu_info::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_info::set_gpu_working_set_bytes(info.working_set);
-        if info.working_set != 0 { self.gpu_admission.set_device_bytes(info.working_set); }
+        if info.working_set != 0 {
+            self.gpu_admission.set_device_bytes(info.working_set);
+            let envelope = crate::retained_instances::retained_device_envelope(
+                info.working_set,
+                info.working_set,
+                false,
+            );
+            if !self.draw_lists.1.allocations.has_device_limit() {
+                self.draw_lists.1.allocations.set_device_limit(envelope);
+            }
+            if self.publications.envelope() == 0 {
+                self.publications.set_envelope(envelope);
+            }
+        }
         crate::app_main::set_hal_window_manager(info.flags & info_flags::WM_HOSTED != 0);
         self.hal.info = Some(info);
         // `MAKEPAD_PICK_VARIANTS=1`: every shader also compiles its pick variant from the start
