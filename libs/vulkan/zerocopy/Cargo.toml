@@ -18,7 +18,6 @@ authors = [
     "Joshua Liebow-Feeser <joshlf@google.com>",
     "Jack Wrenn <jswrenn@amazon.com>",
 ]
-build = "build.rs"
 exclude = [".*"]
 autolib = false
 autobins = false
@@ -43,15 +42,6 @@ categories = [
 ]
 license = "BSD-2-Clause OR Apache-2.0 OR MIT"
 repository = "https://github.com/google/zerocopy"
-
-[package.metadata.build-rs]
-no-zerocopy-simd-x86-avx12-1-89-0 = "1.89.0"
-no-zerocopy-core-error-1-81-0 = "1.81.0"
-no-zerocopy-diagnostic-on-unimplemented-1-78-0 = "1.78.0"
-no-zerocopy-generic-bounds-in-const-fn-1-61-0 = "1.61.0"
-no-zerocopy-target-has-atomics-1-60-0 = "1.60.0"
-no-zerocopy-aarch64-simd-1-59-0 = "1.59.0"
-no-zerocopy-panic-in-const-and-vec-try-reserve-1-57-0 = "1.57.0"
 
 [package.metadata.ci]
 pinned-stable = "1.93.0"
@@ -83,3 +73,13 @@ std = ["alloc"]
 [lib]
 name = "zerocopy"
 path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(doc_cfg)",
+    "cfg(kani)",
+    "cfg(coverage_nightly)",
+    "cfg(__ZEROCOPY_INTERNAL_USE_ONLY_NIGHTLY_FEATURES_IN_TESTS)",
+    "cfg(__ZEROCOPY_INTERNAL_USE_ONLY_DEV_MODE)",
+    "cfg(rust, values(\"1.57.0\", \"1.59.0\", \"1.60.0\", \"1.61.0\", \"1.78.0\", \"1.81.0\", \"1.89.0\"))",
+] }

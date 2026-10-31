@@ -1,0 +1,18 @@
+# Additive composition bindings; existing Win32/DXGI definitions stay in lib.rs.
+Windows.Win32.Graphics.DirectComposition.DCompositionCreateDevice2
+Windows.Win32.Graphics.DirectComposition.DCompositionCreateDevice3
+Windows.Win32.Graphics.DirectComposition.IDCompositionDesktopDevice
+Windows.Win32.Graphics.DirectComposition.IDCompositionDevice2
+Windows.Win32.Graphics.DirectComposition.IDCompositionDevice3
+Windows.Win32.Graphics.DirectComposition.IDCompositionTarget
+Windows.Win32.Graphics.DirectComposition.IDCompositionVisual2
+Windows.Win32.Graphics.DirectComposition.IDCompositionVisual3
+Windows.Win32.Graphics.DirectComposition.IDCompositionRectangleClip
+Windows.Win32.Graphics.DirectComposition.IDCompositionEffectGroup
+Windows.Win32.Graphics.DirectComposition.IDCompositionSurface
+Windows.Win32.Graphics.Dxgi.IDXGIFactory2
+# Pacing of windows whose frames are composition surfaces; Windows 11 and later, so it is
+# looked up at run time instead of imported.
+dynamic Windows.Win32.Graphics.DirectComposition.DCompositionWaitForCompositorClock
+# The documented device-state check (the desktop device is queried for it at run time).
+Windows.Win32.Graphics.DirectComposition.IDCompositionDevice

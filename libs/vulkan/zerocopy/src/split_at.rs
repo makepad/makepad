@@ -50,10 +50,7 @@ use crate::pointer::invariant::{Aligned, Exclusive, Invariants, Shared, Valid};
     not(feature = "derive"),
     doc = concat!("[derive]: https://docs.rs/zerocopy/", env!("CARGO_PKG_VERSION"), "/zerocopy/derive.SplitAt.html"),
 )]
-#[cfg_attr(
-    not(no_zerocopy_diagnostic_on_unimplemented_1_78_0),
-    diagnostic::on_unimplemented(note = "Consider adding `#[derive(SplitAt)]` to `{Self}`")
-)]
+#[diagnostic::on_unimplemented(note = "Consider adding `#[derive(SplitAt)]` to `{Self}`")]
 // # Safety
 //
 // The trailing slice is well-aligned for its element type. `Self` is `[T]`, or

@@ -41,6 +41,9 @@
 )]
 #![cfg_attr(libloading_docs, feature(doc_cfg))]
 
+#[cfg(windows)]
+extern crate makepad_windows_sys;
+
 pub mod changelog;
 mod error;
 pub mod os;

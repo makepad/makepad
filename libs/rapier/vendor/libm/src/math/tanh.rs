@@ -8,7 +8,6 @@ use super::expm1;
 /// The hyperbolic tangent of `x` (f64).
 ///
 /// `x` is specified in radians.
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn tanh(mut x: f64) -> f64 {
     let mut uf: f64 = x;
     let mut ui: u64 = f64::to_bits(uf);

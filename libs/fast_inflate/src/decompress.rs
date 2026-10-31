@@ -1432,112 +1432,95 @@ pub fn gzip_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
 mod tests {
     use super::*;
 
-    fn roundtrip_vs_c_zlib(data: &[u8], level: i32) {
-        let mut c_comp =
-            libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
-        let max_sz = c_comp.zlib_compress_bound(data.len());
-        let mut compressed = vec![0u8; max_sz];
-        let c_compressed_len = c_comp.zlib_compress(data, &mut compressed).unwrap();
-        compressed.truncate(c_compressed_len);
+    // xorshift64*: fixed seeds make failures reproducible without rand.
+    struct Rng(u64);
 
-        let mut c_decomp = libdeflater::Decompressor::new();
-        let mut c_output = vec![0u8; data.len()];
-        let c_written = c_decomp
-            .zlib_decompress(&compressed, &mut c_output)
-            .unwrap();
-        assert_eq!(c_written, data.len());
-        assert_eq!(&c_output[..c_written], data);
-
-        let mut rust_output = vec![0u8; data.len()];
-        let (_, rust_written) =
-            zlib_decompress(&compressed, &mut rust_output).expect("Rust zlib_decompress failed");
-        assert_eq!(rust_written, data.len(), "output length mismatch");
-        assert_eq!(&rust_output[..rust_written], data, "output data mismatch");
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
     }
 
-    fn roundtrip_vs_c_deflate(data: &[u8], level: i32) {
-        let mut c_comp =
-            libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
-        let max_sz = c_comp.deflate_compress_bound(data.len());
-        let mut compressed = vec![0u8; max_sz];
-        let c_compressed_len = c_comp.deflate_compress(data, &mut compressed).unwrap();
-        compressed.truncate(c_compressed_len);
+    fn roundtrip_zlib(data: &[u8], level: u32) {
+        let compressed = crate::zlib_compress(data, level);
+        let mut output = vec![0u8; data.len()];
+        let (consumed, written) = zlib_decompress(&compressed, &mut output).unwrap();
+        assert_eq!(consumed, compressed.len());
+        assert_eq!(written, data.len());
+        assert_eq!(output, data);
+    }
 
-        let mut c_decomp = libdeflater::Decompressor::new();
-        let mut c_output = vec![0u8; data.len()];
-        let c_written = c_decomp
-            .deflate_decompress(&compressed, &mut c_output)
-            .unwrap();
-        assert_eq!(&c_output[..c_written], data);
-
-        let mut rust_output = vec![0u8; data.len()];
-        let (_, rust_written) = deflate_decompress(&compressed, &mut rust_output)
-            .expect("Rust deflate_decompress failed");
-        assert_eq!(rust_written, data.len());
-        assert_eq!(&rust_output[..rust_written], data);
+    fn roundtrip_deflate(data: &[u8], level: u32) {
+        let compressed = crate::deflate_compress(data, level);
+        let mut output = vec![0u8; data.len()];
+        let (consumed, written) = deflate_decompress(&compressed, &mut output).unwrap();
+        assert_eq!(consumed, compressed.len());
+        assert_eq!(written, data.len());
+        assert_eq!(output, data);
     }
 
     #[test]
     fn test_empty() {
-        roundtrip_vs_c_zlib(b"", 6);
-        roundtrip_vs_c_deflate(b"", 6);
+        roundtrip_zlib(b"", 6);
+        roundtrip_deflate(b"", 6);
     }
 
     #[test]
     fn test_one_byte() {
-        roundtrip_vs_c_zlib(b"x", 6);
-        roundtrip_vs_c_deflate(b"x", 6);
+        roundtrip_zlib(b"x", 6);
+        roundtrip_deflate(b"x", 6);
     }
 
     #[test]
     fn test_short_string() {
         let data = b"Hello, World!";
-        for level in [1, 6, 9, 12] {
-            roundtrip_vs_c_zlib(data, level);
-            roundtrip_vs_c_deflate(data, level);
+        for level in 0..=10 {
+            roundtrip_zlib(data, level);
+            roundtrip_deflate(data, level);
         }
     }
 
     #[test]
     fn test_repeated_data() {
         let data: Vec<u8> = b"ABCDEFGH".iter().copied().cycle().take(65536).collect();
-        for level in [1, 6, 9, 12] {
-            roundtrip_vs_c_zlib(&data, level);
-            roundtrip_vs_c_deflate(&data, level);
+        for level in 0..=10 {
+            roundtrip_zlib(&data, level);
+            roundtrip_deflate(&data, level);
         }
     }
 
     #[test]
     fn test_all_same_byte() {
         let data = vec![0x42u8; 100_000];
-        for level in [1, 6, 12] {
-            roundtrip_vs_c_zlib(&data, level);
+        for level in 0..=10 {
+            roundtrip_zlib(&data, level);
         }
     }
 
     #[test]
     fn test_sequential_bytes() {
         let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
-        for level in [1, 6, 12] {
-            roundtrip_vs_c_zlib(&data, level);
+        for level in 0..=10 {
+            roundtrip_zlib(&data, level);
         }
     }
 
     #[test]
     fn test_pseudo_random() {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let data: Vec<u8> = (0..100_000).map(|_| rng.gen()).collect();
-        for level in [1, 6, 12] {
-            roundtrip_vs_c_zlib(&data, level);
-            roundtrip_vs_c_deflate(&data, level);
+        let mut rng = Rng(0x1234_5678_9abc_def0);
+        let data: Vec<u8> = (0..100_000).map(|_| rng.next() as u8).collect();
+        for level in 0..=10 {
+            roundtrip_zlib(&data, level);
+            roundtrip_deflate(&data, level);
         }
     }
 
     #[test]
     fn test_mixed_compressibility() {
-        use rand::{Rng, SeedableRng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut rng = Rng(42);
         let mut data = Vec::with_capacity(200_000);
         for _ in 0..20 {
             data.extend(
@@ -1546,20 +1529,20 @@ mod tests {
                     .cycle()
                     .take(5000),
             );
-            data.extend((0..5000).map(|_| rng.gen::<u8>()));
+            data.extend((0..5000).map(|_| rng.next() as u8));
         }
-        for level in [1, 6, 9, 12] {
-            roundtrip_vs_c_deflate(&data, level);
-            roundtrip_vs_c_zlib(&data, level);
+        for level in 0..=10 {
+            roundtrip_deflate(&data, level);
+            roundtrip_zlib(&data, level);
         }
     }
 
     #[test]
     fn test_all_compression_levels() {
         let data = b"Pack my box with five dozen liquor jugs. ".repeat(1000);
-        for level in 1..=12 {
-            roundtrip_vs_c_zlib(&data, level);
-            roundtrip_vs_c_deflate(&data, level);
+        for level in 0..=10 {
+            roundtrip_zlib(&data, level);
+            roundtrip_deflate(&data, level);
         }
     }
 
@@ -1576,14 +1559,13 @@ mod tests {
 
     #[test]
     fn test_various_sizes() {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = Rng(0x1234_5678_9abc_def0);
         for size in [
             0, 1, 2, 3, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 511, 512, 1023, 1024,
             4095, 4096, 8191, 8192, 16383, 16384, 32767, 32768, 65535, 65536,
         ] {
-            let data: Vec<u8> = (0..size).map(|_| rng.gen()).collect();
-            roundtrip_vs_c_zlib(&data, 6);
+            let data: Vec<u8> = (0..size).map(|_| rng.next() as u8).collect();
+            roundtrip_zlib(&data, 6);
         }
     }
 
@@ -1596,66 +1578,109 @@ mod tests {
         for _ in 0..2 {
             data.extend_from_slice(&data[0..32768].to_vec());
         }
-        roundtrip_vs_c_zlib(&data, 6);
-        roundtrip_vs_c_zlib(&data, 12);
+        roundtrip_zlib(&data, 6);
+        roundtrip_zlib(&data, 10);
     }
 
     #[test]
-    fn test_cross_compressed_flate2_to_rust() {
-        let data = b"Cross-library compatibility test! ".repeat(5000);
-        let compressed = crate::zlib_compress(&data, 9);
-
-        let mut output = vec![0u8; data.len()];
-        let (_, written) = zlib_decompress(&compressed, &mut output).unwrap();
-        assert_eq!(written, data.len());
-        assert_eq!(&output[..written], &data[..]);
+    fn test_cross_compressed_png_to_rust() {
+        // Existing assets from the UI zoo, Android and Splash resources and
+        // a GNOME screenshot. Keep the original streams; never regenerate
+        // these using the compressor under test.
+        let pngs: &[&[u8]] = &[
+            include_bytes!("../../../examples/uizoo/resources/logo_makepad.png"),
+            include_bytes!("../../../examples/xr/resources/android/res/mipmap-mdpi/ic_launcher.png"),
+            include_bytes!("../../../examples/splash/resources/app_icon.png"),
+            include_bytes!("../testdata/desktop.png"),
+        ];
+        for png in pngs {
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+            let be32 = |b: &[u8]| u32::from_be_bytes(b.try_into().unwrap());
+            let mut chunks = &png[8..];
+            let mut compressed = Vec::new();
+            let mut expected_size = None;
+            while !chunks.is_empty() {
+                let len = be32(&chunks[..4]) as usize;
+                let kind = &chunks[4..8];
+                let data = &chunks[8..8 + len];
+                match kind {
+                    b"IHDR" => {
+                        let width = be32(&data[..4]) as usize;
+                        let height = be32(&data[4..8]) as usize;
+                        assert_eq!(data[8], 8, "8-bit samples required");
+                        assert_eq!(&data[10..13], &[0, 0, 0], "non-interlaced PNG required");
+                        let bytes_per_pixel = match data[9] {
+                            0 | 3 => 1, // grayscale or palette index
+                            2 => 3,
+                            4 => 2,
+                            6 => 4,
+                            color => panic!("unsupported color type {color}"),
+                        };
+                        expected_size = Some(height * (1 + width * bytes_per_pixel));
+                    }
+                    b"IDAT" => compressed.extend_from_slice(data),
+                    b"IEND" => break,
+                    _ => {}
+                }
+                chunks = &chunks[12 + len..];
+            }
+            let mut output = vec![0; expected_size.unwrap()];
+            let (consumed, written) = zlib_decompress(&compressed, &mut output).unwrap();
+            assert_eq!(consumed, compressed.len());
+            assert_eq!(written, output.len());
+            // Independent scalar Adler-32, compared with the encoder's trailer.
+            let (mut a, mut b) = (1u32, 0u32);
+            for byte in output {
+                a = (a + byte as u32) % 65521;
+                b = (b + a) % 65521;
+            }
+            assert_eq!((b << 16) | a, be32(&compressed[compressed.len() - 4..]));
+        }
     }
 
     #[test]
     fn test_benchmark_zlib_correctness_1mb() {
-        use rand::{Rng, SeedableRng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(123);
+        let mut rng = Rng(123);
         let size = 1_000_000;
         let mut data = Vec::with_capacity(size);
         while data.len() < size {
-            if rng.gen::<f32>() < 0.75 {
+            if rng.next() % 4 != 0 {
                 data.extend_from_slice(
                     b"Makepad is a creative software development platform built in Rust. ",
                 );
             } else {
-                let n = (rng.gen::<usize>() % 100) + 1;
-                data.extend((0..n).map(|_| rng.gen::<u8>()));
+                let n = (rng.next() as usize % 100) + 1;
+                data.extend((0..n).map(|_| rng.next() as u8));
             }
         }
         data.truncate(size);
-        roundtrip_vs_c_zlib(&data, 6);
+        roundtrip_zlib(&data, 6);
     }
 
     #[test]
     fn test_garbage_input_no_panic() {
-        use rand::{Rng, SeedableRng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0xdead);
+        let mut rng = Rng(0xdead);
         let mut out = vec![0u8; 65536];
 
         for _ in 0..10_000 {
-            let len = rng.gen_range(0..=512);
-            let garbage: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
+            let len = (rng.next() % 513) as usize;
+            let garbage: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
             let _ = deflate_decompress(&garbage, &mut out);
             let _ = zlib_decompress(&garbage, &mut out);
         }
 
         let mut tiny_out = vec![0u8; 1];
         for _ in 0..1_000 {
-            let len = rng.gen_range(0..=256);
-            let garbage: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
+            let len = (rng.next() % 257) as usize;
+            let garbage: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
             let _ = deflate_decompress(&garbage, &mut tiny_out);
             let _ = zlib_decompress(&garbage, &mut tiny_out);
         }
 
         let mut empty_out = vec![0u8; 0];
         for _ in 0..1_000 {
-            let len = rng.gen_range(0..=256);
-            let garbage: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
+            let len = (rng.next() % 257) as usize;
+            let garbage: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
             let _ = deflate_decompress(&garbage, &mut empty_out);
             let _ = zlib_decompress(&garbage, &mut empty_out);
         }
@@ -1699,15 +1724,10 @@ mod tests {
 
     #[test]
     fn test_zlib_decompress_vec_various_sizes() {
-        use rand::{Rng, SeedableRng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+        let mut rng = Rng(99);
         for size in [0, 1, 10, 100, 1000, 10000, 100000] {
-            let data: Vec<u8> = (0..size).map(|_| rng.gen()).collect();
-            let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
-            let max_sz = c.zlib_compress_bound(data.len());
-            let mut compressed = vec![0u8; max_sz];
-            let clen = c.zlib_compress(&data, &mut compressed).unwrap();
-            compressed.truncate(clen);
+            let data: Vec<u8> = (0..size).map(|_| rng.next() as u8).collect();
+            let compressed = crate::zlib_compress(&data, 6);
 
             let result = zlib_decompress_vec(&compressed).unwrap();
             assert_eq!(result, data, "mismatch at size {}", size);

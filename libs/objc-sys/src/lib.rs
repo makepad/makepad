@@ -3,8 +3,8 @@ mod malloc_buf;
 pub use encode::{Encode, EncodeArguments, Encoding};
 pub use message::{Message, MessageArguments, MessageError};
 
-pub use message::send_message as __send_message;
-pub use message::send_super_message as __send_super_message;
+pub use message::send_message_or_panic as __send_message_or_panic;
+pub use message::send_super_message_or_panic as __send_super_message_or_panic;
 
 #[macro_use]
 mod macros;

@@ -48,7 +48,8 @@ pub type jweak = jobject;
 pub type jfieldID = *mut _jfieldID;
 pub type jmethodID = *mut _jmethodID;
  
-pub const JNI_ABORT: i32 = 2; 
+pub const JNI_ABORT: i32 = 2;
+pub const JNI_ERR: jint = -1;
 
 #[repr(C)]
 pub struct JNINativeMethod {
@@ -1379,3 +1380,5 @@ pub struct JNINativeInterface_ {
 pub enum _jobject {}
 pub enum _jfieldID {}
 pub enum _jmethodID {}
+
+pub mod registration;

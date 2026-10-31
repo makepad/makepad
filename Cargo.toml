@@ -1,238 +1,93 @@
 workspace.members = [
     # === app ===
-    "apps/browser",
-    "apps/terminal",
-    "apps/wm",
-    "apps/wm-all",
-    "apps/wm-dyn",
-    "apps/wm-android",
-    "apps/wm-android/launch",
-    "apps/wm-dyn/engine",
-    "apps/aichat",
-    "apps/finance",
-    "apps/sheets",
-    "apps/photos",
-    "apps/clock",
-    "apps/weather",
-    "apps/mail",
-    "apps/notes",
-    "apps/calendar",
-    "apps/reminders",
-    "apps/calculator",
-    "libs/wm_theme",
-    "libs/civil_time",
-    "libs/wm_api",
-    "libs/app_module",
-    "apps/task",
-    "apps/image",
-    "apps/video",
-    "apps/pdf",
-    "apps/files",
-    "libs/diskmap",
-    "libs/workspace",
-    "libs/code_arch",
-    "libs/code_language",
+    "tools/dbus_codegen",
     "libs/search",
-    "libs/tar",
     "libs/lz4",
-    "libs/rmeta",
-    "apps/route",
-    "libs/flowgraph",
-    "apps/ai-hub",
-    "apps/mixer",
-    "apps/storybook",
+    "libs/zstd_decode",
+    # === Flow: the generation studio and graph workbench's libraries ===
     # The tiled-RTS map generator, shared by the importer and the sandbox.
     "libs/rtsmap",
-    "libs/texcomp",
-    "libs/ai/hub_ui",
-    "libs/ai/services",
     # The AI stack: loader (disk), cuda/metal (kernel and residency stores),
     # job (the one cross-model contract), llm and models/* (per-family model
     # crates), the generate hub and the live pipe.
-    "libs/ai/loader",
-    "libs/ai/cuda",
-    "libs/ai/metal",
-    "libs/ai/job",
-    "libs/ai/llm",
-    "libs/ai/models/*",
-    "libs/ai/hub",
-    "libs/ai/livepipe",
     # Constructive solid geometry.
-    "libs/csg/csg",
-    "libs/csg/csg_boolean",
-    "libs/csg/csg_exact",
-    "libs/csg/csg_math",
-    "libs/csg/csg_mesh",
-    "libs/csg/csg_primitives",
-    "libs/csg/csg_sdf",
-    "libs/render",
-    "libs/raytrace",
-    "libs/fab",
-    "libs/fab_tour",
-    "apps/fab/loaders/gltf",
-    "libs/scene",
     "libs/soft_body",
-    "libs/show_control",
-    "libs/bounded_http",
     # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
-    "libs/core_util",
     "libs/strict_json",
-    "libs/loader_bundle",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
-    "libs/remesh",
     "libs/xatlas",
     # Editable polygon topology and worker-owned model documents.
-    "libs/mesh_edit",
-    "libs/model",
     # === examples ===
-    "examples/teamtalk",
-    "examples/automate",
-    "examples/map",
-    "examples/splash",
-    "examples/slides",
-    "examples/isolate",
-    "examples/uizoo",
-    "examples/video_player",
-    "examples/video_codec_test",
-    "examples/charts",
-    "examples/datagrid",
-    "examples/todo",
-    "examples/portallist_hit",
-    "examples/scroll_containment",
-    "examples/modal_footprint",
-    "examples/vector",
-    "examples/aichat",
-    "examples/pdf",
-    "examples/shader",
-    "examples/raytrace",
-    "examples/text_input",
-    "examples/text_atlas_stress",
-    "examples/text_selection",
-    "examples/text_center",
-    "examples/counter",
-    "examples/browser",
-    "examples/camera",
-    "examples/windows_blur",
-    "examples/floating_panel",
-    "examples/glass",
-    "examples/skeuomorph",
-    "examples/bugfix",
-    "examples/move_after_draw",
-    "examples/xr",
-    "examples/splat_bench",
-    "examples/cad",
-    "examples/box3d",
-    "examples/hello_world",
-    "examples/render_to_texture",
     # === digital-fabrication product ===
-    "apps/fab",
-    "apps/fabric",
     "libs/fabric/measure",
     "libs/fabric/draft",
     # === xr app ===
-    "xr",
-    # === director ===
-    "apps/director",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
     # === headless music score engine ===
-    "libs/score",
     "libs/score_layout",
     "libs/score_play",
-    "libs/score_render",
-    "libs/score_view",
-    "libs/score_view/tests/embed_app",
-    "libs/score_import",
-    "libs/score_pdf",
-    "libs/score_ui",
-    "apps/score",
     "libs/midi_file",
-    "libs/soundfont",
-    "libs/piano_model",
     "libs/drumkit",
     "libs/drumkit_phys",
     "libs/musicxml",
+    # === Synth: live-coded scores, their player and the tweak UI kit ===
     # === own MP3 / Ogg Vorbis decoders ===
-    "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
-    "libs/audio_encode",
-    "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
-    "libs/audio_picture",
     # === per-application audio tap, mixer input for a host equalizer ===
-    "libs/audio_route",
     # === mkfl motion payload + classical optical flow + all-intra re-encode
     # (shared by the enhance backend and the VJ's flow-warp import) ===
-    "libs/video_flow",
     # === realtime frame tweening: the classical GPU optical-flow pass
     # chain, the RIFE producer behind the same warp, and the mode set
     # (extracted from the VJ, which is still its reference user) ===
-    "libs/frametween",
     # === archive.org search + download content input (VJ / asset-ui) ===
-    "libs/archive_org",
     # === image tile wall: HEVC tape atlases + baker CLI + TileGrid widget
     # (the engine extracted from the Source Library picture wall) ===
-    "libs/image_tiles",
-    "examples/image_tiles",
     # === mp4 sample index for range-streaming playback ===
-    "libs/mp4_index",
     # === necessary tools ===
-    "platform/video",
-    "tools/cargo_makepad",
-    "tools/makepad_builder",
     "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
-    "libs/map_build",
-    "tools/map_tiles",
-    "tools/map_bake",
-    "tools/remote",
-    "tools/agents",
-    "tools/ci",
-    "libs/system_speech",
+    # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
+    # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
+    # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
+    # Relax data-structure microbenchmarks (Vec, iterators, HashMap, BTreeMap, sort, strings, bounds loops)
     # Send feedback: caption icon + panel (Amp, Scope)
-    "widgets/feedback",
     # === tests ===
-    "platform/script/test",
     # === makepad-widgets: the core and its family crates (widgets/ is the
     # front, a member through its dependents) ===
-    "widgets/core",
-    "widgets/families/tweaker",
-    "widgets/families/data",
-    "widgets/families/rich_text",
-    "widgets/families/menus",
-    "widgets/families/extras",
-    "widgets/families/maps",
-    "widgets/families/pdf",
-    "widgets/families/voice",
-    "widgets/families/cef",
-    "widgets/families/ai",
     # === private app repositories ===
     # Every app directory with a `src/`: the public apps above, and a private
-    # app repository cloned into apps/<name> whose root Cargo.toml is a
-    # package (Scope, Source Library) or a members package (Stage) naming its
-    # crates as path dependencies, which makes them members too. Its crates then compile in this workspace and share its
-    # target/, profiles and patches. Cargo fails on a member path that does
+    # repository cloned into apps/<name> whose root Cargo.toml is a package
+    # (Source Library) or a members package (apps/commercial: Stage and
+    # Scope) naming its crates as path dependencies, which makes them members
+    # too. Its crates then compile in this workspace and share its target/,
+    # profiles and patches. Cargo fails on a member path that does
     # not exist and on a glob that matches nothing; this glob always matches
     # the public apps, so a tree without the private repositories loads as
     # before. Directories without a `src/` (local data) are not matched.
-    "apps/*/src/..",
 ]
 
 workspace.exclude = [
-    # Private app repositories cloned into apps/<name> are members through
-    # apps/*/src/.. above: Scope (its deps/* come with it as path
-    # dependencies), Source Library, and Stage (a members package at its
-    # root).
-    # Private Arcade frontend (apps/sandbox) keeps its own workspace for now:
-    # its libs/* reuse the package names of Stage's libs/game/* crates
-    # (makepad-game-sim, -math, ...), which one workspace cannot hold twice.
-    "apps/sandbox",
+    # Relax's own fixtures, benches and std check crates: Relax programs and standalone
+    # workspaces (their own [workspace] / Cargo.lock), not members
+    "libs/relax/compiler/bench_rt",
+    "libs/relax/compiler/std",
+    "libs/relax/compiler/tests",
+    "libs/relax/types/tests",
+    "libs/relax/attr",
+    # Private repositories cloned into apps/<name> are members through
+    # apps/*/src/.. above: Source Library, and the commercial products at
+    # apps/commercial (a members package at its root naming Stage's and
+    # Scope's crates).
     # Stage's donors are preserved sources, not built.
-    "apps/stage/donors",
+    "apps/commercial/stage/donors",
     "libs/terminal_core",
     "libs/diffusion",
     "widgets/test",
     "libs/stitch",
+    # the wasm_strip spec runner: needs the `wast` crate the repo does not carry
+    "libs/wasm_strip/spec",
     "libs/wasm_bridge/test",
     # vendored third-party libs (tests require external dev-deps)
     "libs/ab_glyph_rasterizer",
@@ -257,6 +112,8 @@ workspace.exclude = [
     "libs/simd-adler32",
     "libs/smallvec",
     "libs/ttf-parser",
+    "libs/tween",
+    "libs/gizmo",
     "libs/unicase",
     "libs/unicode/unicode-bidi",
     "libs/unicode/unicode-bidi-mirroring",
@@ -276,47 +133,29 @@ workspace.exclude = [
     "libs/zune/zune-qoi",
     # vendored Vulkan crates (patched crates.io crates; tests/benches pull
     # upstream-only dev-deps or missing packaged assets)
+    "libs/vulkan",
     "libs/vulkan/arrayvec",
-    "libs/vulkan/ash",
-    "libs/vulkan/bit-set",
-    "libs/vulkan/bit-vec",
-    "libs/vulkan/bitflags",
     "libs/vulkan/cfg-if",
-    "libs/vulkan/cfg_aliases",
     "libs/vulkan/crunchy",
     "libs/vulkan/equivalent",
     "libs/vulkan/foldhash",
     "libs/vulkan/half",
     "libs/vulkan/hashbrown",
-    "libs/vulkan/hexf-parse",
     "libs/vulkan/indexmap",
     "libs/vulkan/libloading",
-    "libs/vulkan/log",
     "libs/vulkan/makepad-half",
-    "libs/vulkan/naga",
     "libs/vulkan/num-traits",
     "libs/vulkan/once_cell",
-    "libs/vulkan/rustc-hash",
-    "libs/vulkan/spirv",
-    "libs/vulkan/thiserror",
-    "libs/vulkan/thiserror-impl",
-    "libs/vulkan/unicode-ident",
     "libs/vulkan/zerocopy",
     "libs/rapier",
     # platform-specific libs
-    "libs/windows/windows-collections",
-    "libs/windows/windows-core",
-    "libs/windows/windows-future",
-    "libs/windows/windows-link",
-    "libs/windows/windows-result",
-    "libs/windows/windows-rs",
-    "libs/windows/windows-strings",
+    "libs/windows/sys",
+    "tools/winbind",
     "libs/linux/wayland-backend",
     "libs/linux/wayland-client",
     "libs/linux/wayland-egl",
     "libs/linux/wayland-protocols",
     "libs/linux/wayland-sys",
-    "tools/windows_strip",
     "tools/file_router",
     "tools/wasm_strip",
 ]
@@ -325,27 +164,92 @@ workspace.resolver = "2"
 #debug = true
 
 [patch.crates-io]
+# third-party crates the repo carries in-tree (libs/), for registry-style dependents
 bitflags = { path = "libs/bitflags" }
 smallvec = { path = "libs/smallvec" }
-windows-link = { path = "libs/windows/windows-link" }
+cfg-if = { path = "libs/cfg-if" }
+libloading = { path = "libs/vulkan/libloading" }
+memchr = { path = "libs/memchr" }
+unicode-segmentation = { path = "libs/unicode/unicode-segmentation" }
 
 # Build profiles, for every member, the private apps' crates included.
 #
 # dev: line tables are enough for backtraces and printf debugging (nobody
 # attaches a debugger); full debuginfo cost a quarter of a clean dev build
 # and doubled the Windows PDB and link time.
+# Paths of Relax's JIT libraries (libs/relax), the host crates (tools/run), and their makepad dependencies:
+# members say `name = { workspace = true }`.
+[workspace.dependencies]
+relax-lex = { path = "libs/relax/lex", version = "0.1.0" }
+makepad-relax = { path = "libs/relax/attr", version = "1.0.0" }
+relax-base = { path = "libs/relax/base", version = "0.1.0" }
+relax-backend = { path = "libs/relax/backend", version = "0.1.0" }
+relax-codegen = { path = "libs/relax/codegen", version = "0.1.0" }
+relax-compiler = { path = "libs/relax/compiler", version = "0.1.0" }
+relax-front = { path = "libs/relax/front", version = "0.1.0" }
+relax-light-http = { path = "tools/run/light_http", version = "0.1.0" }
+relax-native-macros = { path = "libs/relax/native_macros", version = "0.1.0" }
+relax-session = { path = "libs/relax/session", version = "0.1.0" }
+relax-types = { path = "libs/relax/types", version = "0.1.0" }
+relax-provided-fixture = { path = "tools/run/fixture", version = "0.1.0" }
+makepad-live-id = { path = "libs/live_id", version = "1.0.0" }
+makepad-stack = { path = "libs/stack", version = "1.0.0" }
+makepad-remote = { path = "libs/remote", version = "0.1.0" }
+makepad-strict-json = { path = "libs/strict_json", version = "0.1.0" }
+makepad-gpu-trace = { path = "libs/gpu_trace", version = "1.0.0" }
+makepad-prof-stream = { path = "libs/prof_stream", version = "1.0.0" }
+makepad-relax-api = { path = "libs/relax_api", version = "1.0.0" }
+makepad-relax-api-macro-impl = { path = "libs/relax_api/macro_impl", version = "1.0.0" }
+makepad-live-id-macros-impl = { path = "libs/live_id/id_macros_impl", version = "1.0.0" }
+makepad-derive-widget-impl = { path = "widgets/derive_widget_impl", version = "1.0.0" }
+makepad-micro-serde-derive-impl = { path = "libs/micro_serde/derive_impl", version = "1.0.0" }
+makepad-micro-proc-macro = { path = "libs/micro_proc_macro", version = "1.0.0" }
+# third-party crates carried in-tree (libs/) and the makepad crates Relax's real-world benchmark
+# (libs/relax/compiler/rwbench) runs; nothing in the workspace resolves from crates.io
+brotli = { path = "libs/brotli/brotli", version = "8.0.4" }
+rustybuzz = { path = "libs/rustybuzz", version = "0.18.0" }
+ab_glyph_rasterizer = { path = "libs/ab_glyph_rasterizer", version = "0.1.8" }
+sdfer = { path = "libs/sdfer", version = "0.2.1" }
+pulldown-cmark = { path = "libs/pulldown-cmark", version = "0.12.2", default-features = false }
+makepad-fast-inflate = { path = "libs/fast_inflate", version = "0.1.0" }
+makepad-zstd-decode = { path = "libs/zstd_decode", version = "0.1.0" }
+makepad-zip-file = { path = "libs/zip_file", version = "1.0.0" }
+makepad-zune-png = { path = "libs/zune/zune-png", version = "0.5.2" }
+makepad-rust-tokenizer = { path = "libs/rust_tokenizer", version = "1.0.0" }
+makepad-html = { path = "libs/html", version = "1.0.0" }
+makepad-ai-llm = { path = "libs/ai/llm", version = "0.1.0" }
+makepad-widgets-core = { path = "widgets/core", version = "2.0.0" }
+makepad-widgets-sheets = { path = "widgets/sheets", version = "0.1.0" }
+makepad-mbtile-reader = { path = "libs/mbtile_reader", version = "1.0.0" }
+makepad-piano-model = { path = "libs/piano_model", version = "0.1.0" }
+makepad-audio-decode = { path = "libs/audio_decode", version = "0.1.0" }
+makepad-audio-synth = { path = "libs/audio_synth", version = "0.1.0" }
+makepad-script = { path = "platform/script", version = "1.0.0" }
+makepad-csg = { path = "libs/csg/csg", version = "0.1.0" }
+
 [profile.dev]
 debug = "line-tables-only"
 
 # release: agents build release all the time, so an edited crate recompiles
 # incrementally (widgets edit 30 s -> 11 s on Mac, 45 s -> 16 s on Windows;
 # a clean build is ~6% slower). cargo-makepad's packaging commands (android,
-# apple, wasm, ohos, desktop build) set CARGO_PROFILE_RELEASE_INCREMENTAL=false,
+# apple, wasm, desktop build) set CARGO_PROFILE_RELEASE_INCREMENTAL=false,
 # so shipped binaries are still built whole. lto = "off" drops the default
 # thin-local LTO pass (release clean 63 s -> 52 s for amp, edit loop faster).
 [profile.release]
 incremental = true
 lto = "off"
+
+# host: the `makepad` JIT binary (Relax + makepad run) built for speed on the machine that runs it.
+# Output goes to target/host/ (or target/<triple>/host/), never over target/release: release stays the
+# distributable build and the build every gate, A/B and timing series uses.
+# local/agent_state/relax-campaign/build-host.sh adds -Ctarget-cpu=native and the PGO profile.
+[profile.host]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+incremental = false
 
 [profile.small]
 inherits = "release"
@@ -402,3 +306,26 @@ incremental = false
 #opt-level = 3
 #[profile.dev.package.ttf-parser]
 #opt-level = 3
+
+# The makepad run host and Relax JIT build whole: incremental release splits each crate into many more
+# codegen units, which costs the JIT compiler speed.
+[profile.release.package.makepad-run]
+incremental = false
+[profile.release.package.relax-runner]
+incremental = false
+[profile.release.package.makepad-run-android]
+incremental = false
+[profile.release.package.relax-compiler]
+incremental = false
+[profile.release.package.relax-types]
+incremental = false
+[profile.release.package.relax-front]
+incremental = false
+[profile.release.package.relax-base]
+incremental = false
+[profile.release.package.relax-codegen]
+incremental = false
+[profile.release.package.relax-session]
+incremental = false
+[profile.release.package.relax-native-macros]
+incremental = false

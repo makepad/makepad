@@ -4,6 +4,7 @@ use std::fmt;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::ptr;
 use std::str;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use encode;
 use {Encode, Encoding};
@@ -635,3 +636,57 @@ mod tests {
         assert!(result == 4);
     }
 }*/
+
+/// The selector cached in `slot` (one static per `sel!` site), registered on first use.
+/// `name` ends in a NUL.
+#[doc(hidden)]
+#[inline]
+pub fn __cached_sel(slot: &'static AtomicUsize, name: &str) -> Sel {
+    // `Relaxed` is enough: `sel_registerName` is thread-safe and idempotent.
+    let ptr = slot.load(Ordering::Relaxed) as *const c_void;
+    if ptr.is_null() {
+        __register_sel(slot, name)
+    } else {
+        Sel { ptr }
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn __register_sel(slot: &'static AtomicUsize, name: &str) -> Sel {
+    assert!(name.ends_with('\0'), "selector name must end in NUL");
+    let sel = unsafe { sel_registerName(name.as_ptr() as *const c_char) };
+    slot.store(sel.ptr as usize, Ordering::Relaxed);
+    sel
+}
+
+/// The class cached in `slot` (one static per `class!` site), looked up on first use;
+/// panics when the runtime has no class of that name. `name` ends in a NUL.
+#[doc(hidden)]
+#[inline]
+#[track_caller]
+pub fn __cached_class(slot: &'static AtomicUsize, name: &str) -> &'static Class {
+    let ptr = slot.load(Ordering::Relaxed) as *const Class;
+    if ptr.is_null() {
+        __lookup_class(slot, name)
+    } else {
+        unsafe { &*ptr }
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+#[track_caller]
+pub fn __lookup_class(slot: &'static AtomicUsize, name: &str) -> &'static Class {
+    assert!(name.ends_with('\0'), "class name must end in NUL");
+    // `Relaxed` is enough: `objc_getClass` is thread-safe.
+    let cls = unsafe { objc_getClass(name.as_ptr() as *const c_char) };
+    slot.store(cls as usize, Ordering::Relaxed);
+    if cls.is_null() {
+        panic!(
+            "Class with name {} could not be found",
+            name.trim_end_matches('\0')
+        );
+    }
+    unsafe { &*cls }
+}

@@ -165,7 +165,6 @@ fn sin_pi(mut x: f64) -> f64 {
     }
 }
 
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn lgamma_r(mut x: f64) -> (f64, i32) {
     let u: u64 = x.to_bits();
     let mut t: f64;

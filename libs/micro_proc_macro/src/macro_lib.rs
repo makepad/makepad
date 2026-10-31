@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-extern crate proc_macro;
-use proc_macro::token_stream::IntoIter;
-use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
+use crate::proc_macro::token_stream::IntoIter;
+use crate::proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
 #[derive(Clone, Default, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
 pub struct LiveId(pub u64);
@@ -72,14 +70,17 @@ pub fn unwrap_option(input: TokenStream) -> Result<TokenStream, TokenStream> {
     }
 }
 
+/// Builds a TokenStream. Tokens collect in plain Vecs (one per open group) and
+/// become a TokenStream once per group, at `pop_group` / `end`: one bridge call
+/// per group instead of one `TokenStream::extend` per token.
 pub struct TokenBuilder {
-    pub groups: Vec<(Delimiter, TokenStream)>,
+    groups: Vec<(Delimiter, Vec<TokenTree>)>,
 }
 
 impl TokenBuilder {
     pub fn new() -> Self {
         Self {
-            groups: vec![(Delimiter::None, TokenStream::new())],
+            groups: vec![(Delimiter::None, Vec::new())],
         }
     }
 
@@ -91,27 +92,24 @@ impl TokenBuilder {
         if self.groups.len() != 1 {
             panic!("Groups not empty, you missed a pop_group")
         }
-        self.groups.pop().unwrap().1
+        self.groups.pop().unwrap().1.into_iter().collect()
     }
 
     pub fn eprint(&self) {
-        eprintln!("{}", self.groups.last().unwrap().1.to_string());
+        let ts: TokenStream = self.groups.last().unwrap().1.iter().cloned().collect();
+        eprintln!("{}", ts);
     }
 
     pub fn extend(&mut self, tt: TokenTree) -> &mut Self {
-        self.groups.last_mut().unwrap().1.extend(Some(tt));
+        self.groups.last_mut().unwrap().1.push(tt);
         self
     }
 
     pub fn stream(&mut self, what: Option<TokenStream>) -> &mut Self {
         if let Some(what) = what {
-            for c in what.into_iter() {
-                self.extend(c);
-            }
-            self
-        } else {
-            self
+            self.groups.last_mut().unwrap().1.extend(what);
         }
+        self
     }
 
     pub fn add(&mut self, what: &str) -> &mut Self {
@@ -271,8 +269,14 @@ impl TokenBuilder {
         self
     }
 
+    /// An identifier; `r#name` is the raw identifier `name` (a keyword used
+    /// as a name, as a struct field `r#in`).
     pub fn ident(&mut self, id: &str) -> &mut Self {
-        self.extend(TokenTree::from(Ident::new(id, Span::call_site())))
+        let ident = match id.strip_prefix("r#") {
+            Some(raw) => Ident::new_raw(raw, Span::call_site()),
+            None => Ident::new(id, Span::call_site()),
+        };
+        self.extend(TokenTree::from(ident))
     }
 
     pub fn ident_with_span(&mut self, id: &str, span: Span) -> &mut Self {
@@ -315,6 +319,15 @@ impl TokenBuilder {
     pub fn suf_u64(&mut self, val: u64) -> &mut Self {
         self.extend(TokenTree::from(Literal::u64_suffixed(val)))
     }
+    /// `LiveId(<hash>)` with the hash computed here, what `id!(name)` expands to.
+    pub fn live_id(&mut self, name: &str) -> &mut Self {
+        let id = LiveId::from_str(name);
+        self.add("LiveId (").suf_u64(id.0).add(")")
+    }
+    /// `LiveId::from_str_with_lut("<name>").unwrap()`, what `id_lut!(name)` expands to.
+    pub fn live_id_lut(&mut self, name: &str) -> &mut Self {
+        self.add("LiveId::from_str_with_lut(").string(name).add(").unwrap()")
+    }
     pub fn unsuf_f32(&mut self, val: f32) -> &mut Self {
         self.extend(TokenTree::from(Literal::f32_unsuffixed(val)))
     }
@@ -333,14 +346,15 @@ impl TokenBuilder {
     }
 
     pub fn push_group(&mut self, delim: Delimiter) -> &mut Self {
-        self.groups.push((delim, TokenStream::new()));
+        self.groups.push((delim, Vec::new()));
         self
     }
 
     pub fn stack_as_string(&self) -> String {
         let mut ret = String::new();
         for i in (0..self.groups.len() - 1).rev() {
-            ret.push_str(&format!("Level {}: {}", i, self.groups[i].1.to_string()));
+            let ts: TokenStream = self.groups[i].1.iter().cloned().collect();
+            ret.push_str(&format!("Level {}: {}", i, ts));
         }
         ret
     }
@@ -358,7 +372,7 @@ impl TokenBuilder {
                 ts.0, delim
             );
         }
-        self.extend(TokenTree::from(Group::new(delim, ts.1)));
+        self.extend(TokenTree::from(Group::new(delim, ts.1.into_iter().collect())));
         self
     }
 }
@@ -538,7 +552,7 @@ impl TokenParser {
     pub fn eat_level(&mut self) -> TokenStream {
         let mut tb = TokenBuilder::new();
         while !self.eat_eot() {
-            tb.extend(self.current.clone().unwrap());
+            tb.extend(self.current.take().unwrap());
             self.advance();
         }
         tb.end()
@@ -551,7 +565,7 @@ impl TokenParser {
                 self.advance();
                 return tb.end();
             }
-            tb.extend(self.current.clone().unwrap());
+            tb.extend(self.current.take().unwrap());
             self.advance();
         }
         tb.end()
@@ -927,6 +941,11 @@ impl TokenParser {
                 }
             }
         }
+        // a leading `::` (`::std::time::Instant`); the JIT's token model and rustc's must
+        // accept the same field types (a path type once built only under the JIT)
+        if self.eat_double_colon_destruct() {
+            tb.add("::");
+        }
         if self.open_bracket() {
             // array type
             tb.add("[");
@@ -955,8 +974,16 @@ impl TokenParser {
                 }
             }
             tb.stream(self.eat_generic());
+            // path segments: `crate::module::Type<T>`
+            while self.eat_double_colon_destruct() {
+                tb.add("::");
+                let (segment, span) = self.eat_any_ident_with_span()?;
+                tb.ident_with_span(&segment, span);
+                tb.stream(self.eat_generic());
+            }
             return Some(tb.end());
         }
         None
     }
 }
+

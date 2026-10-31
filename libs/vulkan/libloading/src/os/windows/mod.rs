@@ -4,15 +4,22 @@
 mod windows_imports {}
 #[cfg(any(not(libloading_docs), windows))]
 mod windows_imports {
-    use super::{BOOL, DWORD, FARPROC, HANDLE, HMODULE};
+    pub(super) use makepad_windows_sys::{
+        core::{PCSTR, PCWSTR, PWSTR},
+        Win32::{
+            Foundation::{
+                FreeLibrary_raw, GetLastError_raw, HANDLE as NativeHandle, HMODULE as NativeModule,
+            },
+            System::{
+                Diagnostics::Debug::{SetThreadErrorMode_raw, THREAD_ERROR_MODE},
+                LibraryLoader::{
+                    GetModuleFileNameW_raw, GetModuleHandleExW_raw, GetProcAddress_raw,
+                    LoadLibraryExW_raw, LOAD_LIBRARY_FLAGS as NativeLoadFlags,
+                },
+            },
+        },
+    };
     pub(super) use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    windows_link::link!("kernel32.dll" "system" fn GetLastError() -> DWORD);
-    windows_link::link!("kernel32.dll" "system" fn SetThreadErrorMode(new_mode: DWORD, old_mode: *mut DWORD) -> BOOL);
-    windows_link::link!("kernel32.dll" "system" fn GetModuleHandleExW(flags: u32, module_name: *const u16, module: *mut HMODULE) -> BOOL);
-    windows_link::link!("kernel32.dll" "system" fn FreeLibrary(module: HMODULE) -> BOOL);
-    windows_link::link!("kernel32.dll" "system" fn LoadLibraryExW(filename: *const u16, file: HANDLE, flags: DWORD) -> HMODULE);
-    windows_link::link!("kernel32.dll" "system" fn GetModuleFileNameW(module: HMODULE, filename: *mut u16, size: DWORD) -> DWORD);
-    windows_link::link!("kernel32.dll" "system" fn GetProcAddress(module: HMODULE, procname: *const u8) -> FARPROC);
 }
 
 use self::windows_imports::*;
@@ -86,7 +93,12 @@ impl Library {
             with_get_last_error(
                 |source| crate::Error::GetModuleHandleExW { source },
                 || {
-                    let result = GetModuleHandleExW(0, std::ptr::null_mut(), &mut handle);
+                    let result = GetModuleHandleExW_raw(
+                        0,
+                        PCWSTR(std::ptr::null_mut()),
+                        &mut handle as *mut HMODULE as *mut NativeModule,
+                    )
+                    .0;
                     if result == 0 {
                         None
                     } else {
@@ -125,7 +137,12 @@ impl Library {
                 || {
                     // Make sure no winapi calls as a result of drop happen inside this closure, because
                     // otherwise that might change the return value of the GetLastError.
-                    let result = GetModuleHandleExW(0, wide_filename.as_ptr(), &mut handle);
+                    let result = GetModuleHandleExW_raw(
+                        0,
+                        PCWSTR(wide_filename.as_ptr()),
+                        &mut handle as *mut HMODULE as *mut NativeModule,
+                    )
+                    .0;
                     if result == 0 {
                         None
                     } else {
@@ -172,7 +189,12 @@ impl Library {
             || {
                 // Make sure no winapi calls as a result of drop happen inside this closure, because
                 // otherwise that might change the return value of the GetLastError.
-                let handle = LoadLibraryExW(wide_filename.as_ptr(), 0, flags);
+                let handle = LoadLibraryExW_raw(
+                    PCWSTR(wide_filename.as_ptr()),
+                    NativeHandle(0 as *mut _),
+                    NativeLoadFlags(flags),
+                )
+                .0 as HMODULE;
                 if handle == 0 {
                     None
                 } else {
@@ -208,11 +230,12 @@ impl Library {
                     // We use our cached module handle of this `Library` instead of the module name. This works
                     // if we also pass the flag `GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS` because on Windows, module handles
                     // are the loaded base address of the module.
-                    let result = GetModuleHandleExW(
+                    let result = GetModuleHandleExW_raw(
                         GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                        self.0 as *const u16,
-                        &mut handle,
-                    );
+                        PCWSTR(self.0 as *const u16),
+                        &mut handle as *mut HMODULE as *mut NativeModule,
+                    )
+                    .0;
                     if result == 0 {
                         None
                     } else {
@@ -241,7 +264,10 @@ impl Library {
         with_get_last_error(
             |source| crate::Error::GetProcAddress { source },
             || {
-                let symbol = GetProcAddress(self.0, symbol.as_ptr().cast());
+                let symbol = GetProcAddress_raw(
+                    NativeModule(self.0 as *mut _),
+                    PCSTR(symbol.as_ptr().cast()),
+                );
                 if symbol.is_none() {
                     None
                 } else {
@@ -266,7 +292,7 @@ impl Library {
             |source| crate::Error::GetProcAddress { source },
             || {
                 let ordinal = ordinal as usize as *const _;
-                let symbol = GetProcAddress(self.0, ordinal);
+                let symbol = GetProcAddress_raw(NativeModule(self.0 as *mut _), PCSTR(ordinal));
                 if symbol.is_none() {
                     None
                 } else {
@@ -308,7 +334,7 @@ impl Library {
         let result = with_get_last_error(
             |source| crate::Error::FreeLibrary { source },
             || {
-                if unsafe { FreeLibrary(self.0) == 0 } {
+                if unsafe { FreeLibrary_raw(NativeModule(self.0 as *mut _)).0 == 0 } {
                     None
                 } else {
                     Some(())
@@ -327,7 +353,7 @@ impl Library {
 impl Drop for Library {
     fn drop(&mut self) {
         unsafe {
-            FreeLibrary(self.0);
+            FreeLibrary_raw(NativeModule(self.0 as *mut _)).0;
         }
     }
 }
@@ -337,7 +363,11 @@ impl fmt::Debug for Library {
         unsafe {
             // FIXME: use Maybeuninit::uninit_array when stable
             let mut buf = mem::MaybeUninit::<[mem::MaybeUninit<u16>; 1024]>::uninit().assume_init();
-            let len = GetModuleFileNameW(self.0, buf[..].as_mut_ptr().cast(), 1024) as usize;
+            let len = GetModuleFileNameW_raw(
+                NativeModule(self.0 as *mut _),
+                PWSTR(buf[..].as_mut_ptr().cast()),
+                1024,
+            ) as usize;
             if len == 0 {
                 f.write_str(&format!("Library@{:#x}", self.0))
             } else {
@@ -419,17 +449,22 @@ impl ErrorModeGuard {
     #[allow(clippy::if_same_then_else)]
     fn new() -> Option<ErrorModeGuard> {
         unsafe {
-            let mut previous_mode = 0;
-            if SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut previous_mode) == 0 {
+            let mut previous_mode = THREAD_ERROR_MODE(0);
+            if SetThreadErrorMode_raw(
+                THREAD_ERROR_MODE(SEM_FAILCRITICALERRORS),
+                &mut previous_mode,
+            )
+            .0 == 0
+            {
                 // How in the world is it possible for what is essentially a simple variable swap
                 // to fail?  For now we just ignore the error -- the worst that can happen here is
                 // the previous mode staying on and user seeing a dialog error on older Windows
                 // machines.
                 None
-            } else if previous_mode == SEM_FAILCRITICALERRORS {
+            } else if previous_mode.0 == SEM_FAILCRITICALERRORS {
                 None
             } else {
-                Some(ErrorModeGuard(previous_mode))
+                Some(ErrorModeGuard(previous_mode.0))
             }
         }
     }
@@ -438,7 +473,7 @@ impl ErrorModeGuard {
 impl Drop for ErrorModeGuard {
     fn drop(&mut self) {
         unsafe {
-            SetThreadErrorMode(self.0, ptr::null_mut());
+            SetThreadErrorMode_raw(THREAD_ERROR_MODE(self.0), ptr::null_mut()).0;
         }
     }
 }
@@ -451,7 +486,7 @@ where
     F: FnOnce() -> Option<T>,
 {
     closure().ok_or_else(|| {
-        let error = unsafe { GetLastError() };
+        let error = unsafe { GetLastError_raw().0 };
         if error == 0 {
             None
         } else {
@@ -463,11 +498,7 @@ where
 }
 
 #[allow(clippy::upper_case_acronyms)]
-type BOOL = i32;
-#[allow(clippy::upper_case_acronyms)]
 type DWORD = u32;
-#[allow(clippy::upper_case_acronyms)]
-type HANDLE = isize;
 #[allow(clippy::upper_case_acronyms)]
 type HMODULE = isize;
 #[allow(clippy::upper_case_acronyms)]

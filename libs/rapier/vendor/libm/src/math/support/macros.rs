@@ -72,7 +72,7 @@ macro_rules! select_implementation {
         }
 
         // By default, never use arch-specific implementations if we have force-soft-floats
-        #[cfg(arch_enabled)]
+        #[cfg(all(feature = "arch", not(feature = "force-soft-floats")))]
         select_implementation! {
             @cfg $($use_arch)?;
             // Wrap in `if true` to avoid unused warnings

@@ -1,6 +1,5 @@
 //! Math types and helpers from `vendor/xatlas.cpp` (lines ~436–1904).
 
-use std::f32;
 
 // Call C libm so we match xatlas.cpp compiled with clang -O2 on this platform.
 // Rust's f32::{sqrt,sin,...} can differ by 1 ULP from `sqrtf`/`sinf`.

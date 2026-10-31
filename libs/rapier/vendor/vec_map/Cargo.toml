@@ -21,7 +21,7 @@ homepage = "https://github.com/contain-rs/vec-map"
 documentation = "https://contain-rs.github.io/vec-map/vec_map"
 readme = "README.md"
 keywords = ["data-structures", "collections", "vecmap", "vec_map", "contain-rs"]
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/contain-rs/vec-map"
 [features]
 serde = []

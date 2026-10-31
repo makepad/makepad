@@ -14,7 +14,6 @@ edition = "2021"
 name = "crunchy"
 version = "0.2.4"
 authors = ["Eira Fransham <jackefransham@gmail.com>"]
-build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false
@@ -27,13 +26,6 @@ license = "MIT"
 repository = "https://github.com/eira-fransham/crunchy"
 
 [features]
-default = ["limit_128"]
-limit_1024 = []
-limit_128 = []
-limit_2048 = []
-limit_256 = []
-limit_512 = []
-limit_64 = []
 std = []
 
 [lib]
@@ -41,3 +33,11 @@ name = "crunchy"
 path = "src/lib.rs"
 
 [dependencies]
+
+[[example]]
+name = "gen_unroll"
+path = "examples/gen_unroll.rs"
+
+[[test]]
+name = "generated"
+path = "tests/generated.rs"
