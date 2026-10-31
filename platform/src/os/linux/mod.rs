@@ -8,6 +8,8 @@ pub mod file_dialog;
 #[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
 pub mod wayland;
 #[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
+pub(crate) mod kde_color_scheme;
+#[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
 pub mod windowing_backend;
 #[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
 pub mod x11;

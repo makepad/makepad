@@ -1,5 +1,6 @@
 use crate::{
     cx::Cx,
+    display_context::NativeAppearance,
     draw_list::DrawListId,
     draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
     draw_shader::{
@@ -1942,11 +1943,17 @@ impl D3d11Window {
         position: Option<Vec2d>,
         title: &str,
         is_fullscreen: bool,
+        native_appearance: Option<NativeAppearance>,
     ) -> D3d11Window {
         // create window, and then initialize it; this is needed because
         // GWLP_USERDATA needs to reference a stable and existing window
-        let mut win32_window =
-            Box::new(Win32Window::new(window_id, title, position, is_fullscreen));
+        let mut win32_window = Box::new(Win32Window::new(
+            window_id,
+            title,
+            position,
+            is_fullscreen,
+            native_appearance,
+        ));
         win32_window.init(inner_size);
         win32_window.set_ime_active(false);
         let wg = win32_window.get_window_geom();
@@ -1981,8 +1988,14 @@ impl D3d11Window {
         d3d11_cx: &D3d11Cx,
         size: Vec2d,
         position: Vec2d,
+        native_appearance: Option<NativeAppearance>,
     ) -> D3d11Window {
-        let mut win32_window = Box::new(Win32Window::new_popup(window_id, position, size));
+        let mut win32_window = Box::new(Win32Window::new_popup(
+            window_id,
+            position,
+            size,
+            native_appearance,
+        ));
         win32_window.init(size);
 
         let wg = win32_window.get_window_geom();

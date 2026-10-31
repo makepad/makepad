@@ -618,6 +618,7 @@ impl Cx {
                     //self.os.keyboard_visible = false;
                     //unsafe {android_jni::to_java_show_keyboard(false);}
                 }
+                CxOsOp::SetNativeAppearance(_) => {}
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on OpenHarmony");
                     self.call_event_handler(&Event::DragEnd);

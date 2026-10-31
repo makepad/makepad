@@ -5,7 +5,7 @@ use {
         area::Area,
         cursor::MouseCursor,
         cx::{Cx, CxRef, GpuBackend, OsType, XrCapabilities},
-        display_context::SystemBarAppearance,
+        display_context::{NativeAppearance, SystemBarAppearance},
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
@@ -329,6 +329,9 @@ pub enum CxOsOp {
     /// dark icons, `false` requests light icons. Honored on Android and iOS
     /// (iOS only has a status bar).
     SetSystemBarDarkIcons(bool),
+    /// Makes the OS-drawn parts of the app look light or dark.
+    /// See [`Cx::set_native_appearance`].
+    SetNativeAppearance(NativeAppearance),
     /// Asks the OS to defer its own edge gestures (the home-indicator swipe,
     /// the status-bar and control-centre pulls) on these screen edges, so
     /// the first swipe from such an edge reaches the app. Honored on iOS.
@@ -522,6 +525,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::PinMousePointer(..) => write!(f, "PinMousePointer"),
             Self::RepinMousePointer => write!(f, "RepinMousePointer"),
             Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
+            Self::SetNativeAppearance(..) => write!(f, "SetNativeAppearance"),
             Self::DeferSystemGestures(..) => write!(f, "DeferSystemGestures"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
@@ -1323,6 +1327,20 @@ impl Cx {
     /// event cycle.
     pub fn set_system_bar_appearance(&mut self, appearance: SystemBarAppearance) {
         self.display_context.system_bar_appearance = appearance;
+    }
+
+    /// Makes the UI that the OS draws for the app light or dark, regardless of the OS's own setting.
+    ///
+    /// Honored on iOS and macOS, by Android's copy/paste toolbar and splash screen,
+    /// by KWin's and some other Linux title bars, and by the window menu on Windows.
+    pub fn set_native_appearance(&mut self, appearance: NativeAppearance) {
+        if self.display_context.native_appearance == Some(appearance) {
+            return;
+        }
+        self.display_context.native_appearance = Some(appearance);
+        self.platform_ops
+            .retain(|queued| !matches!(queued, CxOsOp::SetNativeAppearance(_)));
+        self.platform_ops.push_back(CxOsOp::SetNativeAppearance(appearance));
     }
 
     /// Ask the OS to defer its own gestures on these screen edges, so the

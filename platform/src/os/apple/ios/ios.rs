@@ -1642,6 +1642,9 @@ impl Cx {
                 CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
                     IosApp::set_status_bar_dark_icons(dark_icons);
                 }
+                CxOsOp::SetNativeAppearance(appearance) => {
+                    IosApp::set_native_appearance(appearance);
+                }
                 CxOsOp::DeferSystemGestures(edges) => {
                     IosApp::set_deferred_system_gesture_edges(ui_rect_edges(edges));
                 }

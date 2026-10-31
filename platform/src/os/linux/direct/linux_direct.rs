@@ -660,6 +660,7 @@ impl Cx {
                     let window = &mut self.windows[window_id];
                     window.window_geom.position = size;
                 }
+                CxOsOp::SetNativeAppearance(_) => {}
                 CxOsOp::CheckPermission {
                     permission,
                     request_id,

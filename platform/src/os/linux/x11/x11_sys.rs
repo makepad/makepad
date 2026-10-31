@@ -402,6 +402,8 @@ extern "C" {
         num_elements: c_int,
     ) -> c_int;
 
+    pub fn XDeleteProperty(display: *mut Display, w: Window, property: Atom) -> c_int;
+
     pub fn XSendEvent(
         arg1: *mut Display,
         arg2: Window,

@@ -4,6 +4,7 @@ use crate::file_dialogs::{FileDialog, FileDialogAction};
 use {
     crate::{
         cursor::MouseCursor,
+        display_context::NativeAppearance,
         //macos_menu::{
         //    CxCommandSetting
         //},
@@ -156,6 +157,24 @@ pub fn activate_cocoa_window_on_pointer_down(window: ObjcId) -> bool {
             let () = msg_send![window, makeKeyAndOrderFront: nil];
         }
         !active || !key
+    }
+}
+
+/// `setAppearance:` re-lays out each window's titlebar right away, which can call back
+/// into `MacosApp`, so this can't run inside `with_macos_app`.
+pub fn set_native_appearance(appearance: NativeAppearance) {
+    unsafe {
+        let ns_appearance: ObjcId = match appearance {
+            NativeAppearance::System => nil,
+            NativeAppearance::Light => {
+                msg_send![class!(NSAppearance), appearanceNamed: NSAppearanceNameAqua]
+            }
+            NativeAppearance::Dark => {
+                msg_send![class!(NSAppearance), appearanceNamed: NSAppearanceNameDarkAqua]
+            }
+        };
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![ns_app, setAppearance: ns_appearance];
     }
 }
 

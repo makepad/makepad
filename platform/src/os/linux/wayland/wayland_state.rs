@@ -26,6 +26,10 @@ use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::{
+    plasma::server_decoration_palette::client::{
+        org_kde_kwin_server_decoration_palette::OrgKdeKwinServerDecorationPalette,
+        org_kde_kwin_server_decoration_palette_manager::OrgKdeKwinServerDecorationPaletteManager,
+    },
     wp::{
         cursor_shape::v1::client::{
             wp_cursor_shape_device_v1,
@@ -355,6 +359,7 @@ pub(crate) struct WaylandState {
     pub(crate) requested_cursor: MouseCursor,
     pub(crate) keyboard_serial: Option<u32>,
     pub(crate) decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+    pub(crate) palette_manager: Option<OrgKdeKwinServerDecorationPaletteManager>,
     pub(crate) icon_manager: Option<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) popups: Vec<WaylandPopupWindow>,
@@ -474,6 +479,7 @@ impl WaylandState {
             pinch_gesture: None,
             pinch_scale: 1.0,
             decoration_manager: None,
+            palette_manager: None,
             icon_manager: None,
             scale_manager: None,
             viewporter: None,
@@ -732,6 +738,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                         (),
                     );
                     state.decoration_manager = Some(decoration_manager);
+                }
+                "org_kde_kwin_server_decoration_palette_manager" => {
+                    let palette_manager = wl_registry
+                        .bind::<OrgKdeKwinServerDecorationPaletteManager, _, _>(
+                        name,
+                        1,
+                        qhandle,
+                        (),
+                    );
+                    state.palette_manager = Some(palette_manager);
                 }
                 "wp_cursor_shape_manager_v1" => {
                     let cursor =
@@ -2171,6 +2187,8 @@ delegate_noop!(WaylandState: ignore wl_region::WlRegion);
 delegate_noop!(WaylandState: ignore wl_subcompositor::WlSubcompositor);
 delegate_noop!(WaylandState: ignore wl_subsurface::WlSubsurface);
 delegate_noop!(WaylandState: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
+delegate_noop!(WaylandState: ignore OrgKdeKwinServerDecorationPaletteManager);
+delegate_noop!(WaylandState: ignore OrgKdeKwinServerDecorationPalette);
 delegate_noop!(WaylandState: ignore xdg_toplevel_icon_v1::XdgToplevelIconV1);
 delegate_noop!(WaylandState: ignore wl_shm::WlShm);
 delegate_noop!(WaylandState: ignore wl_shm_pool::WlShmPool);

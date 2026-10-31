@@ -1,6 +1,7 @@
 use {
     crate::{
         area::Area,
+        display_context::NativeAppearance,
         event::*,
         makepad_math::*,
         os::{
@@ -59,6 +60,16 @@ pub const UI_RETURN_KEY_YAHOO: i64 = 8;
 pub const UI_RETURN_KEY_DONE: i64 = 9;
 pub const UI_RETURN_KEY_EMERGENCY_CALL: i64 = 10;
 pub const UI_RETURN_KEY_CONTINUE: i64 = 11;
+
+// UIKeyboardAppearance
+pub const UI_KEYBOARD_APPEARANCE_DEFAULT: i64 = 0;
+pub const UI_KEYBOARD_APPEARANCE_DARK: i64 = 1;
+pub const UI_KEYBOARD_APPEARANCE_LIGHT: i64 = 2;
+
+// UIUserInterfaceStyle
+pub const UI_USER_INTERFACE_STYLE_UNSPECIFIED: i64 = 0;
+pub const UI_USER_INTERFACE_STYLE_LIGHT: i64 = 1;
+pub const UI_USER_INTERFACE_STYLE_DARK: i64 = 2;
 
 pub(crate) const IOS_TEXT_INPUT_CARET_HEIGHT: f64 = 20.0;
 pub(crate) const IOS_TEXT_INPUT_TARGET_HEIGHT: f64 = 32.0;
@@ -215,6 +226,8 @@ pub struct IosApp {
     last_keyboard_config: Option<crate::ime::TextInputConfig>,
     /// Root view controller for status bar / home indicator control
     pub view_controller: Option<ObjcId>,
+    window: Option<ObjcId>,
+    native_appearance: NativeAppearance,
     /// Native camera preview layers keyed by video_id.
     pub camera_preview_layers: HashMap<u64, ObjcId>,
     /// Selection handles overlayed over the MTK view (iOS 15+ custom implementation).
@@ -228,7 +241,10 @@ pub struct IosApp {
 /// text + caret), and attaches it to the MTKView. Used at startup and to
 /// re-create the view when leaving a secure field (iOS caches a sticky
 /// password/AutoFill tag on the text-input object).
-unsafe fn create_makepad_text_view(mtk_view_obj: ObjcId) -> ObjcId {
+unsafe fn create_makepad_text_view(
+    mtk_view_obj: ObjcId,
+    native_appearance: NativeAppearance,
+) -> ObjcId {
     let mtk_bounds: NSRect = msg_send![mtk_view_obj, bounds];
     let view: ObjcId = msg_send![get_ios_class_global().makepad_text_view, alloc];
     let view: ObjcId = msg_send![view, initWithFrame: mtk_bounds];
@@ -251,6 +267,7 @@ unsafe fn create_makepad_text_view(mtk_view_obj: ObjcId) -> ObjcId {
     let () = msg_send![view, setClipsToBounds: YES];
     // Drop the red misspelling underline; makepad renders the text itself.
     let () = msg_send![view, setSpellCheckingType: 1i64];
+    set_keyboard_appearance(view, native_appearance);
     let () = msg_send![view, setDelegate: view];
     let responds: BOOL = msg_send![view, respondsToSelector: sel!(setFocusEffect:)];
     if responds == YES {
@@ -266,6 +283,15 @@ unsafe fn create_makepad_text_view(mtk_view_obj: ObjcId) -> ObjcId {
     }
     let () = msg_send![mtk_view_obj, addSubview: view];
     view
+}
+
+unsafe fn set_keyboard_appearance(text_view: ObjcId, appearance: NativeAppearance) {
+    let keyboard_appearance = match appearance {
+        NativeAppearance::System => UI_KEYBOARD_APPEARANCE_DEFAULT,
+        NativeAppearance::Light => UI_KEYBOARD_APPEARANCE_LIGHT,
+        NativeAppearance::Dark => UI_KEYBOARD_APPEARANCE_DARK,
+    };
+    let () = msg_send![text_view, setKeyboardAppearance: keyboard_appearance];
 }
 
 impl IosApp {
@@ -302,6 +328,8 @@ impl IosApp {
                 physical_keyboard_connected,
                 last_keyboard_config: None,
                 view_controller: None,
+                window: None,
+                native_appearance: NativeAppearance::System,
                 camera_preview_layers: HashMap::new(),
                 selection_handle_start_view: None,
                 selection_handle_end_view: None,
@@ -445,7 +473,7 @@ impl IosApp {
 
             // Invisible real UITextView client: makepad renders text/caret, this owns
             // the system keyboard session. show_keyboard focuses it.
-            let makepad_text_view = create_makepad_text_view(mtk_view_obj);
+            let makepad_text_view = create_makepad_text_view(mtk_view_obj, self.native_appearance);
 
             // No UITextInteraction needed: arrow nav and auto-repeat come from
             // UIKeyCommand (see key_commands in ios_text_input.rs).
@@ -517,6 +545,7 @@ impl IosApp {
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
             self.view_controller = Some(view_ctrl_obj);
             let () = msg_send![window_obj, makeKeyAndVisible];
+            self.window = Some(window_obj);
 
             // Initialize UIEditMenuInteraction for clipboard actions (iOS 16+)
             let edit_menu_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(
@@ -880,12 +909,12 @@ impl IosApp {
                     app.ime_position = None;
                     app.last_forwarded_text = None;
                 }
-                Some((recreate, old_view, mtk))
+                Some((recreate, old_view, mtk, app.native_appearance))
             })
             .ok()
             .flatten();
 
-        let Some((recreate, old_view, mtk)) = plan else {
+        let Some((recreate, old_view, mtk, native_appearance)) = plan else {
             return;
         };
 
@@ -897,7 +926,7 @@ impl IosApp {
                     // with no strong refs; release balances its alloc+1.
                     let () = msg_send![old_view, removeFromSuperview];
                     let () = msg_send![old_view, release];
-                    create_makepad_text_view(mtk)
+                    create_makepad_text_view(mtk, native_appearance)
                 };
                 let _ = IOS_APP.try_with(|app| {
                     if let Ok(mut app_ref) = app.try_borrow_mut() {
@@ -1481,6 +1510,39 @@ impl IosApp {
             unsafe {
                 (*vc).set_ivar::<i64>("_preferredStatusBarStyle", style);
                 let () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
+            }
+        }
+    }
+
+    pub fn set_native_appearance(appearance: NativeAppearance) {
+        let views = IOS_APP
+            .try_with(|app| {
+                let mut app_ref = app.try_borrow_mut().ok()?;
+                let app = app_ref.as_mut()?;
+                app.native_appearance = appearance;
+                Some((app.window, app.makepad_text_view))
+            })
+            .ok()
+            .flatten();
+        let Some((window, text_view)) = views else {
+            return;
+        };
+
+        let style = match appearance {
+            NativeAppearance::System => UI_USER_INTERFACE_STYLE_UNSPECIFIED,
+            NativeAppearance::Light => UI_USER_INTERFACE_STYLE_LIGHT,
+            NativeAppearance::Dark => UI_USER_INTERFACE_STYLE_DARK,
+        };
+        unsafe {
+            if let Some(window) = window {
+                let () = msg_send![window, setOverrideUserInterfaceStyle: style];
+            }
+            if let Some(text_view) = text_view {
+                set_keyboard_appearance(text_view, appearance);
+                let is_first_responder: BOOL = msg_send![text_view, isFirstResponder];
+                if is_first_responder == YES {
+                    let () = msg_send![text_view, reloadInputViews];
+                }
             }
         }
     }

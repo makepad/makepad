@@ -616,6 +616,10 @@ impl Cx {
                 let time = self.os.timers.time_now();
                 self.handle_keyboard_closed(time);
                 if self.os.in_xr_mode {
+                    // XR frames never reach this activity's surface, so nothing else would hide its cover.
+                    unsafe {
+                        android_jni::to_java_set_surface_cover_visible(false);
+                    }
                     if let Err(e) = self.os.openxr.create_instance(activity_handle) {
                         crate::error!("OpenXR init failed: {}", e);
                     }
@@ -2492,6 +2496,17 @@ impl Cx {
                     if self.windows[window_id].is_popup {
                         continue;
                     }
+                    // Java shows our clear color in place of the surface whenever it hasn't drawn yet,
+                    // like at startup or while resuming.
+                    let color = self.passes[*draw_pass_id].clear_color;
+                    let [r, g, b] = [color.x, color.y, color.z].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
+                    let argb = 0xFF00_0000 | (r << 16) | (g << 8) | b;
+                    if self.os.last_app_background_argb != Some(argb) {
+                        self.os.last_app_background_argb = Some(argb);
+                        unsafe {
+                            android_jni::to_java_set_app_background_color(attach_jni_env(), argb);
+                        }
+                    }
                     let start = self.seconds_since_app_start();
                     let metrics = self.collect_gpu_pass_metrics(*draw_pass_id);
                     self.draw_pass_to_window_for_active_backend(*draw_pass_id);
@@ -3260,6 +3275,10 @@ impl Cx {
                     let env = attach_jni_env();
                     android_jni::to_java_set_system_bar_appearance(env, dark_icons);
                 },
+                CxOsOp::SetNativeAppearance(appearance) => unsafe {
+                    let env = attach_jni_env();
+                    android_jni::to_java_set_native_appearance(env, appearance);
+                },
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
@@ -3563,6 +3582,7 @@ impl Default for CxOs {
             gl_fallback: false,
             quit: false,
             fullscreen: false,
+            last_app_background_argb: None,
             timers: Default::default(),
             video_surfaces: HashMap::new(),
             video_configs: HashMap::new(),
@@ -3705,6 +3725,7 @@ pub struct CxOs {
     pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,
+    pub(crate) last_app_background_argb: Option<u32>,
     pub(crate) start_time: Instant,
     pub(crate) timers: PollTimers,
     pub display: Option<CxAndroidDisplay>,
