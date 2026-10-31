@@ -427,6 +427,8 @@ pub struct LongPressEvent {
 pub enum TouchState {
     Start,
     Stop,
+    /// The platform interrupted this touch; release capture without activating its target.
+    Cancel,
     Move,
     Stable,
 }
@@ -453,6 +455,8 @@ pub struct TouchPoint {
 /// `Hit::FingerUp` with `cancelled: true` (never over, never a tap), and
 /// its capture ends there — wherever the finger is and whether or not
 /// that point is still on the widget.
+/// A touch the platform cancels shows up first as `TouchState::Cancel` in a
+/// `TouchUpdate`, so its `FingerCancel` only ends the presses that update didn't reach.
 #[derive(Clone, Debug)]
 pub struct FingerCancelEvent {
     pub window_id: WindowId,
@@ -618,6 +622,8 @@ pub struct CxDigitCapture {
     /// FingerUp; later events see nothing from it. The capture itself
     /// retires with its digit, like an ordinary release.
     cancel_seen: Option<f64>,
+    /// A `TouchState::Cancel` update already gave this its terminal FingerUp, so `cancel_digit` drops it.
+    ended_by_cancel_touch: bool,
 }
 
 #[derive(Default, Clone)]
@@ -680,7 +686,7 @@ pub struct CxFingers {
     /// before any further input (`take_pending_cancels`).
     pending_cancels: Vec<FingerCancelEvent>,
     /// Fingers whose physical press was taken away as a whole (the host or
-    /// the OS cancelled it: `cancel_digit`), until the digit is released.
+    /// the OS cancelled it: `take_away_digit`, `cancel_digit`), until the digit is released.
     /// A claim or a recycle cancels only some captures of a press that is
     /// still held; those fingers are not here.
     taken_away: Vec<DigitId>,
@@ -852,6 +858,7 @@ impl CxFingers {
             cancelled: false,
             owner: false,
             cancel_seen: None,
+            ended_by_cancel_touch: false,
         })
         /*}*/
     }
@@ -967,13 +974,21 @@ impl CxFingers {
     /// [`Event::FingerCancel`] so each widget ends its press, and retires
     /// the digit.
     pub fn cancel_digit(&mut self, digit_id: DigitId) {
+        self.captures.retain(|v| v.digit_id != digit_id || !v.ended_by_cancel_touch);
+        self.cancelled.retain(|v| v.digit_id != digit_id || !v.ended_by_cancel_touch);
         self.move_to_cancelled(|v| v.digit_id == digit_id);
+        self.take_away_digit(digit_id);
+    }
+
+    /// The press of `digit_id` is taken away, but its captures stay live for
+    /// the `TouchState::Cancel` update that ends them, before `cancel_digit`.
+    pub fn take_away_digit(&mut self, digit_id: DigitId) {
         if !self.taken_away.contains(&digit_id) {
             self.taken_away.push(digit_id);
         }
     }
 
-    /// Whether the press of `digit_id` itself was taken away (`cancel_digit`:
+    /// Whether the press of `digit_id` itself was taken away (`take_away_digit`, `cancel_digit`:
     /// the host rotated, the OS cancelled the touch) — as opposed to a
     /// `FingerCancel` that ends only some captures of a press still held (a
     /// list took the finger, a pressed row was recycled). Widgets that follow
@@ -1045,9 +1060,16 @@ impl CxFingers {
     /// shows the cancel (every consumer of that event sees it), `Some(false)`
     /// for any later event (nothing more from this finger), `None` when the
     /// capture is not cancelled (ordinary handling).
-    fn cancelled_capture(&mut self, digit_id: DigitId, area: Area, time: f64) -> Option<(bool, CxDigitCapture)> {
+    fn cancelled_capture(&mut self, digit_id: DigitId, area: Area, time: f64, is_cancel_touch: bool) -> Option<(bool, CxDigitCapture)> {
+        // Like `is_area_captured`: a press parked on `Area::Empty` isn't every undrawn area's.
+        if area == Area::Empty {
+            return None;
+        }
         let capture = self.cancelled.iter_mut().find(|v| v.digit_id == digit_id && v.area == area)?;
         let seen = *capture.cancel_seen.get_or_insert(time);
+        if seen == time && is_cancel_touch {
+            capture.ended_by_cancel_touch = true;
+        }
         Some((seen == time, capture.clone()))
     }
 
@@ -1331,7 +1353,7 @@ impl CxFingers {
         }
     }
 
-    /// Bookkeeping after a `TouchUpdate` was dispatched: a lifted finger
+    /// Bookkeeping after a `TouchUpdate` was dispatched: a lifted or cancelled finger
     /// releases its capture and hover, the others cycle their hover. The
     /// platform backends call it for real touches; a host that synthesizes
     /// a touch for content it embeds (a phone simulator presenting the
@@ -1342,7 +1364,7 @@ impl CxFingers {
         for touch in touches {
             let digit_id = live_id_num!(touch, touch.uid).into();
             match touch.state {
-                TouchState::Stop => {
+                TouchState::Stop | TouchState::Cancel => {
                     self.release_digit(digit_id);
                     self.remove_hover(digit_id);
                 }
@@ -1671,6 +1693,7 @@ pub struct FingerUpEvent {
     pub rect: Rect,
     /// Whether this finger-up event (`abs`) occurred within the hits area.
     pub is_over: bool,
+    /// A synthetic release caused by leaving a sweep area or canceling a touch.
     pub is_sweep: bool,
     /// The press was taken away rather than released (see
     /// [`FingerCancelEvent`]): end the press — let go of a pressed look,
@@ -1685,9 +1708,9 @@ impl Deref for FingerUpEvent {
     }
 }
 impl FingerUpEvent {
-    /// Returns `true` if this FingerUp event was a regular tap/click (not a long press).
+    /// Returns `true` for a regular tap/click, excluding long presses and synthetic releases.
     pub fn was_tap(&self) -> bool {
-        if self.cancelled || self.has_long_press_occurred {
+        if self.cancelled || self.is_sweep || self.has_long_press_occurred {
             return false;
         }
         self.time - self.capture_time < TAP_COUNT_TIME
@@ -1853,6 +1876,7 @@ impl Event {
     /// (a cancelled press never moves, taps or long-presses again). `None`
     /// when this event holds no cancelled capture of `area`.
     fn cancelled_press_hit(&self, cx: &mut Cx, area: Area) -> Option<Hit> {
+        let mut is_cancel_touch = false;
         let (digit_id, device, abs, time, window_id, modifiers) = match self {
             Event::FingerCancel(e) => (e.digit_id, e.device.clone(), e.abs, e.time, e.window_id, e.modifiers),
             Event::TouchUpdate(e) => {
@@ -1866,6 +1890,7 @@ impl Event {
                         c.digit_id == digit && c.area == area && c.cancel_seen.map_or(true, |seen| seen == e.time)
                     })
                 })?;
+                is_cancel_touch = t.state == TouchState::Cancel;
                 (live_id_num!(touch, t.uid).into(), DigitDevice::Touch { uid: t.uid }, t.abs, e.time, e.window_id, e.modifiers)
             }
             Event::LongPress(e) => {
@@ -1877,7 +1902,7 @@ impl Event {
             Event::MouseUp(e) => (live_id!(mouse).into(), DigitDevice::Mouse { button: e.button }, e.abs, e.time, e.window_id, e.modifiers),
             _ => return None,
         };
-        let (terminal, capture) = cx.fingers.cancelled_capture(digit_id, area, time)?;
+        let (terminal, capture) = cx.fingers.cancelled_capture(digit_id, area, time, is_cancel_touch)?;
         if !terminal {
             return Some(Hit::Nothing);
         }
@@ -1895,7 +1920,7 @@ impl Event {
             modifiers,
             rect,
             is_over: false,
-            is_sweep: false,
+            is_sweep: true,
             cancelled: true,
         }))
     }
@@ -2172,7 +2197,7 @@ impl Event {
                                 rect,
                             });
                         }
-                        TouchState::Stop => {
+                        TouchState::Stop | TouchState::Cancel => {
                             let tap_count = cx.fingers.tap_count();
                             let rect = area.clipped_rect(&cx);
                             if let Some(capture) = cx.fingers.find_digit_area_capture(digit_id, area) {
@@ -2186,7 +2211,13 @@ impl Event {
                                     < TAP_COUNT_TIME)
                                     && ((t.abs - capture.abs_start).length() < TAP_COUNT_DISTANCE);
 
-                                let is_over = !capture.cancelled && (rect_check || layout_shift_fallback);
+                                // The capture stays live for the rest of this update, so every
+                                // consumer of the area sees the same end.
+                                if t.state == TouchState::Cancel {
+                                    capture.ended_by_cancel_touch = true;
+                                }
+                                let cancelled = capture.cancelled || t.state == TouchState::Cancel;
+                                let is_over = !cancelled && (rect_check || layout_shift_fallback);
 
                                 return Hit::FingerUp(FingerUpEvent {
                                     abs_start: capture.abs_start,
@@ -2201,8 +2232,8 @@ impl Event {
                                     modifiers: e.modifiers,
                                     time: e.time,
                                     is_over,
-                                    is_sweep: false,
-                                    cancelled: capture.cancelled,
+                                    is_sweep: cancelled,
+                                    cancelled,
                                 });
                             }
                         }

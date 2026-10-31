@@ -829,7 +829,7 @@ impl IosApp {
         // Keep unchanged fingers in later updates without replaying their previous phase.
         with_ios_app(|app| {
             app.touches.retain_mut(|touch| {
-                if touch.state == TouchState::Stop {
+                if matches!(touch.state, TouchState::Stop | TouchState::Cancel) {
                     false
                 } else {
                     touch.state = TouchState::Stable;

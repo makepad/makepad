@@ -574,7 +574,7 @@ pub fn define_mtk_view() -> *const Class {
     }
 
     extern "C" fn touches_canceled(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
-        on_touch(this, touches, TouchState::Stop);
+        on_touch(this, touches, TouchState::Cancel);
         IosApp::send_touch_cancel();
     }
 

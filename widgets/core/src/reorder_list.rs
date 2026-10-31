@@ -275,6 +275,16 @@ impl ReorderList {
                 self.cancel_drag(cx);
                 return true;
             }
+            // The press itself taken away (the host or the OS cancelled it):
+            // the row goes back, nothing is reordered. The cancel still goes
+            // on to the rows.
+            if matches!(event, Event::FingerCancel(c) if cx.fingers.press_taken_away(c.digit_id))
+                || matches!(event, Event::TouchUpdate(e)
+                    if e.touches.iter().any(|t| t.state == makepad_draw::makepad_platform::event::TouchState::Cancel))
+            {
+                self.cancel_drag(cx);
+                return false;
+            }
             // A live drag is modal for the list: a wheel scroll would slide
             // the rows away under the pointer, and so would a page around the
             // list scrolling by it, so the list takes the wheel itself.
@@ -329,13 +339,6 @@ impl ReorderList {
                     self.drag_edge_autoscroll(cx);
                 }
                 return true;
-            }
-            // The press itself taken away (the host or the OS cancelled it):
-            // the row goes back, nothing is reordered. The cancel still goes
-            // on to the rows.
-            if matches!(event, Event::FingerCancel(c) if cx.fingers.press_taken_away(c.digit_id)) {
-                self.cancel_drag(cx);
-                return false;
             }
             let released = matches!(event, Event::MouseUp(_))
                 || matches!(event, Event::TouchUpdate(e)

@@ -197,7 +197,7 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
                             activity.touches.push(id);
                         }
                     }
-                    TouchState::Stop => {
+                    TouchState::Stop | TouchState::Cancel => {
                         changed = true;
                         activity.touches.retain(|touch| *touch != id);
                     }

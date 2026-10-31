@@ -198,7 +198,8 @@ pub enum Event {
     TouchUpdate(TouchUpdateEvent),
     /// A press taken away before it lifted (see [`FingerCancelEvent`]):
     /// dispatched by the owner of a claimed gesture to its children, or by
-    /// a host that cancels a finger. Handle it through `hits()`, which
+    /// a host that cancels a finger (for a touch, right after the `TouchUpdate`
+    /// that shows it as `TouchState::Cancel`). Handle it through `hits()`, which
     /// turns it into the capture's terminal `Hit::FingerUp` with
     /// `cancelled: true`.
     FingerCancel(FingerCancelEvent),

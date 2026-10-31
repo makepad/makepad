@@ -1088,27 +1088,35 @@ impl WmDesk {
     }
     /// The finger is taken away mid-press (the phone rotated, the app
     /// closed or left the front, the style changed, the window lost focus,
-    /// the shell navigated): every capture of it is cancelled, the app gets
+    /// the shell navigated): the app sees it as a `Cancel` touch, then gets
     /// `Event::FingerCancel` — each widget still holding the press ends it
     /// with a cancelled FingerUp (no click, no fling), wherever the finger
     /// is — and the digit is retired, even if nothing was left to hear it.
     pub fn cancel_phone_finger(&mut self,cx:&mut Cx) {
         let Some(f)=self.phone_finger.take() else {return};
         let digit_id:DigitId=live_id_num!(touch,PHONE_FINGER).into();
+        // Its own moment: the cancel is one dispatch of its own, never
+        // the dispatch that already showed a claim's cancel to a widget.
+        let time=cx.seconds_since_app_start().max(f.time+1e-6);
+        let point=TouchPoint {
+            state:TouchState::Cancel,abs:f.abs,time,uid:PHONE_FINGER,rotation_angle:0.0,force:1.0,radius:dvec2(1.0,1.0),
+            handled:std::cell::Cell::new(Area::Empty),sweep_lock:std::cell::Cell::new(Area::Empty),
+        };
+        let item=self.items.get(&f.client).cloned();
+        cx.fingers.take_away_digit(digit_id);
+        let touch=Event::TouchUpdate(TouchUpdateEvent {time,window_id:f.window_id,modifiers:f.modifiers,touches:vec![point.clone()]});
+        if let Some(item)=&item {
+            item.handle_event(cx,&touch,&mut Scope::empty());
+        }
         cx.fingers.cancel_digit(digit_id);
         let cancel=Event::FingerCancel(FingerCancelEvent {
             window_id:f.window_id,digit_id,device:DigitDevice::Touch {uid:PHONE_FINGER},
-            // Its own moment: the cancel is one dispatch of its own, never
-            // the dispatch that already showed a claim's cancel to a widget.
-            abs:f.abs,time:cx.seconds_since_app_start().max(f.time+1e-6),modifiers:f.modifiers,
+            abs:f.abs,time,modifiers:f.modifiers,
         });
-        if let Some(item)=self.items.get(&f.client).cloned() {
+        if let Some(item)=&item {
             item.handle_event(cx,&cancel,&mut Scope::empty());
         }
-        cx.fingers.process_touch_update_end(&[TouchPoint {
-            state:TouchState::Stop,abs:f.abs,time:f.time,uid:PHONE_FINGER,rotation_angle:0.0,force:1.0,radius:dvec2(1.0,1.0),
-            handled:std::cell::Cell::new(Area::Empty),sweep_lock:std::cell::Cell::new(Area::Empty),
-        }]);
+        cx.fingers.process_touch_update_end(&[point]);
     }
     fn dispatch_phone_finger(&mut self,cx:&mut Cx,state:TouchState) {
         let Some(f)=self.phone_finger.as_ref() else {return};

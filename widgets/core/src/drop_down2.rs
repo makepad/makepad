@@ -1280,6 +1280,11 @@ impl Widget for DropDown2 {
                             TouchState::Start => self.pointer_down(cx, pointer, touch.abs, false),
                             TouchState::Move => self.pointer_move(cx, pointer, touch.abs),
                             TouchState::Stop => self.pointer_up(cx, pointer, touch.abs),
+                            TouchState::Cancel => {
+                                if self.pointer.is_some_and(|g| g.pointer == pointer) {
+                                    self.set_closed(cx);
+                                }
+                            }
                             TouchState::Stable => (),
                         }
                         if !self.is_active {

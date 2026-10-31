@@ -4663,7 +4663,7 @@ impl Widget for StudioIterationView {
                 event
                     .touches
                     .iter()
-                    .any(|touch| touch.uid == *uid && touch.state == TouchState::Stop)
+                    .any(|touch| touch.uid == *uid && matches!(touch.state, TouchState::Stop | TouchState::Cancel))
             }) {
                 self.body_touch_capture = None;
             }

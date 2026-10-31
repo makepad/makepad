@@ -133,8 +133,7 @@ pub enum FromJavaMessage {
         time: f64,
     },
     Touch(Vec<TouchPoint>),
-    /// `ACTION_CANCEL`: the system took every pointer away; each is a Stop
-    /// dispatched as a cancellation.
+    /// `ACTION_CANCEL`: the system took every pointer away; each is a `Cancel`.
     TouchCancel(Vec<TouchPoint>),
     Character {
         character: u32,
@@ -1028,7 +1027,7 @@ unsafe fn surface_on_touch(env: *mut jni_sys::JNIEnv, _: jni_sys::jclass, event:
             state: {
                 if action_masked == 3 {
                     // ACTION_CANCEL ends every pointer of the gesture.
-                    TouchState::Stop
+                    TouchState::Cancel
                 } else if action_index == touch_index {
                     match action_masked {
                         0 | 5 => TouchState::Start,

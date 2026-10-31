@@ -4,7 +4,7 @@ use crate::{
     event::{BackGestureEdge, BackGestureState, DigitDevice, FingerCancelEvent, TouchPoint, TouchState, TouchUpdateEvent},
     scroll_motion::{critically_damped_spring, estimate_release_velocity, push_sample, FrameClock, ScrollSample},
 };
-use std::collections::HashMap;
+use std::{cell::Cell, collections::HashMap};
 
 /// How far (in the OS's points, so UI zoom doesn't shrink it) a finger must move before we decide
 /// whether it's a swipe back. That's iOS's pan threshold, and at least both platforms' long-press tolerance.
@@ -677,10 +677,10 @@ impl Widget for StackNavigation {
             (Event::TouchUpdate(e), Some(driver)) => {
                 // Nothing in the stack gets touch input while a gesture drags the view, but the views
                 // still see a finger end, as a cancel, so nothing in them stays pressed.
-                for touch in e.touches.iter().filter(|touch| touch.state == TouchState::Stop) {
-                    let cancel_event = cancel_touch(cx, e, touch);
-                    self.forward_event_to_views(cx, &cancel_event, scope);
-                }
+                let ended_touches: Vec<_> = e.touches.iter()
+                    .filter(|touch| matches!(touch.state, TouchState::Stop | TouchState::Cancel))
+                    .collect();
+                cancel_touches(cx, e, &ended_touches, |cx, cancel_event| self.forward_event_to_views(cx, cancel_event, scope));
                 if let InteractivePopDriver::Touch { uid, origin_x } = driver {
                     match e.touches.iter().find(|touch| touch.uid == uid) {
                         Some(touch) if matches!(touch.state, TouchState::Move) => {
@@ -700,7 +700,7 @@ impl Widget for StackNavigation {
                             let is_commit = progress + RELEASE_PROJECTION_TIME * velocity >= 0.5;
                             self.release_interactive_pop(cx, is_commit, velocity);
                         }
-                        // We missed its end.
+                        // The OS took the touch away, or we missed its end.
                         _ => self.release_interactive_pop(cx, false, 0.0),
                     }
                 }
@@ -753,8 +753,9 @@ impl Widget for StackNavigation {
                             self.current_view,
                         ) else { break 'touch };
                         // The view's widgets see this touch get canceled, so none of them act on it.
-                        let cancel_event = cancel_touch(cx, e, touch);
-                        self.stack_view_ref(cx, current).handle_event(cx, &cancel_event, scope);
+                        cancel_touches(cx, e, &[touch], |cx, cancel_event| {
+                            self.stack_view_ref(cx, current).handle_event(cx, cancel_event, scope)
+                        });
                         // The pop can end while this finger is still down, so the rest of it must hit nothing.
                         cx.release_touch_captures(touch.uid);
                         // This hides the soft keyboard of a text input in the view.
@@ -767,6 +768,15 @@ impl Widget for StackNavigation {
             }
             (Event::LongPress(_), None) => {
                 self.swipe_back_candidate = None;
+                self.forward_event_to_views(cx, event, scope);
+            }
+            // The OS took the touch away before it moved far enough to swipe.
+            (Event::FingerCancel(e), None) => {
+                if self.swipe_back_candidate.is_some_and(|candidate| e.digit_id == live_id_num!(touch, candidate.uid).into())
+                    && cx.fingers.press_taken_away(e.digit_id)
+                {
+                    self.swipe_back_candidate = None;
+                }
                 self.forward_event_to_views(cx, event, scope);
             }
             (Event::BackGesture(e), _) => match e.state {
@@ -1703,17 +1713,37 @@ fn is_swipe_taken(cx: &Cx, uid: u64) -> bool {
         || cx.fingers.scroll_drag_owner(live_id_num!(touch, uid).into(), Vec2Index::X).is_some()
 }
 
-/// Cancels `touch` for every widget that captured it and returns the `FingerCancel` that tells them,
-/// so widgets that saw it start let go of it without acting on it.
-fn cancel_touch(cx: &mut Cx, e: &TouchUpdateEvent, touch: &TouchPoint) -> Event {
-    let digit_id = live_id_num!(touch, touch.uid).into();
-    cx.fingers.cancel_digit(digit_id);
-    Event::FingerCancel(FingerCancelEvent {
-        window_id: e.window_id,
-        digit_id,
-        device: DigitDevice::Touch { uid: touch.uid },
-        abs: touch.abs,
-        time: e.time,
-        modifiers: e.modifiers,
-    })
+/// Shows `dispatch` a copy of `e` with just `touches`, canceled, so widgets that saw them start let go
+/// of them without acting on them. Touches we take away ourselves then get a `FingerCancel` as well.
+fn cancel_touches(cx: &mut Cx, e: &TouchUpdateEvent, touches: &[&TouchPoint], mut dispatch: impl FnMut(&mut Cx, &Event)) {
+    if touches.is_empty() {
+        return;
+    }
+    // The platform takes its own `Cancel` touches away, and sends their `FingerCancel` after `e`.
+    let taken: Vec<&TouchPoint> = touches.iter().copied().filter(|touch| touch.state != TouchState::Cancel).collect();
+    for touch in &taken {
+        cx.fingers.take_away_digit(live_id_num!(touch, touch.uid).into());
+    }
+    let cancelled = touches
+        .iter()
+        .map(|&touch| TouchPoint {
+            state: TouchState::Cancel,
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
+            ..touch.clone()
+        })
+        .collect();
+    dispatch(cx, &Event::TouchUpdate(TouchUpdateEvent { touches: cancelled, ..e.clone() }));
+    for touch in taken {
+        let digit_id = live_id_num!(touch, touch.uid).into();
+        cx.fingers.cancel_digit(digit_id);
+        dispatch(cx, &Event::FingerCancel(FingerCancelEvent {
+            window_id: e.window_id,
+            digit_id,
+            device: DigitDevice::Touch { uid: touch.uid },
+            abs: touch.abs,
+            time: e.time,
+            modifiers: e.modifiers,
+        }));
+    }
 }
