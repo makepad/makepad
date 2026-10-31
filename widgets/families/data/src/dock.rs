@@ -2780,6 +2780,18 @@ impl DockRef {
         WidgetRef::empty()
     }
 
+    /// Returns the `Tab` widget in the tab bar that holds the given tab,
+    /// or an empty ref if that bar hasn't drawn the tab yet.
+    pub fn tab_widget(&self, tab_id: LiveId) -> WidgetRef {
+        let Some(dock) = self.borrow() else {
+            return WidgetRef::empty();
+        };
+        dock.find_tab_bar_of_tab(tab_id)
+            .and_then(|(tabs_id, _)| dock.tab_bars.get(&tabs_id))
+            .and_then(|tab_bar| tab_bar.tab_bar.tab_widget(tab_id))
+            .unwrap_or_else(WidgetRef::empty)
+    }
+
     pub fn item_or_create(
         &self,
         cx: &mut Cx,
