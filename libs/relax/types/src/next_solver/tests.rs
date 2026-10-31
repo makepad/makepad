@@ -4,7 +4,7 @@ use crate::tcx::{Tcx, TypingMode};
 use crate::infer::InferCtxt;
 use crate::types::{TyKind, AliasTyKind, RegionKind};
 fn program(source: &str, label: &str) -> (Program, Tcx) {
-    let dir = std::env::temp_dir().join(format!("relax-round11-solver-{label}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("relax-round11-solver-{label}-{}-{}", std::process::id(), crate::unique_test_suffix()));
     std::fs::create_dir_all(&dir).unwrap(); let path = dir.join("lib.rs"); std::fs::write(&path, source).unwrap();
     let mut prog = Program::new(&std::sync::Arc::new(crate::Session::default()));
     let cfg = crate::cfg::CfgSet::host(&prog.session, &[]);
@@ -1663,4 +1663,222 @@ fn s12_type_outlives_obligations_are_normalized_before_decomposition() {
     ConstraintConversion::new(&cx, &universals, &[], &[], Locations::All(span), span, ConstraintCategory::Boring, &mut out).convert_all(&data);
     assert!(out.type_tests.is_empty(), "{:?}", out.type_tests);
     assert!(out.outlives_constraints.outlives.iter().any(|e| e.sup == s6_vid(&t, a) && e.sub == s6_vid(&t, c)), "{:?}", out.outlives_constraints.outlives);
+}
+
+fn check_rayon_with_producer_for_global(global_def: &str, label: &str) {
+    let src = format!(r#"
+        #![recursion_limit = "22"]
+        #[lang = "sized"] trait Sized {{}}
+        #[lang = "sync"] unsafe auto trait Sync {{}}
+        unsafe auto trait Send {{}}
+        #[lang = "tuple_trait"] trait Tuple {{}}
+        #[lang = "fn_once"] trait FnOnce<Args: Tuple> {{ #[lang = "fn_once_output"] type Output; extern "rust-call" fn call_once(self, args: Args) -> Self::Output; }}
+        #[lang = "fn_mut"] trait FnMut<Args: Tuple>: FnOnce<Args> {{ extern "rust-call" fn call_mut(&mut self, args: Args) -> Self::Output; }}
+        #[lang = "fn"] trait Fn<Args: Tuple>: FnMut<Args> {{ extern "rust-call" fn call(&self, args: Args) -> Self::Output; }}
+
+        struct D12(u32); struct D11(D12); struct D10(D11); struct D9(D10);
+        struct D8(D9); struct D7(D8); struct D6(D7); struct D5(D6);
+        struct D4(D5); struct D3(D4); struct D2(D3); struct D1(D2); struct D0(D1);
+        struct W5(D0); struct W4(W5); struct W3(W4); struct W2(W3); struct W1(W2); struct W0(W1);
+        {global_def}
+        struct Device {{ global: Global }}
+        impl Device {{ fn touch(&self) -> u32 {{ 0 }} }}
+
+        trait Producer {{ type Item; }}
+        trait ProducerCallback<T> {{
+            type Output;
+            fn callback<P>(self, producer: P) -> Self::Output where P: Producer<Item = T>;
+        }}
+        trait Consumer<T> {{ type Result; }}
+        trait UnindexedConsumer<T>: Consumer<T> {{}}
+        trait ParallelIterator: Sized {{
+            type Item;
+            fn drive_unindexed<C>(self, consumer: C) -> C::Result where C: UnindexedConsumer<Self::Item>;
+            fn map<F, R>(self, map_op: F) -> Map<Self, F> where F: Fn(Self::Item) -> R + Sync + Send, R: Send {{
+                Map {{ base: self, map_op }}
+            }}
+        }}
+        trait IndexedParallelIterator: ParallelIterator {{
+            fn with_producer<CB>(self, callback: CB) -> CB::Output where CB: ProducerCallback<Self::Item>;
+            fn enumerate(self) -> Enumerate<Self> {{ Enumerate {{ base: self }} }}
+        }}
+        struct BridgeCallback<C> {{ consumer: C }}
+        impl<C, I> ProducerCallback<I> for BridgeCallback<C> where C: Consumer<I> {{
+            type Output = C::Result;
+            fn callback<P>(self, _producer: P) -> C::Result where P: Producer<Item = I> {{ loop {{}} }}
+        }}
+        fn bridge<I, C>(par_iter: I, consumer: C) -> C::Result where I: IndexedParallelIterator, C: Consumer<I::Item> {{
+            par_iter.with_producer(BridgeCallback {{ consumer }})
+        }}
+        struct Iter<'data, T: Sync> {{ slice: &'data [T] }}
+        struct IterProducer<'data, T: Sync> {{ slice: &'data [T] }}
+        impl<'data, T: 'data + Sync> Producer for IterProducer<'data, T> {{ type Item = &'data T; }}
+        impl<'data, T: Sync> ParallelIterator for Iter<'data, T> {{
+            type Item = &'data T;
+            fn drive_unindexed<C>(self, consumer: C) -> C::Result where C: UnindexedConsumer<Self::Item> {{ bridge(self, consumer) }}
+        }}
+        impl<T: Sync> IndexedParallelIterator for Iter<'_, T> {{
+            fn with_producer<CB>(self, callback: CB) -> CB::Output where CB: ProducerCallback<Self::Item> {{
+                callback.callback(IterProducer {{ slice: self.slice }})
+            }}
+        }}
+        struct Enumerate<I> {{ base: I }}
+        struct EnumerateProducer<P> {{ base: P }}
+        impl<P: Producer> Producer for EnumerateProducer<P> {{ type Item = (usize, P::Item); }}
+        struct EnumerateCallback<CB> {{ callback: CB }}
+        impl<I, CB> ProducerCallback<I> for EnumerateCallback<CB> where CB: ProducerCallback<(usize, I)> {{
+            type Output = CB::Output;
+            fn callback<P>(self, base: P) -> CB::Output where P: Producer<Item = I> {{
+                self.callback.callback(EnumerateProducer {{ base }})
+            }}
+        }}
+        impl<I: IndexedParallelIterator> ParallelIterator for Enumerate<I> {{
+            type Item = (usize, I::Item);
+            fn drive_unindexed<C>(self, consumer: C) -> C::Result where C: UnindexedConsumer<Self::Item> {{ bridge(self, consumer) }}
+        }}
+        impl<I: IndexedParallelIterator> IndexedParallelIterator for Enumerate<I> {{
+            fn with_producer<CB>(self, callback: CB) -> CB::Output where CB: ProducerCallback<Self::Item> {{
+                self.base.with_producer(EnumerateCallback {{ callback }})
+            }}
+        }}
+        struct Map<I, F> {{ base: I, map_op: F }}
+        struct MapConsumer<'f, C, F> {{ base: C, map_op: &'f F }}
+        impl<'f, T, R, C, F> Consumer<T> for MapConsumer<'f, C, F>
+        where
+            C: Consumer<F::Output>,
+            F: Fn(T) -> R + Sync,
+            R: Send,
+        {{
+            type Result = C::Result;
+        }}
+        impl<'f, T, R, C, F> UnindexedConsumer<T> for MapConsumer<'f, C, F>
+        where
+            C: UnindexedConsumer<F::Output>,
+            F: Fn(T) -> R + Sync,
+            R: Send,
+        {{}}
+        impl<I, F, R> ParallelIterator for Map<I, F>
+        where
+            I: ParallelIterator,
+            F: Fn(I::Item) -> R + Sync + Send,
+            R: Send,
+        {{
+            type Item = F::Output;
+            fn drive_unindexed<C>(self, consumer: C) -> C::Result where C: UnindexedConsumer<Self::Item> {{
+                self.base.drive_unindexed(MapConsumer {{ base: consumer, map_op: &self.map_op }})
+            }}
+        }}
+        struct CollectConsumer<T>(T);
+        impl<T: Send> Consumer<T> for CollectConsumer<T> {{ type Result = (); }}
+        impl<T: Send> UnindexedConsumer<T> for CollectConsumer<T> {{}}
+        struct SlotStorage<S>(S);
+        impl<S: Send + Sync> SlotStorage<S> {{
+            fn from_host_slots(device: &Device, batch: &[u32], b: usize) {{
+                let map = (Iter {{ slice: batch }}).enumerate().map(|(i, _block)| device.touch() + (b + i) as u32);
+                map.drive_unindexed(CollectConsumer(0u32));
+            }}
+        }}
+    "#);
+    let (p, t) = round19_program(&src, label);
+    let from_host_slots = named(&p, "from_host_slots");
+    let body = crate::typeck::codegen_body(&p, &t, from_host_slots, &[t.tys.u8_]);
+    let mut closure_ty = None;
+    for &ty in &body.expr_ty {
+        if matches!(t.tys.kind(ty), TyKind::Closure(..)) { closure_ty = Some(ty); }
+    }
+    let closure_ty = closure_ty.expect("closure in from_host_slots");
+    let collect = t.tys.intern(TyKind::Adt(named(&p, "CollectConsumer"), t.tys.mk_list(&[t.tys.u32_]), crate::types::RegionArgsId::EMPTY));
+    let erased = t.tys.intern_region_args(&[crate::types::RegionId::ERASED]);
+    let map_consumer = t.tys.intern(TyKind::Adt(named(&p, "MapConsumer"), t.tys.mk_list(&[collect, closure_ty]), erased));
+    let bridge_cb = t.tys.intern(TyKind::Adt(named(&p, "BridgeCallback"), t.tys.mk_list(&[map_consumer]), crate::types::RegionArgsId::EMPTY));
+    let enum_cb = t.tys.intern(TyKind::Adt(named(&p, "EnumerateCallback"), t.tys.mk_list(&[bridge_cb]), crate::types::RegionArgsId::EMPTY));
+    let slice_with_producer = p.defs.iter().enumerate().find_map(|(i, d)| {
+        (p.syms.str(d.name) == "with_producer" && d.kind == crate::program::DefKind::AssocFn
+            && t.impl_self.get(&d.parent).is_some_and(|&st| matches!(t.tys.kind(st), TyKind::Adt(adt, ..) if p.syms.str(p.def(*adt).name) == "Iter")))
+            .then_some(crate::program::DefId(i as u32))
+    }).expect("Iter::with_producer");
+    crate::typeck::codegen_body(&p, &t, slice_with_producer, &[t.tys.u32_, enum_cb]);
+}
+
+#[test]
+fn rayon_slice_iter_with_producer_normalizes_for_codegen() {
+    check_rayon_with_producer_for_global("struct Global { surfaces: D0, render_passes: W0 }", "rayon_repro");
+}
+
+#[test]
+fn zz_rayon_fields_swapped() {
+    check_rayon_with_producer_for_global("struct Global { render_passes: W0, surfaces: D0 }", "rayon_swapped");
+}
+
+#[test]
+fn zz_rayon_w_only() {
+    check_rayon_with_producer_for_global("struct Global { render_passes: W0 }", "rayon_w_only");
+}
+
+#[test]
+fn overflow_in_fn_call_reports_e0275_with_limit() {
+    let (p, t) = round19_program(r#"
+        #![recursion_limit = "4"]
+        #[lang = "sized"] trait Sized {}
+        #[lang = "sync"] unsafe auto trait Sync {}
+        struct D12(u32); struct D11(D12); struct D10(D11); struct D9(D10);
+        struct D8(D9); struct D7(D8); struct D6(D7); struct D5(D6);
+        struct D4(D5); struct D3(D4); struct D2(D3); struct D1(D2); struct D0(D1);
+        struct Global { surfaces: D0 }
+        fn need<T: Sync>() {}
+        fn caller() { need::<Global>(); }
+    "#, "overflow_e0275");
+    let body = t.typeck(&p, named(&p, "caller"));
+    assert!(
+        body.errors.iter().any(|e| e.contains("E0275") && e.contains("overflow evaluating the requirement `Global: Sync`") && e.contains("#![recursion_limit = \"8\"]")),
+        "expected E0275 naming Global: Sync and recursion_limit = 8, got: {:?}",
+        body.errors
+    );
+}
+
+#[test]
+fn recursion_depth_exceeding_limit_span_text_and_crate_level_only() {
+    crate::lint::enable();
+    let _ = crate::lint::take_thread();
+    check_rayon_with_producer_for_global("struct Global { surfaces: D0, render_passes: W0 }", "rayon_lint_check");
+    let (_, warnings) = crate::lint::take_thread();
+    assert!(!warnings.is_empty(), "expected recursion_depth_exceeding_limit warnings from codegen_body");
+    for w in &warnings {
+        assert!(!w.contains(":1:1:"), "warning should point at real span, not 1:1: {w}");
+        assert!(w.contains("attribute to your crate (`rayon_lint_check`)"), "missing crate name in help: {w}");
+        assert!(w.contains("manual `impl` of auto traits like `Send`"), "missing auto-trait help: {w}");
+        assert!(w.contains("attached to the whole crate and can't be disabled on a per-function basis"), "missing crate-level note: {w}");
+        assert!(w.contains("it will become a hard error in a future release!"), "missing future-incompat warning: {w}");
+        assert!(w.contains("see issue #159228 <https://github.com/rust-lang/rust/issues/159228>"), "missing issue link: {w}");
+    }
+
+    // Per-function #[allow(recursion_depth_exceeding_limit)] must NOT silence the lint:
+    let (p_fn, t_fn) = round19_program(r#"
+        #![recursion_limit = "4"]
+        #[lang = "sized"] trait Sized {}
+        #[lang = "sync"] unsafe auto trait Sync {}
+        struct W<T>(T);
+        fn need<T: Sync>() {}
+        #[allow(recursion_depth_exceeding_limit)]
+        fn trigger() { need::<W<W<W<W<W<u32>>>>>>(); }
+    "#, "fn_allow_ignored");
+    let _ = crate::lint::take_thread();
+    let _ = t_fn.typeck(&p_fn, named(&p_fn, "trigger"));
+    let (_, fn_warnings) = crate::lint::take_thread();
+    assert_eq!(fn_warnings.len(), 1, "per-fn #[allow] must not silence crate-level lint: {fn_warnings:?}");
+
+    // Crate-level #![allow(recursion_depth_exceeding_limit)] MUST silence the lint:
+    let (p_crate, t_crate) = round19_program(r#"
+        #![recursion_limit = "4"]
+        #![allow(recursion_depth_exceeding_limit)]
+        #[lang = "sized"] trait Sized {}
+        #[lang = "sync"] unsafe auto trait Sync {}
+        struct W<T>(T);
+        fn need<T: Sync>() {}
+        fn trigger() { need::<W<W<W<W<W<u32>>>>>>(); }
+    "#, "crate_allow_works");
+    let _ = crate::lint::take_thread();
+    let _ = t_crate.typeck(&p_crate, named(&p_crate, "trigger"));
+    let (_, crate_warnings) = crate::lint::take_thread();
+    assert!(crate_warnings.is_empty(), "crate-level #![allow] must silence lint: {crate_warnings:?}");
 }

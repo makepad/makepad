@@ -7577,6 +7577,10 @@ impl<'a> Fcx<'a> {
                 let (prog, tcx) = (self.prog, self.tcx);
                 let mut msg = trait_error_message(prog, tcx, code, p, &mut |t| self.ty_str(t));
                 if code == "E0277" { msg.push_str(&crate::next_solver::diagnostics::auto_trait_failure_notes(&self.infcx, prog, &obligation.goal, Some(&self.b))); }
+                if code == "E0275" {
+                    let next = self.infcx.recursion_limit(self.prog).saturating_mul(2);
+                    msg.push_str(&format!(" (consider increasing the recursion limit by adding a `#![recursion_limit = \"{next}\"]` attribute)"));
+                }
                 self.err(obligation.cause.span, format!("{code}: {msg}"));
                 continue;
             }

@@ -19,7 +19,7 @@ pub fn fold_term(tys: &Types, term: Term, f: &mut dyn TypeFolder, depth: u32) ->
     }
 }
 
-fn fold_alias(tys: &Types, alias: &AliasTerm, f: &mut dyn TypeFolder, depth: u32) -> AliasTerm {
+pub fn fold_alias(tys: &Types, alias: &AliasTerm, f: &mut dyn TypeFolder, depth: u32) -> AliasTerm {
     match alias {
         AliasTerm::Ty(ty) => AliasTerm::Ty(crate::types::fold::super_fold_ty(tys, *ty, f, depth)),
         AliasTerm::Const(alias) => {

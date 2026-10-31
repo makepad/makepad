@@ -306,20 +306,59 @@ pub fn canonicalize_goal(infcx: &InferCtxt<'_>, goal: &Goal, opaque_types: &[(Op
     };
     c.state.cache.clear();
     c.mode = CanonicalizeMode::Input { in_param_env: false };
+    let mut output_var = None;
     let predicate = if goal.predicate.flags(tys) & TypeFlags::NEEDS_CANONICAL.bits() == 0 {
         crate::solver_work::count(crate::solver_work::CANON_PRED_SKIPPED);
         goal.predicate.clone()
-    } else { fold_predicate(tys, &goal.predicate, &mut c) };
+    } else {
+        match &goal.predicate.kind {
+            PredicateKind::Clause(ClauseKind::Projection(p)) => {
+                let projection_term = super::fold::fold_alias(tys, &p.projection_term, &mut c, 1);
+                let before_term = c.state.var_kinds.len();
+                let term = super::fold::fold_term(tys, p.term, &mut c, 1);
+                output_var = bare_bound_var_at_depth_1(tys, term).filter(|&v| v == before_term);
+                Predicate { kind: PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term, term })), bound_vars: goal.predicate.bound_vars.clone() }
+            }
+            PredicateKind::NormalizesTo(p) => {
+                let alias = super::fold::fold_alias(tys, &p.alias, &mut c, 1);
+                let before_term = c.state.var_kinds.len();
+                let term = super::fold::fold_term(tys, p.term, &mut c, 1);
+                output_var = bare_bound_var_at_depth_1(tys, term).filter(|&v| v == before_term);
+                Predicate { kind: PredicateKind::NormalizesTo(NormalizesTo { alias, term }), bound_vars: goal.predicate.bound_vars.clone() }
+            }
+            _ => fold_predicate(tys, &goal.predicate, &mut c),
+        }
+    };
     let mut predefined_opaques_in_body = Vec::with_capacity(opaque_types.len());
     for (key, ty) in opaque_types {
         let mut args = Vec::with_capacity(key.args.len());
         for &arg in &*key.args { args.push(super::fold::fold_arg(tys, arg, &mut c, 0)); }
         predefined_opaques_in_body.push((OpaqueTypeKey { def_id: key.def_id, args: args.into() }, c.fold_ty(tys, *ty, 0)));
     }
-    let impl_view = infcx.impl_view.filter(|_| goal.predicate.flags(tys) & TypeFlags::HAS_NON_REGION_INFER.bits() != 0);
+    if !predefined_opaques_in_body.is_empty() {
+        output_var = None;
+    }
     let value = QueryInput { goal: Goal { param_env, predicate }, predefined_opaques_in_body };
     let (max_universe, originals, var_kinds) = c.finalize();
+    let has_input_infer = var_kinds.iter().enumerate().any(|(i, k)| {
+        Some(i) != output_var
+            && matches!(k, CanonicalVarKind::Ty { .. } | CanonicalVarKind::Int | CanonicalVarKind::Float | CanonicalVarKind::Const(_))
+    });
+    let impl_view = infcx.impl_view.filter(|_| has_input_infer);
     (originals, CanonicalQueryInput { canonical: Canonical { value, max_universe, var_kinds }, typing_mode: TypingModeEqWrapper(typing_mode), coherence_crate: infcx.coherence_crate, impl_view })
+}
+
+fn bare_bound_var_at_depth_1(tys: &Types, term: Term) -> Option<usize> {
+    match term {
+        Term::Ty(t) => match tys.kind(t) {
+            TyKind::Bound(1, v) => Some(v.var.0 as usize),
+            _ => None,
+        },
+        Term::Const(c) => match tys.const_kind(c) {
+            ConstKind::Bound(1, v) => Some(v.var.0 as usize),
+            _ => None,
+        },
+    }
 }
 
 #[cfg(test)]

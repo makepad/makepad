@@ -711,11 +711,24 @@ pub mod obligations {
         if depth > 8 { return goal.clone(); }
         if let PredicateKind::Clause(ClauseKind::WellFormed(term)) = &goal.predicate.kind {
             if let Ok(Some(goals)) = crate::next_solver::wf::unnormalized_obligations(infcx, prog, &goal.param_env, term.clone()) {
+                let mut recur = None;
                 for g in goals {
                     if g == *goal { continue; }
-                    if matches!(infcx.evaluate_obligation(prog, g.clone()), crate::next_solver::evaluate_obligation::EvaluationResult::EvaluatedToErr) {
-                        return leaf_goal(infcx, prog, &g, depth + 1);
+                    match infcx.evaluate_obligation(prog, g.clone()) {
+                        crate::next_solver::evaluate_obligation::EvaluationResult::EvaluatedToErr => {
+                            return leaf_goal(infcx, prog, &g, depth + 1);
+                        }
+                        crate::next_solver::evaluate_obligation::EvaluationResult::EvaluatedToAmbig
+                            if recur.is_none()
+                                && infcx.probe(|_| matches!(infcx.evaluate_root_goal(prog, g.clone(), None), Ok(r) if r.certainty.is_overflow())) =>
+                        {
+                            recur = Some(g);
+                        }
+                        _ => {}
                     }
+                }
+                if let Some(g) = recur {
+                    return leaf_goal(infcx, prog, &g, depth + 1);
                 }
             }
         }
@@ -728,18 +741,32 @@ pub mod obligations {
         let tcx = infcx.tcx;
         let goal = leaf_goal(infcx, prog, goal, 0);
         let ty_str = |t: TyId| crate::typeck::ty_to_string(false, prog, tcx, infcx.deeply_resolve_ignoring_regions(t));
+        let limit_note = || if code == "E0275" {
+            let next = infcx.recursion_limit(prog).saturating_mul(2);
+            format!(" (consider increasing the recursion limit by adding a `#![recursion_limit = \"{next}\"]` attribute)")
+        } else { String::new() };
         match &goal.predicate.kind {
             PredicateKind::Clause(ClauseKind::Trait(p)) => {
-                let mut message = format!("{code}: {}", crate::typeck::trait_error_message(prog, tcx, code, p, &mut |t| ty_str(t)));
+                let mut message = format!("{code}: {}{}", crate::typeck::trait_error_message(prog, tcx, code, p, &mut |t| ty_str(t)), limit_note());
                 if code == "E0277" { message.push_str(&crate::next_solver::diagnostics::auto_trait_failure_notes(infcx, prog, &goal, None)); }
                 Some(message)
             }
             PredicateKind::Clause(ClauseKind::Projection(p)) => {
                 let (AliasTerm::Ty(a), Term::Ty(t)) = (&p.projection_term, &p.term) else { return None };
-                Some(format!("E0271: type mismatch resolving `{}` == `{}`", ty_str(*a), ty_str(*t)))
+                if code == "E0275" {
+                    Some(format!("E0275: overflow evaluating the requirement `{}` == `{}`{}", ty_str(*a), ty_str(*t), limit_note()))
+                } else {
+                    Some(format!("E0271: type mismatch resolving `{}` == `{}`", ty_str(*a), ty_str(*t)))
+                }
             }
             PredicateKind::DynCompatible(d) => Some(format!("E0038: the trait `{}` is not dyn compatible", prog.name(*d))),
-            PredicateKind::Clause(ClauseKind::WellFormed(Term::Ty(t))) => Some(format!("E0277: the type `{}` is not well-formed", ty_str(*t))),
+            PredicateKind::Clause(ClauseKind::WellFormed(Term::Ty(t))) => {
+                if code == "E0275" {
+                    Some(format!("E0275: overflow evaluating the requirement `{}` well-formed{}", ty_str(*t), limit_note()))
+                } else {
+                    Some(format!("E0277: the type `{}` is not well-formed", ty_str(*t)))
+                }
+            }
             // regions, constants and the rest belong to their own checks
             _ => None,
         }

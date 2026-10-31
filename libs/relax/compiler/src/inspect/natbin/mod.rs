@@ -506,11 +506,12 @@ fn main() {
         assert!(nb.fn_at(f.addr + 1).map(|g| g.addr) == Some(f.addr));
         // the same bytes through the system disassembler's section dump
         #[cfg(target_os = "linux")]
-        if let Ok(o) = Command::new("objdump").args(["-s", &format!("--start-address={}", f.addr), &format!("--stop-address={}", f.addr + f.size), bin.to_str().unwrap()]).output() {
+        if let Ok(o) = Command::new("objdump").args(["-s", "-j", ".text", &format!("--start-address={}", f.addr), &format!("--stop-address={}", f.addr + f.size), bin.to_str().unwrap()]).output() {
             let mut hex = Vec::new();
             for l in String::from_utf8_lossy(&o.stdout).lines() {
                 // " 401120 f30f1efa 4889f8 ...  text"
-                let mut it = l.split_whitespace();
+                let hex_part = l.trim_start().split("  ").next().unwrap_or("");
+                let mut it = hex_part.split_whitespace();
                 if it.next().map_or(false, |a| u64::from_str_radix(a, 16).is_ok()) {
                     for w in it.take(4) {
                         if w.len() % 2 == 0 && w.bytes().all(|c| c.is_ascii_hexdigit()) {
