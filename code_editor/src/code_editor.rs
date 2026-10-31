@@ -142,7 +142,7 @@ script_mod! {
                 )
                 sdf.gloop(self.gloopiness)
             }
-            return sdf.fill(theme.color_u_1.mix(theme.color_u_3 * 0.8, self.focus)) * self.content_opacity
+            return sdf.fill(self.color.mix(self.color_focus, self.focus)) * self.content_opacity
         }
         }
 

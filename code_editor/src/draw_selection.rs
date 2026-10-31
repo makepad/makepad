@@ -7,6 +7,8 @@ script_mod! {
         ..mod.draw.DrawQuad
         gloopiness: uniform(8.0)
         border_radius: uniform(2.0)
+        color: uniform(theme.color_u_1)
+        color_focus: uniform(theme.color_u_3 * 0.8)
         focus: 1.0
         vertex: fn() {
             let clipped = clamp(
@@ -49,7 +51,7 @@ script_mod! {
                 )
                 sdf.gloop(self.gloopiness)
             }
-            return sdf.fill(theme.color_u_1.mix(theme.color_u_3 * 0.8, self.focus))
+            return sdf.fill(self.color.mix(self.color_focus, self.focus))
         }
     }
 }
