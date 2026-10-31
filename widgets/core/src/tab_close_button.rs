@@ -16,6 +16,7 @@ script_mod! {
         draw_button +: {
             hover: instance(0.0)
             active: instance(0.0)
+            current: instance(0.0)
 
             size: uniform(1.0)
 
@@ -80,7 +81,9 @@ pub struct TabCloseButton {
 }
 
 impl TabCloseButton {
-    pub fn draw(&mut self, cx: &mut Cx2d) {
+    pub fn draw(&mut self, cx: &mut Cx2d, is_current: bool) {
+        let current = if is_current { 1.0 } else { 0.0 };
+        self.draw_button.draw_vars.set_dyn_instance(cx, id!(current), &[current]);
         self.draw_button.draw_walk(cx, self.walk);
     }
 

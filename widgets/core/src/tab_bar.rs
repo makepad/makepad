@@ -254,6 +254,8 @@ pub struct TabBar {
 
     #[rust]
     active_tab: Option<usize>,
+    #[rust]
+    is_current_bar: bool,
 
     #[rust]
     active_tab_id: Option<LiveId>,
@@ -518,8 +520,15 @@ impl TabBar {
         }
     }
 
-    pub fn begin(&mut self, cx: &mut Cx2d, active_tab: Option<usize>, walk: Walk) {
+    pub fn begin(
+        &mut self,
+        cx: &mut Cx2d,
+        active_tab: Option<usize>,
+        is_current_bar: bool,
+        walk: Walk,
+    ) {
         self.active_tab = active_tab;
+        self.is_current_bar = is_current_bar;
         self.scroll_bars.begin(cx, walk, Layout::flow_right());
         self.draw_bg.draw_abs(cx, cx.turtle().rect_unscrolled());
         self.tab_order.clear();
@@ -586,6 +595,7 @@ impl TabBar {
         if let Some(mut tab) = tab.borrow_mut::<Tab>() {
             if self.active_tab.is_some() {
                 tab.set_is_active(cx, is_active, Animate::No);
+                tab.set_is_current(is_active && self.is_current_bar);
             }
             tab.name = name.to_string();
         }
@@ -646,14 +656,20 @@ impl TabBar {
             .map(|(id, (tab, _))| (Self::tab_node_name(*id), tab.clone()))
     }
 
-    /// Creates a new Tab from the same template as the given tab, with the same active state.
+    /// Creates a new Tab from the same template as the given tab, with the given active and current states.
     /// Returns `None` if the tab_id isn't found.
-    pub fn create_ghost_tab(&self, cx: &mut Cx, tab_id: LiveId) -> Option<Tab> {
-        let (tab, template_id) = self.tabs.get(&tab_id)?;
-        let is_active = tab.borrow::<Tab>()?.is_active();
+    pub fn create_ghost_tab(
+        &self,
+        cx: &mut Cx,
+        tab_id: LiveId,
+        is_active: bool,
+        is_current: bool,
+    ) -> Option<Tab> {
+        let (_, template_id) = self.tabs.get(&tab_id)?;
         let template_value: ScriptValue = self.templates.get(template_id)?.as_object().into();
         let mut ghost = cx.with_vm(|vm| Tab::script_from_value(vm, template_value));
         ghost.set_is_active(cx, is_active, Animate::No);
+        ghost.set_is_current(is_current);
         Some(ghost)
     }
 
