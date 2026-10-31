@@ -848,6 +848,8 @@ fn has_lines_after(
         HtmlNode::CloseTag { lc, .. } if *lc == live_id!(summary) => {
             has_content_from(doc, collapsed_details_end.unwrap_or(line_end_index), has_template)
         }
+        // A `<br>` shows nothing itself, it just ends the line.
+        HtmlNode::OpenTag { lc, .. } if *lc == live_id!(br) => has_content_from(doc, line_end_index, has_template),
         // The tag that ends the line can show something itself, like a rule.
         _ => has_content_from(doc, line_end_index - 1, has_template),
     }
@@ -860,6 +862,8 @@ fn has_content_from(doc: &HtmlDoc, node_index: usize, has_template: impl Fn(Live
     while index < doc.nodes.len() {
         match &doc.nodes[index] {
             HtmlNode::Text { start, end, all_ws } if start != end && !all_ws => return true,
+            // We'd have stopped at anything before this `<br>`, so it's on an empty line and leaves a blank one.
+            HtmlNode::OpenTag { lc, .. } if *lc == live_id!(br) => return true,
             // Rules, list markers, and quote, code and table boxes show even without text.
             HtmlNode::OpenTag { lc, .. }
                 if matches!(

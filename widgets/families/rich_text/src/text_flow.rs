@@ -1837,6 +1837,26 @@ impl TextFlow {
         ((line_asc + line_desc) * line_size * LPXS_PER_PT, line_asc * line_size * LPXS_PER_PT)
     }
 
+    /// Makes the current line at least as tall as a line of text, even with no text on it.
+    fn make_line_as_tall_as_text(&mut self, cx: &mut Cx2d) {
+        let (height_in_lpxs, baseline_in_lpxs) = self.get_line_height_and_baseline_in_lpxs(cx);
+        let font_scale = self.draw_text.font_scale as f64;
+        let height = height_in_lpxs as f64 * font_scale;
+        let align_list_start = cx.align_list_len();
+        let pos = cx.turtle().pos();
+        let turtle = cx.turtle_mut();
+        turtle.allocate_height(height);
+        turtle.set_wrap_spacing((baseline_in_lpxs * (self.text_style_normal.line_spacing - 1.0)) as f64);
+        cx.emit_turtle_walk_with_role(
+            Rect { pos, size: dvec2(0.0, height) },
+            align_list_start,
+            Metrics::default(),
+            Some(height),
+            Some(baseline_in_lpxs as f64 * font_scale),
+            RowAlignRole::Shiftable,
+        );
+    }
+
     /// Lays out a probe in the current line's own style (the normal style at the
     /// line's size), so an inline widget can read the metrics it has to line up with.
     pub fn line_probe(&mut self, cx: &mut Cx2d) -> Rc<LaidoutText> {
@@ -2390,7 +2410,20 @@ impl TextFlow {
         if self.content_truncated {
             return;
         }
+        // Like in a browser, a line break on an empty line leaves a blank line as tall as text.
+        let is_blank_line = self.first_thing_on_a_line && Self::is_at_row_start(cx);
+        // A blank line past the `max_lines` budget cuts what follows, just like a run would.
+        if is_blank_line && self.max_lines > 0 && self.lines_drawn >= self.max_lines && self.is_on_new_row(cx) {
+            self.content_truncated = true;
+            return;
+        }
         self.flush_block_margin(cx);
+        if is_blank_line {
+            self.make_line_as_tall_as_text(cx);
+            if self.max_lines > 0 {
+                self.charge_inline_content(cx, false);
+            }
+        }
         let spacing = cx.turtle().wrap_spacing();
         cx.turtle_new_line_with_spacing(spacing);
         self.mark_as_line_start();
@@ -2861,22 +2894,7 @@ impl TextFlow {
             if text.is_empty() {
                 // An empty run past the line's start still makes a line of widgets as tall as text.
                 if !is_at_line_start {
-                    let (height_in_lpxs, baseline_in_lpxs) = self.get_line_height_and_baseline_in_lpxs(cx);
-                    let font_scale = self.draw_text.font_scale as f64;
-                    let height = height_in_lpxs as f64 * font_scale;
-                    let align_list_start = cx.align_list_len();
-                    let pos = cx.turtle().pos();
-                    let turtle = cx.turtle_mut();
-                    turtle.allocate_height(height);
-                    turtle.set_wrap_spacing((baseline_in_lpxs * (self.text_style_normal.line_spacing - 1.0)) as f64);
-                    cx.emit_turtle_walk_with_role(
-                        Rect { pos, size: dvec2(0.0, height) },
-                        align_list_start,
-                        Metrics::default(),
-                        Some(height),
-                        Some(baseline_in_lpxs as f64 * font_scale),
-                        RowAlignRole::Shiftable,
-                    );
+                    self.make_line_as_tall_as_text(cx);
                 }
                 return;
             }
