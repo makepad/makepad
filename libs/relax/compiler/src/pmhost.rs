@@ -34,7 +34,10 @@ thread_local! {
 /// `"..".parse::<TokenStream>()` inside JIT-run macro code (Relax's std proc_macro FromStr):
 /// Relax's lexer, the stream in the bridge encoding in a buffer of this thread (valid until its
 /// next call). 0: lexed; 1: not valid tokens.
-pub extern "C" fn relax_pm_parse(src: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32 {
+///
+/// # Safety
+/// `src` must be valid for `len` readable bytes, and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_pm_parse(src: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32 {
     let s = unsafe { std::slice::from_raw_parts(src, len) };
     let Ok(s) = std::str::from_utf8(s) else { return 1 };
     let Some(ts) = crate::builtins::lex_stream(s) else { return 1 };
@@ -52,7 +55,10 @@ pub extern "C" fn relax_pm_parse(src: *const u8, len: usize, out: *mut *const u8
 /// Per-crate compile-time environment variable (`CARGO_MANIFEST_DIR`, `CARGO_PKG_*`, build-script
 /// `rustc-env`) for the crate invoking the currently running JIT proc macro.
 /// 0: found (`out` and `out_len` set); 1: not set in the invoking crate's environment.
-pub extern "C" fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32 {
+///
+/// # Safety
+/// `key` must be valid for `len` readable bytes, and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32 {
     let s = unsafe { std::slice::from_raw_parts(key, len) };
     let Ok(s) = std::str::from_utf8(s) else { return 1 };
     let Some(val) = crate::macro_reg::call_krate_env(s) else { return 1 };

@@ -54,7 +54,10 @@ pub extern "C" fn relax_sstack() -> *mut RawRegion {
 }
 
 /// `__relax_sstack_grow`: raises the region's limit to cover `need` (1) or says it is full (0).
-pub extern "C" fn relax_sstack_grow(r: *mut RawRegion, need: usize) -> u32 {
+///
+/// # Safety
+/// `r` must point to a valid, mutable `RawRegion` for the calling thread.
+pub unsafe extern "C" fn relax_sstack_grow(r: *mut RawRegion, need: usize) -> u32 {
     let r = unsafe { &mut *r };
     if r.end == 0 || need > r.end {
         return 0;
@@ -70,7 +73,10 @@ pub extern "C" fn relax_sstack_grow(r: *mut RawRegion, need: usize) -> u32 {
 }
 
 /// `__relax_sstack_trim`: gives back the pages above KEEP (the outermost frame closed).
-pub extern "C" fn relax_sstack_trim(r: *mut RawRegion) {
+///
+/// # Safety
+/// `r` must point to a valid, mutable `RawRegion` for the calling thread with no active frames above `KEEP`.
+pub unsafe extern "C" fn relax_sstack_trim(r: *mut RawRegion) {
     let r = unsafe { &mut *r };
     let keep = (r.base + KEEP).min(r.end);
     if r.limit > keep {
@@ -157,9 +163,9 @@ mod tests {
         assert!(!r.is_null());
         let (base, end) = unsafe { ((*r).base, (*r).end) };
         assert!(end - base >= 1 << 20);
-        assert_eq!(super::relax_sstack_grow(r, base + (64 << 20)), 1);
+        assert_eq!(unsafe { super::relax_sstack_grow(r, base + (64 << 20)) }, 1);
         unsafe { *((base + (64 << 20) - 8) as *mut u64) = 7 };
-        super::relax_sstack_trim(r);
+        unsafe { super::relax_sstack_trim(r) };
         assert_eq!(unsafe { (*r).limit }, base + super::KEEP);
     }
 }

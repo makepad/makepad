@@ -4203,7 +4203,7 @@ impl RecursionLimit {
 }
 
 /// Predicate environment and typing mode, following rustc_middle/src/ty/mod.rs:1050.
-#[derive(Clone, Copy, Debug, Hash)]
+#[derive(Clone, Copy, Debug)]
 pub struct TypingEnv {
     pub limit: RecursionLimit,
     pub param_env: ParamEnvId,
@@ -4217,6 +4217,13 @@ impl PartialEq for TypingEnv {
     }
 }
 impl Eq for TypingEnv {}
+impl std::hash::Hash for TypingEnv {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.limit.hash(state);
+        self.param_env.hash(state);
+        self.mode.hash(state);
+    }
+}
 
 impl TypingEnv {
     /// rustc_middle/src/ty/mod.rs:1073: codegen has no predicates in scope.

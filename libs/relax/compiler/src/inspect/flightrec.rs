@@ -438,7 +438,10 @@ pub extern "C" fn relax_flight_mark(cat: *const u8, cat_len: usize, text: *const
 
 /// `relax_flight_input(frame, injected, command, len)`: an input event the program dispatched,
 /// as the remote command that injects it.
-pub extern "C" fn relax_flight_input(frame: u64, injected: u64, cmd: *const u8, len: usize) {
+///
+/// # Safety
+/// `cmd` must be null or point to `len` valid UTF-8 bytes.
+pub unsafe extern "C" fn relax_flight_input(frame: u64, injected: u64, cmd: *const u8, len: usize) {
     if !on() || cmd.is_null() {
         return;
     }

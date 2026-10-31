@@ -124,8 +124,8 @@ pub unsafe fn restore(heap: *const ()) {
 }
 
 /// `enter`'s heap as `current` names it, for a scoped entry that switches without the registry.
-pub fn raw(heap: *const DomainHeap) -> *const () {
-    unsafe { heap.as_ref() }.map_or(std::ptr::null(), |h| &*h.inner.arena as *const Arena as *const ())
+pub fn raw(heap: &DomainHeap) -> *const () {
+    &*heap.inner.arena as *const Arena as *const ()
 }
 
 #[derive(Clone, Copy)]

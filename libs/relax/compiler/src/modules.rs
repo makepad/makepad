@@ -981,7 +981,9 @@ pub(crate) fn stream_applied(h: u64, file: u32) {
     if let Some(m) = unhandle(h).and_then(|(i, g)| ms.get_mut(i).filter(|m| m.gen == g && m.alive)) { m.file = file; }
 }
 
-pub extern "C" fn __relax_module_load_stream(name: *const u8, nlen: usize, path: *const u8, plen: usize, src: *const u8, slen: usize, deps: *const u8, dlen: usize) -> u64 {
+/// # Safety
+/// Each non-zero-length `(ptr, len)` pair must point to `len` readable bytes.
+pub unsafe extern "C" fn __relax_module_load_stream(name: *const u8, nlen: usize, path: *const u8, plen: usize, src: *const u8, slen: usize, deps: *const u8, dlen: usize) -> u64 {
     let up = jit::current_unit();
     if up.is_null() { set_error("no running unit".to_string()); return 0; }
     let session = unsafe { crate::jit::unit_session(up) };
@@ -992,7 +994,10 @@ pub extern "C" fn __relax_module_load_stream(name: *const u8, nlen: usize, path:
 }
 
 /// 0 applied, 1 incomplete, 2 needs reload, 3 pending, 4 invalid handle.
-pub extern "C" fn __relax_module_stream(h: u64, src: *const u8, slen: usize, kept: *mut usize) -> u32 {
+///
+/// # Safety
+/// `src` must be valid for `slen` readable bytes when `slen > 0`, and `kept` must be null or a valid writable pointer.
+pub unsafe extern "C" fn __relax_module_stream(h: u64, src: *const u8, slen: usize, kept: *mut usize) -> u32 {
     if stream_target(h).is_none() {
         set_error("the module was unloaded".to_string());
         return 4;
@@ -1106,7 +1111,10 @@ fn load_src_inner(name: *const u8, nlen: usize, path: *const u8, plen: usize, sr
 
 /// The callable address of export `name` checked against the fn-pointer type `ty`
 /// (type_name); 0 with an error otherwise.
-pub extern "C" fn __relax_module_get(h: u64, name: *const u8, nlen: usize, ty: *const u8, tlen: usize) -> u64 {
+///
+/// # Safety
+/// `name` and `ty` must be valid for `nlen` and `tlen` readable bytes respectively when non-empty.
+pub unsafe extern "C" fn __relax_module_get(h: u64, name: *const u8, nlen: usize, ty: *const u8, tlen: usize) -> u64 {
     let (name, ty) = unsafe { (String::from_utf8_lossy(bytes(name, nlen)).into_owned(), String::from_utf8_lossy(bytes(ty, tlen)).into_owned()) };
     let mut ms = MODULES.lock().unwrap_or_else(|e| e.into_inner());
     let (idx, m) = match unhandle(h).and_then(|(i, g)| ms.get_mut(i).filter(|m| m.gen == g && m.alive).map(|m| (i, m))) {
@@ -1140,7 +1148,10 @@ pub extern "C" fn __relax_module_get(h: u64, name: *const u8, nlen: usize, ty: *
 /// Applies a new text of the module (hot reload: one transaction). 0 applied; 1 refused (errors
 /// in __relax_module_error); 2 the edit needs a fresh load (layout or item-set change: unload,
 /// then load the new text); 3 unloaded handle.
-pub extern "C" fn __relax_module_replace(h: u64, src: *const u8, slen: usize) -> u32 {
+///
+/// # Safety
+/// `src` must be valid for `slen` readable bytes when `slen > 0`.
+pub unsafe extern "C" fn __relax_module_replace(h: u64, src: *const u8, slen: usize) -> u32 {
     let src = unsafe { bytes(src, slen).to_vec() };
     let up = jit::current_unit();
     let Some(o) = (unsafe { crate::reload::finish_module_stream(up, h, src) }) else {
@@ -1212,7 +1223,10 @@ pub extern "C" fn __relax_module_unload(h: u64) {
 }
 
 /// Copies this thread's last module error into `buf` (up to `cap` bytes); returns its length.
-pub extern "C" fn __relax_module_error(buf: *mut u8, cap: usize) -> usize {
+///
+/// # Safety
+/// When `buf` is non-null and `cap > 0`, `buf` must be valid for `cap` writable bytes.
+pub unsafe extern "C" fn __relax_module_error(buf: *mut u8, cap: usize) -> usize {
     LAST_ERROR.with(|l| {
         let l = l.borrow();
         let n = l.len().min(cap);
@@ -1258,7 +1272,9 @@ pub extern "C" fn __relax_budget_new(fuel: u64, growth: u64) -> u64 {
 pub extern "C" fn __relax_budget_drop(token: u64) {
     unsafe { drop(std::rc::Rc::from_raw(token as *const std::cell::Cell<[u64; 4]>)); }
 }
-pub extern "C" fn __relax_budget_read(token: u64, out: *mut [u64; 4]) {
+/// # Safety
+/// `token` must be a live budget token from `__relax_budget_new`, and `out` must be a valid writable pointer.
+pub unsafe extern "C" fn __relax_budget_read(token: u64, out: *mut [u64; 4]) {
     unsafe { *out = (*(token as *const std::cell::Cell<[u64; 4]>)).get(); }
 }
 pub extern "C" fn __relax_budget_reset(token: u64, fuel: u64, growth: u64) {
@@ -1288,7 +1304,9 @@ thread_local! {
 }
 static NEXT_HOST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-pub extern "C" fn __relax_host_new(h: u64, ptr: u64, ty: *const u8, len: usize) -> u64 {
+/// # Safety
+/// `ty` must be valid for `len` readable bytes when `len > 0`.
+pub unsafe extern "C" fn __relax_host_new(h: u64, ptr: u64, ty: *const u8, len: usize) -> u64 {
     let Some(a) = arena_for(h) else { return 0; };
     let id = NEXT_HOST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if id == 0 { return 0; }
@@ -1302,7 +1320,9 @@ pub extern "C" fn __relax_host_drop(id: u64) {
     HOSTS.with(|s| s.borrow_mut().retain(|e| e.id != id));
 }
 
-pub extern "C" fn __relax_host_acquire(id: u64, ty: *const u8, len: usize) -> u64 {
+/// # Safety
+/// `ty` must be valid for `len` readable bytes when `len > 0`.
+pub unsafe extern "C" fn __relax_host_acquire(id: u64, ty: *const u8, len: usize) -> u64 {
     let module = crate::sandbox::current_module();
     HOSTS.with(|s| {
         let mut s = s.borrow_mut();
@@ -1319,7 +1339,9 @@ pub extern "C" fn __relax_host_release(id: u64) {
     });
 }
 
-pub extern "C" fn __relax_sb_string_copy(p: u64, len: u64, out: *mut u8) -> u32 {
+/// # Safety
+/// `out` must be valid for `len` writable bytes when `len > 0`.
+pub unsafe extern "C" fn __relax_sb_string_copy(p: u64, len: u64, out: *mut u8) -> u32 {
     unsafe { crate::sandbox::string_copy(p, len, out) as u32 }
 }
 
@@ -1357,7 +1379,10 @@ pub fn guard_reset(m: GuardMark) {
 /// Sandbox statistics for tests and memory reports: [twin code bytes installed (append-only:
 /// every version stays), image ro bytes, image rw bytes, arenas live, unloaded modules' windows
 /// (reserved, inaccessible, never reused)].
-pub extern "C" fn __relax_sb_stats(out: *mut [u64; 5]) {
+///
+/// # Safety
+/// `out` must be a valid writable pointer.
+pub unsafe extern "C" fn __relax_sb_stats(out: *mut [u64; 5]) {
     let (ro, rw, n) = crate::sandbox::stats();
     unsafe { *out = [crate::sandbox::twin_code_bytes(), ro as u64, rw as u64, n as u64, crate::sandbox::dead_arenas() as u64] };
 }

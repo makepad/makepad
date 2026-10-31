@@ -245,7 +245,7 @@ fn c_representable(s: &str) -> bool {
 /// under the HAL, is rustc's), to a fixpoint;
 /// then the report and the number of violations (bodies that reach into a provided crate the
 /// way JIT-compiled code cannot).
-pub fn run(up: *mut Unit, root: u32) -> (String, usize) {
+pub(crate) fn run(up: *mut Unit, root: u32) -> (String, usize) {
     AUDIT_ON.store(true, std::sync::atomic::Ordering::Relaxed);
     let u = unsafe { &mut *up };
     let std_crates: Vec<u32> = ["core", "alloc", "std"].iter().filter_map(|n| u.prog.crates.iter().position(|c| u.prog.syms.str(c.name) == *n).map(|i| i as u32)).collect();

@@ -1037,7 +1037,10 @@ fn hold(data: Vec<u8>, out: *mut *const u8, out_len: *mut usize) -> u64 {
 
 /// 0: not a virtual path (the disk), 1: a file (`*size` its length), 2: a folder, -1: virtual but
 /// missing.
-pub extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32 {
+///
+/// # Safety
+/// `p` must be valid for `n` bytes (when `n > 0`) and `size` must point to a writable `u64`.
+pub unsafe extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32 {
     if !ANY.load(Ordering::Acquire) && !OVERLAY_ANY.load(Ordering::Acquire) {
         return 0;
     }
@@ -1066,7 +1069,10 @@ pub extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32 
 }
 
 /// A virtual file's bytes, held until `relax_vfs_release`; 0 when it cannot be read.
-pub extern "C" fn relax_vfs_read(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `p` must be valid for `n` bytes (when `n > 0`), and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_vfs_read(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let path = unsafe { path_arg(p, n) };
     match read(path) {
         Ok(d) => hold(d, out, out_len),
@@ -1075,7 +1081,10 @@ pub extern "C" fn relax_vfs_read(p: *const u8, n: usize, out: *mut *const u8, ou
 }
 
 /// A virtual folder's entries as lines `d <name>` / `f <name>`, held until `relax_vfs_release`.
-pub extern "C" fn relax_vfs_list(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `p` must be valid for `n` bytes (when `n > 0`), and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_vfs_list(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let path = unsafe { path_arg(p, n) };
     match read_dir(path) {
         Ok(v) => hold(v.iter().map(|(name, d)| format!("{} {name}\n", if *d { 'd' } else { 'f' })).collect::<String>().into_bytes(), out, out_len),
@@ -1084,13 +1093,19 @@ pub extern "C" fn relax_vfs_list(p: *const u8, n: usize, out: *mut *const u8, ou
 }
 
 /// The mount table (`mounts_text`), held until `relax_vfs_release`.
-pub extern "C" fn relax_vfs_mounts(out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `out` and `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_vfs_mounts(out: *mut *const u8, out_len: *mut usize) -> u64 {
     hold(mounts_text().into_bytes(), out, out_len)
 }
 
 /// std::relax::store_file: one file of a repository's store at a commit (`url`, 40-hex `commit`,
 /// `path` in the repository), held until `relax_vfs_release`; 0 when it is not there.
-pub extern "C" fn relax_store_file(u: *const u8, un: usize, c: *const u8, cn: usize, p: *const u8, pn: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `u`, `c`, and `p` must be valid for `un`, `cn`, and `pn` bytes respectively, and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_store_file(u: *const u8, un: usize, c: *const u8, cn: usize, p: *const u8, pn: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let (url, commit, path) = unsafe { (path_arg(u, un), path_arg(c, cn), path_arg(p, pn)) };
     let Some(oid) = store::from_hex(commit) else { return 0 };
     match store::store_file(url, &oid, path) {
@@ -1383,7 +1398,10 @@ fn reconcile_seeded(dir: &std::path::Path) {
 /// std's write into a virtual path (fs_vfs.rs): mode 0 the edited file or folder if any, 1 a
 /// write keeping the content, 2 a write replacing it, 3 a folder. The disk path, held until
 /// `relax_vfs_release`; 0 when the path cannot be written.
-pub extern "C" fn relax_vfs_edit(p: *const u8, n: usize, mode: u32, out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `p` must be valid for `n` bytes (when `n > 0`), and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_vfs_edit(p: *const u8, n: usize, mode: u32, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let path = unsafe { path_arg(p, n) };
     let r = match mode {
         0 => edited_disk_path(path).ok_or_else(|| not_found(path)),
@@ -1536,13 +1554,15 @@ mod tests {
             assert_eq!(canonicalize(&missing).unwrap_err().kind(), io::ErrorKind::NotFound);
             assert_eq!(canonicalize(format!("{root}/../outside")).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
             let mut len = 0;
-            assert_eq!(relax_vfs_stat(path.as_ptr(), path.len(), &mut len), 1);
+            assert_eq!(unsafe { relax_vfs_stat(path.as_ptr(), path.len(), &mut len) }, 1);
             assert_eq!(len, bytes.len() as u64);
-            assert_eq!(relax_vfs_stat(missing.as_ptr(), missing.len(), &mut len), -1);
+            assert_eq!(unsafe { relax_vfs_stat(missing.as_ptr(), missing.len(), &mut len) }, -1);
             for (path, list) in [(&path, false), (&dir, true)] {
                 let (mut data, mut len) = (std::ptr::null(), 0);
-                let id = if list { relax_vfs_list(path.as_ptr(), path.len(), &mut data, &mut len) }
-                    else { relax_vfs_read(path.as_ptr(), path.len(), &mut data, &mut len) };
+                let id = unsafe {
+                    if list { relax_vfs_list(path.as_ptr(), path.len(), &mut data, &mut len) }
+                    else { relax_vfs_read(path.as_ptr(), path.len(), &mut data, &mut len) }
+                };
                 assert_ne!(id, 0);
                 assert_eq!(unsafe { std::slice::from_raw_parts(data, len) }, if list { &b"f counter.rs\n"[..] } else { bytes });
                 relax_vfs_release(id);

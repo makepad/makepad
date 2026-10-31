@@ -2150,7 +2150,7 @@ thread_local! {
 
 /// Sets this thread's block in the OS key (what JIT code reads) and in the runtime's copy.
 fn set_tls_block(b: *mut u8) {
-    os::tls::set(tls_key(), b);
+    unsafe { os::tls::set(tls_key(), b) };
     TLS_BLOCK_COPY.with(|c| c.set(b as u64));
 }
 
@@ -12233,7 +12233,7 @@ unsafe fn load_modules(up: *mut Unit, mods: &[u32], why: &str) {
     }
 }
 
-pub fn start_completion(up: *mut Unit, runtime: &crate::options::RuntimeOptions) {
+pub(crate) fn start_completion(up: *mut Unit, runtime: &crate::options::RuntimeOptions) {
     if std::env::var("MAKEPAD_RUN_LAZY_COMPLETE").is_ok_and(|v| v == "0") { return; }
     if unsafe { (*up).prog.skipped_files.is_empty() } { return; }
     let upn = up as usize;

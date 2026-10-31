@@ -3618,7 +3618,10 @@ pub extern "C" fn __relax_restored_state(buf: *mut u8, cap: usize) -> usize {
 
 /// A hosted app queues a fresh domain with this state and returns for cooperative shutdown.
 /// A directly running program writes MAKEPAD_RUN_RESTORE and replaces its process as before.
-pub extern "C" fn __relax_restart_now(state: *const u8, len: usize) {
+///
+/// # Safety
+/// `state` must be null or valid for `len` readable bytes.
+pub unsafe extern "C" fn __relax_restart_now(state: *const u8, len: usize) {
     crate::jit::host_boundary("__relax_restart_now", move || {
         let st = unsafe { if state.is_null() { &[][..] } else { std::slice::from_raw_parts(state, len) } };
         // a rebuilt makepad waits: the process restarts into it (or this returns, said why)
@@ -4113,7 +4116,10 @@ pub(crate) fn session_summary() -> Option<String> {
 }
 
 /// std::relax::live_log: the program adds a record to the session log (the restart's kept/lost).
-pub extern "C" fn __relax_live_log(p: *const u8, n: usize) {
+///
+/// # Safety
+/// `p` must be null or valid for `n` readable bytes.
+pub unsafe extern "C" fn __relax_live_log(p: *const u8, n: usize) {
     crate::jit::host_boundary("__relax_live_log", move || {
         if p.is_null() {
             return;
@@ -4301,7 +4307,9 @@ unsafe fn drain_streams(up: *mut Unit) {
     }
 }
 
-pub extern "C" fn __relax_live_stream(p: *const u8, n: usize, t: *const u8, len: usize) -> u32 {
+/// # Safety
+/// `p` and `t` must each be null or valid for `n` and `len` readable bytes respectively.
+pub unsafe extern "C" fn __relax_live_stream(p: *const u8, n: usize, t: *const u8, len: usize) -> u32 {
     crate::jit::host_boundary("__relax_live_stream", move || {
         if p.is_null() || t.is_null() { return 3; }
         unsafe {
@@ -4333,7 +4341,7 @@ pub use inputs::Inputs;
 pub mod host;
 pub use host::set_loader_package;
 
-pub fn start_watcher(up: *mut Unit, inputs: Inputs) {
+pub(crate) fn start_watcher(up: *mut Unit, inputs: Inputs) {
     let session = unsafe { crate::jit::unit_session(up) };
     struct P(*mut Unit);
     unsafe impl Send for P {}
