@@ -211,7 +211,7 @@ impl App {
                 self.refresh_workspace(cx);
             }
             DockAction::SplitPanelChanged { .. } => self.save_dock(cx),
-            DockAction::None => {}
+            DockAction::TabWasClicked { .. } | DockAction::None => {}
         }
     }
 }
