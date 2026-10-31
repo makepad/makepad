@@ -119,6 +119,7 @@ script_mod! {
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
+                depth_buffer: false
                 window.inner_size: vec2(1200, 760)
                 body +: {
                     app_view := SolidView{
