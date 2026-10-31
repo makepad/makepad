@@ -1651,9 +1651,35 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn strip_synth_paren_wrap(&self, mut toks: TokRange) -> TokRange {
+        while toks.hi >= toks.lo + 2
+            && self.toks.kind_at(toks.lo as usize) == T::OpenParen
+            && self.toks.kind_at(toks.hi as usize - 1) == T::CloseParen
+            && self.synth_parens.contains(&{ self.toks.at(toks.lo as usize).lo })
+        {
+            let mut depth = 0i32;
+            let mut wraps_all = true;
+            for i in toks.lo as usize..toks.hi as usize - 1 {
+                match self.toks.kind_at(i) {
+                    T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                    T::CloseParen | T::CloseBracket | T::CloseBrace => {
+                        depth -= 1;
+                        if depth == 0 { wraps_all = false; break; }
+                    }
+                    _ => {}
+                }
+            }
+            if !wraps_all || depth != 1 { break; }
+            toks.lo += 1;
+            toks.hi -= 1;
+        }
+        toks
+    }
+
     /// rustc_builtin_macros util.rs: get_exprs_from_tts / expr_to_spanned_string fully expand
     /// each expression before inspecting its literal. stringify! keeps its input unexpanded.
     fn eager_macro_arg(&mut self, toks: TokRange) -> PResult<TokRange> {
+        let toks = self.strip_synth_paren_wrap(toks);
         let save = self.pos;
         self.pos = toks.lo as usize;
         let r = (|| {
@@ -2123,6 +2149,20 @@ impl<'a> Parser<'a> {
         if self.at_item_start() {
             self.item(attrs)?;
             self.extra_items.clear();
+            return Ok(());
+        }
+        if self.path_frags.contains(&{ self.tok().lo }) && self.mac_ahead() {
+            let lo = self.lo();
+            let path = self.path(true)?;
+            self.expect(T::Not)?;
+            let (delim, toks) = self.delim_tt()?;
+            let args = self.mac_args(&path, toks);
+            let m = self.ast.push_row(MacCall { path, delim, toks, args });
+            let e = self.mk_expr(ExprKind::Mac(m), lo);
+            if delim != b'{' || matches!(self.kind(), T::Dot | T::Question) {
+                let e = self.postfix(e, lo)?;
+                self.expr_continue(e, 0, 0, lo)?;
+            }
             return Ok(());
         }
         self.expr().map(|_| ())
@@ -4379,12 +4419,16 @@ impl<'a> Parser<'a> {
         }
         if !attrs.is_empty() { self.closure_attrs(&attrs)?; }
         let lo = self.lo();
-        // statement-level brace macro: `m! { }` ends the statement
+        // statement-level brace macro (`m! { }` ends the statement) or `$p:path!(..)`
+        // (rustc_parse stmt.rs: parse_stmt_without_recovery parses StmtKind::MacCall before
+        // parse_expr_bottom, where MetaVarKind::Path does not extend to `!`).
         if self.mac_ahead() {
+            let path_frag = self.path_frags.contains(&{ self.tok().lo });
             let save = self.pos;
             let path = self.path(true)?;
             self.expect(T::Not)?;
-            if self.kind() == T::OpenBrace {
+            let brace = self.kind() == T::OpenBrace;
+            if brace || (path_frag && matches!(self.kind(), T::OpenParen | T::OpenBracket)) {
                 let (delim, toks) = self.delim_tt()?;
                 let e = if let Some(def) = self.rules_macro(&path) {
                     self.include_as_expr = true;
@@ -4409,6 +4453,17 @@ impl<'a> Parser<'a> {
                     let m = self.ast.push_row(MacCall { path, delim, toks, args });
                     self.mk_expr(ExprKind::Mac(m), lo)
                 };
+                if !brace {
+                    let e = self.postfix(e, lo)?;
+                    let e = self.expr_continue(e, 0, 0, lo)?;
+                    if self.eat(T::Semi) {
+                        return Ok(Stmt::Expr(e, true));
+                    }
+                    if matches!(self.kind(), T::CloseBrace | T::Eof) {
+                        return Ok(Stmt::Expr(e, false));
+                    }
+                    return self.err("expected `;` or `}` after expression");
+                }
                 if matches!(self.kind(), T::Dot | T::Question) {
                     let e = self.postfix(e, lo)?;
                     let e = self.expr_continue(e, 0, 0, lo)?;
