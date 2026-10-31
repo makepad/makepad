@@ -388,9 +388,10 @@ impl WidgetNode for Dock {
                 Some(DockItem::Tabs { tabs, selected, hide_tab_bar, .. }) => {
                     if !hide_tab_bar {
                         if let Some(tab_bar) = dock.tab_bars.get(&id) {
+                            // Cancel walks ignore names.
                             for id in tabs {
-                                if let Some((name, tab)) = tab_bar.tab_bar.tab_ref(*id) {
-                                    visit(name, tab);
+                                if let Some(tab) = tab_bar.tab_bar.tab_widget(*id) {
+                                    visit(*id, tab);
                                 }
                             }
                         }
