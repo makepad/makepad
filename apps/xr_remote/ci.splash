@@ -1,0 +1,22 @@
+// CI for makepad-app-xr-remote, the headset end of remote rendering. A desktop has no headset, so
+// its window says that in one line of text: the default smoke test's "at least two user interface
+// things" can never hold here.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-app-xr-remote"] targets: ci.host.targets})
+})
+
+let app = ci.launch({package: "makepad-app-xr-remote" binary: "makepad-app-xr-remote" cwd: "."})
+
+ci.step("says it has no headset", fn(){
+    ci.sleep(3.0)
+    app.no_errors()
+    let shot = app.grab("start")
+    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. This application only works on a headset, so on a computer its window is a dark background with one line of light text saying there is no headset. YES means ALL of these are true: 1. The background is dark. 2. There is a line of text containing the words no headset. 3. No error panel covers the window: there is no large block of text with words such as panic, error, failed, backtrace or unwrap. Write one short bullet line for each numbered point saying what you see. Then write the verdict as the last line, in exactly this form: VERDICT: YES or VERDICT: NO")
+})
+
+app.quit()
+nil

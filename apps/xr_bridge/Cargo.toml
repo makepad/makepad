@@ -1,0 +1,10 @@
+[package]
+name = "makepad-app-xr-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-xr-stream = { path = "../../libs/xr_stream" }
+makepad-xr-runtime = { path = "../../libs/xr_runtime" }

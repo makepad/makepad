@@ -1,0 +1,15 @@
+[package]
+name = "makepad-xr-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Linux OpenXR runtime for Makepad's remote headsets"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+makepad-micro-serde = { path = "../micro_serde" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+makepad-vulkan = { path = "../vulkan" }

@@ -1,0 +1,12 @@
+[package]
+name = "makepad-xr-stream"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Remote rendering for headsets: an app serves its XR view to a headset (Desk Link XR), and a headset shows a remote app's XR view, reprojected with the pose it was rendered with"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-desk-link = { path = "../desk_link", features = ["host"] }

@@ -1,6 +1,42 @@
 mod tests {
     use super::*;
 
+    fn pointer_move(x: f64, y: f64) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs: dvec2(x, y),
+            lock_delta: Vec2d::default(),
+            window_id: WindowId(0, 0),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    /// A move away from the camera's viewport keeps the cursor a control
+    /// set in the same move, and the move that leaves gives back the grab.
+    #[test]
+    fn a_camera_keeps_its_cursor_to_its_own_viewport() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut camera = XrCamera::default();
+        camera.set_desktop_viewport_rect(Rect { pos: dvec2(300.0, 10.0), size: dvec2(4.0, 4.0) });
+
+        cx.set_cursor(MouseCursor::ColResize);
+        camera.handle_desktop_interaction(&mut cx, &pointer_move(700.0, 580.0));
+        assert_eq!(cx.mouse_cursor(), MouseCursor::ColResize, "a move elsewhere took the cursor");
+
+        camera.handle_desktop_interaction(&mut cx, &pointer_move(302.0, 12.0));
+        assert_eq!(cx.mouse_cursor(), MouseCursor::Grab);
+
+        camera.handle_desktop_interaction(&mut cx, &pointer_move(320.0, 12.0));
+        assert_eq!(cx.mouse_cursor(), MouseCursor::Default, "leaving kept the grab");
+
+        cx.set_cursor(MouseCursor::Grab);
+        camera.handle_desktop_interaction(&mut cx, &pointer_move(302.0, 12.0));
+        cx.set_cursor(MouseCursor::Hand);
+        camera.handle_desktop_interaction(&mut cx, &pointer_move(320.0, 12.0));
+        assert_eq!(cx.mouse_cursor(), MouseCursor::Hand, "leaving took a control's cursor");
+    }
+
     fn sample(captured_at: f64, vertical_split: f32) -> BoxSyncPoseSample {
         BoxSyncPoseSample {
             anchor: XrAnchor {

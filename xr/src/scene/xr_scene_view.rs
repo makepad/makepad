@@ -19,7 +19,7 @@ script_mod! {
         tint: vec4(1.0, 1.0, 1.0, 1.0)
 
         pixel: fn() {
-            let color = self.scene_texture.sample_as_bgra(self.pos)
+            let color = self.scene_texture.sample(self.pos)
             return Pal.premul(color * self.tint)
         }
     }
@@ -105,7 +105,7 @@ impl XrSceneView {
     }
 
     /// The scene's color render target. Valid after the first draw; read it
-    /// back with `Cx::debug_read_render_texture` for pixel checks.
+    /// back with `Texture::read_back` for asynchronous pixel checks.
     pub fn color_texture(&self) -> &Texture {
         &self.color_texture
     }
@@ -136,7 +136,7 @@ impl XrSceneView {
         );
         self.pass
             .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
+        self.pass.set_keep_camera_matrix(cx, true);
     }
 
     fn set_pass_camera(&self, cx: &mut Cx, scene: &SceneState3D) {
@@ -338,7 +338,11 @@ impl Widget for XrSceneView {
         } else {
             rect
         };
-        self.camera.set_desktop_viewport_rect(render_rect);
+        // The pointer orbits the view where it is drawn. A fixed render
+        // size behind a small placeholder would otherwise claim a render
+        // sized stretch of the window from the placeholder's corner, and
+        // take the cursor from every control under it.
+        self.camera.set_desktop_viewport_rect(rect);
         self.pass.set_size(cx, render_rect.size);
         self.pass.set_color_texture(
             cx,

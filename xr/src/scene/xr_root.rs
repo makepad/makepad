@@ -83,6 +83,10 @@ pub struct XrCamera {
     pub orbit_last_abs: Option<DVec2>,
     #[rust]
     pub viewport_rect: Option<Rect>,
+    /// The last move was over the viewport, so the pointer wears the
+    /// camera's grab.
+    #[rust]
+    pub pointer_over: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -108,6 +112,7 @@ impl Default for XrCamera {
             orbit_pitch: 0.0,
             orbit_last_abs: None,
             viewport_rect: None,
+            pointer_over: false,
         }
     }
 }
@@ -167,6 +172,13 @@ impl XrCamera {
         self.viewport_rect.is_some_and(|rect| rect.contains(abs))
     }
 
+    /// Orbit and zoom from the desktop pointer, over `viewport_rect`.
+    ///
+    /// The pointer is only the camera's over its own viewport. A move
+    /// anywhere else leaves the cursor to whatever is under it: once the
+    /// pointer has left, it puts back the default only if the cursor still
+    /// wears the camera's grab, so a cursor a control set in the same move -
+    /// a resize edge, a hand - stands.
     pub fn handle_desktop_interaction(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::MouseDown(fe) if self.contains_abs(fe.abs) && fe.button.is_primary() => {
@@ -183,8 +195,11 @@ impl XrCamera {
                     cx.set_cursor(MouseCursor::Grabbing);
                     cx.redraw_all();
                 } else if self.contains_abs(fe.abs) {
+                    self.pointer_over = true;
                     cx.set_cursor(MouseCursor::Grab);
-                } else {
+                } else if std::mem::take(&mut self.pointer_over)
+                    && cx.mouse_cursor() == MouseCursor::Grab
+                {
                     cx.set_cursor(MouseCursor::Default);
                 }
             }
@@ -219,6 +234,7 @@ impl XrCamera {
                 }
             }
             Event::MouseLeave(_) if self.orbit_last_abs.is_none() => {
+                self.pointer_over = false;
                 cx.set_cursor(MouseCursor::Default);
             }
             _ => {}
@@ -1065,12 +1081,13 @@ impl XrRoot {
     fn handle_draw_event(&mut self, cx: &mut Cx, e: &DrawEvent, scope: &mut Scope) {
         let started = Instant::now();
         self.ensure_initialized(cx);
-        cx.passes[self.pass.handle.draw_pass_id()].keep_camera_matrix =
+        let keep =
             if cx.in_xr_mode() || !self.permissions_ui_visible() {
                 self.pass.keep_camera_matrix
             } else {
                 false
             };
+        self.pass.handle.set_keep_camera_matrix(cx, keep);
         self.pass.handle.set_window_clear_color(
             cx,
             if cx.in_xr_mode() {
@@ -1364,11 +1381,9 @@ impl Widget for XrRoot {
         if method == live_id!(set_depth) || method == live_id!(set_depth_mesh) {
             let mut visible = self.depth_mesh_visible();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 visible = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 visible = self.set_depth_mesh_visible(cx, visible);
@@ -1388,11 +1403,9 @@ impl Widget for XrRoot {
         if method == live_id!(set_depth_mesh_focus_cube) {
             let mut enabled = self.depth_mesh_focus_cube_enabled();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 enabled = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 enabled = self.set_depth_mesh_focus_cube_enabled(cx, enabled);
@@ -1414,11 +1427,9 @@ impl Widget for XrRoot {
         if method == live_id!(set_depth_query_hits) {
             let mut visible = self.depth_query_hits_visible();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 visible = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 visible = self.set_depth_query_hits_visible(cx, visible);
@@ -1440,8 +1451,8 @@ impl Widget for XrRoot {
         if method == live_id!(set_depth_voxel_size) || method == live_id!(set_depth_resolution) {
             let mut voxel_size_meters = vm.cx().xr_tsdf().voxel_size_meters();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                let trap = vm.trap();
+                if let Some(value) = vm.bx.heap_ref().vec_value(args_obj, 0, trap).as_f64() {
                     voxel_size_meters = value as f32;
                 }
             }
@@ -1458,8 +1469,8 @@ impl Widget for XrRoot {
         if method == live_id!(set_render_scale) || method == live_id!(set_xr_render_scale) {
             let mut scale = vm.cx().xr_render_scale().unwrap_or(1.4) as f32;
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                let trap = vm.trap();
+                if let Some(value) = vm.bx.heap_ref().vec_value(args_obj, 0, trap).as_f64() {
                     scale = value as f32;
                 }
             }
@@ -1491,8 +1502,8 @@ impl Widget for XrRoot {
         if method == live_id!(set_physics_time_scale) || method == live_id!(set_sim_time_scale) {
             let mut scale = self.physics_time_scale();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                let trap = vm.trap();
+                if let Some(value) = vm.bx.heap_ref().vec_value(args_obj, 0, trap).as_f64() {
                     scale = value as f32;
                 }
             }

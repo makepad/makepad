@@ -1,4 +1,11 @@
 workspace.members = [
+    "apps/ai-hub",
+    "apps/aichat",
+    "apps/aihub",
+    "apps/browser",
+    "apps/browser_host",
+    "apps/devhub",
+    "apps/translator",
     "libs/ai/models/beats",
     "libs/ai/models/body",
     "libs/ai/models/common",
@@ -19,17 +26,27 @@ workspace.members = [
     "libs/ai/models/trellis",
     "libs/ai/models/vision",
     # === app ===
+    "apps/browser",
+    "apps/browser_host",
+    "libs/xr_runtime",
+    "tools/xr_proton",
+    "apps/aichat",
+    "apps/translator",
     "libs/xkb_keymap",
     "libs/a11y",
     "libs/dbus_wire",
     "libs/atspi",
     "tools/dbus_codegen",
     "libs/xr_core",
+    "libs/xr_nav",
+    "libs/xr_ui",
     "libs/relax_api",
     "libs/relax_api/macro",
     "libs/relax_api/macro_impl",
     "libs/civil_time",
     "libs/wm_api",
+    "libs/shell_kit",
+    "libs/app_module",
     "libs/app_registry",
     "libs/app_host",
     "libs/browser_view",
@@ -41,10 +58,18 @@ workspace.members = [
     "libs/lz4",
     "libs/zstd_decode",
     # === Flow: the generation studio and graph workbench's libraries ===
+    "libs/media_view",
     "libs/gen/tools",
+    "apps/ai-hub",
+    "apps/aihub",
+    "apps/devhub",
     # The tiled-RTS map generator, shared by the importer and the sandbox.
     "libs/rtsmap",
     "libs/texcomp",
+    "libs/skyline",
+    "libs/ai/hub_ui",
+    "libs/ai/hub_panel",
+    "libs/ai/services",
     # The AI stack: loader (disk), cuda/metal (kernel and residency stores),
     # job (the one cross-model contract), llm and models/* (per-family model
     # crates), the generate hub and the live pipe.
@@ -54,6 +79,8 @@ workspace.members = [
     "libs/ai/vulkan",
     "libs/ai/job",
     "libs/ai/llm",
+    "libs/ai/hub",
+    "libs/ai/livepipe",
     # Constructive solid geometry.
     "libs/csg/csg",
     "libs/csg/csg_cad",
@@ -67,17 +94,21 @@ workspace.members = [
     "libs/csg/csg_sdf",
     "libs/csg/csg_sculpt",
     "libs/sdf_engine",
+    "libs/render",
     "libs/render_kernels",
     "libs/render_kernels/tools",
     "libs/render_graph",
     "libs/effect_sim",
     "libs/render_material",
+    "libs/render_lines",
     "libs/geom3d",
     "libs/text_mesh",
     "libs/typography",
     "libs/web_pack",
     "libs/web_manifest",
     "libs/font_subset",
+    "libs/kinetic_type",
+    "libs/raytrace",
     "libs/scene",
     "libs/soft_body",
     "libs/show_control",
@@ -94,11 +125,17 @@ workspace.members = [
     "libs/xatlas",
     # Editable polygon topology and worker-owned model documents.
     "libs/mesh_edit",
+    "libs/model",
     # === examples ===
+    "examples/teamtalk",
+    "examples/browser_capture_probe",
+    "examples/aichat",
+    "examples/browser",
     # === digital-fabrication product ===
     "libs/fabric/measure",
     "libs/fabric/draft",
     # === xr app ===
+    "xr",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
     # === headless music score engine ===
@@ -123,8 +160,13 @@ workspace.members = [
     "libs/score_player",
     "libs/score_voice",
     "libs/beat",
+    "libs/look",
+    "libs/code_values",
     "libs/edit_values",
     "libs/score_live/tools",
+    "libs/model_install",
+    "libs/value_pickers",
+    "libs/editor_panel",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
@@ -132,6 +174,7 @@ workspace.members = [
     "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
+    "libs/milkdrop",
     "libs/audio_reactive",
     # === per-application audio tap, mixer input for a host equalizer ===
     "libs/audio_route",
@@ -160,6 +203,8 @@ workspace.members = [
     "libs/devhub",
     "libs/stack",
     "tools/agents",
+    "tools/ci",
+    "tools/ci_leg",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
     "tools/run",
@@ -181,6 +226,7 @@ workspace.members = [
     "libs/relax/session",
     "libs/relax/types",
     "tools/run/fixture",
+    "tools/run/fixture/park_view",
     "libs/relax/lex",
     "libs/system_speech",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
@@ -191,6 +237,7 @@ workspace.members = [
     "widgets/feedback",
     # === tests ===
     "platform/shader",
+    "platform/script/test",
     "platform/script/audio_aot",
     "platform/hal",
     "platform/script/compute",
@@ -201,6 +248,7 @@ workspace.members = [
     # === makepad-widgets: the core and its family crates (widgets/ is the
     # front, a member through its dependents) ===
     "widgets/core",
+    "widgets/sheets",
     "widgets/families/tweaker",
     "widgets/families/data",
     "widgets/families/rich_text",
@@ -208,6 +256,7 @@ workspace.members = [
     "widgets/families/extras",
     "widgets/families/maps",
     "widgets/families/pdf",
+    "widgets/families/voice",
     "widgets/families/browser",
     "widgets/families/ai",
     "widgets/families/catalog",

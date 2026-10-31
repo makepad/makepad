@@ -542,7 +542,7 @@ mod tests {
         let sender_node_id = XrNetPeerId(0x1234);
         let sender_peer = XrNetPeer {
             id: sender_node_id,
-            addr: "192.168.1.42:41547".parse().unwrap(),
+            addr: "192.0.2.42:41547".parse().unwrap(),
         };
         let object_id = xr_make_shared_object_id(sender_node_id, XrSharedObjectCounter(3))
             .expect("shared object id should hash");
