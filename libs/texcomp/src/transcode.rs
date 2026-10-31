@@ -56,7 +56,7 @@ fn solid_tables() -> &'static SolidTables {
 }
 
 /// The specification's `determine_unique_pbits`: per-endpoint p-bits.
-fn unique_pbits(total_comps: usize, comp_bits: u32, xl: [f32; 4], xh: [f32; 4]) -> ([u8; 4], [u8; 4], [u8; 2]) {
+pub(crate) fn unique_pbits(total_comps: usize, comp_bits: u32, xl: [f32; 4], xh: [f32; 4]) -> ([u8; 4], [u8; 4], [u8; 2]) {
     let total_bits = comp_bits + 1;
     let iscalep = (1i32 << total_bits) - 1;
     let scalep = iscalep as f32;
@@ -86,7 +86,7 @@ fn unique_pbits(total_comps: usize, comp_bits: u32, xl: [f32; 4], xh: [f32; 4]) 
 }
 
 /// The specification's `determine_shared_pbits`: one p-bit per subset.
-fn shared_pbits(total_comps: usize, comp_bits: u32, xl: [f32; 4], xh: [f32; 4]) -> ([u8; 4], [u8; 4], u8) {
+pub(crate) fn shared_pbits(total_comps: usize, comp_bits: u32, xl: [f32; 4], xh: [f32; 4]) -> ([u8; 4], [u8; 4], u8) {
     let total_bits = comp_bits + 1;
     let iscalep = (1i32 << total_bits) - 1;
     let scalep = iscalep as f32;
@@ -208,7 +208,7 @@ pub fn uastc_to_bc7_unpacked(u: &Unpacked) -> Bc7 {
 }
 
 /// A solid colour as BC7 mode 6 when it reproduces it exactly, else mode 5.
-fn solid_bc7(c: [u8; 4]) -> Bc7 {
+pub(crate) fn solid_bc7(c: [u8; 4]) -> Bc7 {
     let t = solid_tables();
     let err = |p: usize| (0..4).map(|k| t.mode6[c[k] as usize][p].2 as u32).sum::<u32>();
     let (e0, e1) = (err(0), err(1));
@@ -233,7 +233,7 @@ fn solid_bc7(c: [u8; 4]) -> Bc7 {
 }
 
 /// Swap endpoints (and invert indices) so each BC7 anchor index has MSB 0.
-fn fix_bc7_anchors(b: &mut Bc7) {
+pub(crate) fn fix_bc7_anchors(b: &mut Bc7) {
     let m = b.mode as usize;
     let ns = bc7::NS[m];
     // Modes 4 and 5 keep colour and alpha index sets apart: each swap only

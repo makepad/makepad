@@ -208,17 +208,38 @@ impl Widget for TexBurst {
             // New textures every frame: the previous frame's are dropped here,
             // exactly like a level load cutting sprite sheets during a draw.
             self.textures.clear();
+            let use_bc7 = cx.gpu_info().texture_bc7;
             for k in 0..BURST_TEXTURES {
-                let shade = 0xff00_0000 | ((k as u32 * 5) << 16) | (0x80 << 8) | (255 - k as u32 * 5);
-                let texture = Texture::new_with_format(
-                    cx,
+                let mut pixels = [0u32; 64];
+                for (i, px) in pixels.iter_mut().enumerate() {
+                    let gx = (i % 8) as u32 * 8;
+                    let gy = (i / 8) as u32 * 8;
+                    let r = (k as u32 * 5 + gx).min(255);
+                    let g = (0x60 + gy).min(255);
+                    let b = 255u32.saturating_sub(k as u32 * 5);
+                    *px = 0xff00_0000 | (r << 16) | (g << 8) | b;
+                }
+                let format = if use_bc7 && k % 2 == 0 {
+                    let bc7 = makepad_texcomp::bc7::encode_bgra_u32_image(&pixels, 8, 8, 1)
+                        .expect("8x8 BGRA slice matches dimensions");
+                    TextureFormat::VecMipCompressed {
+                        width: 8,
+                        height: 8,
+                        format: CompressedTextureFormat::Bc7,
+                        data: Some(bc7),
+                        max_level: Some(0),
+                        wrap: TextureWrap::ClampToEdge,
+                        updated: TextureUpdated::Full,
+                    }
+                } else {
                     TextureFormat::VecBGRAu8_32 {
                         width: 8,
                         height: 8,
-                        data: Some(vec![shade; 64]),
+                        data: Some(pixels.to_vec()),
                         updated: TextureUpdated::Full,
-                    },
-                );
+                    }
+                };
+                let texture = Texture::new_with_format(cx, format).discard_cpu_after_upload(cx);
                 self.draw_tex.draw_vars.set_texture(0, &texture);
                 let x = rect.pos.x + 8.0 + k as f64 * 18.0;
                 self.draw_tex.draw_abs(cx, Rect { pos: dvec2(x, rect.pos.y + 8.0), size: dvec2(16.0, 16.0) });
