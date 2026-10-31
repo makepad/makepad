@@ -135,9 +135,9 @@ impl Default for CalloutTooltipOptions {
 
 /// A tooltip widget with a callout pointing towards the referenced widget.
 ///
-/// `CalloutTooltip` automatically listens for `TooltipAction::HoverIn` and
-/// `TooltipAction::HoverOut` events from any widget in the action batch and
-/// shows or hides itself accordingly. Apps generally do **not** need to
+/// `CalloutTooltip` automatically listens for `TooltipAction::HoverIn`,
+/// `TooltipAction::HoverOut` and `TooltipAction::Update` events from any widget
+/// in the action batch and shows, hides or updates itself accordingly. Apps generally do **not** need to
 /// handle `TooltipAction` themselves. It is enough to instantiate one
 /// `CalloutTooltip` somewhere in the widget tree and have hover-aware
 /// widgets emit `TooltipAction::HoverIn` from their `handle_event` (e.g.
@@ -165,6 +165,9 @@ pub struct CalloutTooltip {
     /// it hovers is placed clear of the cursor drawn there.
     #[rust]
     pointer: Option<DVec2>,
+    /// The widget whose `HoverIn` or `Update` was last shown from actions, so only meaningful while the tooltip's open.
+    #[rust]
+    owner: Option<WidgetUid>,
 }
 
 impl Widget for CalloutTooltip {
@@ -236,7 +239,10 @@ impl WidgetMatchEvent for CalloutTooltip {
         // applying them in queue order would show then immediately hide.
         // Rule: latest `HoverIn` wins; a `HoverOut` only clears the buffer
         // if its `widget_uid` matches the buffered `HoverIn`.
+        // An `Update` only applies to the widget whose tooltip is shown or about to be.
         let mut buffered: Option<(WidgetUid, String, Rect, CalloutTooltipOptions)> = None;
+        // Whether `buffered` updates the tooltip that was already shown, which a `HoverOut` from any widget still hides.
+        let mut is_buffered_shown_update = false;
         let mut had_tooltip_event = false;
 
         for action in actions {
@@ -249,16 +255,37 @@ impl WidgetMatchEvent for CalloutTooltip {
                     had_tooltip_event = true;
                     if let Some(uid) = action.as_widget_action().map(|wa| wa.widget_uid) {
                         buffered = Some((uid, text, widget_rect, options));
+                        is_buffered_shown_update = false;
                     }
                 }
                 TooltipAction::HoverOut => {
                     had_tooltip_event = true;
                     if let Some(uid) = action.as_widget_action().map(|wa| wa.widget_uid) {
                         if let Some((cur_uid, _, _, _)) = &buffered {
-                            if *cur_uid == uid {
+                            if *cur_uid == uid || is_buffered_shown_update {
                                 buffered = None;
                             }
                         }
+                    }
+                }
+                TooltipAction::Update {
+                    text,
+                    widget_rect,
+                    options,
+                } => {
+                    let Some(uid) = action.as_widget_action().map(|wa| wa.widget_uid) else {
+                        continue;
+                    };
+                    let is_shown_for_uid = match &buffered {
+                        Some((buffered_uid, ..)) => *buffered_uid == uid,
+                        None => !had_tooltip_event && self.tooltip.is_open() && self.owner == Some(uid),
+                    };
+                    if is_shown_for_uid {
+                        had_tooltip_event = true;
+                        if buffered.is_none() {
+                            is_buffered_shown_update = true;
+                        }
+                        buffered = Some((uid, text, widget_rect, options));
                     }
                 }
                 _ => {}
@@ -269,9 +296,11 @@ impl WidgetMatchEvent for CalloutTooltip {
             return;
         }
 
-        if let Some((_uid, text, widget_rect, options)) = buffered {
+        if let Some((uid, text, widget_rect, options)) = buffered {
             self.show_with_options(cx, &text, widget_rect, options);
+            self.owner = Some(uid);
         } else {
+            self.owner = None;
             self.tooltip.hide(cx);
         }
     }
@@ -287,6 +316,8 @@ impl CalloutTooltip {
         widget_rect: Rect,
         options: CalloutTooltipOptions,
     ) {
+        // A direct call isn't for any widget, so no widget's `Update` applies to it.
+        self.owner = None;
         self.tooltip.set_text(cx, text);
         self.text = text.to_owned();
         self.options = options;
@@ -340,6 +371,13 @@ pub enum TooltipAction {
     },
     /// Hide the tooltip.
     HoverOut,
+    /// Change the text, position and options of the tooltip this widget is showing.
+    /// It's ignored if the tooltip isn't showing for this widget, e.g., after a click, tap or scroll hid it.
+    Update {
+        text: String,
+        widget_rect: Rect,
+        options: CalloutTooltipOptions,
+    },
     #[default]
     None,
 }
