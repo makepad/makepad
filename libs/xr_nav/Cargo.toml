@@ -1,0 +1,9 @@
+[package]
+name = "makepad-xr-nav"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "XR navigation shared by apps that show a world in a box in the room: the clip box, two-hand move/turn/scale, one-hand zoom/turn/fly with controllers or tracked hands, and the controls left over as a gamepad"
+
+[dependencies]
+makepad-platform = { path = "../../platform", version = "2.0.0" }

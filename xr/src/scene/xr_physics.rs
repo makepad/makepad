@@ -73,8 +73,9 @@ const XR_FILTER_CAT_WORLD: u64 = 1 << 0;
 const XR_FILTER_CAT_DEPTH_QUERY_BODY: u64 = 1 << 1;
 const XR_FILTER_CAT_DEPTH_QUERY_SURFACE: u64 = 1 << 2;
 
+/// One collider of a hand as the physics builds it (world space).
 #[derive(Clone, Copy, Debug)]
-pub(super) enum HandCollider {
+pub enum HandCollider {
     Capsule { a: Vec3f, b: Vec3f, radius: f32 },
     Ball { center: Vec3f, radius: f32 },
     Box { pose: Pose, half_extents: Vec3f },
@@ -101,6 +102,15 @@ pub(super) struct HandColliderBody {
     pub(super) collider: ColliderHandle,
 }
 
+/// A player's hand collider slots and grab states, while it is not the one in the scene's fields.
+pub(super) struct HandRig {
+    player: u32,
+    left_hand: Vec<HandColliderBody>,
+    right_hand: Vec<HandColliderBody>,
+    left_hand_grab: HandGrabState,
+    right_hand_grab: HandGrabState,
+}
+
 #[derive(Clone, Copy)]
 struct FloorSlabCollider {
     body: RigidBodyHandle,
@@ -110,28 +120,130 @@ struct FloorSlabCollider {
 #[derive(Clone, Copy, Debug)]
 struct HandGrabState {
     shared_hand: XrSharedHand,
+    /// the grip point (the pinch point with the palm's orientation, or the controller's grip):
+    /// where a grab reaches for a body
     pose: Pose,
+    /// the frame a hold follows rigidly (the palm, or the controller's grip; `xr_hold_frame`):
+    /// the fingertips that place the grip point jitter with the finger tracking, the palm
+    /// does not, so a held body is `hold_frame * grab_offset`
+    hold_frame: Pose,
     previous_pose: Pose,
     linvel: Vec3f,
     tracked: bool,
     gripping: bool,
     held_body: Option<RigidBodyHandle>,
     grab_offset: Pose,
+    /// The hand's most curled mean finger bend (degrees) in this hold: the hold lets go when
+    /// the hand opens from it (`updated_hand_grab_state`).
+    hold_bend: f32,
+    /// The grip began at this step (it was not gripping the step before).
+    grip_began: bool,
+    /// Steps since the grip began (a grab takes a body only within `XR_GRAB_ACQUIRE_STEPS` of
+    /// it: holds begin on a grab, never because a closed hand happens to touch something).
+    grip_steps: u32,
+    /// Consecutive steps the hand has not gripped (a new grab needs `XR_GRAB_REARM_STEPS` of
+    /// them: a grasp value flickering off and on is no new grab).
+    open_steps: u32,
+    /// Consecutive steps a holding hand has been untracked (the hold waits
+    /// `XR_HOLD_LOST_GRACE_STEPS` for it to come back).
+    lost_steps: u32,
+    /// The mean finger bend smoothed over steps (degrees): the hold's most curled is the most
+    /// of this, so one bad joint sample (a 120 degree spike) does not make the ordinary grip
+    /// read as opened afterwards.
+    bend_smooth: f32,
+    /// Consecutive steps the holding hand has looked let go (`XR_HOLD_LET_GO_STEPS` end it).
+    let_go_steps: u32,
 }
+
+/// The mean finger bend's smoothing per step (an exponential average: ~4 steps, 33 ms).
+const XR_HOLD_BEND_SMOOTHING: f32 = 0.25;
+/// Steps a holding hand must look let go before the hold ends (25 ms: under two pictures; a
+/// single odd hand sample does not drop the body).
+const XR_HOLD_LET_GO_STEPS: u32 = 3;
+
+/// Steps (of the worker's fixed 1/120 s) a hand must have been open before a grip counts as a
+/// new grab (50 ms).
+const XR_GRAB_REARM_STEPS: u32 = 6;
+/// Steps after a grab begins in which it may take a body (250 ms: the hand closes a moment
+/// before it touches).
+const XR_GRAB_ACQUIRE_STEPS: u32 = 30;
+/// Steps a hold survives the hand being untracked (300 ms: a hand the cameras lose for a few
+/// frames keeps its cube; then it falls).
+const XR_HOLD_LOST_GRACE_STEPS: u32 = 36;
+/// A free body is taken by a grab touching it, or this near (metres) without a contact yet.
+const XR_HAND_GRAB_REACH_WITHOUT_CONTACT: f32 = 0.03;
+/// The fingers opening this far (degrees of mean bend) from the hold's most curled end a hold.
+const XR_HOLD_RELEASE_OPENING_DEGREES: f32 = 20.0;
+const XR_CONTROLLER_GRAB_GRIP: f32 = 0.55;
+const XR_CONTROLLER_RELEASE_GRIP: f32 = 0.35;
 
 impl HandGrabState {
     fn new(shared_hand: XrSharedHand) -> Self {
         Self {
             shared_hand,
             pose: Pose::default(),
+            hold_frame: Pose::default(),
             previous_pose: Pose::default(),
             linvel: vec3f(0.0, 0.0, 0.0),
             tracked: false,
             gripping: false,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
+            grip_steps: 0,
+            open_steps: 0,
+            lost_steps: 0,
+            bend_smooth: 0.0,
+            let_go_steps: 0,
         }
     }
+
+    /// Holding on (also while briefly untracked: the grace keeps `tracked` and `gripping`).
+    fn holds_on(&self) -> bool {
+        self.tracked && self.gripping
+    }
+}
+
+/// Whether a holding hand has let go: open (all four fingers straight), or with the grasp and
+/// the pinch both over, the fingers opened `XR_HOLD_RELEASE_OPENING_DEGREES` from the hold's
+/// most curled (`hold_bend`). (Holding a cube the index often lies straight along it and the
+/// runtime's grasp value sags on a loose hold: either alone let go of the cube mid-wave; waiting
+/// for a fully open hand kept a cube on a relaxed hand for a second.) Fingers without valid
+/// joints and no grasp or pinch count as open. Answers (let go, at once): an open hand (or one
+/// without finger joints) lets go at once; an opening read from the bend only when it lasts
+/// `XR_HOLD_LET_GO_STEPS` (the bend is the noisiest reading of a hand).
+fn hand_let_go(hand: &XrHand, hold_bend: f32) -> (bool, bool) {
+    if hand.is_open() {
+        return (true, true);
+    }
+    if hand.grab_intent() || hand.pinch_index() {
+        return (false, false);
+    }
+    match hand.average_open_finger_bend_degrees() {
+        None => (true, true),
+        Some(bend) => (bend <= hold_bend - XR_HOLD_RELEASE_OPENING_DEGREES, false),
+    }
+}
+
+/// A body held by two hands: the primary hand's hold turned so the line between the two
+/// hold points follows the line between the two grips, placed midway between where each hand
+/// alone would put it. Both the physics target and the draw use this.
+pub fn xr_two_hand_hold_pose(primary_grip: Pose, primary_offset: Pose, secondary_grip: Pose, secondary_offset: Pose) -> Pose {
+    let primary_single_target = Pose::multiply(&primary_grip, &primary_offset);
+    let primary_anchor_local = primary_offset.invert().position;
+    let secondary_anchor_local = secondary_offset.invert().position;
+    let local_anchor_delta = secondary_anchor_local - primary_anchor_local;
+    let world_hand_delta = secondary_grip.position - primary_grip.position;
+    if local_anchor_delta.length() < XR_HAND_DUAL_GRAB_MIN_SPAN || world_hand_delta.length() < XR_HAND_DUAL_GRAB_MIN_SPAN {
+        return primary_single_target;
+    }
+    let baseline_world_delta = primary_single_target.orientation.rotate_vec3(&local_anchor_delta);
+    let orientation = Quat::multiply(&quat_from_to(baseline_world_delta, world_hand_delta), &primary_single_target.orientation);
+    let primary_world_anchor = orientation.rotate_vec3(&primary_anchor_local);
+    let secondary_world_anchor = orientation.rotate_vec3(&secondary_anchor_local);
+    let position = ((primary_grip.position - primary_world_anchor) + (secondary_grip.position - secondary_world_anchor)) * 0.5;
+    Pose::new(orientation, position)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -302,6 +414,11 @@ pub(crate) struct PhysicsScene {
     pub(super) right_hand: Vec<HandColliderBody>,
     left_hand_grab: HandGrabState,
     right_hand_grab: HandGrabState,
+    /// the player whose hands are in the fields above (0: the local one)
+    active_player: u32,
+    /// every other player's hands (a host simulating for remote players): swapped into the
+    /// fields above while their hands sync, hold and grab, so one player's code serves all
+    other_rigs: Vec<HandRig>,
     shadow_body_motion: HashMap<BodyKey, ShadowBodyMotion>,
     body_drive_motion: HashMap<BodyKey, BodyDriveMotion>,
     settle_frame_counts: HashMap<BodyKey, u8>,
@@ -500,6 +617,18 @@ fn grab_offset_from_body_anchor(
         .orientation
         .rotate_vec3(&(body_anchor_local * -1.0));
     grab_offset
+}
+
+/// The grip point a grab reaches from: the controller's grip while it is tracked, else the
+/// hand's pinch point with the palm's orientation.
+pub fn xr_grip_pose(hand: &XrHand, controller: &XrController) -> Option<Pose> {
+    controller_grab_pose(controller).or_else(|| hand_grab_pose(hand))
+}
+
+/// The frame a hold follows (a held body is this times its grab offset): the controller's grip
+/// while it is tracked, else the hand's palm.
+pub fn xr_hold_frame(hand: &XrHand, controller: &XrController) -> Option<Pose> {
+    controller_grab_pose(controller).or_else(|| hand.tracking_pose())
 }
 
 fn hand_grab_pose(hand: &XrHand) -> Option<Pose> {
@@ -1346,6 +1475,8 @@ impl PhysicsScene {
             right_hand: Vec::new(),
             left_hand_grab: HandGrabState::new(XrSharedHand::LeftHand),
             right_hand_grab: HandGrabState::new(XrSharedHand::RightHand),
+            active_player: 0,
+            other_rigs: Vec::new(),
             shadow_body_motion: HashMap::new(),
             body_drive_motion: HashMap::new(),
             settle_frame_counts: HashMap::new(),
@@ -1832,6 +1963,10 @@ impl PhysicsScene {
         );
     }
 
+    /// One step of a hand's grip. The holder logic is event based: a grip BEGINS (after the hand
+    /// was open for `XR_GRAB_REARM_STEPS`) and ENDS (an empty grip when the grasp and pinch are
+    /// over; a hold when the hand lets go, `hand_let_go`, or stays untracked past the grace).
+    /// Nothing in between changes who holds what.
     fn updated_hand_grab_state(
         &self,
         mut state: HandGrabState,
@@ -1840,32 +1975,86 @@ impl PhysicsScene {
         hand_shared: XrSharedHand,
         controller_shared: XrSharedHand,
     ) -> HandGrabState {
-        let next_source = controller_grab_pose(controller)
-            .map(|pose| (pose, controller.grip >= 0.55, controller_shared))
-            .or_else(|| hand_grab_pose(hand).map(|pose| (pose, hand.grab_intent(), hand_shared)));
-        let Some((pose, gripping, shared_hand)) = next_source else {
+        let holding = state.held_body.is_some();
+        let source = if let Some(pose) = controller_grab_pose(controller) {
+            let threshold = if state.gripping && state.shared_hand == controller_shared { XR_CONTROLLER_RELEASE_GRIP } else { XR_CONTROLLER_GRAB_GRIP };
+            Some((pose, pose, controller.grip >= threshold, controller_shared))
+        } else {
+            // a hand grips with a grasp (the fist) or an index pinch; the grip point is the
+            // pinch point either way (hand_grab_pose)
+            hand_grab_pose(hand).zip(hand.tracking_pose()).map(|(pose, palm)| {
+                let grips = if holding && state.gripping && state.shared_hand == hand_shared {
+                    // (let go: only once it has looked so for XR_HOLD_LET_GO_STEPS)
+                    let (let_go, at_once) = hand_let_go(hand, state.hold_bend);
+                    state.let_go_steps = if let_go { state.let_go_steps + 1 } else { 0 };
+                    !(at_once || state.let_go_steps >= XR_HOLD_LET_GO_STEPS)
+                } else {
+                    state.let_go_steps = 0;
+                    hand.grab_intent() || hand.pinch_index()
+                };
+                (pose, palm, grips, hand_shared)
+            })
+        };
+        if let Some(b) = hand.average_open_finger_bend_degrees() {
+            state.bend_smooth = if state.tracked { state.bend_smooth + (b - state.bend_smooth) * XR_HOLD_BEND_SMOOTHING } else { b };
+        }
+        state.hold_bend = if holding { state.hold_bend.max(state.bend_smooth) } else { state.bend_smooth };
+        state.grip_began = false;
+        let Some((pose, hold_frame, grips, shared_hand)) = source else {
+            if holding && state.gripping {
+                state.lost_steps += 1;
+                if state.lost_steps <= XR_HOLD_LOST_GRACE_STEPS {
+                    // the hold waits where it is for the hand to come back
+                    state.previous_pose = state.pose;
+                    state.linvel = vec3f(0.0, 0.0, 0.0);
+                    state.grip_steps = state.grip_steps.saturating_add(1);
+                    return state;
+                }
+                eprintln!("[xr physics] holder: {:?} of player {} lets go: untracked for {} steps (flags {:#x}, controller buttons {:#x})",
+                    state.shared_hand, self.active_player, state.lost_steps, hand.flags, controller.buttons);
+            }
             state.previous_pose = state.pose;
             state.linvel = vec3f(0.0, 0.0, 0.0);
             state.tracked = false;
             state.gripping = false;
+            state.grip_steps = 0;
+            // a hand that comes back closed is no grab: it opens first
+            state.open_steps = 0;
             state.shared_hand = hand_shared;
             return state;
         };
-        let was_tracked = state.tracked;
-        let previous_pose = if was_tracked && state.shared_hand == shared_hand {
-            state.pose
-        } else {
-            pose
-        };
+        if state.lost_steps > 0 && holding {
+            eprintln!("[xr physics] holder: {:?} of player {} tracked again after {} steps, still holding", state.shared_hand, self.active_player, state.lost_steps);
+        }
+        state.lost_steps = 0;
+        let was_tracked = state.tracked && state.shared_hand == shared_hand;
+        let previous_pose = if was_tracked { state.pose } else { pose };
+        let previous_hold = if was_tracked { state.hold_frame } else { hold_frame };
         let dt = self.simulation_dt.max(0.0001);
         state.previous_pose = previous_pose;
         state.pose = pose;
-        state.linvel = if was_tracked {
-            (pose.position - previous_pose.position) * (1.0 / dt)
-        } else {
-            vec3f(0.0, 0.0, 0.0)
-        };
+        state.hold_frame = hold_frame;
+        // (the hold frame's motion: what a released body flies off with)
+        state.linvel = if was_tracked { (hold_frame.position - previous_hold.position) * (1.0 / dt) } else { vec3f(0.0, 0.0, 0.0) };
         state.tracked = true;
+        let was_gripping = state.gripping && state.shared_hand == shared_hand;
+        // (a controller's grip is a button with hysteresis: every press is a grab; a hand's
+        // grasp value flickers, so a hand must have been open a moment first)
+        let rearmed = shared_hand == controller_shared || state.open_steps >= XR_GRAB_REARM_STEPS;
+        let gripping = if was_gripping { grips } else { grips && rearmed };
+        if grips {
+            if !was_gripping {
+                state.open_steps = 0;
+            }
+        } else {
+            state.open_steps = state.open_steps.saturating_add(1);
+        }
+        if holding && was_gripping && !gripping {
+            eprintln!("[xr physics] holder: {:?} of player {} lets go: open {} (mean bend {:?}, hold's most curled {:.0}) grasp {} pinch {} controller grip {:.2}",
+                shared_hand, self.active_player, hand.is_open(), hand.average_open_finger_bend_degrees(), state.hold_bend, hand.grab_intent(), hand.pinch_index(), controller.grip);
+        }
+        state.grip_began = gripping && !was_gripping;
+        state.grip_steps = if state.grip_began { 0 } else if gripping { state.grip_steps.saturating_add(1) } else { 0 };
         state.gripping = gripping;
         state.shared_hand = shared_hand;
         state
@@ -1978,15 +2167,96 @@ impl PhysicsScene {
         }
     }
 
+    /// Swaps `rig` with the hands in the scene's fields (twice: back again).
+    fn swap_rig(&mut self, rig: &mut HandRig) {
+        std::mem::swap(&mut self.left_hand, &mut rig.left_hand);
+        std::mem::swap(&mut self.right_hand, &mut rig.right_hand);
+        std::mem::swap(&mut self.left_hand_grab, &mut rig.left_hand_grab);
+        std::mem::swap(&mut self.right_hand_grab, &mut rig.right_hand_grab);
+        std::mem::swap(&mut self.active_player, &mut rig.player);
+    }
+
+    /// Runs `f` with each player's hands in the scene's fields in turn (the local player's first).
+    pub(super) fn for_each_rig(&mut self, mut f: impl FnMut(&mut Self)) {
+        f(self);
+        let mut rigs = std::mem::take(&mut self.other_rigs);
+        for rig in rigs.iter_mut() {
+            self.swap_rig(rig);
+            f(self);
+            self.swap_rig(rig);
+        }
+        self.other_rigs = rigs;
+    }
+
+    /// Runs `f` with `player`'s hands in the scene's fields, making that player's collider slots
+    /// the first time.
+    pub(super) fn with_rig(&mut self, player: u32, f: impl FnOnce(&mut Self)) {
+        if player == self.active_player {
+            return f(self);
+        }
+        let at = match self.other_rigs.iter().position(|r| r.player == player) {
+            Some(at) => at,
+            None => {
+                let (left_hand, right_hand) = if XR_ENABLE_HAND_PHYSICS {
+                    (self.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND), self.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND))
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                self.other_rigs.push(HandRig { player, left_hand, right_hand,
+                    left_hand_grab: HandGrabState::new(XrSharedHand::LeftHand), right_hand_grab: HandGrabState::new(XrSharedHand::RightHand) });
+                self.other_rigs.len() - 1
+            }
+        };
+        let mut rig = self.other_rigs.swap_remove(at);
+        self.swap_rig(&mut rig);
+        f(self);
+        self.swap_rig(&mut rig);
+        self.other_rigs.push(rig);
+    }
+
+    /// The players whose hands the scene has slots for.
+    pub(super) fn rig_players(&self) -> Vec<u32> {
+        let mut out = vec![self.active_player];
+        out.extend(self.other_rigs.iter().map(|r| r.player));
+        out
+    }
+
+    /// The hold's offset (the body is the grip pose times it) of whoever holds `body_handle`.
+    pub(crate) fn grab_offset_for_body(&self, body_handle: RigidBodyHandle) -> Option<Pose> {
+        let here = [&self.left_hand_grab, &self.right_hand_grab];
+        let others = self.other_rigs.iter().flat_map(|r| [&r.left_hand_grab, &r.right_hand_grab]);
+        here.into_iter().chain(others).find(|g| g.held_body == Some(body_handle)).map(|g| g.grab_offset)
+    }
+
+    /// The second hand of a two-handed hold of `body_handle` (the first is `held_by_for_body`'s,
+    /// with `grab_offset_for_body`): its hand and offset.
+    pub(crate) fn second_hold_for_body(&self, body_handle: RigidBodyHandle) -> Option<(XrSharedHand, Pose)> {
+        let here = [&self.left_hand_grab, &self.right_hand_grab];
+        let others = self.other_rigs.iter().flat_map(|r| [&r.left_hand_grab, &r.right_hand_grab]);
+        here.into_iter().chain(others).filter(|g| g.held_body == Some(body_handle)).nth(1).map(|g| (g.shared_hand, g.grab_offset))
+    }
+
+    fn body_held_by_any(&self, body: RigidBodyHandle) -> Option<(u32, XrSharedHand)> {
+        let here = [(self.active_player, &self.left_hand_grab), (self.active_player, &self.right_hand_grab)];
+        let others = self.other_rigs.iter().flat_map(|r| [(r.player, &r.left_hand_grab), (r.player, &r.right_hand_grab)]);
+        here.into_iter().chain(others).find(|(_, g)| g.held_body == Some(body)).map(|(p, g)| (p, g.shared_hand))
+    }
+
+    fn cube_has_any_hand_contact(&self, cube: &PhysicsCube) -> bool {
+        self.cube_has_hand_contact(cube, &self.left_hand)
+            || self.cube_has_hand_contact(cube, &self.right_hand)
+            || self.other_rigs.iter().any(|r| self.cube_has_hand_contact(cube, &r.left_hand) || self.cube_has_hand_contact(cube, &r.right_hand))
+    }
+
     pub(crate) fn step(&mut self) {
-        self.apply_held_body_targets();
+        self.for_each_rig(|s| s.apply_held_body_targets());
         self.apply_shadow_body_targets();
         self.sync_linked_support_bodies();
         self.sync_vehicle_query_sources_pre_step();
         self.update_four_wheel_vehicles();
         b3world::world_step(&mut self.world, self.simulation_dt, XR_PHYSICS_SUB_STEPS);
         self.sync_vehicle_support_bodies_post_step();
-        self.acquire_hand_grabs();
+        self.for_each_rig(|s| s.acquire_hand_grabs());
         self.settle_resting_bodies();
         self.actively_driven_bodies.clear();
     }
@@ -2037,32 +2307,28 @@ impl PhysicsScene {
     }
 
     fn apply_held_body_targets(&mut self) {
-        if let (Some(left_body), Some(right_body)) = (
-            self.left_hand_grab.held_body,
-            self.right_hand_grab.held_body,
-        ) {
+        if let (Some(left_body), Some(right_body)) = (self.left_hand_grab.held_body, self.right_hand_grab.held_body) {
             if left_body == right_body {
-                match (
-                    self.left_hand_grab.tracked && self.left_hand_grab.gripping,
-                    self.right_hand_grab.tracked && self.right_hand_grab.gripping,
-                ) {
+                match (self.left_hand_grab.holds_on(), self.right_hand_grab.holds_on()) {
                     (true, true) => {
                         self.apply_dual_held_body_target(self.left_hand_grab, self.right_hand_grab);
                         return;
                     }
                     (true, false) => {
                         self.right_hand_grab = Self::drop_hand_hold(self.right_hand_grab);
+                        self.left_hand_grab = self.rebased_hold(self.left_hand_grab, left_body);
                         self.left_hand_grab = self.apply_held_body_target(self.left_hand_grab);
                         return;
                     }
                     (false, true) => {
                         self.left_hand_grab = Self::drop_hand_hold(self.left_hand_grab);
+                        self.right_hand_grab = self.rebased_hold(self.right_hand_grab, left_body);
                         self.right_hand_grab = self.apply_held_body_target(self.right_hand_grab);
                         return;
                     }
                     (false, false) => {
-                        let (left, right) =
-                            self.release_dual_hand_hold(self.left_hand_grab, self.right_hand_grab);
+                        eprintln!("[xr physics] holder: both hands of player {} let go of body {:?} together", self.active_player, left_body);
+                        let (left, right) = self.release_dual_hand_hold(self.left_hand_grab, self.right_hand_grab);
                         self.left_hand_grab = left;
                         self.right_hand_grab = right;
                         return;
@@ -2072,6 +2338,16 @@ impl PhysicsScene {
         }
         self.left_hand_grab = self.apply_held_body_target(self.left_hand_grab);
         self.right_hand_grab = self.apply_held_body_target(self.right_hand_grab);
+    }
+
+    /// The hand left holding a two-handed hold carries the body on from where it is now (its
+    /// own offset from the grab would jump it from between the hands back to that hand).
+    fn rebased_hold(&self, mut hand: HandGrabState, body: RigidBodyHandle) -> HandGrabState {
+        if self.body_is_valid(body) {
+            hand.grab_offset = Pose::multiply(&hand.hold_frame.invert(), &self.body_pose(body));
+        }
+        eprintln!("[xr physics] holder: the other hand let go of body {:?}; {:?} of player {} holds it on alone", body, hand.shared_hand, self.active_player);
+        hand
     }
 
     fn drop_hand_hold(mut hand: HandGrabState) -> HandGrabState {
@@ -2095,7 +2371,7 @@ impl PhysicsScene {
             hand.held_body = None;
             return hand;
         }
-        let target_pose = Pose::multiply(&hand.pose, &hand.grab_offset);
+        let target_pose = Pose::multiply(&hand.hold_frame, &hand.grab_offset);
         if !target_pose.is_finite() {
             return self.release_hand_hold(hand);
         }
@@ -2123,30 +2399,7 @@ impl PhysicsScene {
             self.right_hand_grab = Self::drop_hand_hold(self.right_hand_grab);
             return;
         }
-        let primary_single_target = Pose::multiply(&primary.pose, &primary.grab_offset);
-        let primary_anchor_local = primary.grab_offset.invert().position;
-        let secondary_anchor_local = secondary.grab_offset.invert().position;
-        let local_anchor_delta = secondary_anchor_local - primary_anchor_local;
-        let world_hand_delta = secondary.pose.position - primary.pose.position;
-        let target_pose = if local_anchor_delta.length() >= XR_HAND_DUAL_GRAB_MIN_SPAN
-            && world_hand_delta.length() >= XR_HAND_DUAL_GRAB_MIN_SPAN
-        {
-            let baseline_world_delta = primary_single_target
-                .orientation
-                .rotate_vec3(&local_anchor_delta);
-            let orientation = Quat::multiply(
-                &quat_from_to(baseline_world_delta, world_hand_delta),
-                &primary_single_target.orientation,
-            );
-            let primary_world_anchor = orientation.rotate_vec3(&primary_anchor_local);
-            let secondary_world_anchor = orientation.rotate_vec3(&secondary_anchor_local);
-            let position = ((primary.pose.position - primary_world_anchor)
-                + (secondary.pose.position - secondary_world_anchor))
-                * 0.5;
-            Pose::new(orientation, position)
-        } else {
-            primary_single_target
-        };
+        let target_pose = xr_two_hand_hold_pose(primary.hold_frame, primary.grab_offset, secondary.hold_frame, secondary.grab_offset);
         if !target_pose.is_finite() {
             let (left, right) =
                 self.release_dual_hand_hold(self.left_hand_grab, self.right_hand_grab);
@@ -2167,6 +2420,7 @@ impl PhysicsScene {
         let Some(body_handle) = hand.held_body.take() else {
             return hand;
         };
+        eprintln!("[xr physics] holder: {:?} of player {} releases body {:?} at {:.2} m/s", hand.shared_hand, self.active_player, body_handle, hand.linvel.length());
         self.release_body_into_dynamics(
             body_handle,
             hand.linvel * XR_HAND_GRAB_RELEASE_LINEAR_VELOCITY_SCALE,
@@ -2216,7 +2470,8 @@ impl PhysicsScene {
         slots: &[HandColliderBody],
         other_held_body: Option<RigidBodyHandle>,
     ) -> HandGrabState {
-        if !hand.tracked || !hand.gripping || hand.held_body.is_some() {
+        // only a grab that began a moment ago takes a body (holds begin on a grab event)
+        if !hand.tracked || !hand.gripping || hand.held_body.is_some() || hand.lost_steps > 0 || hand.grip_steps > XR_GRAB_ACQUIRE_STEPS {
             return hand;
         }
 
@@ -2249,7 +2504,14 @@ impl PhysicsScene {
             if distance > XR_HAND_GRAB_MAX_DISTANCE {
                 continue;
             }
-            if !shared_candidate && !self.cube_has_hand_contact(cube, slots) {
+            // a body the other hand holds is joined (a two-handed hold) only by this hand's own
+            // grab on it: an idle hand's grasp value, noisy, took it whenever it flickered on
+            // near the cube (the cube jumped to the middle of both hands and back). (A held body
+            // is kinematic: no contacts with the hand's colliders, so the reach is its distance.)
+            if shared_candidate && distance > XR_HAND_SHARED_GRAB_MAX_DISTANCE {
+                continue;
+            }
+            if !shared_candidate && distance > XR_HAND_GRAB_REACH_WITHOUT_CONTACT && !self.cube_has_hand_contact(cube, slots) {
                 continue;
             }
             if best_candidate
@@ -2263,10 +2525,15 @@ impl PhysicsScene {
         let Some((_, body_handle, body_pose, body_anchor_local)) = best_candidate else {
             return hand;
         };
-        hand.grab_offset = grab_offset_from_body_anchor(hand.pose, body_pose, body_anchor_local);
+        // the body's grabbed surface point goes to the grip point, and from then on it rides the
+        // hold frame rigidly
+        let at_grip = Pose::multiply(&hand.pose, &grab_offset_from_body_anchor(hand.pose, body_pose, body_anchor_local));
+        hand.grab_offset = Pose::multiply(&hand.hold_frame.invert(), &at_grip);
         hand.held_body = Some(body_handle);
+        eprintln!("[xr physics] holder: {:?} of player {} grabs body {:?} ({} steps into the grab){}", hand.shared_hand, self.active_player, body_handle, hand.grip_steps,
+            if other_held_body == Some(body_handle) { ": the other hand holds it too, a two-handed hold" } else { "" });
         self.release_settle_state(body_handle);
-        let target_pose = Pose::multiply(&hand.pose, &hand.grab_offset);
+        let target_pose = Pose::multiply(&hand.hold_frame, &hand.grab_offset);
         if !target_pose.is_finite() {
             hand.held_body = None;
             hand.grab_offset = Pose::default();
@@ -2622,22 +2889,23 @@ impl PhysicsScene {
     fn clear_held_body(&mut self, body_handle: RigidBodyHandle) {
         self.release_drive_state(body_handle);
         self.release_settle_state(body_handle);
-        if self.left_hand_grab.held_body == Some(body_handle) {
-            self.left_hand_grab = self.release_hand_hold(self.left_hand_grab);
-        }
-        if self.right_hand_grab.held_body == Some(body_handle) {
-            self.right_hand_grab = self.release_hand_hold(self.right_hand_grab);
-        }
+        self.for_each_rig(|s| {
+            if s.left_hand_grab.held_body == Some(body_handle) {
+                s.left_hand_grab = s.release_hand_hold(s.left_hand_grab);
+            }
+            if s.right_hand_grab.held_body == Some(body_handle) {
+                s.right_hand_grab = s.release_hand_hold(s.right_hand_grab);
+            }
+        });
     }
 
     pub(crate) fn held_by_for_body(&self, body_handle: RigidBodyHandle) -> Option<XrSharedHand> {
-        if self.left_hand_grab.held_body == Some(body_handle) {
-            Some(self.left_hand_grab.shared_hand)
-        } else if self.right_hand_grab.held_body == Some(body_handle) {
-            Some(self.right_hand_grab.shared_hand)
-        } else {
-            None
-        }
+        self.body_held_by_any(body_handle).map(|(_, hand)| hand)
+    }
+
+    /// The player holding `body_handle`, if any.
+    pub(crate) fn held_by_player_for_body(&self, body_handle: RigidBodyHandle) -> Option<u32> {
+        self.body_held_by_any(body_handle).map(|(player, _)| player)
     }
 
     pub(crate) fn shadow_body_motion_for_body(
@@ -2668,9 +2936,7 @@ impl PhysicsScene {
             if !matches!(cube.body_kind, XrBodyKind::Dynamic) {
                 continue;
             }
-            if self.left_hand_grab.held_body == Some(cube.body)
-                || self.right_hand_grab.held_body == Some(cube.body)
-            {
+            if self.body_held_by_any(cube.body).is_some() {
                 to_reset.push(cube.body);
                 continue;
             }
@@ -2683,8 +2949,7 @@ impl PhysicsScene {
                 to_reset.push(cube.body);
                 continue;
             }
-            let has_hand_contact = self.cube_has_hand_contact(&cube, &self.left_hand)
-                || self.cube_has_hand_contact(&cube, &self.right_hand);
+            let has_hand_contact = self.cube_has_any_hand_contact(&cube);
 
             if !self.body_is_valid(cube.body) {
                 to_reset.push(cube.body);

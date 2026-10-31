@@ -1,0 +1,9 @@
+[package]
+name = "makepad-xr-ui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Headset UI shared by apps that stream their XR view: a wrist menu built from the app's rows, floating cards, aim-ray and fingertip pointing, standard haptic ticks and grab-to-edit (one gesture, one edit, one undo step)"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }

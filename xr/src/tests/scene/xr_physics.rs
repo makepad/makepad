@@ -1494,11 +1494,19 @@ mod tests {
             shared_hand: XrSharedHand::LeftHand,
             pose: hand_pose,
             previous_pose: hand_pose,
+            hold_frame: hand_pose,
             linvel: vec3f(0.0, 0.0, 0.0),
             tracked: true,
             gripping: true,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
+            grip_steps: 0,
+            open_steps: 0,
+            lost_steps: 0,
+            bend_smooth: 0.0,
+            let_go_steps: 0,
         };
 
         scene.step();
@@ -1560,11 +1568,19 @@ mod tests {
             shared_hand: XrSharedHand::LeftHand,
             pose: acquire_pose,
             previous_pose: acquire_pose,
+            hold_frame: acquire_pose,
             linvel: vec3f(0.0, 0.0, 0.0),
             tracked: true,
             gripping: true,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
+            grip_steps: 0,
+            open_steps: 0,
+            lost_steps: 0,
+            bend_smooth: 0.0,
+            let_go_steps: 0,
         };
 
         scene.step();
@@ -1572,6 +1588,7 @@ mod tests {
 
         scene.left_hand_grab.previous_pose = scene.left_hand_grab.pose;
         scene.left_hand_grab.pose = moved_pose;
+        scene.left_hand_grab.hold_frame = moved_pose;
         scene.apply_held_body_targets();
         scene.step();
 
@@ -1686,11 +1703,19 @@ mod tests {
             shared_hand: XrSharedHand::LeftHand,
             pose: left_pose,
             previous_pose: left_pose,
+            hold_frame: left_pose,
             linvel: vec3f(0.0, 0.0, 0.0),
             tracked: true,
             gripping: true,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
+            grip_steps: 0,
+            open_steps: 0,
+            lost_steps: 0,
+            bend_smooth: 0.0,
+            let_go_steps: 0,
         };
         scene.step();
         assert_eq!(scene.left_hand_grab.held_body, Some(cube.body));
@@ -1709,11 +1734,19 @@ mod tests {
             shared_hand: XrSharedHand::RightHand,
             pose: right_pose,
             previous_pose: right_pose,
+            hold_frame: right_pose,
             linvel: vec3f(0.0, 0.0, 0.0),
             tracked: true,
             gripping: true,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: true,
+            grip_steps: 0,
+            open_steps: 0,
+            lost_steps: 0,
+            bend_smooth: 0.0,
+            let_go_steps: 0,
         };
         scene.step();
 
@@ -1758,11 +1791,19 @@ mod tests {
             shared_hand: XrSharedHand::LeftHand,
             pose: hand_pose,
             previous_pose: hand_pose,
+            hold_frame: hand_pose,
             linvel: vec3f(0.0, 0.0, 0.0),
             tracked: true,
             gripping: true,
             held_body: Some(cube.body),
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
+            grip_steps: 0,
+            open_steps: 0,
+            lost_steps: 0,
+            bend_smooth: 0.0,
+            let_go_steps: 0,
         };
 
         let mut hand = XrHand::default();
@@ -1815,11 +1856,19 @@ mod tests {
             shared_hand: XrSharedHand::LeftHand,
             pose: hand_pose,
             previous_pose: hand_pose,
+            hold_frame: hand_pose,
             linvel: vec3f(0.0, 0.0, 0.0),
             tracked: true,
             gripping: true,
             held_body: Some(cube.body),
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
+            grip_steps: 0,
+            open_steps: 0,
+            lost_steps: 0,
+            bend_smooth: 0.0,
+            let_go_steps: 0,
         };
 
         let mut hand = XrHand::default();

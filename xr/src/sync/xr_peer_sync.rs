@@ -457,11 +457,9 @@ impl Widget for XrPeerSync {
         if method == live_id!(set_enabled) {
             let mut enabled = self.enabled;
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 enabled = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             let enabled = vm.with_cx_mut(|cx| self.set_enabled(cx, enabled));
             return ScriptAsyncResult::Return(ScriptValue::from_bool(enabled));
@@ -476,11 +474,9 @@ impl Widget for XrPeerSync {
         if method == live_id!(set_auto_alignment_enabled) || method == live_id!(set_auto_align) {
             let mut enabled = self.auto_alignment_enabled;
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 enabled = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             let enabled = vm.with_cx_mut(|cx| self.set_auto_alignment_enabled(cx, enabled));
             return ScriptAsyncResult::Return(ScriptValue::from_bool(enabled));

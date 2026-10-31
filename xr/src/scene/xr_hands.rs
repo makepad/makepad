@@ -326,6 +326,12 @@ impl XrEnv {
     }
 }
 
+/// The colliders the physics gives this hand (or its controller) at this pose: exactly what the
+/// hand pushes bodies with (a debug view draws them).
+pub fn xr_hand_colliders(hand: &XrHand, controller: &XrController) -> Vec<HandCollider> {
+    XrHandSystem.build_hand_colliders(hand, controller)
+}
+
 pub(super) fn build_hand_colliders_for_physics(
     hand: &XrHand,
     controller: &XrController,
@@ -333,21 +339,33 @@ pub(super) fn build_hand_colliders_for_physics(
     XrHandSystem.build_hand_colliders(hand, controller)
 }
 
-pub(super) fn sync_hands_on_scene(
-    scene: Option<&mut PhysicsScene>,
+/// Every player's hands into the scene: their colliders and grabs. A player the scene has
+/// hands of who is not in `players` any more has untracked hands (their holds let go).
+pub(super) fn sync_hands_on_scene(scene: Option<&mut PhysicsScene>, players: &[XrPlayerHands]) {
+    if !XR_ENABLE_HAND_PHYSICS {
+        return;
+    }
+    let Some(scene) = scene else {
+        return;
+    };
+    for player in scene.rig_players() {
+        if !players.iter().any(|p| p.player == player) {
+            let gone = XrPlayerHands { player, ..Default::default() };
+            scene.with_rig(player, |s| sync_player_hands(s, &gone.left_hand, &gone.right_hand, &gone.left_controller, &gone.right_controller));
+        }
+    }
+    for p in players {
+        scene.with_rig(p.player, |s| sync_player_hands(s, &p.left_hand, &p.right_hand, &p.left_controller, &p.right_controller));
+    }
+}
+
+fn sync_player_hands(
+    scene: &mut PhysicsScene,
     left_hand: &XrHand,
     right_hand: &XrHand,
     left_controller: &XrController,
     right_controller: &XrController,
 ) {
-    if !XR_ENABLE_HAND_PHYSICS {
-        return;
-    }
-
-    let Some(scene) = scene else {
-        return;
-    };
-
     let left = build_hand_colliders_for_physics(left_hand, left_controller);
     let right = build_hand_colliders_for_physics(right_hand, right_controller);
     let dt = scene.simulation_dt();
