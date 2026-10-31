@@ -5,10 +5,10 @@
 //! no child processes, no shared swapchains. The build for a platform
 //! that has none of those (iOS), and its desktop twin in the iOS skin,
 //! which is how the build is tested outside the simulator. Everything
-//! but the build itself is `makepad-wm`.
+//! but the build itself is `makepad-app-wm`.
 
-use makepad_wm::makepad_widgets::*;
-use makepad_wm::{App, DesktopStyle, WmBuild};
+use makepad_app_wm::makepad_widgets::*;
+use makepad_app_wm::{App, DesktopStyle, WmBuild};
 
 app_main!(
     App,
@@ -22,23 +22,22 @@ app_main!(
     configure: |cx: &mut Cx| {
         cx.set_global(WmBuild {
             modules: vec![
-                &makepad_files::FILES_MODULE,
-                &makepad_sheets::SHEETS_MODULE,
-                &makepad_photos::PHOTOS_MODULE,
+                &makepad_app_files::FILES_MODULE,
+                &makepad_app_sheets::SHEETS_MODULE,
+                &makepad_app_photos::PHOTOS_MODULE,
                 &makepad_app_route::ROUTE_MODULE,
-                &makepad_finance::FINANCE_MODULE,
-                &makepad_clock::CLOCK_MODULE,
-                &makepad_weather::WEATHER_MODULE,
-                &makepad_mail::MAIL_MODULE,
-                &makepad_notes::NOTES_MODULE,
-                &makepad_calendar::CALENDAR_MODULE,
-                &makepad_reminders::REMINDERS_MODULE,
-                &makepad_calculator::CALCULATOR_MODULE,
+                &makepad_app_finance::FINANCE_MODULE,
+                &makepad_app_clock::CLOCK_MODULE,
+                &makepad_app_weather::WEATHER_MODULE,
+                &makepad_app_mail::MAIL_MODULE,
+                &makepad_app_notes::NOTES_MODULE,
+                &makepad_app_calendar::CALENDAR_MODULE,
+                &makepad_app_reminders::REMINDERS_MODULE,
+                &makepad_app_calculator::CALCULATOR_MODULE,
             ],
             modules_only: true,
-            dynamic_dylibs: false,
             style: DesktopStyle::Ios,
-            assistant: Some(makepad_aichat::script_mod),
+            assistant: Some(makepad_app_aichat::script_mod),
             title: "wm all-in-one".to_string(),
         });
     }
@@ -50,9 +49,9 @@ app_main!(
 /// build; there is no dev path that makes a shipped module panic.
 #[cfg(test)]
 mod panicking {
-    use makepad_wm::makepad_app_module::makepad_ai_services::wire::{ServiceCall, ServiceManifest, ToolResult};
-    use makepad_wm::makepad_app_module::*;
-    use makepad_wm::makepad_widgets::*;
+    use makepad_app_wm::makepad_app_module::makepad_ai_services::wire::{ServiceCall, ServiceManifest, ToolResult};
+    use makepad_app_wm::makepad_app_module::*;
+    use makepad_app_wm::makepad_widgets::*;
 
     script_mod! {
         use mod.prelude.widgets_internal.*
@@ -149,13 +148,12 @@ mod panicking {
 
 #[cfg(test)]
 mod tests {
-    use makepad_wm::makepad_app_module::AppModule;
-    use makepad_wm::makepad_widgets::widget_async::current_splash_vm_id;
-    use makepad_wm::makepad_widgets::*;
-    use makepad_wm::makepad_wm_theme;
-    use makepad_wm::module_host::ModuleHost;
-    use makepad_wm::module_view::MpModuleView;
-    use makepad_wm::MpRunViewAction;
+    use makepad_app_wm::makepad_app_module::AppModule;
+    use makepad_app_wm::makepad_widgets::widget_async::current_splash_vm_id;
+    use makepad_app_wm::makepad_widgets::*;
+    use makepad_app_wm::module_host::ModuleHost;
+    use makepad_app_wm::module_view::MpModuleView;
+    use makepad_app_wm::MpRunViewAction;
     use super::panicking::{PanicRoot, PANIC_MODULE};
 
     /// A host with the tile family in the main VM and one instance of the
@@ -163,15 +161,15 @@ mod tests {
     fn host_with_panicking_tiles(cx: &mut Cx, clients: &[u64]) -> (ModuleHost, Vec<WidgetRef>) {
         cx.with_vm(makepad_widgets::script_mod);
         cx.with_vm(|vm| {
-            // The tokens the tile styles from; the WM evaluates its theme
-            // file here.
+            // The tokens the tile's own WM chrome styles from; the WM
+            // evaluates its desk theme file here.
             vm.eval(script! {
                 mod.wm_theme = {
                     background: #1a1b26
                     foreground: #c0caf5
                 }
             });
-            makepad_wm::module_view::script_mod(vm);
+            makepad_app_wm::module_view::script_mod(vm);
             assert!(vm.take_errors().is_empty(), "the tile family evaluates");
         });
         let mut host = ModuleHost::default();
@@ -235,7 +233,7 @@ mod tests {
     fn a_module_whose_root_panics_in_handle_event_is_torn_down_and_the_desk_keeps_drawing() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (mut host, tiles) = host_with_panicking_tiles(&mut cx, &[7, 8]);
-        let main_heap = cx.with_vm(|vm| vm.bx.heap.heap_key());
+        let main_heap = cx.with_vm(|vm| vm.heap_key());
 
         let actions = cx.capture_actions(|cx| tiles[0].handle_event(cx, &Event::Signal, &mut Scope::empty()));
         let (client, message) = crash_reported(&actions).expect("the tile reports the crash to the WM");
@@ -250,9 +248,9 @@ mod tests {
         // and both isolates are still in the table with their heaps.
         assert!(!cx.is_script_vm_held());
         assert_eq!(current_splash_vm_id(&mut cx), MAIN_SPLASH_VM_ID);
-        assert_eq!(cx.with_vm(|vm| vm.bx.heap.heap_key()), main_heap);
+        assert_eq!(cx.with_vm(|vm| vm.heap_key()), main_heap);
         let vm_id = host.get(7).unwrap().vm_id;
-        cx.with_script_vm_id_trusted(vm_id, |vm| assert!(vm.bx.heap.heap_key() != main_heap));
+        cx.with_script_vm_id(vm_id, |vm| assert!(vm.heap_key() != main_heap));
 
         // The host's order: the tile has dropped the root, the instance goes.
         assert!(host.teardown(&mut cx, 7));
@@ -299,12 +297,12 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(makepad_widgets::script_mod);
         let mut host = ModuleHost::default();
-        let module: &'static dyn AppModule = &makepad_clock::CLOCK_MODULE;
+        let module: &'static dyn AppModule = &makepad_app_clock::CLOCK_MODULE;
         let open = module.open_schema().validate("{}", &[]).unwrap();
         host.create(&mut cx, 1, module, open, dvec2(402.0, 778.0)).unwrap();
         let vm_id = host.get(1).unwrap().vm_id;
-        let isolate = cx.with_script_vm_id_trusted(vm_id, |vm| vm.bx.heap.heap_key());
-        let main = cx.with_vm(|vm| vm.bx.heap.heap_key());
+        let isolate = cx.with_script_vm_id(vm_id, |vm| vm.heap_key());
+        let main = cx.with_vm(|vm| vm.heap_key());
         assert_ne!(isolate, main);
         let clock_svg = |name: &str| format!("apps/clock/resources/icons/{name}.svg").replace('/', std::path::MAIN_SEPARATOR_STR);
         let (path, handle) = {
@@ -336,10 +334,10 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(makepad_widgets::script_mod);
         let mut host = ModuleHost::default();
-        let light = desktop_style::StyleSheet::load_with_appearance(desktop_style::DesktopStyle::Ios, false);
-        let dark = desktop_style::StyleSheet::load_with_appearance(desktop_style::DesktopStyle::Ios, true);
+        let light = desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios.sheet(false));
+        let dark = desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios.sheet(true));
         host.apply_style(&mut cx, &light);
-        let module: &'static dyn AppModule = &makepad_clock::CLOCK_MODULE;
+        let module: &'static dyn AppModule = &makepad_app_clock::CLOCK_MODULE;
         let open = module.open_schema().validate("{}", &[]).unwrap();
         host.create(&mut cx, 1, module, open, dvec2(402.0, 778.0)).unwrap();
         let ink = |cx: &mut Cx, host: &ModuleHost, id: &[LiveId]| -> Vec4f {
@@ -365,18 +363,18 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(makepad_widgets::script_mod);
         let mut host = ModuleHost::default();
-        let module: &'static dyn AppModule = &makepad_sheets::SHEETS_MODULE;
+        let module: &'static dyn AppModule = &makepad_app_sheets::SHEETS_MODULE;
         let open = module.open_schema().validate("{}", &[]).unwrap();
         host.create(&mut cx, 1, module, open, dvec2(900.0, 700.0)).unwrap();
         let uid = host.get(1).unwrap().root.widget_uid();
-        host.apply_style(&mut cx, &desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos));
+        host.apply_style(&mut cx, &desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos.sheet(false)));
         let instance = host.get(1).unwrap();
         assert_eq!(instance.root.widget_uid(), uid);
-        cx.with_script_vm_id_trusted(instance.vm_id, |vm| {
-            let palette = makepad_wm_theme::current_for_vm(vm).unwrap();
-            assert_eq!(palette.get("background"), Some("#ececec"));
+        cx.with_script_vm_id(instance.vm_id, |vm| {
+            let background = theme_tokens::color(vm, "color_bg_app").unwrap();
+            assert_eq!(background, Vec4f::from_u32(0xecececff));
             let sheets = vm.module(id!(sheets));
-            assert_eq!(vm.bx.heap.value(sheets, id!(bg).into(), NoTrap).as_color(), Some(0xecececff));
+            assert_eq!(vm.value(sheets, id!(bg)).as_color().map(Vec4f::from_u32), Some(background));
             assert!(vm.take_errors().is_empty());
         });
         host.teardown(&mut cx, 1);

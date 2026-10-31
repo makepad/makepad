@@ -12,7 +12,7 @@
 # crates linked in as MODULES (libs/app_module), one splash isolate each,
 # drawn into the desk's own texture. This crate is a LIBRARY for that: the
 # `wm` binary here is the desktop build (src/main.rs), and an all-in-one
-# project links `makepad-wm` plus its app crates and sets the `WmBuild`
+# project links `makepad-app-wm` plus its app crates and sets the `WmBuild`
 # (src/build.rs). No app crate is a dependency of wm itself.
 #
 # Session mode (later, Linux only): the same layout/chrome/protocol with a
@@ -21,44 +21,72 @@
 # nested-mode assumptions for that reason.
 
 [package]
-name = "makepad-wm"
+name = "makepad-app-wm"
 version = "0.1.0"
 edition = "2021"
-default-run = "wm"
+license = "MIT"
+default-run = "makepad-app-wm"
+
+# the window manager is a desktop compositor (Linux; macOS hosts it for development): no web or mobile build
+[package.metadata.makepad]
+platforms = ["desktop"]
 
 [lib]
-name = "makepad_wm"
+name = "makepad_app_wm"
 path = "src/lib.rs"
 
 [[bin]]
-name = "wm"
+name = "makepad-app-wm"
 path = "src/main.rs"
+
+# The deploy's prebuild of what the WM starts (the AI Hub, its apps, the JIT tool), each with the
+# WM's own start command as a build (deploy_build.rs).
+[[bin]]
+name = "makepad-wm-build"
+path = "src/bin/makepad_wm_build.rs"
 
 [features]
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-studio-protocol = { path = "../../platform/studio" }
 makepad-network = { path = "../../platform/network" }
 makepad-wm-api = { path = "../../libs/wm_api" }
+makepad-desk-link = { path = "../../libs/desk_link" }
+makepad-app-registry = { path = "../../libs/app_registry" }
+makepad-app-host = { path = "../../libs/app_host" }
 # The AI services wire only: the WM relays frames between the aichat child and the apps.
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+# The shell's drawing kit and the AI hub control panel (shared with the AI Hub app).
+makepad-shell-kit = { path = "../../libs/shell_kit" }
+makepad-ai-hub-panel = { path = "../../libs/ai/hub_panel" }
+makepad-desk-link-panel = { path = "../../libs/desk_link_panel" }
 # In-process hosting (aicontrol §3): the module contract and the palette
 # applied into each instance's isolate. Which modules a build links is the
 # binary's say (src/build.rs), never a feature of this crate.
 makepad-app-module = { path = "../../libs/app_module" }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-civil-time = { path = "../../libs/civil_time" }
-# The super-app provisions its shipped toolchain, checkout and target/ and
-# rebuilds the host proc-macros under their recorded SVHs (the packer is
-# cargo-makepad's dyn-pack).
-makepad-ondevice-build = { path = "../../libs/ondevice_build" }
+# The headset IMU reader (src/headset_imu.rs) inflates the tracker board's
+# zlib config JSON.
+makepad-fast-inflate = { path = "../../libs/fast_inflate" }
+# Head poses, display optics and reprojection, shared with the HAL's XR backends.
+makepad-xr-core = { path = "../../libs/xr_core" }
 
-# dlopen for on-demand app dylibs (src/dylib_host.rs): native only.
+# Foreign Wayland windows (src/wayland_host): the WM serves the protocol itself.
+[target.'cfg(target_os = "linux")'.dependencies]
+makepad-wayland-server = { path = "../../libs/wayland_server" }
+makepad-xkb-keymap = { path = "../../libs/xkb_keymap" }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-libloading = { path = "../../libs/vulkan/libloading" }
+makepad-remote = { path = "../../libs/remote" }
+makepad-devhub = { path = "../../libs/devhub" }
+# Serving Desk Link (listener, TLS, fleet credentials): native desktops only
+makepad-desk-link = { path = "../../libs/desk_link", features = ["server", "tiles"] }
+makepad-hal = { path = "../../platform/hal" }

@@ -2,7 +2,7 @@
 """Assemble a persistent Arch USB on macOS using Python 3.14 and Apple tools.
 
 Example:
-  python3 tools/arch_usb/build.py --device diskN --clone arch@10.0.0.165 --writer-app
+  python3 tools/arch_usb/build.py --device diskN --clone arch@192.0.2.165 --writer-app
 
 Repeat without contacting the clone using --cached-clone. Cached OS/driver/CEF
 assets are reused; no software is downloaded or installed on either host.
@@ -18,7 +18,7 @@ containing mirror.tar.*, realtek-firmware.tar, fanatec.tar.gz and cargo-cache.ta
 Use --base-image for a different pristine raw Arch cloud image. All executable
 build/setup/writer logic lives beside this script, independently of the cache.
 The source snapshot is refreshed from this checkout unless --cached-source is set.
-Use --include-checkout apps/sandbox to package an optional local Sandbox clone;
+Use --include-checkout apps/commercial to package an optional local commercial clone;
 the default snapshot does not require a network or private clone.
 SSH is enabled for arch using a memorable password generated on first boot
 and shown on the local console. No personal SSH key is copied into the image.
@@ -152,8 +152,7 @@ def prepare_seed(args, output):
         clone, manifest = verify_source(args.assets)
         for name in ('makepad-source.tgz', 'cargo-cache.tar', 'source-revision.txt'):
             copy(clone/name, seed/name)
-        for name in ('wm', 'makepad-ai-hub'):
-            copy(clone/'binaries'/name, seed/name)
+        copy(clone/'binaries'/'makepad-app-wm', seed/'makepad-app-wm')
         (seed/'clone.json').write_text(json.dumps(manifest, indent=2)+'\n')
     elif args.cached_source:
         if args.include_checkout:
@@ -176,10 +175,10 @@ def prepare_seed(args, output):
         assert cef_root+'/include/cef_version.h' in members
     copy(cef_archive, seed/'cef-linux.bz2')
     (seed/'cef-directory.txt').write_text(cef_root+'\n')
-    for name in ('firstboot.sh', 'ssh.sh', 'provision.sh', 'mount-win.sh', 'status.sh', 'wm-session.sh', 'aihub-session.sh', 'gbelt-bind.sh'):
+    for name in ('firstboot.sh', 'ssh.sh', 'provision.sh', 'mount-win.sh', 'status.sh', 'wm-session.sh', 'gbelt-bind.sh'):
         copy(HERE/name, seed/name)
         subprocess.run(['/bin/bash', '-n', str(seed/name)], check=True)
-    for name in ('makepad-wm.service', 'wm.env', 'makepad-aihub.service', 'aihub.env', '70-makepad-game-hardware.rules'):
+    for name in ('makepad-wm.service', 'wm.env', 'ai-hub.conf', '70-makepad-game-hardware.rules'):
         copy(HERE/name, seed/name)
     if clone:
         # Preserve the known-working service setup. SSH and firstboot logic
@@ -414,7 +413,7 @@ def main():
     clone.add_argument('--cached-clone', action='store_true', help='Reuse the last verified clone snapshot without SSH')
     parser.add_argument('--clone-root', default='/home/arch/makepad', help='Source directory on the installed clone')
     parser.add_argument('--include-checkout', action='append', default=[], type=Path, metavar='PATH',
-                        help='Optional nested git checkout to package (repeatable; e.g. apps/sandbox)')
+                        help='Optional nested git checkout to package (repeatable; e.g. apps/commercial)')
     parser.add_argument('--cef-archive', type=Path, help='Cached Linux x86_64 CEF tar.bz2 (default: ASSETS/cef-linux.tar.bz2)')
     parser.add_argument('--writer-app', type=Path, nargs='?', const=Path.home()/'Applications/Makepad USB Writer.app')
     args = parser.parse_args()

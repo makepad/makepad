@@ -1,43 +1,49 @@
 //! Linux status dropdowns, drawn from the worker's observed device state.
 //!
-//! The Display dropdown adds what the other platforms do not have:
+//! The Display dropdown is about what the screens show, packed tight so
+//! the whole of it fits a short screen without scrolling:
 //!
-//! * DPI SCALE — 1.00×–3.00× in hundredths; previewed while held, applied
-//!   on release through the platform's `dpi_override`, persisted by the
-//!   system worker.
-//! * DISPLAYS — what the renderer reports: the connected outputs with
-//!   their native mode, and the clone-only arrangement: one framebuffer,
-//!   rendered at the native pixels of the "Optimize for" output, shown on
-//!   every driven output (letterboxed where the aspect differs). The
-//!   "Optimize for" row picks that source among the driven outputs, the
-//!   way a Mac picks which display a mirrored set is optimised for.
-//!   Nothing here offers an extend mode, a per-display scale, or an output
-//!   the renderer does not drive.
-//! * Compositor — which GPU is compositing now is the renderer's own
-//!   identity (`linux_gpu_snapshot`), not the GPU of the physical output.
-//!   The row picks a live Vulkan GPU (Auto is the display GPU). A GPU
-//!   does not need a connected output. The same list can set the focused
-//!   app's GPU, or follow the compositor, for this session only.
-//! * Mouse & touchpad — a row (only while the WM drives the outputs) that
-//!   opens a subview with mouse and touchpad speed sliders. The speeds are
-//!   the process's actual values; a drag applies immediately.
-//!
-//! The card is bounded by the screen. At 1080p ×3 (360 logical points in
-//! all) the sliders and the picker rows still fit: the clone picture,
-//! the backlight caption, the GPU status line, then the hero's and the
-//! sliders' slack give way first, then the output rows down to one, which
-//! scroll, and an unfolded list shrinks to what fits and scrolls too. The
-//! Mouse & touchpad row is kept with the other picker rows.
+//! * The title row carries the arrangement switch: "Extended" (one wide
+//!   desktop) or "Mirror" (one desktop on every screen). In Mirror an
+//!   "Optimise for" row picks the screen the desktop is sized for; it gets
+//!   its native mode, the others show the same picture scaled to fit.
+//! * One compact block per screen, left to right: its title ("Built-in ·
+//!   eDP-1", "HDMI · 3840×2160") with move and main-screen buttons, then a
+//!   resolution picker (the screen's modes, native marked) and a refresh
+//!   picker (the rates of the chosen resolution). A picker unfolds as a
+//!   grid of chips under its screen.
+//! * Extended / Mirror and "Optimise for" switch at once (no output is
+//!   reinitialised) and are saved when the renderer takes them; a refusal
+//!   is noted under the switch.
+//! * The Desktop row chooses where the desktop's resolution comes from:
+//!   "Panel" (the screens' own modes, as above) or "Virtual" (one fixed
+//!   virtual desktop the panels show scaled to fit, or not at all). Virtual
+//!   adds its Size (follow the Desk Link viewer, a preset, or a custom
+//!   size) and Panels (Mirror (scaled) / Off) rows; the scale slider is
+//!   then the virtual desktop's. Extended / Mirror and Pace by do not
+//!   apply while Virtual.
+//! * Every resolution or refresh change is tried first: "Keep this mode?
+//!   Reverting in 15 s" with Keep and Revert under the controls. A change
+//!   that fails shows the renderer's error there and the previous one is
+//!   sent again; the controls stay usable, so another mode can be tried at
+//!   once. Only kept changes are saved (`shell::display_menu`).
+//! * Scale: one slider, live while dragged and saved on release, snapping
+//!   to the multiples (ticks). It is one value for every screen: the
+//!   desktop is one window with one scale, so a per-screen scale is not
+//!   something the WM can show (the row says so).
+//! * The last row opens Mouse & touchpad and the Render on GPU list.
 use super::*;
 use super::super::ui::HAlign;
 use crate::linux_controls::ControlAction;
-use crate::shell::system_linux::{
-    Availability, BatteryStatus, GpuInfo, SystemCommand, DISPLAY_SCALE_MAX, DISPLAY_SCALE_MIN,
+use crate::shell::display_layout::{screen_rows, screens_span_gpus, swap_neighbour};
+use crate::shell::display_menu::{
+    is_virtual, mode_for, step_custom, virtual_mode_label, virtual_size_choices, virtual_size_label, CustomField, native_resolution, rate_after_resolution, rate_label, rates_for, resolution_label, resolutions, screen_title,
+    shown_mode, pacing_choices, pacing_label, Change, Phase, ARRANGEMENT_SLOT,
 };
-use makepad_widgets::makepad_platform::linux_display::LinuxDisplayOutput;
-use makepad_widgets::makepad_platform::linux_gpu::LinuxGpuDevice;
+use crate::shell::system_linux::{Availability, BatteryStatus, GpuInfo, SystemCommand, DISPLAY_SCALE_MAX, DISPLAY_SCALE_MIN};
+use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayOutput, VirtualPanels};
 use makepad_widgets::makepad_platform::linux_input::{
-    pointer_speed, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
+    natural_scroll, pointer_speed, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
 };
 
 const DEVICE_ROWS: usize = 5;
@@ -45,61 +51,90 @@ const DEVICE_ROWS: usize = 5;
 /// window's actual scale.
 const DPI_FALLBACK_HUNDREDTHS: u32 = 130;
 // The Display dropdown's metrics, in logical points.
+/// The title row with the Extended | Mirror switch.
+const TITLE_H: f64 = 30.0;
+/// A separator between sections.
+const SEP_H: f64 = 9.0;
+/// A screen's title line.
+const SCREEN_LINE_H: f64 = 22.0;
+/// A row of controls (pickers, chips, Keep/Revert).
+const CONTROL_H: f64 = 28.0;
+/// Between two screen blocks.
+const SCREEN_GAP: f64 = 6.0;
+/// One line of a note (an error takes two).
+const NOTE_LINE_H: f64 = 16.0;
+/// A chip of an unfolded picker.
+const CHIP_H: f64 = 26.0;
+const RESOLUTION_CHIPS: usize = 3;
+const RATE_CHIPS: usize = 4;
+const PACE_CHIPS: usize = 3;
+/// The Size picker's chips per row.
+const SIZE_CHIPS: usize = 3;
+/// The scale row's caption.
+const CAPTION_H: f64 = 16.0;
+/// The footer row and the Render on list's rows.
+const PICKER_ROW_H: f64 = 26.0;
+const LIST_ITEM_H: f64 = 26.0;
+const GPU_ITEMS_MAX: usize = 4;
+/// "Next start: …" under the Render on list.
+const GPU_STATUS_H: f64 = 18.0;
+const NOTICE_H: f64 = 18.0;
+// The Mouse & touchpad subview.
 const HERO_H: f64 = 40.0;
 const HERO_COMPACT_H: f64 = 32.0;
-const SEP_FIRST_H: f64 = 16.0;
-const SEP_H: f64 = 12.0;
+const POINTER_SEP_H: f64 = 12.0;
 const HEADER_H: f64 = 22.0;
 const SLIDER_H: f64 = 34.0;
-const SLIDER_COMPACT_H: f64 = 30.0;
-const BACKLIGHT_CAPTION_H: f64 = 30.0;
 const ENDS_H: f64 = 14.0;
-/// The "Optimize for" and "Compositor" rows.
-const PICKER_ROW_H: f64 = 30.0;
-const PICKER_ROW_COMPACT_H: f64 = 26.0;
-const SOURCE_ITEM_H: f64 = 26.0;
-const SOURCE_ITEMS_MAX: usize = 4;
-const GPU_ITEMS_MAX: usize = 4;
-/// "Now on …" under the GPU picker rows.
-const GPU_STATUS_H: f64 = 18.0;
-const DISPLAY_ROW_H: f64 = 26.0;
-/// Rows the card asks for before the list scrolls; the screen may bound it
-/// further.
-const DISPLAY_ROWS_MAX: usize = 5;
-/// The clone picture, drawn only when it fits above at least one row.
-const DISPLAY_PICTURE_H: f64 = 60.0;
-const NOTICE_H: f64 = 18.0;
-/// Caption under the pointer-speed sliders.
 const POINTER_CAPTION_H: f64 = 18.0;
 
-/// What the Display dropdown draws at the height it actually has.
+/// The scale slider row.
+const SCALE_SLIDER_H: f64 = 30.0;
+
+/// A scale slider drag (`ShellPanel::dpi_drag`).
 #[derive(Clone, Copy, Debug)]
-struct MonitorPlan {
-    hero: f64,
-    sep_first: f64,
-    slider: f64,
-    /// The "1.00 / 3.00" endpoints row under the DPI slider.
-    ends: f64,
-    picker_row: f64,
-    backlight_caption: bool,
-    picture: bool,
-    gpu_status: bool,
-    /// Rows of the unfolded "Optimize for" list.
-    source_items: usize,
-    /// Rows of the one unfolded GPU list (compositor or app).
-    gpu_items: usize,
-    /// The focused-app GPU picker row.
-    app_gpu_row: bool,
-    /// Output rows shown; the rest scroll.
-    rows: usize,
-    /// The "Mouse & touchpad" row, only while the WM drives the outputs.
-    pointer_row: bool,
+pub(crate) struct DpiDrag {
+    /// The scale when the drag began, in hundredths.
+    pub start: u32,
+    /// The track's left end and usable width, in device pixels.
+    pub x0: f64,
+    pub width: f64,
+    /// The scale last applied, in hundredths.
+    pub last: u32,
 }
 
-impl MonitorPlan {
-    fn list_open(&self) -> bool {
-        self.source_items > 0 || self.gpu_items > 0
-    }
+/// The multiples the slider snaps to and marks with ticks, in hundredths.
+const SCALE_SNAPS: [u32; 6] = [100, 125, 150, 200, 250, 300];
+/// How close (in hundredths) a drag has to come to a snap point to land on it.
+const SCALE_SNAP_RADIUS: u32 = 4;
+
+/// `value` on the nearest snap point when it is within the snap radius.
+fn snap_dpi(value: u32) -> u32 {
+    SCALE_SNAPS.into_iter().find(|s| s.abs_diff(value) <= SCALE_SNAP_RADIUS).unwrap_or(value)
+}
+
+/// The slider's 0..1 as a scale in hundredths, 100..=300.
+fn dpi_from_slider(v: f64) -> u32 {
+    let span = (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN) as f64;
+    (DISPLAY_SCALE_MIN as f64 + v.clamp(0.0, 1.0) * span).round() as u32
+}
+
+fn dpi_slider_progress(hundredths: u32) -> f64 {
+    let clamped = hundredths.clamp(DISPLAY_SCALE_MIN, DISPLAY_SCALE_MAX);
+    (clamped - DISPLAY_SCALE_MIN) as f64 / (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN) as f64
+}
+
+/// The scale under device-pixel `x` on a track that started at `x0` and is
+/// `width` device pixels wide.
+fn dpi_at(x: f64, x0: f64, width: f64) -> u32 {
+    snap_dpi(dpi_from_slider((x - x0) / width.max(1.0)))
+}
+
+/// Which picker of a screen is unfolded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Chooser {
+    Resolution,
+    Rate,
 }
 
 impl ShellPanel {
@@ -119,10 +154,32 @@ impl ShellPanel {
 
     pub(crate) fn close_gpu_lists(&mut self) {
         self.gpu_picker = false;
-        self.app_gpu_picker = false;
         self.gpu_scroll = 0;
         self.gpu_targets.clear();
-        self.gpu_target_client = None;
+    }
+
+    /// Fold a screen's unfolded picker (its chips go with it).
+    pub(super) fn close_chooser(&mut self) {
+        self.chooser = None;
+        self.chooser_changes.clear();
+        self.pace_open = false;
+        self.pace_targets.clear();
+        self.virtual_size_open = false;
+        self.virtual_size_targets.clear();
+    }
+
+    /// One list at a time: fold every Display list and drop a restart
+    /// confirm that is waiting.
+    pub(super) fn close_display_lists(&mut self) {
+        self.close_gpu_lists();
+        self.close_chooser();
+        self.restart_confirm = false;
+    }
+
+    /// The screen drawn at `row`, while the renderer still lists it.
+    fn screen_at(&self, row: usize) -> Option<LinuxDisplayOutput> {
+        let name = self.screen_targets.get(row)?;
+        self.display_snapshot.outputs.iter().find(|o| o.name == *name).cloned()
     }
 
     pub(super) fn system_press(&mut self, cx: &mut Cx, hit: Hit) {
@@ -141,82 +198,146 @@ impl ShellPanel {
                 self.device_picker = None;
             }
             Hit::InputMute => self.system_action(cx, ControlAction::Command(SystemCommand::ToggleInputMute)),
-            Hit::SourcePicker => {
-                self.source_picker = !self.source_picker;
-                // Unfolded with the current source as the first shown row,
-                // so it is in view however few rows the screen allows.
-                self.source_scroll = if self.source_picker {
-                    self.eligible_sources().iter().position(|o| o.primary).unwrap_or(0)
-                } else {
-                    0
-                };
-                self.source_targets.clear();
-                // One list at a time.
-                self.close_gpu_lists();
+            Hit::ScreenMove(row, dir) => {
+                // The left-to-right order that was drawn, with this screen
+                // swapped with its neighbour. Only placed screens move.
+                let placed = &self.screen_targets[..self.screen_placed.min(self.screen_targets.len())];
+                let order = (row < placed.len()).then(|| swap_neighbour(placed, row, dir)).flatten();
+                self.close_display_lists();
+                if let Some(order) = order {
+                    self.system_action(cx, ControlAction::DisplayOrder(order));
+                }
             }
-            Hit::Source(row) => {
-                // The name that was drawn on that row — exactly as the
-                // renderer lists it — and only while the current inventory
-                // still drives it. The renderer confirms the choice (or
-                // not) through the snapshot's `primary`.
-                let name = self
-                    .source_targets
-                    .get(row)
-                    .cloned()
-                    .filter(|name| self.eligible_sources().iter().any(|o| o.name == *name));
-                self.source_picker = false;
-                self.source_scroll = 0;
-                self.source_targets.clear();
+            Hit::ScreenMain(row) => {
+                // The name drawn on that row, while the renderer still
+                // drives it; the renderer confirms it through `primary`.
+                let name = self.screen_at(row).filter(|o| o.active && self.in_desktop(o)).map(|o| o.name);
+                self.close_display_lists();
                 if let Some(name) = name {
                     self.system_action(cx, ControlAction::DisplaySource(name));
                 }
             }
+            Hit::ScreenResolution(row) | Hit::ScreenRate(row) => {
+                let kind = if matches!(hit, Hit::ScreenRate(_)) { Chooser::Rate } else { Chooser::Resolution };
+                let name = self.screen_targets.get(row).cloned();
+                let open = name.as_ref().is_some_and(|name| self.chooser.as_ref() != Some(&(name.clone(), kind)));
+                self.close_display_lists();
+                if open {
+                    self.chooser = name.map(|name| (name, kind));
+                }
+            }
+            Hit::ChooserItem(index) => {
+                let change = self.chooser_changes.get(index).cloned();
+                self.close_display_lists();
+                if let Some(change) = change {
+                    self.system_action(cx, ControlAction::DisplayTry(change));
+                }
+            }
+            Hit::Arrangement(mirror) => {
+                let snapshot = &self.display_snapshot;
+                let now = self.display_trials.selected_arrangement(&snapshot.arrangement).clone();
+                let wanted = if !mirror {
+                    Some(DisplayArrangement::Extended)
+                } else if matches!(now, DisplayArrangement::Mirror { .. }) {
+                    None
+                } else {
+                    // Sized for the main screen, else the first one shown.
+                    snapshot
+                        .outputs
+                        .iter()
+                        .find(|o| o.primary)
+                        .or_else(|| snapshot.outputs.iter().find(|o| o.active))
+                        .map(|o| DisplayArrangement::Mirror { optimise_for: o.name.clone() })
+                };
+                self.close_display_lists();
+                if let Some(wanted) = wanted.filter(|wanted| *wanted != now) {
+                    self.system_action(cx, ControlAction::DisplayArrangement(wanted));
+                }
+            }
+            Hit::OptimiseFor(row) => {
+                let name = self.screen_at(row).map(|o| o.name);
+                self.close_display_lists();
+                if let Some(optimise_for) = name {
+                    self.system_action(cx, ControlAction::DisplayArrangement(DisplayArrangement::Mirror { optimise_for }));
+                }
+            }
+            Hit::PacePicker => {
+                let open = !self.pace_open;
+                self.close_display_lists();
+                self.pace_open = open;
+            }
+            Hit::PaceItem(index) => {
+                let pacing = self.pace_targets.get(index).cloned();
+                self.close_display_lists();
+                if let Some(pacing) = pacing.filter(|p| *p != self.display_snapshot.pacing) {
+                    self.system_action(cx, ControlAction::DisplayPacing(pacing));
+                }
+            }
+            Hit::Desktop(virtual_) => {
+                let now = self.virtual_desktop();
+                self.close_display_lists();
+                if virtual_ != now {
+                    self.system_action(cx, if virtual_ { ControlAction::DesktopVirtual } else { ControlAction::DesktopPanel });
+                }
+            }
+            Hit::VirtualSizePicker => {
+                let open = !self.virtual_size_open;
+                self.close_display_lists();
+                self.virtual_size_open = open;
+            }
+            Hit::VirtualSizeItem(index) => {
+                let size = self.virtual_size_targets.get(index).copied();
+                self.close_display_lists();
+                if let Some(size) = size {
+                    self.system_action(cx, ControlAction::VirtualSize(size));
+                }
+            }
+            Hit::VirtualCustom(field, dir) => {
+                let size = self.virtual_saved.map(|saved| step_custom(&saved.mode, field, dir));
+                self.close_display_lists();
+                if let Some(size) = size {
+                    self.system_action(cx, ControlAction::VirtualSize(size));
+                }
+            }
+            Hit::VirtualPanels(off) => {
+                self.close_display_lists();
+                self.system_action(cx, ControlAction::VirtualPanels(if off { VirtualPanels::Off } else { VirtualPanels::Mirror }));
+            }
+            Hit::TrialKeep => self.system_action(cx, ControlAction::DisplayKeep),
+            Hit::TrialRevert => self.system_action(cx, ControlAction::DisplayRevert),
+            Hit::RestartDesktop => {
+                self.close_display_lists();
+                self.restart_confirm = true;
+            }
+            Hit::RestartCancel => self.restart_confirm = false,
+            Hit::RestartConfirm => {
+                // Only while a restart would still change something.
+                let still = self.restart_row_shown();
+                self.close_display_lists();
+                if still {
+                    self.system_action(cx, ControlAction::RestartDesktop);
+                }
+            }
             Hit::GpuPicker => {
                 let open = !self.gpu_picker;
-                self.close_gpu_lists();
+                self.close_display_lists();
                 self.gpu_picker = open;
-                self.gpu_scroll = if open { self.gpu_compositor_current_row() } else { 0 };
-                self.source_picker = false;
-                self.source_scroll = 0;
-                self.source_targets.clear();
-            }
-            Hit::AppGpuPicker => {
-                let open = !self.app_gpu_picker;
-                let client = self.gpu_app.as_ref().map(|(id, _, _, _)| *id);
-                self.close_gpu_lists();
-                self.app_gpu_picker = open;
-                self.gpu_target_client = if open { client } else { None };
-                self.gpu_scroll = if open { self.gpu_app_current_row() } else { 0 };
-                self.source_picker = false;
-                self.source_scroll = 0;
-                self.source_targets.clear();
+                self.gpu_scroll = if open { self.gpu_saved_row() } else { 0 };
             }
             Hit::PointerSettings => {
                 self.pointer_settings = !self.pointer_settings;
                 self.dragging = None;
-                self.dpi_preview = None;
-                self.source_picker = false;
-                self.source_scroll = 0;
-                self.source_targets.clear();
-                self.close_gpu_lists();
+                self.close_display_lists();
+            }
+            Hit::NaturalScroll(touchpad) => {
+                self.system_action(cx, ControlAction::NaturalScroll { touchpad, on: !natural_scroll(touchpad) });
             }
             Hit::Gpu(row) => {
                 let choice = self.gpu_targets.get(row).cloned();
-                let app_client = self.gpu_target_client;
                 self.close_gpu_lists();
-                if self.gpu_busy {
-                    // Progress is the notice line; do not start another switch.
-                } else if let Some(choice) = choice {
-                    let usable = match choice.as_deref() {
-                        None => true,
-                        Some(identity) => self.gpu_identity_available(identity),
-                    };
-                    if usable {
-                        if let Some(client) = app_client {
-                            self.system_action(cx, ControlAction::AppGpuChoice { client, choice });
-                        } else {
-                            self.system_action(cx, ControlAction::GpuChoice(choice));
-                        }
+                if let Some(choice) = choice {
+                    if choice.as_deref().is_none_or(|identity| self.gpu_identity_available(identity)) {
+                        self.system_action(cx, ControlAction::GpuChoice(choice));
                     }
                 }
             }
@@ -224,6 +345,7 @@ impl ShellPanel {
         }
         self.redraw(cx);
     }
+
 
     pub(super) fn device_scroll_by(&mut self, cx: &mut Cx, dy: f64) {
         let n = if self.device_picker == Some(true) { self.system.audio.inputs.len() }
@@ -302,17 +424,6 @@ impl ShellPanel {
 
     // ----------------------------------------------------------- monitor
 
-    /// The slider's 0..1 as a scale in hundredths, 100..=300.
-    pub(super) fn dpi_from_slider(v: f64) -> u32 {
-        let span = (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN) as f64;
-        (DISPLAY_SCALE_MIN as f64 + v.clamp(0.0, 1.0) * span).round() as u32
-    }
-
-    fn dpi_slider_progress(hundredths: u32) -> f64 {
-        let clamped = hundredths.clamp(DISPLAY_SCALE_MIN, DISPLAY_SCALE_MAX);
-        (clamped - DISPLAY_SCALE_MIN) as f64 / (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN) as f64
-    }
-
     /// The slider's 0..1 as a pointer speed in hundredths, 25..=300.
     pub(super) fn pointer_from_slider(v: f64) -> u32 {
         let span = (POINTER_SPEED_MAX - POINTER_SPEED_MIN) as f64;
@@ -322,6 +433,44 @@ impl ShellPanel {
     fn pointer_slider_progress(hundredths: u32) -> f64 {
         let clamped = hundredths.clamp(POINTER_SPEED_MIN, POINTER_SPEED_MAX);
         (clamped - POINTER_SPEED_MIN) as f64 / (POINTER_SPEED_MAX - POINTER_SPEED_MIN) as f64
+    }
+
+    /// A press on the scale slider: the track is kept in device pixels and
+    /// the scale under the pointer applies at once.
+    pub(super) fn dpi_drag_begin(&mut self, cx: &mut Cx, p: Vec2d) {
+        let Some((_, r)) = self.hits.iter().find(|(h, _)| *h == Hit::DpiScaleSlider).copied() else { return };
+        // The same usable track as `slider_value`.
+        let track = inset(r, 6.0);
+        let dpi = self.dpi_hundredths() as f64 / 100.0;
+        let start = self.dpi_hundredths();
+        self.dragging = Some(Hit::DpiScaleSlider);
+        self.dpi_drag = Some(DpiDrag { start, x0: (track.pos.x + 6.0) * dpi, width: (track.size.x - 12.0) * dpi, last: start });
+        self.dpi_drag_to(cx, p);
+    }
+
+    /// The pointer moved during a scale drag: a new value applies live.
+    pub(super) fn dpi_drag_to(&mut self, cx: &mut Cx, p: Vec2d) {
+        let Some(mut drag) = self.dpi_drag else { return };
+        let dpi = self.dpi_hundredths() as f64 / 100.0;
+        let value = dpi_at(p.x * dpi, drag.x0, drag.width);
+        if value != drag.last {
+            drag.last = value;
+            self.dpi_drag = Some(drag);
+            self.system_action(cx, ControlAction::DpiScaleLive(value));
+        }
+    }
+
+    /// The release: the scale reached is saved.
+    pub(super) fn dpi_drag_end(&mut self, cx: &mut Cx) {
+        if let Some(drag) = self.dpi_drag.take() {
+            self.system_action(cx, ControlAction::DpiScale(drag.last));
+        }
+    }
+
+    /// A scale drag is under way: a saved scale landing now would move the
+    /// window under the pointer, so the WM waits.
+    pub(crate) fn dpi_adjusting(&self) -> bool {
+        self.dpi_drag.is_some()
     }
 
     /// The window's actual scale in hundredths, or the launch default until
@@ -334,278 +483,217 @@ impl ShellPanel {
         }
     }
 
-    /// The outputs the person may pick as the source: the ones the
-    /// renderer drives now. Outputs it cannot drive (another GPU, a
-    /// failure) stay in the list below with their status and are not
-    /// offered. Nothing when the desktop owns the outputs.
-    fn eligible_sources(&self) -> Vec<&LinuxDisplayOutput> {
-        if !self.display_snapshot.direct {
-            return Vec::new();
-        }
-        self.display_snapshot.outputs.iter().filter(|o| o.active).collect()
-    }
-
-    /// The DISPLAYS header's reading of the renderer's snapshot.
+    /// How many screens make up the desktop, as the renderer reports them.
     fn display_status(&self) -> String {
         let s = &self.display_snapshot;
         if !s.direct {
             return "Managed by the desktop".into();
         }
-        let active = s.outputs.iter().filter(|o| o.active).count();
-        match (s.outputs.len(), active) {
+        let placed = s.outputs.iter().filter(|o| o.desktop_position.is_some()).count();
+        let shown = if placed > 0 { placed } else { s.outputs.iter().filter(|o| o.active).count() };
+        match (s.outputs.len(), shown) {
             (0, _) => "No outputs".into(),
             (_, 0) => "No active output".into(),
-            (_, 1) => "One display".into(),
-            (_, n) => format!("Clone displays · {n}"),
+            (_, 1) => "One screen".into(),
+            (_, n) => format!("{n} screens"),
         }
     }
 
-    // ---- the GPU the compositor runs on -----------------------------
+    /// A screen's status and whether it is a problem: nothing for a screen
+    /// of the desktop, the renderer's own status for one outside it
+    /// (failed, another GPU's screen still to join, …).
+    fn screen_status(&self, output: &LinuxDisplayOutput) -> (String, bool) {
+        if self.in_desktop(output) {
+            (String::new(), false)
+        } else if output.status.is_empty() {
+            ("Inactive".into(), false)
+        } else {
+            (output.status.clone(), true)
+        }
+    }
 
-    /// The sysfs GPU index compositing now: the snapshot's `renderer`
-    /// matched onto `system.gpus` by exact PCI address and vendor/device
-    /// when PCI is known, or by a unique vendor/device pair when it is
-    /// not. `None` when the renderer is unknown, unmatched, or ambiguous.
-    /// Never taken from the output list.
-    fn gpu_now(&self) -> Option<usize> {
-        let renderer = self.gpu_snapshot.renderer.as_ref()?;
-        match renderer.pci_address.as_deref().filter(|pci| !pci.is_empty()) {
-            Some(pci) => self.system.gpus.iter().position(|g| {
-                !g.pci.is_empty() && g.pci == pci && gpu_vendor_device_match(g, renderer)
-            }),
-            None => {
-                let mut found = None;
-                for (i, gpu) in self.system.gpus.iter().enumerate() {
-                    if gpu_vendor_device_match(gpu, renderer) {
-                        if found.is_some() {
-                            return None;
-                        }
-                        found = Some(i);
-                    }
-                }
-                found
+    /// Part of the desktop: placed, or active while nothing is placed yet.
+    /// An active screen left out by the GPU's limits is not.
+    /// In Mirror only the screen the desktop is sized for is placed; every
+    /// other active screen shows the same desktop, so it counts too.
+    fn in_desktop(&self, output: &LinuxDisplayOutput) -> bool {
+        let mirror = self.display_snapshot.arrangement != DisplayArrangement::Extended;
+        output.desktop_position.is_some() || (output.active && (mirror || !self.any_placed()))
+    }
+
+    fn any_placed(&self) -> bool {
+        self.display_snapshot.outputs.iter().any(|o| o.desktop_position.is_some())
+    }
+
+    /// The GPU driving `output`: the sysfs label of the card with its PCI
+    /// address, else its card name.
+    fn screen_gpu_label(&self, output: &LinuxDisplayOutput) -> String {
+        output
+            .pci
+            .as_deref()
+            .and_then(|pci| self.system.gpus.iter().find(|gpu| !gpu.pci.is_empty() && gpu.pci == pci))
+            .map(|gpu| gpu.label())
+            .unwrap_or_else(|| output.card.clone())
+    }
+
+    /// Whether row `row` (of `screen_rows`, `placed` of them in the
+    /// desktop) can move left and right.
+    fn screen_moves(&self, row: usize, placed: usize) -> (bool, bool) {
+        let direct = self.display_snapshot.direct && !self.mirror_shown();
+        (direct && row > 0 && row < placed, direct && row + 1 < placed)
+    }
+
+    /// The arrangement the switch shows: the one being tried, else the
+    /// renderer's.
+    fn arrangement_shown(&self) -> DisplayArrangement {
+        self.display_trials.selected_arrangement(&self.display_snapshot.arrangement).clone()
+    }
+
+    /// The arrangement switch's Mirror: never while the desktop is virtual,
+    /// where Extended / Mirror do not apply.
+    fn mirror_shown(&self) -> bool {
+        !self.virtual_desktop() && matches!(self.arrangement_shown(), DisplayArrangement::Mirror { .. })
+    }
+
+    /// The desktop is the virtual display (chosen, or the renderer shows it).
+    fn virtual_desktop(&self) -> bool {
+        self.virtual_saved.is_some() || self.display_snapshot.virtual_display.is_some()
+    }
+
+    /// The Desktop block: the switch, and while virtual the Size row (its
+    /// unfolded chips), the Custom steppers and the Panels row; then a
+    /// separator.
+    fn desktop_height(&self) -> f64 {
+        if !self.display_snapshot.direct {
+            return 0.0;
+        }
+        let mut h = CONTROL_H;
+        if let Some(saved) = &self.virtual_saved {
+            h += CONTROL_H;
+            if self.virtual_size_open {
+                h += virtual_size_choices(saved).len().div_ceil(SIZE_CHIPS) as f64 * CHIP_H;
+            }
+            if !saved.follow {
+                h += CONTROL_H;
+            }
+            h += CONTROL_H;
+        }
+        h + SEP_H
+    }
+
+    /// The mode the controls of `output` show (`None` is automatic).
+    fn mode_shown<'a>(&'a self, output: &'a LinuxDisplayOutput) -> Option<&'a str> {
+        self.display_trials.selected_mode(&output.name, output.mode_override.as_deref())
+    }
+
+    // ---- heights -------------------------------------------------------
+
+    /// What a slot (a screen, or the arrangement) adds under its controls:
+    /// the Keep / Revert row while a change of it is tried, then its note
+    /// (an error gets two lines).
+    fn slot_extra_height(&self, slot: &str) -> f64 {
+        let trial = if self.display_trials.trial_for(slot).is_some() { CONTROL_H } else { 0.0 };
+        let note = match self.display_trials.note_for(slot) {
+            Some(note) if note.error => NOTE_LINE_H * 2.0,
+            Some(_) => NOTE_LINE_H,
+            None => 0.0,
+        };
+        trial + note
+    }
+
+    /// The chips of `output`'s unfolded picker: how many rows they take.
+    fn chooser_rows(&self, output: &LinuxDisplayOutput) -> usize {
+        let Some((name, kind)) = self.chooser.as_ref().filter(|(name, _)| *name == output.name) else { return 0 };
+        let _ = name;
+        match kind {
+            Chooser::Resolution => resolutions(&output.modes, native_resolution(output)).len().div_ceil(RESOLUTION_CHIPS),
+            Chooser::Rate => {
+                let (w, h, _) = shown_mode(output, self.mode_shown(output)).unwrap_or_default();
+                rates_for(&output.modes, w, h).len().div_ceil(RATE_CHIPS)
             }
         }
     }
 
-    /// Sysfs label when `gpu_now` matched a card; otherwise the renderer's
-    /// own `name`. "unknown" only when there is no renderer name either.
-    fn gpu_label(&self, index: Option<usize>) -> String {
-        if let Some(gpu) = index.and_then(|i| self.system.gpus.get(i)) {
-            gpu.label()
-        } else if let Some(name) = self
-            .gpu_snapshot
-            .renderer
-            .as_ref()
-            .map(|r| r.name.trim())
-            .filter(|n| !n.is_empty())
-        {
-            name.to_string()
-        } else {
-            "unknown".into()
+    fn screen_block_height(&self, output: &LinuxDisplayOutput) -> f64 {
+        if is_virtual(output) {
+            return SCREEN_LINE_H;
         }
+        SCREEN_LINE_H + CONTROL_H + self.chooser_rows(output) as f64 * CHIP_H + self.slot_extra_height(&output.name)
     }
 
-    fn gpu_matches_snapshot(&self, gpu: &GpuInfo) -> bool {
-        if gpu.pci.is_empty() {
-            return false;
-        }
-        self.gpu_snapshot.devices.iter().any(|device| {
-            device.pci_address.as_deref() == Some(gpu.pci.as_str()) && gpu_vendor_device_match(gpu, device)
-        })
+    /// Pace by is offered while more than one screen shows.
+    fn pace_shown(&self) -> bool {
+        self.display_snapshot.direct
+            && !self.virtual_desktop()
+            && self.display_snapshot.outputs.iter().filter(|o| o.active).count() > 1
     }
 
-    fn gpu_identity_available(&self, identity: &str) -> bool {
-        self.system.gpus.iter().any(|gpu| gpu.matches(identity) && self.gpu_matches_snapshot(gpu))
+    fn pace_height(&self) -> f64 {
+        if !self.pace_shown() {
+            return 0.0;
+        }
+        let rows = if self.pace_open { pacing_choices(&self.display_snapshot).len().div_ceil(PACE_CHIPS) } else { 0 };
+        CONTROL_H + rows as f64 * CHIP_H
     }
 
-    fn gpu_index_for_uuid(&self, uuid: [u8; 16]) -> Option<usize> {
-        let device = self.gpu_snapshot.devices.iter().find(|d| d.uuid == uuid)?;
-        let pci = device.pci_address.as_deref().filter(|pci| !pci.is_empty())?;
-        self.system.gpus.iter().position(|gpu| {
-            !gpu.pci.is_empty() && gpu.pci == pci && gpu_vendor_device_match(gpu, device)
-        })
+    fn gpu_items(&self) -> usize {
+        if self.gpu_picker { (1 + self.system.gpus.len()).min(GPU_ITEMS_MAX) } else { 0 }
     }
 
-    fn gpu_label_for_uuid(&self, uuid: [u8; 16]) -> String {
-        if let Some(gpu) = self.gpu_index_for_uuid(uuid).and_then(|i| self.system.gpus.get(i)) {
-            gpu.label()
-        } else if let Some(name) = self
-            .gpu_snapshot
-            .devices
-            .iter()
-            .find(|d| d.uuid == uuid)
-            .map(|d| d.name.trim())
-            .filter(|n| !n.is_empty())
-        {
-            name.to_string()
-        } else {
-            "unknown".into()
-        }
+    fn gpu_status_shown(&self) -> bool {
+        self.display_snapshot.direct && !self.system.gpus.is_empty()
     }
 
-    /// Auto (row 0) is current when the compositor is the display GPU.
-    fn gpu_compositor_current_row(&self) -> usize {
-        let renderer = self.gpu_snapshot.renderer.as_ref();
-        let display = self.gpu_snapshot.display.as_ref();
-        if renderer.is_some() && renderer.map(|g| g.uuid) == display.map(|g| g.uuid) {
-            return 0;
-        }
-        self.gpu_now().map(|i| i + 1).unwrap_or(usize::MAX)
-    }
-
-    /// Follow compositor is row 0; otherwise the policy GPU in sysfs order.
-    fn gpu_app_current_row(&self) -> usize {
-        match self.gpu_app.as_ref() {
-            Some((_, _, None, _)) => 0,
-            Some((_, _, Some(uuid), _)) => self.gpu_index_for_uuid(*uuid).map(|i| i + 1).unwrap_or(0),
-            None => 0,
-        }
-    }
-
-    fn gpu_picker_enabled(&self) -> bool {
-        self.display_snapshot.direct && !self.gpu_busy
-    }
-
-    fn gpu_list_open(&self) -> bool {
-        self.gpu_picker || (self.app_gpu_picker && self.gpu_app.is_some())
-    }
-
-    // ---- layout --------------------------------------------------------
-
-    fn plan_height(&self, p: &MonitorPlan) -> f64 {
-        let notice = if self.system_notice.is_empty() { 0.0 } else { NOTICE_H };
-        p.hero + p.sep_first + HEADER_H + p.slider
-            + if p.backlight_caption { BACKLIGHT_CAPTION_H } else { 0.0 }
-            + SEP_H + HEADER_H + p.slider + p.ends
-            + if p.pointer_row { SEP_H + p.picker_row } else { 0.0 }
-            + SEP_H + HEADER_H
-            + p.picker_row + p.source_items as f64 * SOURCE_ITEM_H
-            + p.picker_row + if p.app_gpu_row { p.picker_row } else { 0.0 }
-            + p.gpu_items as f64 * SOURCE_ITEM_H
-            + if p.gpu_status { GPU_STATUS_H } else { 0.0 }
-            + if p.picture { DISPLAY_PICTURE_H } else { 0.0 }
-            + p.rows as f64 * DISPLAY_ROW_H
-            + notice
-    }
-
-    /// Everything, at full size: what the card asks the screen for.
-    fn full_plan(&self) -> MonitorPlan {
-        MonitorPlan {
-            hero: HERO_H,
-            sep_first: SEP_FIRST_H,
-            slider: SLIDER_H,
-            ends: ENDS_H,
-            picker_row: PICKER_ROW_H,
-            backlight_caption: true,
-            picture: self.display_snapshot.outputs.iter().any(|o| o.active),
-            gpu_status: self.display_snapshot.direct && (!self.system.gpus.is_empty() || self.gpu_snapshot.renderer.is_some()),
-            source_items: if self.source_picker { self.eligible_sources().len().min(SOURCE_ITEMS_MAX) } else { 0 },
-            gpu_items: if self.gpu_list_open() { (1 + self.system.gpus.len()).min(GPU_ITEMS_MAX) } else { 0 },
-            app_gpu_row: self.gpu_app.is_some(),
-            rows: self.display_snapshot.outputs.len().clamp(1, DISPLAY_ROWS_MAX),
-            pointer_row: self.display_snapshot.direct,
-        }
-    }
-
-    /// The plan for the height the card really has (the screen bounds
-    /// it). The clone picture goes first, then the backlight caption, then
-    /// the GPU status line, then the hero, the endpoints and the sliders'
-    /// slack, then the output rows give way down to one — or to none while
-    /// a list is unfolded, which then shrinks to what fits — and, last of
-    /// all, the one remaining row. The sliders, source and compositor
-    /// picker rows, the App GPU row (when a native child is focused), and
-    /// the Mouse & touchpad row (when the WM drives the outputs) are never
-    /// dropped.
-    fn monitor_plan(&self, avail: f64) -> MonitorPlan {
-        let mut plan = self.full_plan();
-        if self.plan_height(&plan) > avail {
-            plan.picture = false;
-        }
-        if self.plan_height(&plan) > avail {
-            plan.backlight_caption = false;
-        }
-        if self.plan_height(&plan) > avail {
-            plan.gpu_status = false;
-        }
-        if self.plan_height(&plan) > avail {
-            plan.hero = HERO_COMPACT_H;
-            plan.sep_first = SEP_H;
-            plan.ends = 0.0;
-            plan.slider = SLIDER_COMPACT_H;
-            plan.picker_row = PICKER_ROW_COMPACT_H;
-        }
-        if self.plan_height(&plan) > avail {
-            let rows_wanted = plan.rows;
-            plan.rows = 0;
-            let fixed = self.plan_height(&plan);
-            let fit = ((avail - fixed) / DISPLAY_ROW_H).floor().max(0.0) as usize;
-            plan.rows = fit.min(rows_wanted).max(if plan.list_open() { 0 } else { 1 });
-        }
-        if plan.source_items > 1 && self.plan_height(&plan) > avail {
-            let items_wanted = plan.source_items;
-            plan.source_items = 0;
-            let fixed = self.plan_height(&plan);
-            let fit = ((avail - fixed) / SOURCE_ITEM_H).floor().max(0.0) as usize;
-            plan.source_items = fit.clamp(1, items_wanted);
-        }
-        if plan.gpu_items > 1 && self.plan_height(&plan) > avail {
-            let items_wanted = plan.gpu_items;
-            plan.gpu_items = 0;
-            let fixed = self.plan_height(&plan);
-            let fit = ((avail - fixed) / SOURCE_ITEM_H).floor().max(0.0) as usize;
-            plan.gpu_items = fit.clamp(1, items_wanted);
-        }
-        if plan.rows == 1 && self.plan_height(&plan) > avail {
-            // The DISPLAYS header still counts the outputs; the pickers and
-            // the sliders matter more than the one row that would clip.
-            plan.rows = 0;
-        }
-        if self.plan_height(&plan) > avail {
-            // On short screens keep the controls and an unfolded choice
-            // reachable; their section labels can stand in for the hero.
-            plan.hero = 0.0;
-            plan.sep_first = 0.0;
-        }
-        plan
-    }
-
-    /// The card height the Display dropdown asks for; `card_rect` bounds it
-    /// to the screen and `monitor_plan` fits the content to what is left.
+    /// The card height the Display dropdown asks for: exactly what
+    /// `draw_monitor` lays out.
     pub(super) fn monitor_height(&self) -> f64 {
         if self.pointer_settings {
             return self.pointer_settings_height();
         }
-        let plan = self.full_plan();
-        self.plan_height(&plan)
+        let snapshot = &self.display_snapshot;
+        let mut h = TITLE_H;
+        if snapshot.direct && self.mirror_shown() {
+            h += CONTROL_H;
+        }
+        h += self.slot_extra_height(ARRANGEMENT_SLOT) + SEP_H;
+        h += self.desktop_height();
+        if snapshot.outputs.is_empty() {
+            h += SCREEN_LINE_H;
+        }
+        for output in &snapshot.outputs {
+            h += self.screen_block_height(output) + SCREEN_GAP;
+        }
+        h += self.pace_height();
+        h += SEP_H + CAPTION_H + SCALE_SLIDER_H + SEP_H + PICKER_ROW_H;
+        h += self.gpu_items() as f64 * LIST_ITEM_H;
+        if self.gpu_status_shown() {
+            h += GPU_STATUS_H;
+        }
+        if self.restart_row_shown() {
+            h += PICKER_ROW_H;
+        }
+        if !self.system_notice.is_empty() {
+            h += NOTICE_H;
+        }
+        h
     }
 
     fn pointer_settings_height(&self) -> f64 {
         let notice = if self.system_notice.is_empty() { 0.0 } else { NOTICE_H };
-        HERO_H + SEP_H + PICKER_ROW_H
-            + SEP_H + HEADER_H + SLIDER_H + ENDS_H
-            + SEP_H + HEADER_H + SLIDER_H + ENDS_H
+        HERO_H + POINTER_SEP_H + PICKER_ROW_H
+            + POINTER_SEP_H + HEADER_H + SLIDER_H + ENDS_H + PICKER_ROW_H
+            + POINTER_SEP_H + HEADER_H + SLIDER_H + ENDS_H + PICKER_ROW_H
             + POINTER_CAPTION_H
             + notice
     }
 
-    /// The wheel over an overflowing display list; the draw clamps.
-    pub(super) fn display_scroll_by(&mut self, cx: &mut Cx, dy: f64) {
-        self.display_scroll = if dy > 0.0 { self.display_scroll + 1 } else { self.display_scroll.saturating_sub(1) };
-        self.redraw(cx);
-    }
-
-    /// The wheel over the unfolded "Optimize for" list; the draw clamps.
-    pub(super) fn source_scroll_by(&mut self, cx: &mut Cx, dy: f64) {
-        self.source_scroll = if dy > 0.0 { self.source_scroll + 1 } else { self.source_scroll.saturating_sub(1) };
-        self.redraw(cx);
-    }
-
-    /// The wheel over the unfolded "Compositor" list; the draw clamps.
+    /// The wheel over the unfolded "Render on" list; the draw clamps.
     pub(super) fn gpu_scroll_by(&mut self, cx: &mut Cx, dy: f64) {
         self.gpu_scroll = if dy > 0.0 { self.gpu_scroll + 1 } else { self.gpu_scroll.saturating_sub(1) };
         self.redraw(cx);
     }
+
+    // ---- drawing -------------------------------------------------------
 
     pub(super) fn draw_monitor(&mut self, cx: &mut Cx2d, body: Rect) {
         if self.pointer_settings {
@@ -614,56 +702,70 @@ impl ShellPanel {
         }
         let tok = self.tokens;
         let fg = tok.popups.text;
-        let dim = darker(fg, 1.4);
-        let plan = self.monitor_plan(body.size.y);
-        let snapshot = self.system.clone();
-        let brightness = snapshot.brightness.percent();
-        let (hero, rest) = cut_top(body, plan.hero);
-        if plan.hero > 0.0 {
-            self.d.panel_hero(cx, hero, &tok, fg, Ico::Monitor, "Display", "Brightness, scale and outputs", 0.0);
+        let snapshot = self.display_snapshot.clone();
+        let (order, placed) = screen_rows(&snapshot);
+        self.screen_targets = order.iter().map(|&i| snapshot.outputs[i].name.clone()).collect();
+        self.screen_placed = placed;
+        self.chooser_changes.clear();
+        if self.chooser.as_ref().is_some_and(|(name, _)| !self.screen_targets.contains(name)) {
+            // Its screen went away: nothing left to pick for.
+            self.chooser = None;
         }
-        let (sep, rest) = cut_top(rest, plan.sep_first); self.d.separator(cx, sep, fg, 0.12);
-        let (header, rest) = cut_top(rest, HEADER_H);
-        self.section_header(cx, header, "BRIGHTNESS", &brightness.map_or("—".into(), |v| format!("{v}%")));
-        let (row, mut rest) = cut_top(rest, plan.slider);
-        self.slider_row(cx, row, Hit::BrightnessSlider, brightness.unwrap_or(0) as f64 / 100.0, brightness.is_some());
-        if plan.backlight_caption {
-            let (row, next) = cut_top(rest, BACKLIGHT_CAPTION_H); rest = next;
-            self.unavailable(cx, row, snapshot.brightness.primary().map(|b| b.name.as_str())
-                .unwrap_or("Use this monitor’s brightness buttons"));
+        let mirror = snapshot.direct && self.mirror_shown();
+
+        let (title, mut rest) = cut_top(body, TITLE_H);
+        self.draw_title_row(cx, title);
+        if mirror {
+            let (row, next) = cut_top(rest, CONTROL_H);
+            rest = next;
+            self.draw_optimise_for(cx, row, &order);
+        }
+        // A switch takes no confirm; only a refusal is noted here.
+        rest = self.draw_slot_extra(cx, rest, ARRANGEMENT_SLOT, "");
+        let (sep, next) = cut_top(rest, SEP_H);
+        rest = next;
+        self.d.separator(cx, sep, fg, 0.12);
+        if snapshot.direct {
+            let (area, next) = cut_top(rest, self.desktop_height() - SEP_H);
+            rest = next;
+            self.draw_desktop(cx, area);
+            let (sep, next) = cut_top(rest, SEP_H);
+            rest = next;
+            self.d.separator(cx, sep, fg, 0.12);
+        } else {
+            self.virtual_size_open = false;
+            self.virtual_size_targets.clear();
         }
 
-        // ---- DPI scale: the window's actual scale, or the held preview.
-        let (sep, next) = cut_top(rest, SEP_H); rest = next; self.d.separator(cx, sep, fg, 0.12);
-        let (header, next) = cut_top(rest, HEADER_H); rest = next;
-        let shown = self.dpi_preview.unwrap_or_else(|| self.dpi_hundredths());
-        self.section_header(cx, header, "DPI SCALE", &format!("{:.2}×", shown as f64 / 100.0));
-        let (row, next) = cut_top(rest, plan.slider); rest = next;
-        self.slider_row(cx, row, Hit::DpiScaleSlider, Self::dpi_slider_progress(shown), true);
-        if plan.ends > 0.0 {
-            let (ends, next) = cut_top(rest, plan.ends); rest = next;
-            self.d.label(cx, ends, false, tok.font.caption, dim, HAlign::Left, "1.00");
-            self.d.label(cx, ends, false, tok.font.caption, dim, HAlign::Right, "3.00");
-            if self.dpi_preview.is_some() {
-                self.d.label(cx, ends, false, tok.font.caption, tok.bar.active, HAlign::Center,
-                    "Release to apply · Esc cancels");
-            }
+        if order.is_empty() {
+            let (row, next) = cut_top(rest, SCREEN_LINE_H);
+            rest = next;
+            self.unavailable(cx, row, if snapshot.direct { "No connected screen" }
+                else { "The desktop owns the screens; the scale below still applies" });
+        }
+        for (row, &index) in order.iter().enumerate() {
+            let output = &snapshot.outputs[index];
+            let (block, next) = cut_top(rest, self.screen_block_height(output));
+            rest = cut_top(next, SCREEN_GAP).1;
+            self.draw_screen_block(cx, block, row, output, placed, mirror);
+        }
+        if self.pace_shown() {
+            let (area, next) = cut_top(rest, self.pace_height());
+            rest = next;
+            self.draw_pace(cx, area);
+        } else {
+            self.pace_open = false;
+            self.pace_targets.clear();
         }
 
-        if plan.pointer_row {
-            let (sep, next) = cut_top(rest, SEP_H); rest = next; self.d.separator(cx, sep, fg, 0.12);
-            let (row, next) = cut_top(rest, plan.picker_row); rest = next;
-            self.draw_pointer_entry(cx, row);
-        }
-
-        // ---- the outputs: the source, the GPU, the picture, the inventory.
-        let (sep, next) = cut_top(rest, SEP_H); rest = next; self.d.separator(cx, sep, fg, 0.12);
-        let (header, next) = cut_top(rest, HEADER_H); rest = next;
-        let status = self.display_status();
-        self.section_header(cx, header, "DISPLAYS", &status);
-        let rest = self.draw_source_picker(cx, rest, &plan);
-        let rest = self.draw_gpu_picker(cx, rest, &plan);
-        let rest = self.draw_displays(cx, rest, &plan);
+        let (sep, next) = cut_top(rest, SEP_H);
+        rest = next;
+        self.d.separator(cx, sep, fg, 0.12);
+        rest = self.draw_scale(cx, rest);
+        let (sep, next) = cut_top(rest, SEP_H);
+        rest = next;
+        self.d.separator(cx, sep, fg, 0.12);
+        rest = self.draw_footer(cx, rest);
         if !self.system_notice.is_empty() {
             let notice = self.system_notice.clone();
             let (row, _) = cut_top(rest, NOTICE_H);
@@ -671,27 +773,526 @@ impl ShellPanel {
         }
     }
 
-    /// `Mouse & touchpad` with the live speeds on the right. Wider caption
-    /// than [`Self::picker_row`] so the label is not clipped.
-    fn draw_pointer_entry(&mut self, cx: &mut Cx2d, row: Rect) {
+    /// `[▭] Display · 2 screens        [Extended | Mirror]`.
+    fn draw_title_row(&mut self, cx: &mut Cx2d, row: Rect) {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);
-        let hit = Hit::PointerSettings;
-        self.d.cursor_surface(cx, row, &tok.controls, self.hot == Some(hit), self.pointer_settings);
-        let label_w = 148.0;
-        self.d.label(cx, rect(row.pos.x + 5.0, row.pos.y, label_w, row.size.y),
-            false, tok.font.body_small, dim, HAlign::Left, "Mouse & touchpad");
-        let mouse = pointer_speed(false);
-        let pad = pointer_speed(true);
-        let value = format!("{:.2}× · {:.2}×", mouse as f64 / 100.0, pad as f64 / 100.0);
-        let chevron_w = 26.0;
-        let value_x = row.pos.x + label_w + 5.0;
-        self.d.label_elided(cx, rect(value_x, row.pos.y, (row.pos.x + row.size.x - chevron_w - value_x).max(0.0), row.size.y),
-            false, tok.font.body, fg, HAlign::Right, &value);
-        self.d.icon_centered(cx, Ico::ChevronDown,
-            rect(row.pos.x + row.size.x - 22.0, row.pos.y, 18.0, row.size.y), 12.0, fg);
-        self.hits.push((hit, row));
+        let direct = self.display_snapshot.direct;
+        let switch_w = if direct && !self.virtual_desktop() { 168.0 } else { 0.0 };
+        self.d.icon_centered(cx, Ico::Monitor, rect(row.pos.x, row.pos.y, 22.0, row.size.y), 16.0, fg);
+        let title_x = row.pos.x + 28.0;
+        let title_w = self.d.measure(cx, true, tok.font.body, "Display");
+        self.d.label(cx, rect(title_x, row.pos.y, title_w, row.size.y), true, tok.font.body, fg, HAlign::Left, "Display");
+        let status = self.display_status();
+        let status_x = title_x + title_w + 8.0;
+        let status_w = (row.pos.x + row.size.x - switch_w - 8.0 - status_x).max(0.0);
+        self.d.label_elided(cx, rect(status_x, row.pos.y, status_w, row.size.y), false, tok.font.caption, dim, HAlign::Left, &status);
+        if switch_w == 0.0 {
+            return;
+        }
+        let mirror = self.mirror_shown();
+        let can_mirror = self.display_snapshot.outputs.iter().filter(|o| o.active).count() >= 2 || mirror;
+        let inner = rect(row.pos.x + row.size.x - switch_w, row.pos.y + 2.0, switch_w, row.size.y - 4.0);
+        let half = (inner.size.x / 2.0).floor();
+        let extended = rect(inner.pos.x, inner.pos.y, half, inner.size.y);
+        let mirrored = rect(inner.pos.x + half, inner.pos.y, inner.size.x - half, inner.size.y);
+        self.small_button(cx, extended, (mirror).then_some(Hit::Arrangement(false)), !mirror, None, "Extended");
+        self.small_button(cx, mirrored, (!mirror && can_mirror).then_some(Hit::Arrangement(true)), mirror, None, "Mirror");
+    }
+
+    /// `Optimise for  [Built-in · eDP-1] [HDMI · 3840×2160]`.
+    fn draw_optimise_for(&mut self, cx: &mut Cx2d, row: Rect, order: &[usize]) {
+        let tok = self.tokens;
+        let dim = darker(tok.popups.text, 1.4);
+        let caption_w = 84.0;
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Optimise for");
+        let target = match self.arrangement_shown() {
+            DisplayArrangement::Mirror { optimise_for } => Some(optimise_for),
+            DisplayArrangement::Extended => None,
+        };
+        let screens: Vec<(usize, LinuxDisplayOutput)> = order
+            .iter()
+            .enumerate()
+            .map(|(row, &i)| (row, self.display_snapshot.outputs[i].clone()))
+            .filter(|(_, o)| !o.modes.is_empty())
+            .collect();
+        if screens.is_empty() {
+            return;
+        }
+        let x0 = row.pos.x + caption_w;
+        let gap = 4.0;
+        let w = ((row.pos.x + row.size.x - x0) - gap * (screens.len() - 1) as f64) / screens.len() as f64;
+        for (i, (screen_row, output)) in screens.iter().enumerate() {
+            let r = rect(x0 + i as f64 * (w + gap), row.pos.y + 2.0, w, row.size.y - 4.0);
+            let selected = target.as_deref() == Some(output.name.as_str());
+            self.small_button(cx, r, (!selected).then_some(Hit::OptimiseFor(*screen_row)), selected, None, &screen_title(output));
+        }
+    }
+
+    /// The Keep / Revert row while a change of `slot` is tried, then its
+    /// note. Returns what is left below.
+    fn draw_slot_extra(&mut self, cx: &mut Cx2d, rest: Rect, slot: &str, question: &str) -> Rect {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let dim = darker(fg, 1.4);
+        let mut rest = rest;
+        if let Some(trial) = self.display_trials.trial_for(slot).cloned() {
+            let (row, next) = cut_top(rest, CONTROL_H);
+            rest = next;
+            let inner = rect(row.pos.x, row.pos.y + 2.0, row.size.x, row.size.y - 4.0);
+            let button_w = 64.0;
+            let keep = rect(inner.pos.x + inner.size.x - button_w, inner.pos.y, button_w, inner.size.y);
+            let revert = rect(keep.pos.x - 4.0 - button_w, inner.pos.y, button_w, inner.size.y);
+            let text = match trial.phase {
+                Phase::Applying { .. } => "Applying\u{2026}".to_string(),
+                Phase::Confirming { .. } => {
+                    let left = self.display_trials.seconds_left(self.display_now).unwrap_or(0);
+                    format!("{question} Reverting in {left} s")
+                }
+            };
+            let confirming = matches!(trial.phase, Phase::Confirming { .. });
+            self.d.label_elided(cx, rect(inner.pos.x + 2.0, row.pos.y, (revert.pos.x - inner.pos.x - 8.0).max(0.0), row.size.y),
+                confirming, tok.font.body_small, if confirming { tok.bar.active } else { dim }, HAlign::Left, &text);
+            self.small_button(cx, revert, Some(Hit::TrialRevert), false, None, "Revert");
+            self.small_button(cx, keep, confirming.then_some(Hit::TrialKeep), false, Some(Ico::Check), "Keep");
+        }
+        if let Some(note) = self.display_trials.note_for(slot).cloned() {
+            let lines = if note.error { 2 } else { 1 };
+            let (area, next) = cut_top(rest, NOTE_LINE_H * lines as f64);
+            rest = next;
+            let color = if note.error { tok.bar.active } else { dim };
+            let wrapped = self.d.wrap(cx, false, tok.font.caption, &note.text, area.size.x, lines);
+            for (i, line) in wrapped.iter().enumerate() {
+                let r = rect(area.pos.x, area.pos.y + i as f64 * NOTE_LINE_H, area.size.x, NOTE_LINE_H);
+                self.d.label(cx, r, false, tok.font.caption, color, HAlign::Left, line);
+            }
+        }
+        rest
+    }
+
+    /// `[▭] Built-in · eDP-1  Intel · xe          [◀][▶] [Main]`, then
+    /// `[2560×1600 · native ▾] [240 Hz ▾]` (Mirror: what the screen shows),
+    /// the unfolded chips, the Keep / Revert row and the note.
+    fn draw_screen_block(&mut self, cx: &mut Cx2d, area: Rect, row: usize, output: &LinuxDisplayOutput, placed: usize, mirror: bool) {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let dim = darker(fg, 1.4);
+        let direct = self.display_snapshot.direct;
+        let in_desktop = self.in_desktop(output);
+        let text = if in_desktop { fg } else { dim };
+
+        // Line one: the title, the GPU, then move and main.
+        let (line, rest) = cut_top(area, SCREEN_LINE_H);
+        let icon_w = 22.0;
+        self.d.icon_centered(cx, Ico::Monitor, rect(line.pos.x, line.pos.y, icon_w, line.size.y), 14.0, text);
+        let mut right = line.pos.x + line.size.x;
+        let virtual_row = is_virtual(output);
+        if direct && !mirror && !virtual_row && !self.virtual_desktop() {
+            let main_w = 80.0;
+            let main = rect(right - main_w, line.pos.y + 1.0, main_w, line.size.y - 2.0);
+            if output.primary {
+                self.small_button(cx, main, None, true, Some(Ico::Check), "Main");
+            } else {
+                let can = output.active && in_desktop;
+                self.small_button(cx, main, can.then_some(Hit::ScreenMain(row)), false, None, "Make main");
+            }
+            let (left_ok, right_ok) = self.screen_moves(row, placed);
+            if placed > 1 && row < placed {
+                let move_w = 22.0;
+                let r = rect(main.pos.x - 4.0 - move_w, main.pos.y, move_w, main.size.y);
+                let l = rect(r.pos.x - 2.0 - move_w, main.pos.y, move_w, main.size.y);
+                self.small_button(cx, l, left_ok.then_some(Hit::ScreenMove(row, -1)), false, Some(Ico::ChevronLeft), "");
+                self.small_button(cx, r, right_ok.then_some(Hit::ScreenMove(row, 1)), false, Some(Ico::ChevronRight), "");
+                right = l.pos.x - 8.0;
+            } else {
+                right = main.pos.x - 8.0;
+            }
+        }
+        let title = screen_title(output);
+        let name_x = line.pos.x + icon_w + 6.0;
+        let name_w = self.d.measure(cx, true, tok.font.body_small, &title).min((right - name_x).max(0.0));
+        self.d.label_elided(cx, rect(name_x, line.pos.y, name_w, line.size.y), true, tok.font.body_small, text, HAlign::Left, &title);
+        let (status, problem) = self.screen_status(output);
+        let detail = if virtual_row {
+            match self.display_snapshot.virtual_display {
+                Some(mode) => format!("{} \u{b7} panels {}", virtual_mode_label(&mode),
+                    if mode.panels == VirtualPanels::Off { "off" } else { "mirror the desktop" }),
+                None => status,
+            }
+        } else if !status.is_empty() {
+            status
+        } else if mirror {
+            let target = matches!(self.arrangement_shown(), DisplayArrangement::Mirror { optimise_for } if optimise_for == output.name);
+            if target { "mirror size".into() } else { "scaled to fit".into() }
+        } else {
+            self.screen_gpu_label(output)
+        };
+        let detail_x = name_x + name_w + 8.0;
+        self.d.label_elided(cx, rect(detail_x, line.pos.y, (right - detail_x).max(0.0), line.size.y),
+            false, tok.font.caption, if problem { tok.bar.active } else { dim }, HAlign::Left, &detail);
+
+        if virtual_row {
+            return;
+        }
+        // Line two: the pickers, or in Mirror what the screen shows.
+        let (controls, mut rest) = cut_top(rest, CONTROL_H);
+        let inner = rect(controls.pos.x + icon_w + 6.0, controls.pos.y + 2.0,
+            (controls.size.x - icon_w - 6.0).max(0.0), controls.size.y - 4.0);
+        let shown = shown_mode(output, self.mode_shown(output));
+        // Every screen keeps its own resolution and refresh in Mirror too:
+        // the mirror is rendered at the optimised screen's mode (changing it
+        // resizes the mirror), the others scale it into theirs.
+        {
+            let enabled = direct && !output.modes.is_empty();
+            let res_w = (inner.size.x * 0.6).floor();
+            let res = rect(inner.pos.x, inner.pos.y, res_w - 4.0, inner.size.y);
+            let rate = rect(inner.pos.x + res_w, inner.pos.y, inner.size.x - res_w, inner.size.y);
+            let native = native_resolution(output);
+            let (res_text, rate_text) = match shown {
+                Some((w, h, hz)) => (
+                    if native == Some((w, h)) { format!("{} \u{b7} native", resolution_label(w, h)) } else { resolution_label(w, h) },
+                    rate_label(hz),
+                ),
+                None => (self.mode_shown(output).unwrap_or("Automatic").to_string(), String::new()),
+            };
+            let open = |kind| self.chooser.as_ref().is_some_and(|(name, k)| *name == output.name && *k == kind);
+            let (res_open, rate_open) = (open(Chooser::Resolution), open(Chooser::Rate));
+            self.picker_face(cx, res, enabled.then_some(Hit::ScreenResolution(row)), res_open, &res_text);
+            self.picker_face(cx, rate, (enabled && shown.is_some()).then_some(Hit::ScreenRate(row)), rate_open, &rate_text);
+            if res_open || rate_open {
+                rest = self.draw_chooser(cx, rest, output, shown, if res_open { Chooser::Resolution } else { Chooser::Rate });
+            }
+        }
+        self.draw_slot_extra(cx, rest, &output.name, "Keep this mode?");
+    }
+
+    /// A picker's face: the value and a chevron; no hit when disabled.
+    fn picker_face(&mut self, cx: &mut Cx2d, r: Rect, hit: Option<Hit>, open: bool, value: &str) {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let dim = darker(fg, 1.4);
+        let state = match hit {
+            None => CtrlState::Disabled,
+            Some(_) if open => CtrlState::Selected,
+            Some(hit) if self.hot == Some(hit) => CtrlState::Hover,
+            Some(_) => CtrlState::Normal,
+        };
+        self.d.control(cx, r, &tok.controls, state);
+        let chevron_w = if hit.is_some() { 18.0 } else { 4.0 };
+        self.d.label_elided(cx, rect(r.pos.x + 7.0, r.pos.y, (r.size.x - 7.0 - chevron_w).max(0.0), r.size.y),
+            false, tok.font.body_small, if hit.is_some() { fg } else { dim }, HAlign::Left, value);
+        if let Some(hit) = hit {
+            self.d.icon_centered(cx, Ico::ChevronDown,
+                rect(r.pos.x + r.size.x - 18.0, r.pos.y, 16.0, r.size.y), 10.0, fg);
+            self.hits.push((hit, r));
+        }
+    }
+
+    /// The unfolded picker of `output` as a grid of chips: its resolutions
+    /// (native marked), or the rates of the shown resolution. The change
+    /// behind each chip is bound here, so a click tries what was drawn.
+    fn draw_chooser(&mut self, cx: &mut Cx2d, rest: Rect, output: &LinuxDisplayOutput, shown: Option<(u32, u32, f64)>, kind: Chooser) -> Rect {
+        let (w_now, h_now, hz_now) = shown.unwrap_or_default();
+        // (label, mode, current, native)
+        let items: Vec<(String, Option<String>, bool, bool)> = match kind {
+            Chooser::Resolution => resolutions(&output.modes, native_resolution(output))
+                .into_iter()
+                .filter_map(|r| {
+                    let hz = rate_after_resolution(&output.modes, r.width, r.height, hz_now)?;
+                    let current = r.width == w_now && r.height == h_now;
+                    Some((resolution_label(r.width, r.height), mode_for(&output.modes, native_resolution(output), r.width, r.height, hz), current, r.native))
+                })
+                .collect(),
+            Chooser::Rate => rates_for(&output.modes, w_now, h_now)
+                .into_iter()
+                .map(|hz| (rate_label(hz), mode_for(&output.modes, native_resolution(output), w_now, h_now, hz), hz.round() == hz_now.round(), false))
+                .collect(),
+        };
+        let per_row = if kind == Chooser::Resolution { RESOLUTION_CHIPS } else { RATE_CHIPS };
+        let rows = items.len().div_ceil(per_row);
+        let (area, rest) = cut_top(rest, rows as f64 * CHIP_H);
+        let x0 = area.pos.x + 28.0;
+        let gap = 4.0;
+        let w = ((area.pos.x + area.size.x - x0) - gap * (per_row - 1) as f64) / per_row as f64;
+        for (i, (label, mode, current, native)) in items.into_iter().enumerate() {
+            let r = rect(x0 + (i % per_row) as f64 * (w + gap), area.pos.y + (i / per_row) as f64 * CHIP_H + 2.0, w, CHIP_H - 4.0);
+            let index = self.chooser_changes.len();
+            self.chooser_changes.push(Change::Mode { name: output.name.clone(), mode });
+            self.small_button(cx, r, (!current).then_some(Hit::ChooserItem(index)), current, None, &label);
+            if native {
+                // The screen's own resolution: a dot in the chip's corner.
+                let tok = self.tokens;
+                self.d.icon_centered(cx, Ico::Dot, rect(r.pos.x + r.size.x - 10.0, r.pos.y, 8.0, r.size.y), 6.0, tok.bar.active);
+            }
+        }
+        rest
+    }
+
+    /// `Desktop  [Panel | Virtual]`, and while Virtual `Size  [Follow Desk
+    /// Link viewer · 3840×2160 ▾]` (unfolded: Follow and the presets as
+    /// chips), the Custom steppers when the size is fixed, and `Panels
+    /// [Mirror (scaled) | Off]`.
+    fn draw_desktop(&mut self, cx: &mut Cx2d, area: Rect) {
+        let tok = self.tokens;
+        let dim = darker(tok.popups.text, 1.4);
+        let caption_w = 84.0;
+        let virtual_ = self.virtual_desktop();
+        let (row, mut rest) = cut_top(area, CONTROL_H);
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Desktop");
+        let inner = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+        let half = (inner.size.x / 2.0).floor();
+        let panel = rect(inner.pos.x, inner.pos.y, half, inner.size.y);
+        let virt = rect(inner.pos.x + half, inner.pos.y, inner.size.x - half, inner.size.y);
+        self.small_button(cx, panel, virtual_.then_some(Hit::Desktop(false)), !virtual_, None, "Panel");
+        self.small_button(cx, virt, (!virtual_).then_some(Hit::Desktop(true)), virtual_, None, "Virtual");
+        self.virtual_size_targets.clear();
+        let Some(saved) = self.virtual_saved else {
+            self.virtual_size_open = false;
+            return;
+        };
+
+        // Size.
+        let (row, next) = cut_top(rest, CONTROL_H);
+        rest = next;
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Size");
+        let picker = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+        let label = virtual_size_label(&saved, self.display_snapshot.virtual_display.as_ref());
+        let open = self.virtual_size_open;
+        self.picker_face(cx, picker, Some(Hit::VirtualSizePicker), open, &label);
+        if open {
+            let choices = virtual_size_choices(&saved);
+            let (chips, next) = cut_top(rest, choices.len().div_ceil(SIZE_CHIPS) as f64 * CHIP_H);
+            rest = next;
+            let gap = 4.0;
+            let x0 = chips.pos.x + caption_w;
+            let w = ((chips.pos.x + chips.size.x - x0) - gap * (SIZE_CHIPS - 1) as f64) / SIZE_CHIPS as f64;
+            for (i, (label, size, current)) in choices.into_iter().enumerate() {
+                let r = rect(x0 + (i % SIZE_CHIPS) as f64 * (w + gap), chips.pos.y + (i / SIZE_CHIPS) as f64 * CHIP_H + 2.0, w, CHIP_H - 4.0);
+                self.virtual_size_targets.push(size);
+                self.small_button(cx, r, (!current).then_some(Hit::VirtualSizeItem(i)), current, None, &label);
+            }
+        }
+
+        // Custom: width, height and refresh steppers, while the size is fixed.
+        if !saved.follow {
+            let (row, next) = cut_top(rest, CONTROL_H);
+            rest = next;
+            self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Custom");
+            let inner = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+            let gap = 6.0;
+            let group_w = (inner.size.x - gap * 2.0) / 3.0;
+            let fields = [
+                (CustomField::Width, format!("W {}", saved.mode.width)),
+                (CustomField::Height, format!("H {}", saved.mode.height)),
+                (CustomField::Refresh, rate_label(saved.mode.refresh_hz())),
+            ];
+            let button_w = 22.0;
+            for (i, (field, text)) in fields.into_iter().enumerate() {
+                let x = inner.pos.x + i as f64 * (group_w + gap);
+                let minus = rect(x, inner.pos.y, button_w, inner.size.y);
+                let plus = rect(x + group_w - button_w, inner.pos.y, button_w, inner.size.y);
+                self.small_button(cx, minus, Some(Hit::VirtualCustom(field, -1)), false, Some(Ico::ChevronLeft), "");
+                self.small_button(cx, plus, Some(Hit::VirtualCustom(field, 1)), false, Some(Ico::ChevronRight), "");
+                let text_r = rect(x + button_w, inner.pos.y, group_w - 2.0 * button_w, inner.size.y);
+                self.d.label_elided(cx, text_r, false, tok.font.body_small, tok.popups.text, HAlign::Center, &text);
+            }
+        }
+
+        // Panels.
+        let (row, _) = cut_top(rest, CONTROL_H);
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Panels");
+        let inner = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+        let half = (inner.size.x / 2.0).floor();
+        let off = saved.mode.panels == VirtualPanels::Off;
+        let mirror = rect(inner.pos.x, inner.pos.y, half, inner.size.y);
+        let off_r = rect(inner.pos.x + half, inner.pos.y, inner.size.x - half, inner.size.y);
+        self.small_button(cx, mirror, off.then_some(Hit::VirtualPanels(false)), !off, None, "Mirror (scaled)");
+        self.small_button(cx, off_r, (!off).then_some(Hit::VirtualPanels(true)), off, None, "Off");
+    }
+
+    /// `Pace by  [Auto (each screen at its own rate) ▾]`, then, unfolded,
+    /// Auto, Slowest screen, Fastest screen and each screen as chips.
+    fn draw_pace(&mut self, cx: &mut Cx2d, area: Rect) {
+        let tok = self.tokens;
+        let dim = darker(tok.popups.text, 1.4);
+        let snapshot = self.display_snapshot.clone();
+        let (row, rest) = cut_top(area, CONTROL_H);
+        let caption_w = 84.0;
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Pace by");
+        let picker = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+        let open = self.pace_open;
+        self.picker_face(cx, picker, Some(Hit::PacePicker), open, &pacing_label(&snapshot.pacing, &snapshot));
+        self.pace_targets.clear();
+        if !open {
+            return;
+        }
+        let x0 = rest.pos.x;
+        let gap = 4.0;
+        let w = (rest.size.x - gap * (PACE_CHIPS - 1) as f64) / PACE_CHIPS as f64;
+        for (i, pacing) in pacing_choices(&snapshot).into_iter().enumerate() {
+            let r = rect(x0 + (i % PACE_CHIPS) as f64 * (w + gap), rest.pos.y + (i / PACE_CHIPS) as f64 * CHIP_H + 2.0, w, CHIP_H - 4.0);
+            let current = pacing == snapshot.pacing;
+            // Short on the chips; the picker reads the whole choice.
+            let label = match &pacing {
+                DisplayPacing::Auto => "Auto".to_string(),
+                DisplayPacing::Slowest => "Slowest screen".to_string(),
+                DisplayPacing::Fastest => "Fastest screen".to_string(),
+                other => pacing_label(other, &snapshot),
+            };
+            self.pace_targets.push(pacing);
+            self.small_button(cx, r, (!current).then_some(Hit::PaceItem(i)), current, None, &label);
+        }
+    }
+
+    /// `SCALE  2.00× · one for every screen`, then the slider: continuous,
+    /// live while dragged, with ticks at the multiples it snaps to.
+    fn draw_scale(&mut self, cx: &mut Cx2d, rest: Rect) -> Rect {
+        let tok = self.tokens;
+        let dim = darker(tok.popups.text, 1.4);
+        let now = self.dpi_drag.map_or_else(|| self.dpi_hundredths(), |drag| drag.last);
+        let (caption, rest) = cut_top(rest, CAPTION_H);
+        self.d.section_header(cx, caption, &tok, tok.popups.text, "SCALE");
+        let header_w = self.d.measure(cx, true, tok.font.caption, "SCALE") + 10.0;
+        self.d.label_elided(cx, rect(caption.pos.x + header_w, caption.pos.y, (caption.size.x - header_w).max(0.0), caption.size.y),
+            false, tok.font.caption, dim, HAlign::Right,
+            &format!("{:.2}\u{d7} \u{b7} one for all screens: the desktop is one window", now as f64 / 100.0));
+        let (slider, rest) = cut_top(rest, SCALE_SLIDER_H);
+        // Ticks under the track at the snap points, where the knob centre
+        // lands for them (the same usable track as `slider_value`).
+        let track = inset(slider, 6.0);
+        let (x0, w) = (track.pos.x + 6.0, (track.size.x - 12.0).max(1.0));
+        for snap in SCALE_SNAPS {
+            let x = (x0 + dpi_slider_progress(snap) * w).round();
+            let on = snap == now;
+            let mid = slider.pos.y + slider.size.y * 0.5;
+            self.d.solid(cx, rect(x - 0.75, mid + 6.0, 1.5, 5.0), if on { tok.popups.text } else { dim });
+        }
+        self.slider_row(cx, slider, Hit::DpiScaleSlider, dpi_slider_progress(now), true);
+        rest
+    }
+
+    /// `[Mouse & touchpad ›]  [GPU  NVIDIA · nvidia ▾]`, the GPU list when
+    /// unfolded, its status line and the restart row.
+    fn draw_footer(&mut self, cx: &mut Cx2d, rest: Rect) -> Rect {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let dim = darker(fg, 1.4);
+        let direct = self.display_snapshot.direct;
+        let (row, mut rest) = cut_top(rest, PICKER_ROW_H);
+        let half = (row.size.x / 2.0).floor();
+        let pointer = rect(row.pos.x, row.pos.y, half - 3.0, row.size.y);
+        let gpu = rect(row.pos.x + half + 3.0, row.pos.y, row.size.x - half - 3.0, row.size.y);
+        if direct {
+            let hit = Hit::PointerSettings;
+            self.d.cursor_surface(cx, pointer, &tok.controls, self.hot == Some(hit), false);
+            self.d.label_elided(cx, rect(pointer.pos.x + 5.0, pointer.pos.y, (pointer.size.x - 26.0).max(0.0), pointer.size.y),
+                false, tok.font.body_small, fg, HAlign::Left, "Mouse & touchpad");
+            self.d.icon_centered(cx, Ico::ChevronRight,
+                rect(pointer.pos.x + pointer.size.x - 20.0, pointer.pos.y, 16.0, pointer.size.y), 10.0, fg);
+            self.hits.push((hit, pointer));
+        }
+        if !self.gpu_picker {
+            self.gpu_targets.clear();
+            self.gpu_overflow = false;
+        }
+        let hit = Hit::GpuPicker;
+        let value = if direct { self.render_on_saved_label() } else { "Managed by the desktop".into() };
+        if direct {
+            self.d.cursor_surface(cx, gpu, &tok.controls, self.hot == Some(hit), self.gpu_picker);
+        }
+        let caption_w = 30.0;
+        self.d.label(cx, rect(gpu.pos.x + 5.0, gpu.pos.y, caption_w, gpu.size.y), false, tok.font.body_small, dim, HAlign::Left, "GPU");
+        let chevron_w = if direct { 20.0 } else { 4.0 };
+        self.d.label_elided(cx, rect(gpu.pos.x + 5.0 + caption_w, gpu.pos.y, (gpu.size.x - 5.0 - caption_w - chevron_w).max(0.0), gpu.size.y),
+            false, tok.font.body_small, if direct { fg } else { dim }, HAlign::Right, &value);
+        if direct {
+            self.d.icon_centered(cx, Ico::ChevronDown,
+                rect(gpu.pos.x + gpu.size.x - 18.0, gpu.pos.y, 16.0, gpu.size.y), 10.0, fg);
+            self.hits.push((hit, gpu));
+        }
+        if self.gpu_picker {
+            rest = self.draw_gpu_choice_list(cx, rest, "Auto", self.gpu_saved_row(), direct);
+        }
+        if self.gpu_status_shown() {
+            let (line, remaining) = cut_top(rest, GPU_STATUS_H);
+            rest = remaining;
+            let text = format!("Render on, next start: {}", self.render_on_next_label());
+            self.d.label_elided(cx, line, false, tok.font.caption, dim, HAlign::Left, &text);
+        }
+        if self.restart_row_shown() {
+            let (row, remaining) = cut_top(rest, PICKER_ROW_H);
+            rest = remaining;
+            self.draw_restart_row(cx, row);
+        } else {
+            self.restart_confirm = false;
+        }
+        rest
+    }
+
+
+    // ---- the GPU the compositor runs on -----------------------------
+
+    fn gpu_identity_available(&self, identity: &str) -> bool {
+        self.system.gpus.iter().any(|gpu| gpu.matches(identity))
+    }
+
+    /// The render-on list's checked row: the saved choice (Auto, row 0,
+    /// when nothing is saved), or none when the saved GPU is not listed.
+    fn gpu_saved_row(&self) -> usize {
+        match self.render_on_saved.as_deref() {
+            None => 0,
+            Some(identity) => self
+                .system
+                .gpus
+                .iter()
+                .position(|gpu| gpu.matches(identity))
+                .map(|i| i + 1)
+                .unwrap_or(usize::MAX),
+        }
+    }
+
+    /// The saved render-on choice as the person reads it.
+    fn render_on_saved_label(&self) -> String {
+        match self.render_on_saved.as_deref() {
+            None => "Auto".into(),
+            Some(identity) => self
+                .system
+                .gpus
+                .iter()
+                .find(|gpu| gpu.matches(identity))
+                .map(|gpu| gpu.label())
+                .unwrap_or_else(|| "Auto (saved GPU not present)".into()),
+        }
+    }
+
+    /// What the next start renders on, as the status line says it: an
+    /// external `MAKEPAD_VULKAN_COMPOSITOR_*` wins over the saved choice.
+    fn render_on_next_label(&self) -> String {
+        if self.system.gpu_env.is_some() {
+            "set by the environment".into()
+        } else {
+            self.render_on_saved_label()
+        }
+    }
+
+    /// "Restart desktop now" is offered: the saved settings have been read
+    /// (an unread file is not "Auto"), the WM drives the screens, the
+    /// saved render-on GPU is present. Device changes apply at the next start.
+    fn restart_row_shown(&self) -> bool {
+        self.display_snapshot.direct
+            && self.system.display_settings_loaded
+            && saved_gpu_present(self.render_on_saved.as_deref(), &self.system.gpus)
+            && self.system.gpu_env.is_none()
+
+    }
+
+    fn gpu_picker_enabled(&self) -> bool {
+        self.display_snapshot.direct
+    }
+
+    fn gpu_list_open(&self) -> bool {
+        self.gpu_picker
     }
 
     fn draw_pointer_settings(&mut self, cx: &mut Cx2d, body: Rect) {
@@ -701,7 +1302,7 @@ impl ShellPanel {
         let compact = body.size.y < self.pointer_settings_height();
         let (hero, rest) = cut_top(body, if compact { HERO_COMPACT_H } else { HERO_H });
         self.d.panel_hero(cx, hero, &tok, fg, Ico::Monitor, "Mouse & touchpad", "", 0.0);
-        let (sep, rest) = cut_top(rest, SEP_H); self.d.separator(cx, sep, fg, 0.12);
+        let (sep, rest) = cut_top(rest, POINTER_SEP_H); self.d.separator(cx, sep, fg, 0.12);
         let (back, mut rest) = cut_top(rest, PICKER_ROW_H);
         let hit = Hit::PointerSettings;
         self.d.cursor_surface(cx, back, &tok.controls, self.hot == Some(hit), false);
@@ -711,7 +1312,7 @@ impl ShellPanel {
             false, tok.font.body, fg, HAlign::Left, "Back to Display");
         self.hits.push((hit, back));
         for touchpad in [false, true] {
-            let (sep, next) = cut_top(rest, SEP_H); rest = next; self.d.separator(cx, sep, fg, 0.12);
+            let (sep, next) = cut_top(rest, POINTER_SEP_H); rest = next; self.d.separator(cx, sep, fg, 0.12);
             let (header, next) = cut_top(rest, HEADER_H); rest = next;
             let value = pointer_speed(touchpad);
             self.section_header(
@@ -727,6 +1328,11 @@ impl ShellPanel {
                 self.d.label(cx, ends, false, tok.font.caption, dim, HAlign::Left, "Slow");
                 self.d.label(cx, ends, false, tok.font.caption, dim, HAlign::Right, "Fast");
             }
+            // the content follows the wheel or the fingers, as on a Mac (off: traditional)
+            let (row, next) = cut_top(rest, PICKER_ROW_H); rest = next;
+            self.d.label(cx, row, false, tok.font.body, fg, HAlign::Left, "Natural scrolling");
+            self.d.toggle_switch(cx, dvec2(row.pos.x + row.size.x - 48.0, row.pos.y + 4.0), &tok, natural_scroll(touchpad), fg);
+            self.hits.push((Hit::NaturalScroll(touchpad), row));
         }
         let (caption, rest) = cut_top(rest, POINTER_CAPTION_H);
         self.d.label_elided(cx, caption, false, tok.font.caption, dim, HAlign::Left,
@@ -735,31 +1341,6 @@ impl ShellPanel {
             let notice = self.system_notice.clone();
             let (row, _) = cut_top(rest, NOTICE_H);
             self.d.label_elided(cx, row, false, tok.font.caption, fg, HAlign::Left, &notice);
-        }
-    }
-
-    /// One picker row: the caption on the left, the value on the right,
-    /// the chevron and the hit when enabled.
-    #[allow(clippy::too_many_arguments)]
-    fn picker_row(&mut self, cx: &mut Cx2d, row: Rect, hit: Hit, open: bool, enabled: bool,
-        caption: &str, value: &str, color: Vec4f) {
-        let tok = self.tokens;
-        let fg = tok.popups.text;
-        let dim = darker(fg, 1.4);
-        if enabled {
-            self.d.cursor_surface(cx, row, &tok.controls, self.hot == Some(hit), open);
-        }
-        let label_w = 92.0;
-        self.d.label(cx, rect(row.pos.x + 5.0, row.pos.y, label_w, row.size.y),
-            false, tok.font.body_small, dim, HAlign::Left, caption);
-        let chevron_w = if enabled { 26.0 } else { 4.0 };
-        let value_x = row.pos.x + label_w + 5.0;
-        self.d.label_elided(cx, rect(value_x, row.pos.y, (row.pos.x + row.size.x - chevron_w - value_x).max(0.0), row.size.y),
-            false, tok.font.body, color, HAlign::Right, value);
-        if enabled {
-            self.d.icon_centered(cx, Ico::ChevronDown,
-                rect(row.pos.x + row.size.x - 22.0, row.pos.y, 18.0, row.size.y), 12.0, fg);
-            self.hits.push((hit, row));
         }
     }
 
@@ -782,144 +1363,83 @@ impl ShellPanel {
         right
     }
 
-    /// `Optimize for   DP-2 ▾`: the output whose native pixels the shared
-    /// framebuffer is rendered at; every other driven output shows that
-    /// same frame, letterboxed to its aspect. The value is the renderer's
-    /// observed primary, or the name asked for (marked) until the renderer
-    /// confirms it. Disabled, with the reason, when the desktop owns the
-    /// outputs or nothing is driven.
-    fn draw_source_picker(&mut self, cx: &mut Cx2d, rest: Rect, plan: &MonitorPlan) -> Rect {
+    /// "Restart desktop now · apps will close", then, once pressed,
+    /// "Cancel" and "Restart": restarting closes every running app. Once
+    /// confirmed and waiting for the display layout save to land
+    /// (`restart_waiting`), the row shows "Restarting…" instead, with no
+    /// hit: the confirm has already been sent and there is nothing left
+    /// to press until it either restarts (the process exits) or the App
+    /// abandons it (a save failure or timeout, reported in the notice).
+    fn draw_restart_row(&mut self, cx: &mut Cx2d, row: Rect) {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);
-        let snapshot = self.display_snapshot.clone();
-        let eligible: Vec<(String, String, bool)> = self
-            .eligible_sources()
-            .into_iter()
-            .map(|o| (o.name.clone(), display_mode(o), o.primary))
-            .collect();
-        let enabled = !eligible.is_empty();
-        let (row, mut rest) = cut_top(rest, plan.picker_row);
-        let pending = self.display_source_pending.as_ref().map(|(name, _)| name.clone());
-        let (value, color) = if !snapshot.direct {
-            ("Managed by the desktop".to_string(), dim)
-        } else if let Some(name) = pending {
-            (format!("{name}\u{2026}"), tok.bar.active)
-        } else if let Some(primary) = snapshot.outputs.iter().find(|o| o.primary) {
-            (primary.name.clone(), if enabled { fg } else { dim })
-        } else {
-            ("No active output".to_string(), dim)
-        };
-        self.picker_row(cx, row, Hit::SourcePicker, self.source_picker, enabled, "Optimize for", &value, color);
-        self.source_targets.clear();
-        self.source_overflow = false;
-        if self.source_picker && enabled {
-            // As many rows as the plan left room for, scrolled so every
-            // driven output can be reached even when that is one row. The
-            // offset is clamped here, so a changed inventory never leaves
-            // the list past its end.
-            let shown = plan.source_items.min(eligible.len());
-            let hidden = eligible.len() - shown;
-            self.source_overflow = hidden > 0;
-            self.source_scroll = self.source_scroll.min(hidden);
-            let first = self.source_scroll;
-            let after = eligible.len() - first - shown;
-            for (row, (name, mode, primary)) in eligible.iter().skip(first).take(shown).enumerate() {
-                let (item, next) = cut_top(rest, SOURCE_ITEM_H); rest = next;
-                let hit = Hit::Source(row);
-                self.d.cursor_surface(cx, item, &tok.controls, self.hot == Some(hit), *primary);
-                let above = if row == 0 { first } else { 0 };
-                let below = if row + 1 == shown { after } else { 0 };
-                let right = self.list_edge_hint(cx, item, above, below);
-                let text = if mode.is_empty() { name.clone() } else { format!("{name} \u{b7} {mode}") };
-                self.d.label_elided(cx, rect(item.pos.x + 8.0, item.pos.y, (right - item.pos.x - 8.0).max(0.0), item.size.y),
-                    *primary, tok.font.body_small, fg, HAlign::Left, &text);
-                if *primary {
-                    self.d.icon_centered(cx, Ico::Check,
-                        rect(item.pos.x + item.size.x - 22.0, item.pos.y, 18.0, item.size.y), 12.0, fg);
-                }
-                self.source_targets.push(name.clone());
-                self.hits.push((hit, item));
-            }
+        if self.restart_waiting {
+            self.d.icon_centered(cx, Ico::Refresh, rect(row.pos.x, row.pos.y, 22.0, row.size.y), 12.0, dim);
+            self.d.label_elided(cx, rect(row.pos.x + 24.0, row.pos.y, (row.size.x - 28.0).max(0.0), row.size.y),
+                false, tok.font.body_small, dim, HAlign::Left, "Restarting\u{2026}");
+            return;
         }
-        rest
+        if !self.restart_confirm {
+            let hit = Hit::RestartDesktop;
+            self.d.cursor_surface(cx, row, &tok.controls, self.hot == Some(hit), false);
+            self.d.icon_centered(cx, Ico::Refresh, rect(row.pos.x, row.pos.y, 22.0, row.size.y), 12.0, tok.bar.active);
+            self.d.label_elided(cx, rect(row.pos.x + 24.0, row.pos.y, (row.size.x - 28.0).max(0.0), row.size.y),
+                false, tok.font.body_small, tok.bar.active, HAlign::Left, "Restart desktop now \u{b7} apps will close");
+            self.hits.push((hit, row));
+            return;
+        }
+        let button_w = 72.0;
+        let gap = 6.0;
+        let inner = rect(row.pos.x, row.pos.y + 2.0, row.size.x, (row.size.y - 4.0).max(0.0));
+        let restart = rect(inner.pos.x + inner.size.x - button_w, inner.pos.y, button_w, inner.size.y);
+        let cancel = rect(restart.pos.x - gap - button_w, inner.pos.y, button_w, inner.size.y);
+        let caption_w = (cancel.pos.x - gap - inner.pos.x - 5.0).max(0.0);
+        self.d.label_elided(cx, rect(inner.pos.x + 5.0, row.pos.y, caption_w, row.size.y),
+            false, tok.font.body_small, dim, HAlign::Left, "Apps will close");
+        self.small_button(cx, cancel, Some(Hit::RestartCancel), false, None, "Cancel");
+        self.small_button(cx, restart, Some(Hit::RestartConfirm), true, Some(Ico::Refresh), "Restart");
     }
 
-    /// Compositor row (actual renderer), optional app row, and the one
-    /// unfolded GPU list immediately under the row that owns it.
-    fn draw_gpu_picker(&mut self, cx: &mut Cx2d, rest: Rect, plan: &MonitorPlan) -> Rect {
-        if !self.gpu_picker && !self.app_gpu_picker {
-            self.gpu_targets.clear();
-            self.gpu_overflow = false;
-        }
+    /// A small control face: `hit` `None` draws it disabled (no hit),
+    /// `selected` in the chosen state; an icon, a label, or both.
+    pub(super) fn small_button(&mut self, cx: &mut Cx2d, r: Rect, hit: Option<Hit>, selected: bool, icon: Option<Ico>, text: &str) {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);
-        let direct = self.display_snapshot.direct;
-        let enabled = self.gpu_picker_enabled();
-        let now_label = self.gpu_label(self.gpu_now());
-        let (row, mut rest) = cut_top(rest, plan.picker_row);
-        let (value, color) = if !direct {
-            ("Managed by the desktop".to_string(), dim)
-        } else {
-            (now_label.clone(), if enabled { fg } else { dim })
+        let state = match hit {
+            _ if selected => CtrlState::Selected,
+            None => CtrlState::Disabled,
+            Some(hit) if self.hot == Some(hit) => CtrlState::Hover,
+            Some(_) => CtrlState::Normal,
         };
-        self.picker_row(cx, row, Hit::GpuPicker, self.gpu_picker, enabled, "Compositor", &value, color);
-        if self.gpu_picker {
-            rest = self.draw_gpu_choice_list(cx, rest, plan, "Auto", self.gpu_compositor_current_row(), enabled);
-        }
-        if plan.app_gpu_row {
-            if let Some((_, label, policy, _)) = self.gpu_app.clone() {
-                let (row, next) = cut_top(rest, plan.picker_row);
-                rest = next;
-                let gpu = match policy {
-                    None => "Follow compositor".to_string(),
-                    Some(uuid) => self.gpu_label_for_uuid(uuid),
-                };
-                let value = format!("{label}: {gpu}");
-                self.picker_row(
-                    cx,
-                    row,
-                    Hit::AppGpuPicker,
-                    self.app_gpu_picker,
-                    enabled,
-                    "App GPU",
-                    &value,
-                    if enabled { fg } else { dim },
-                );
-                if self.app_gpu_picker {
-                    rest = self.draw_gpu_choice_list(
-                        cx,
-                        rest,
-                        plan,
-                        "Follow compositor",
-                        self.gpu_app_current_row(),
-                        enabled,
-                    );
+        self.d.control(cx, r, &tok.controls, state);
+        let color = if hit.is_some() || selected { fg } else { alpha(dim, 0.6) };
+        match (icon, text.is_empty()) {
+            (Some(icon), true) => self.d.icon_centered(cx, icon, r, 12.0, color),
+            (icon, _) => {
+                let icon_w = if icon.is_some() { 16.0 } else { 0.0 };
+                let text_w = self.d.measure(cx, false, tok.font.body_small, text);
+                let total = (icon_w + text_w).min(r.size.x - 6.0);
+                let x = r.pos.x + ((r.size.x - total) * 0.5).max(3.0);
+                if let Some(icon) = icon {
+                    self.d.icon_centered(cx, icon, rect(x, r.pos.y, 14.0, r.size.y), 11.0, color);
                 }
+                self.d.label_elided(cx, rect(x + icon_w, r.pos.y, (r.pos.x + r.size.x - x - icon_w - 3.0).max(0.0), r.size.y),
+                    false, tok.font.body_small, color, HAlign::Left, text);
             }
         }
-        if plan.gpu_status {
-            let (line, remaining) = cut_top(rest, GPU_STATUS_H);
-            rest = remaining;
-            let text = match &self.gpu_app {
-                Some((.., actual)) => {
-                    format!("Now on {now_label} \u{b7} app: {}", self.gpu_label_for_uuid(*actual))
-                }
-                None => format!("Now on {now_label}"),
-            };
-            self.d.label_elided(cx, line, false, tok.font.caption, dim, HAlign::Left, &text);
+        if let Some(hit) = hit {
+            self.hits.push((hit, r));
         }
-        rest
     }
 
     /// Auto / Follow first, then sysfs GPUs. Checkmark is `current_row`.
-    /// Only snapshot-matched PCI identities are selectable.
+    /// Saved PCI identities are applied by HAL device selection at the next start.
     fn draw_gpu_choice_list(
         &mut self,
         cx: &mut Cx2d,
         rest: Rect,
-        plan: &MonitorPlan,
         follow_label: &str,
         current_row: usize,
         picking: bool,
@@ -931,10 +1451,8 @@ impl ShellPanel {
         let mut items: Vec<(Option<String>, String, bool)> = Vec::with_capacity(1 + gpus.len());
         items.push((None, follow_label.to_string(), true));
         for gpu in &gpus {
-            let selectable = self.gpu_matches_snapshot(gpu);
-            let detail = if !selectable {
-                "not available to Vulkan".to_string()
-            } else if gpu.connected.is_empty() {
+            let selectable = !gpu.pci.is_empty();
+            let detail = if gpu.connected.is_empty() {
                 "no display connected".to_string()
             } else {
                 gpu.connected.join(", ")
@@ -944,7 +1462,7 @@ impl ShellPanel {
         self.gpu_targets.clear();
         self.gpu_overflow = false;
         let mut rest = rest;
-        let shown = plan.gpu_items.min(items.len());
+        let shown = self.gpu_items().min(items.len());
         if shown == 0 {
             return rest;
         }
@@ -954,7 +1472,7 @@ impl ShellPanel {
         let first = self.gpu_scroll;
         let after = items.len() - first - shown;
         for (row, (choice, text, selectable)) in items.iter().skip(first).take(shown).enumerate() {
-            let (item, remaining) = cut_top(rest, SOURCE_ITEM_H);
+            let (item, remaining) = cut_top(rest, LIST_ITEM_H);
             rest = remaining;
             let hit = Hit::Gpu(row);
             let current = first + row == current_row;
@@ -991,126 +1509,6 @@ impl ShellPanel {
         rest
     }
 
-    /// The clone picture when the plan has room, then one row per
-    /// connected output. The rows that do not fit scroll under the wheel;
-    /// the notice line's room is already kept out of the plan.
-    fn draw_displays(&mut self, cx: &mut Cx2d, rest: Rect, plan: &MonitorPlan) -> Rect {
-        let snapshot = self.display_snapshot.clone();
-        let mut rest = rest;
-        if plan.picture {
-            let active: Vec<&LinuxDisplayOutput> = snapshot.outputs.iter().filter(|o| o.active).collect();
-            if !active.is_empty() {
-                let (picture, next) = cut_top(rest, DISPLAY_PICTURE_H);
-                rest = next;
-                self.draw_clone_picture(cx, picture, &active);
-            }
-        }
-        if snapshot.outputs.is_empty() {
-            self.display_overflow = false;
-            self.display_scroll = 0;
-            if plan.rows == 0 {
-                return rest;
-            }
-            let (row, next) = cut_top(rest, DISPLAY_ROW_H);
-            self.unavailable(cx, row, if snapshot.direct { "No connected output" }
-                else { "The desktop owns the outputs; the scale above still applies" });
-            return next;
-        }
-        let rows = snapshot.outputs.len();
-        let visible = plan.rows.min(rows);
-        self.display_overflow = visible > 0 && rows > visible;
-        self.display_scroll = self.display_scroll.min(rows - visible);
-        for output in snapshot.outputs.iter().skip(self.display_scroll).take(visible) {
-            let (row, next) = cut_top(rest, DISPLAY_ROW_H);
-            rest = next;
-            self.draw_display_row(cx, row, output);
-        }
-        rest
-    }
-
-    /// `[icon] name … 3840×2160 · 240 Hz  Primary` — the mode is the native
-    /// one the renderer selected; the trailing word is Primary (the source
-    /// the frame is rendered for), Cloned, or the renderer's own reason an
-    /// output is not driven.
-    fn draw_display_row(&mut self, cx: &mut Cx2d, row: Rect, output: &LinuxDisplayOutput) {
-        let tok = self.tokens;
-        let fg = tok.popups.text;
-        let dim = darker(fg, 1.4);
-        let (status, color) = if output.active {
-            (if output.primary { "Primary" } else { "Cloned" }.to_string(), fg)
-        } else if output.status.is_empty() {
-            ("Inactive".to_string(), dim)
-        } else {
-            (output.status.clone(), tok.bar.active)
-        };
-        let text = if output.active { fg } else { dim };
-        let icon_w = 22.0;
-        self.d.icon_centered(cx, Ico::Monitor, rect(row.pos.x, row.pos.y, icon_w, row.size.y), 14.0, text);
-        let mut right = row.pos.x + row.size.x;
-        let status_w = self.d.measure(cx, false, tok.font.body_small, &status).min(row.size.x * 0.4);
-        self.d.label_elided(cx, rect(right - status_w, row.pos.y, status_w, row.size.y),
-            false, tok.font.body_small, color, HAlign::Right, &status);
-        right -= status_w + 10.0;
-        let mode = display_mode(output);
-        if !mode.is_empty() {
-            let mode_w = self.d.measure(cx, false, tok.font.caption, &mode).min(row.size.x * 0.4);
-            self.d.label_elided(cx, rect(right - mode_w, row.pos.y, mode_w, row.size.y),
-                false, tok.font.caption, dim, HAlign::Right, &mode);
-            right -= mode_w + 10.0;
-        }
-        let name_x = row.pos.x + icon_w + 6.0;
-        self.d.label_elided(cx, rect(name_x, row.pos.y, (right - name_x).max(0.0), row.size.y),
-            output.primary, tok.font.body, text, HAlign::Left, &output.name);
-    }
-
-    /// The clone arrangement: every driven output as a card at its own
-    /// aspect, the source (primary) in front and the clones stacked behind
-    /// it — one logical desktop, so they overlap rather than sit side by
-    /// side — with a caption saying so.
-    fn draw_clone_picture(&mut self, cx: &mut Cx2d, area: Rect, active: &[&LinuxDisplayOutput]) {
-        let tok = self.tokens;
-        let fg = tok.popups.text;
-        let dim = darker(fg, 1.4);
-        let primary = active.iter().position(|o| o.primary).unwrap_or(0);
-        let behind = active.len().saturating_sub(1);
-        let step = 8.0;
-        let rise = 5.0;
-        let max_h = (area.size.y - 8.0 - behind as f64 * rise).max(20.0);
-        let max_w = 96.0;
-        let card_size = |o: &LinuxDisplayOutput| {
-            let aspect = if o.width > 0 && o.height > 0 { o.width as f64 / o.height as f64 } else { 16.0 / 9.0 };
-            let (mut w, mut h) = (max_h * aspect, max_h);
-            if w > max_w {
-                w = max_w;
-                h = w / aspect;
-            }
-            (w.floor().max(12.0), h.floor().max(8.0))
-        };
-        let (pw, ph) = card_size(active[primary]);
-        let x0 = area.pos.x + 4.0;
-        let bottom = area.pos.y + area.size.y - 4.0;
-        // Back to front: the farthest clone first, the source last.
-        let order: Vec<usize> = (0..active.len()).filter(|i| *i != primary).chain(std::iter::once(primary)).collect();
-        for (depth, index) in order.iter().enumerate() {
-            let (w, h) = if *index == primary { (pw, ph) } else { card_size(active[*index]) };
-            let k = (behind - depth.min(behind)) as f64;
-            let r = rect(x0 + k * step, bottom - h - k * rise, w, h);
-            let state = if *index == primary { CtrlState::Selected } else { CtrlState::Normal };
-            let border = tok.controls.border(state);
-            self.d.bordered(cx, r, tok.controls.fill(state), border, border, 0.0, 1.0);
-        }
-        let caption_x = x0 + pw + behind as f64 * step + 14.0;
-        let caption = rect(caption_x, area.pos.y, (area.pos.x + area.size.x - caption_x).max(0.0), area.size.y);
-        let (line1, line2) = cut_top(rect(caption.pos.x, caption.pos.y + 8.0, caption.size.x, caption.size.y - 8.0), 22.0);
-        let (title, body) = if active.len() >= 2 {
-            ("Clone displays", "Rendered for the source above, shown on every output")
-        } else {
-            ("One display", "A second output would show this desktop too")
-        };
-        self.d.label_elided(cx, line1, true, tok.font.body_small, fg, HAlign::Left, title);
-        self.d.label_elided(cx, rect(line2.pos.x, line2.pos.y, line2.size.x, 18.0), false, tok.font.caption, dim, HAlign::Left, body);
-    }
-
     pub(super) fn draw_power(&mut self, cx: &mut Cx2d, body: Rect) {
         let tok = self.tokens;
         let fg = tok.popups.text;
@@ -1141,42 +1539,56 @@ impl ShellPanel {
 
     pub(super) fn system_summary(&self) -> String {
         let s = &self.system;
-        let mut text = format!("panel={:?} output_volume={:?} input_volume={:?} brightness={:?} battery={:?} charging={:?} notice={}",
+        let mut text = format!("panel={:?} output_volume={:?} input_volume={:?} battery={:?} charging={:?} notice={}",
             self.open, s.audio.default_output().map(|d| d.percent), s.audio.default_input().map(|d| d.percent),
-            s.brightness.percent(), s.power.percent, s.power.status, self.system_notice);
+            s.power.percent, s.power.status, self.system_notice);
         for (direction, devices) in [("output", &s.audio.outputs), ("input", &s.audio.inputs)] {
             for device in devices {
                 text.push_str(&format!("\n{direction}: {} default={} muted={}", device.label, device.is_default, device.muted));
             }
         }
-        // The Display dropdown's scale and outputs: the actual window
-        // scale, the held preview, the saved settings, and the renderer's
-        // snapshot as shown — with the source and GPU selections' state.
+        // The Display dropdown: the actual window scale, the saved settings,
+        // the renderer's snapshot as shown, the change being tried and the
+        // notes, with the screen rows and the chips as drawn.
         let d = &self.display_snapshot;
-        let eligible: Vec<String> = self.eligible_sources().into_iter().map(|o| o.name.clone()).collect();
+        let t = &self.display_trials;
         text.push_str(&format!(
-            "\ndpi={:.2} dpi_hundredths={} dpi_preview={:?} dpi_saved={:?} display_settings_loaded={} display_direct={} display_outputs={} display_status={} display_scroll={} display_overflow={}",
-            self.current_dpi, self.dpi_hundredths(), self.dpi_preview, s.dpi_scale, s.display_settings_loaded,
-            d.direct, d.outputs.len(), self.display_status(), self.display_scroll, self.display_overflow
+            "\ndpi={:.2} dpi_hundredths={} dpi_saved={:?} display_settings_loaded={} display_direct={} display_outputs={} display_status={} arrangement={:?} arrangement_shown={:?}",
+            self.current_dpi, self.dpi_hundredths(), s.dpi_scale, s.display_settings_loaded,
+            d.direct, d.outputs.len(), self.display_status(), d.arrangement, self.arrangement_shown()
         ));
         text.push_str(&format!(
-            "\nsource={:?} source_pending={:?} source_saved={:?} source_picker={} source_eligible={:?} source_scroll={} source_overflow={} source_rows={:?}",
+            "\ntrial={:?} seconds_left={:?} restoring={:?} notes={:?}",
+            t.trial.as_ref().map(|t| (&t.change, &t.previous, &t.phase)), t.seconds_left(self.display_now), t.restoring, t.notes
+        ));
+        text.push_str(&format!(
+            "\npacing={:?} paced_by={:?} pace_label={:?} pace_shown={} pace_open={} pace_targets={:?}",
+            d.pacing, d.paced_by, pacing_label(&d.pacing, d), self.pace_shown(), self.pace_open, self.pace_targets
+        ));
+        text.push_str(&format!(
+            "\nmain={:?} main_pending={:?} main_saved={:?} screen_rows={:?} screens_placed={} screens_span_gpus={} chooser={:?} chooser_changes={:?}",
             d.outputs.iter().find(|o| o.primary).map(|o| o.name.as_str()),
             self.display_source_pending.as_ref().map(|(name, _)| name.as_str()),
-            s.display_source, self.source_picker, eligible, self.source_scroll, self.source_overflow, self.source_targets
+            s.display_layout.main_name(d), self.screen_targets, self.screen_placed, screens_span_gpus(d),
+            self.chooser, self.chooser_changes
         ));
+        let (order, placed) = screen_rows(d);
+        for (row, &index) in order.iter().enumerate() {
+            let output = &d.outputs[index];
+            let (status, _) = self.screen_status(output);
+            let (left, right) = self.screen_moves(row, placed);
+            let shown = shown_mode(output, self.mode_shown(output));
+            text.push_str(&format!(
+                "\nscreen: {row} {} title={:?} gpu={} status={:?} position={:?} main={} move_left={} move_right={} shown={:?} mode_shown={:?} mode_override={:?} resolutions={} rates_here={}",
+                output.name, screen_title(output), self.screen_gpu_label(output), status, output.desktop_position, output.primary,
+                left, right, shown, self.mode_shown(output), output.mode_override, resolutions(&output.modes, native_resolution(output)).len(),
+                shown.map_or(0, |(w, h, _)| rates_for(&output.modes, w, h).len())
+            ));
+        }
         text.push_str(&format!(
-            "\ngpu_now={:?} gpu_busy={} gpu_picker={} app_gpu_picker={} gpu_picker_enabled={} gpu_scroll={} gpu_overflow={} gpu_rows={:?} gpu_target_client={:?} gpu_app={:?}",
-            self.gpu_now().map(|i| s.gpus[i].card.as_str()),
-            self.gpu_busy, self.gpu_picker, self.app_gpu_picker, self.gpu_picker_enabled(),
-            self.gpu_scroll, self.gpu_overflow, self.gpu_targets, self.gpu_target_client,
-            self.gpu_app.as_ref().map(|(id, label, policy, actual)| (id, label.as_str(), policy.is_some(), gpu_uuid_hex(actual)))
-        ));
-        text.push_str(&format!(
-            "\ngpu_renderer_uuid={:?} gpu_renderer_generation={} gpu_display_uuid={:?}",
-            self.gpu_snapshot.renderer.as_ref().map(|r| gpu_uuid_hex(&r.uuid)),
-            self.gpu_snapshot.renderer_generation,
-            self.gpu_snapshot.display.as_ref().map(|d| gpu_uuid_hex(&d.uuid)),
+            "\nrender_on_saved={:?} render_on_next={:?} gpu_env={:?} restart_row={} restart_confirm={} restart_waiting={} gpu_picker={} gpu_scroll={} gpu_rows={:?}",
+            self.render_on_saved, self.render_on_next_label(), s.gpu_env, self.restart_row_shown(),
+            self.restart_confirm, self.restart_waiting, self.gpu_picker, self.gpu_scroll, self.gpu_targets
         ));
         text.push_str(&format!(
             "\npointer_settings={} pointer_speed_mouse={} pointer_speed_touchpad={} pointer_saved={:?} input_settings_loaded={}",
@@ -1203,33 +1615,83 @@ impl ShellPanel {
     }
 }
 
-/// `GpuInfo.vendor` / `device` are sysfs hex without `0x` (lowercase).
-fn parse_pci_id(s: &str) -> Option<u32> {
-    u32::from_str_radix(s, 16).ok()
-}
 
-fn gpu_vendor_device_match(gpu: &GpuInfo, device: &LinuxGpuDevice) -> bool {
-    parse_pci_id(&gpu.vendor) == Some(device.vendor_id)
-        && parse_pci_id(&gpu.device) == Some(device.device_id)
-}
-
-fn gpu_uuid_hex(uuid: &[u8; 16]) -> String {
-    uuid.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// `3840×2160 · 240 Hz`, with the refresh to two places only when it is
-/// not a whole number; empty when the renderer reported no mode.
-fn display_mode(output: &LinuxDisplayOutput) -> String {
-    if output.width == 0 || output.height == 0 {
-        return String::new();
+/// Whether the saved render-on choice (`saved`, `None` for Auto, an
+/// identity `<pci> <vendor>:<device>` otherwise) is not what renders now:
+/// `running` is the renderer's identity, `running_is_display` whether it
+/// is the display GPU (what Auto picks). Unknown means not different, so
+/// a restart is never offered on a guess.
+#[cfg(test)]
+fn next_start_differs(saved: Option<&str>, running: Option<&str>, running_is_display: Option<bool>) -> bool {
+    match saved {
+        None => running_is_display == Some(false),
+        Some(saved) => running.is_some_and(|running| running != saved),
     }
-    let hz = output.refresh_hz;
-    let refresh = if !hz.is_finite() || hz <= 0.0 {
-        String::new()
-    } else if (hz - hz.round()).abs() < 0.05 {
-        format!(" · {:.0} Hz", hz)
-    } else {
-        format!(" · {:.2} Hz", hz)
-    };
-    format!("{}×{}{}", output.width, output.height, refresh)
+}
+
+/// Whether the saved render-on choice can take effect at the next start:
+/// Auto always can; a GPU only while a listed card matches its identity.
+fn saved_gpu_present(saved: Option<&str>, gpus: &[GpuInfo]) -> bool {
+    saved.map_or(true, |identity| gpus.iter().any(|gpu| gpu.matches(identity)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_start_differs_only_when_known_and_different() {
+        let a = "0000:00:02.0 8086:a780";
+        let b = "0000:01:00.0 10de:2b85";
+        assert!(!next_start_differs(Some(a), Some(a), Some(false)));
+        assert!(next_start_differs(Some(b), Some(a), Some(true)));
+        // Auto is the display GPU.
+        assert!(!next_start_differs(None, Some(a), Some(true)));
+        assert!(next_start_differs(None, Some(b), Some(false)));
+        // Nothing known about the renderer: never offer a restart.
+        assert!(!next_start_differs(Some(b), None, None));
+        assert!(!next_start_differs(None, None, None));
+    }
+
+    #[test]
+    fn restart_only_for_a_saved_gpu_that_is_present() {
+        let gpu = GpuInfo {
+            card: "card1".into(),
+            pci: "0000:01:00.0".into(),
+            vendor: "10de".into(),
+            device: "2b85".into(),
+            driver: "nvidia".into(),
+            connected: Vec::new(),
+        };
+        assert!(saved_gpu_present(None, &[]));
+        assert!(saved_gpu_present(Some("0000:01:00.0 10de:2b85"), std::slice::from_ref(&gpu)));
+        // Moved card or another model at that address: the next start
+        // falls back to Auto, so a restart would change nothing.
+        assert!(!saved_gpu_present(Some("0000:02:00.0 10de:2b85"), std::slice::from_ref(&gpu)));
+        assert!(!saved_gpu_present(Some("0000:01:00.0 10de:2b84"), &[gpu]));
+    }
+
+    #[test]
+    fn the_scale_slider_maps_device_pixels_to_hundredths() {
+        assert_eq!(dpi_from_slider(0.0), 100);
+        assert_eq!(dpi_from_slider(1.0), 300);
+        assert_eq!(dpi_from_slider(0.5), 200);
+        assert_eq!(dpi_from_slider(-1.0), 100);
+        assert!((dpi_slider_progress(200) - 0.5).abs() < 1e-9);
+        assert_eq!(dpi_slider_progress(50), 0.0);
+        // A track 400 px wide from x = 1000: the same hand position gives the
+        // same scale whatever the window's scale did meanwhile.
+        assert_eq!(dpi_at(1000.0, 1000.0, 400.0), 100);
+        assert_eq!(dpi_at(1200.0, 1000.0, 400.0), 200);
+        assert_eq!(dpi_at(1500.0, 1000.0, 400.0), 300);
+        assert_eq!(dpi_at(1100.0, 1000.0, 400.0), 150);
+        // Near a multiple the slider snaps onto it; between them it is continuous.
+        assert_eq!(snap_dpi(197), 200);
+        assert_eq!(snap_dpi(204), 200);
+        assert_eq!(snap_dpi(205), 205);
+        assert_eq!(snap_dpi(175), 175);
+        assert_eq!(snap_dpi(128), 125);
+        assert_eq!(dpi_at(1195.0, 1000.0, 400.0), 200);
+        assert_eq!(dpi_at(1180.0, 1000.0, 400.0), 190);
+    }
 }

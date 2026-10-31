@@ -26,6 +26,7 @@
 //! activates, a click outside the card cancels, and the wheel scrolls.
 
 use makepad_widgets::*;
+use makepad_app_host::ClientId;
 use makepad_widgets::app_icon::AppIconDraw;
 use crate::desktop::DesktopStyle;
 
@@ -66,6 +67,8 @@ pub struct MenuItem {
     pub kind: MenuKind,
     /// Appends " ✓" to the label.
     pub checked: bool,
+    /// A divider line is drawn above this row when browsing.
+    pub divider: bool,
     /// Drawn at α .4, skipped by the cursor, ignores clicks.
     pub disabled: bool,
     pub description: String,
@@ -80,6 +83,7 @@ impl MenuItem {
             icon: None,
             kind,
             checked: false,
+            divider: false,
             disabled: false,
             description: String::new(),
             aliases: Vec::new(),
@@ -87,6 +91,10 @@ impl MenuItem {
     }
     fn icon(mut self, ico: Ico) -> Self {
         self.icon = Some(ico);
+        self
+    }
+    fn divided(mut self) -> Self {
+        self.divider = true;
         self
     }
     fn aliases(mut self, a: &[&str]) -> Self {
@@ -190,6 +198,8 @@ pub fn omarchy_tree() -> Vec<MenuItem> {
         ("hyprland", "Hyprland"),
         ("screensaver", "Screensaver"),
         ("about", "About"),
+        ("vr", "VR Mode"),
+        ("vr-recenter", "VR Recenter"),
     ] {
         child("style", leaf, label, MenuKind::Action);
     }
@@ -298,6 +308,20 @@ pub fn omarchy_tree() -> Vec<MenuItem> {
             &["bar", "top bar"],
             "Show or hide the top bar",
         ),
+        (
+            "style.vr",
+            MenuKind::Action,
+            Some(Ico::Monitor),
+            &["vr", "3d", "headset", "stereo"],
+            "Windows as panels in 3D (SUPER+ALT+V)",
+        ),
+        (
+            "style.vr-recenter",
+            MenuKind::Action,
+            Some(Ico::Monitor),
+            &["recenter"],
+            "VR: look straight ahead again (SUPER+ALT+Home)",
+        ),
         ("apps", MenuKind::Menu, Some(Ico::Menu), &[], ""),
     ];
     for (id, kind, ico, aliases, desc) in live {
@@ -322,6 +346,8 @@ pub fn omarchy_tree() -> Vec<MenuItem> {
         "style.theme",
         "style.background",
         "style.bar",
+        "style.vr",
+        "style.vr-recenter",
         "system",
     ];
     for item in v.iter_mut() {
@@ -429,6 +455,21 @@ pub struct MenuModel {
     /// What the `apps` provider may list (apps.rs); the host sets it from
     /// its registry at startup.
     pub launchable: crate::apps::Launchable,
+    /// The apps the dock had no room for, listed under the `dock` path as
+    /// `dock.<app>` rows.
+    dock_rest: Vec<MenuItem>,
+    /// A snapshot of the running windows belonging to a right-clicked dock item.
+    window_menu: Vec<MenuItem>,
+    /// Whether the dock hides itself (the Theme menu's check row).
+    pub dock_autohide: bool,
+    /// Warp shelves on (the Warp desktop) or off (Classic).
+    pub warp_shelves: bool,
+    /// Which shelves (left, right) auto-hide.
+    pub shelf_autohide: [bool; 2],
+    pub tap_to_click: bool,
+    /// `Some(dark)` when the current style has a dark variant: the Theme
+    /// menu then offers the appearance row.
+    pub dark_choice: Option<bool>,
 }
 
 impl Default for MenuModel {
@@ -445,6 +486,13 @@ impl Default for MenuModel {
             items: Vec::new(),
             frozen_top: None,
             launchable: Default::default(),
+            dock_rest: Vec::new(),
+            window_menu: Vec::new(),
+            dock_autohide: false,
+            tap_to_click: false,
+            warp_shelves: true,
+            shelf_autohide: [false; 2],
+            dark_choice: None,
         }
     }
 }
@@ -483,13 +531,13 @@ impl MenuModel {
             ] {items.push(MenuItem::new(id,label,kind).icon(icon));}
         }
         items.extend(launcher::apps(launchable));
-        items.push(MenuItem::new("desktop","Desktop style",MenuKind::Menu));
-        // One row per style. Dark or light is the appearance toggle's to
+        items.push(MenuItem::new("desktop","Theme",MenuKind::Menu));
+        // One row per sheet of the catalogue. Dark or light is the appearance toggle's to
         // say, not a second row here, and the black-orange theme is not
         // offered from this menu.
-        for style in crate::desktop::DesktopStyle::ALL {
-            if style == crate::desktop::DesktopStyle::BlackOrange { continue; }
-            items.push(MenuItem::new(&format!("desktop.{}",style.id()),style.label(),MenuKind::Action));
+        for entry in makepad_widgets::desktop_style::picks() {
+            if entry.id == crate::desktop::DesktopStyle::BlackOrange.id() { continue; }
+            items.push(MenuItem::new(&format!("desktop.{}",entry.id),entry.label,MenuKind::Action));
         }
         if path.starts_with("style.theme") {
             items.extend(theme_items());
@@ -498,6 +546,75 @@ impl MenuModel {
             items.extend(key_items());
         }
         items
+    }
+
+    /// The menu tree plus, under `dock`, the apps the dock had no room for.
+    fn items_for(&self, path: &str) -> Vec<MenuItem> {
+        let mut items = Self::all_items(path, &self.launchable);
+        if path.starts_with("desktop") {
+            if let Some(dark) = self.dark_choice {
+                let mut row = MenuItem::new("desktop.appearance", "Dark mode", MenuKind::Action);
+                row.checked = dark;
+                items.push(row);
+            }
+            let mut row = MenuItem::new("desktop.autohide-dock", "Auto-hide dock", MenuKind::Action).divided();
+            row.checked = self.dock_autohide;
+            items.push(row);
+            for (id, label) in [
+                ("desktop.window-maximise", "Maximise window"),
+                ("desktop.window-fullscreen", "Fullscreen window"),
+                ("desktop.window-restore", "Restore window"),
+            ] {
+                let row = MenuItem::new(id, label, MenuKind::Action);
+                items.push(if id == "desktop.window-maximise" { row.divided() } else { row });
+            }
+            for (id, label, on) in [
+                ("desktop.warp-shelves", "Warp shelves", self.warp_shelves),
+                ("desktop.autohide-left-shelf", "Hide left shelf", self.shelf_autohide[0]),
+                ("desktop.autohide-right-shelf", "Hide right shelf", self.shelf_autohide[1]),
+            ] {
+                let mut row = MenuItem::new(id, label, MenuKind::Action);
+                row.checked = on;
+                items.push(row);
+            }
+            // The direct backend reads the touchpad itself; elsewhere the OS owns the choice.
+            // (Natural scrolling lives with the devices: Display > Mouse & touchpad.)
+            if cfg!(target_os = "linux") {
+                let mut row = MenuItem::new("desktop.tap-to-click", "Tap to click", MenuKind::Action).divided();
+                row.checked = self.tap_to_click;
+                items.push(row);
+            }
+        }
+        if path.starts_with("dock") {
+            items.push(MenuItem::new("dock", "More apps", MenuKind::Menu));
+            items.extend(self.dock_rest.iter().cloned());
+        }
+        if path == "window-menu" {
+            items.extend(self.window_menu.iter().cloned());
+        }
+        items
+    }
+
+    pub fn open_window_menu(&mut self, windows: &[(ClientId, String)]) {
+        self.window_menu = windows.iter().map(|(client, title)| {
+            MenuItem::new(&format!("window-menu.show:{client}"), title, MenuKind::Action).icon(Ico::Monitor)
+        }).collect();
+        let clients = windows.iter().map(|(client, _)| client.to_string()).collect::<Vec<_>>().join(",");
+        let label = if windows.len() == 1 { "Close" } else { "Close All Windows" };
+        self.window_menu.push(MenuItem::new(&format!("window-menu.close:{clients}"), label, MenuKind::Action).icon(Ico::Close).divided());
+        self.open_at("window-menu", MenuSkin::Menu);
+    }
+
+    /// Opens the list of the apps the dock had no room for (`apps.<id>` items).
+    pub fn open_dock_rest(&mut self, rest: Vec<MenuItem>) {
+        self.dock_rest = rest
+            .into_iter()
+            .map(|mut item| {
+                item.id = format!("dock.{}", item.id.trim_start_matches("apps."));
+                item
+            })
+            .collect();
+        self.open_at("dock", MenuSkin::Launcher);
     }
 
     pub fn open_at(&mut self, path: &str, skin: MenuSkin) {
@@ -509,7 +626,7 @@ impl MenuModel {
         self.sel = 0;
         self.scroll = 0;
         self.frozen_top = None;
-        self.items = Self::all_items(path, &self.launchable);
+        self.items = self.items_for(path);
         self.rebuild();
     }
 
@@ -527,7 +644,7 @@ impl MenuModel {
         self.filter.clear();
         self.sel = 0;
         self.scroll = 0;
-        self.items = Self::all_items(&self.path, &self.launchable);
+        self.items = self.items_for(&self.path);
         self.rebuild();
     }
 
@@ -536,7 +653,7 @@ impl MenuModel {
         if let Some((path, sel)) = self.stack.pop() {
             self.path = path;
             self.filter.clear();
-            self.items = Self::all_items(&self.path, &self.launchable);
+            self.items = self.items_for(&self.path);
             self.rebuild();
             self.sel = sel.min(self.rows.len().saturating_sub(1));
             return true;
@@ -551,7 +668,7 @@ impl MenuModel {
         self.path = parent;
         self.filter.clear();
         self.sel = 0;
-        self.items = Self::all_items(&self.path, &self.launchable);
+        self.items = self.items_for(&self.path);
         self.rebuild();
         true
     }
@@ -601,7 +718,7 @@ impl MenuModel {
         if needle.is_empty() {
             // Browse: direct children, in declared order.
             for item in items.iter().filter(|i| i.parent() == path) {
-                rows.push(self.row_for(item, String::new(), false));
+                rows.push(self.row_for(item, String::new(), item.divider));
             }
         } else {
             // Live search over the open submenu's SUBTREE, scored.
@@ -868,6 +985,84 @@ impl PointerGate {
     }
 }
 
+/// What the menu card's placement depends on, besides the screen.
+pub(crate) struct MenuCardSpec<'a> {
+    /// A top-bar selector's module rect (the compact dropdown).
+    pub anchor: Option<Rect>,
+    pub style: DesktopStyle,
+    pub filter_empty: bool,
+    pub row_height: f64,
+    /// One entry per row: whether a divider follows it.
+    pub dividers: &'a [bool],
+    pub empty_block_h: f64,
+    pub panel_padding: f64,
+    pub gaps_out: f64,
+    pub frozen_top: Option<f64>,
+}
+
+/// Total height of the first `n` rows (`row_height` each, spacing between,
+/// plus their dividers).
+pub(crate) fn rows_height_of(row_height: f64, dividers: &[bool], n: usize) -> f64 {
+    let d = dividers.iter().take(n).filter(|d| **d).count() as f64;
+    if n == 0 {
+        0.0
+    } else {
+        n as f64 * row_height + (n as f64 - 1.0) * ROW_SPACING + d * DIVIDER_HEIGHT
+    }
+}
+
+/// The menu card rect inside `screen` (the overlay, or the active screen's
+/// rect on a multi-screen desktop), and how many rows fit in it.
+pub(crate) fn menu_card_layout(spec: &MenuCardSpec, screen: Rect) -> (Rect, usize) {
+    if let Some(anchor) = spec.anchor {
+        let width = 248.0f64.min((screen.size.x - 12.0).max(1.0));
+        let top = (anchor.pos.y + anchor.size.y + 4.0).max(screen.pos.y + 4.0);
+        let available = (screen.pos.y + screen.size.y - top - 6.0).max(1.0);
+        let visible = (((available - 12.0) / (spec.row_height + ROW_SPACING)).floor() as usize)
+            .max(1).min(spec.dividers.len().max(1));
+        let height = (12.0 + rows_height_of(spec.row_height, spec.dividers, visible)).min(available);
+        let left = anchor.pos.x.clamp(screen.pos.x + 6.0, (screen.pos.x + screen.size.x - width - 6.0).max(screen.pos.x + 6.0));
+        return (rect(left, top, width, height), visible);
+    }
+    let classic=spec.style==DesktopStyle::Windows2000;
+    let next=spec.style==DesktopStyle::NextStep;
+    let pad = if classic || next {3.0}else{spec.panel_padding};
+    let header_h=if classic && spec.filter_empty {0.0}else{HEADER_HEIGHT+HEADER_GAP};
+    let gaps_out = spec.gaps_out;
+    let chrome = pad * 2.0 + header_h;
+    let max_h = (screen.size.y * MAX_HEIGHT_FRACTION).min(screen.size.y - gaps_out * 2.0);
+    let avail = (max_h - chrome).max(spec.row_height);
+    let rh = spec.row_height;
+    let full = (((avail + ROW_SPACING) / (rh + ROW_SPACING)).floor() as usize).max(1);
+    let visible = full.min(spec.dividers.len().max(1));
+    let clipped = spec.dividers.len() > visible;
+    let list_h = if spec.dividers.is_empty() {
+        // The rows area collapses to exactly the empty-state block —
+        // never the zero it fell out to before, never a full page.
+        spec.empty_block_h
+    } else if clipped {
+        rows_height_of(spec.row_height, spec.dividers, visible) + ROW_PEEK
+    } else {
+        rows_height_of(spec.row_height, spec.dividers, spec.dividers.len())
+    };
+    let height = (chrome + list_h).min(max_h);
+    let x = (screen.pos.x + (screen.size.x - CARD_WIDTH) * 0.5).floor();
+    let y = match spec.frozen_top {
+        Some(top) => top,
+        None => (screen.pos.y + (screen.size.y - height) * 0.5)
+            .max(screen.pos.y + gaps_out)
+            .floor(),
+    };
+    let (x,y)=match spec.style {
+        crate::desktop::DesktopStyle::Windows2000=>(screen.pos.x+3.0,screen.pos.y+screen.size.y-height-34.0),
+        crate::desktop::DesktopStyle::Windows=>(x,screen.pos.y+screen.size.y-height-66.0),
+        crate::desktop::DesktopStyle::Macos=>(x,screen.pos.y+screen.size.y-height-98.0),
+        DesktopStyle::NextStep=>(screen.pos.x+10.0,screen.pos.y+42.0),
+        _=>(x,y),
+    };
+    (rect(x.max(screen.pos.x),y.max(screen.pos.y+4.0),(if classic || next {244.0}else{CARD_WIDTH}).min(screen.size.x),height),visible)
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct ShellMenu {
     #[rust] app_icons: AppIconDraw,
@@ -901,6 +1096,11 @@ pub struct ShellMenu {
     /// A top-bar selector uses the menu rows as a compact anchored dropdown.
     #[rust]
     pub anchor: Option<Rect>,
+    /// Where the surface draws instead of the whole overlay: the screen it
+    /// was opened on, on a multi-screen desktop (set by the WM before each
+    /// draw). `None` draws across the overlay, as on one screen.
+    #[rust]
+    pub target: Option<Rect>,
     #[rust]
     touch_press: Option<(u64, Vec2d, Vec2d)>,
     #[rust]
@@ -915,6 +1115,17 @@ pub struct ShellMenu {
 }
 
 impl ShellMenu {
+    pub fn open_window_menu(&mut self, cx: &mut Cx, windows: &[(ClientId, String)], cursor: Vec2d) {
+        self.touch_press = None;
+        self.model.open_window_menu(windows);
+        // Dock menus open above the pointer; the normal anchored card clamps horizontally.
+        let height = 12.0 + self.rows_height(self.model.rows.len());
+        self.anchor = Some(Rect { pos: cursor - dvec2(0.0, height + 8.0), size: dvec2(0.0, 0.0) });
+        self.next = nextstep::NextMenus::default();
+        self.gate.reset();
+        self.redraw(cx);
+    }
+
     fn skin(&self) -> MenuTokens {
         let mut skin=match self.model.skin { MenuSkin::Menu=>self.tokens.menu, MenuSkin::Launcher=>self.tokens.launcher };
         if self.anchor.is_some() { skin.scrim_alpha = 0.0; return skin; }
@@ -939,6 +1150,15 @@ impl ShellMenu {
             }
         }
         skin
+    }
+
+    pub fn open_dock_rest(&mut self, cx: &mut Cx, rest: Vec<MenuItem>) {
+        self.anchor = None;
+        self.touch_press = None;
+        self.model.open_dock_rest(rest);
+        self.next = nextstep::NextMenus::default();
+        self.gate.reset();
+        self.redraw(cx);
     }
 
     pub fn open_at(&mut self, cx: &mut Cx, path: &str, skin: MenuSkin) {
@@ -975,71 +1195,25 @@ impl ShellMenu {
 
     /// Total height of `n` rows including their spacing and any dividers.
     fn rows_height(&self, n: usize) -> f64 {
-        let rh = self.row_height();
-        let dividers = self
-            .model
-            .rows
-            .iter()
-            .take(n)
-            .filter(|r| r.divider)
-            .count() as f64;
-        if n == 0 {
-            0.0
-        } else {
-            n as f64 * rh + (n as f64 - 1.0) * ROW_SPACING + dividers * DIVIDER_HEIGHT
-        }
+        let dividers: Vec<bool> = self.model.rows.iter().take(n).map(|r| r.divider).collect();
+        rows_height_of(self.row_height(), &dividers, n)
     }
 
     /// The card rect for a screen, and how many rows fit in it.
     fn layout_card(&self, screen: Rect) -> (Rect, usize) {
-        if let Some(anchor) = self.anchor {
-            let width = 248.0f64.min((screen.size.x - 12.0).max(1.0));
-            let top = (anchor.pos.y + anchor.size.y + 4.0).max(screen.pos.y + 4.0);
-            let available = (screen.pos.y + screen.size.y - top - 6.0).max(1.0);
-            let visible = (((available - 12.0) / (self.row_height() + ROW_SPACING)).floor() as usize)
-                .max(1).min(self.model.rows.len().max(1));
-            let height = (12.0 + self.rows_height(visible)).min(available);
-            let left = anchor.pos.x.clamp(screen.pos.x + 6.0, (screen.pos.x + screen.size.x - width - 6.0).max(screen.pos.x + 6.0));
-            return (rect(left, top, width, height), visible);
-        }
-        let tok = &self.tokens;
-        let classic=self.desktop_style==DesktopStyle::Windows2000;
-        let next=self.desktop_style==DesktopStyle::NextStep;
-        let pad = if classic || next {3.0}else{tok.spacing.panel_padding};
-        let header_h=if classic && self.model.filter.is_empty() {0.0}else{HEADER_HEIGHT+HEADER_GAP};
-        let gaps_out = tok.spacing.gaps_out;
-        let chrome = pad * 2.0 + header_h;
-        let max_h = (screen.size.y * MAX_HEIGHT_FRACTION).min(screen.size.y - gaps_out * 2.0);
-        let avail = (max_h - chrome).max(self.row_height());
-        let rh = self.row_height();
-        let full = (((avail + ROW_SPACING) / (rh + ROW_SPACING)).floor() as usize).max(1);
-        let visible = full.min(self.model.rows.len().max(1));
-        let clipped = self.model.rows.len() > visible;
-        let list_h = if self.model.rows.is_empty() {
-            // The rows area collapses to exactly the empty-state block —
-            // never the zero it fell out to before, never a full page.
-            self.empty_block_height()
-        } else if clipped {
-            self.rows_height(visible) + ROW_PEEK
-        } else {
-            self.rows_height(self.model.rows.len())
+        let dividers: Vec<bool> = self.model.rows.iter().map(|r| r.divider).collect();
+        let spec = MenuCardSpec {
+            anchor: self.anchor,
+            style: self.desktop_style,
+            filter_empty: self.model.filter.is_empty(),
+            row_height: self.row_height(),
+            dividers: &dividers,
+            empty_block_h: self.empty_block_height(),
+            panel_padding: self.tokens.spacing.panel_padding,
+            gaps_out: self.tokens.spacing.gaps_out,
+            frozen_top: self.model.frozen_top,
         };
-        let height = (chrome + list_h).min(max_h);
-        let x = (screen.pos.x + (screen.size.x - CARD_WIDTH) * 0.5).floor();
-        let y = match self.model.frozen_top {
-            Some(top) => top,
-            None => (screen.pos.y + (screen.size.y - height) * 0.5)
-                .max(screen.pos.y + gaps_out)
-                .floor(),
-        };
-        let (x,y)=match self.desktop_style {
-            crate::desktop::DesktopStyle::Windows2000=>(screen.pos.x+3.0,screen.pos.y+screen.size.y-height-34.0),
-            crate::desktop::DesktopStyle::Windows=>(x,screen.pos.y+screen.size.y-height-66.0),
-            crate::desktop::DesktopStyle::Macos=>(x,screen.pos.y+screen.size.y-height-98.0),
-            DesktopStyle::NextStep=>(screen.pos.x+10.0,screen.pos.y+42.0),
-            _=>(x,y),
-        };
-        (rect(x.max(screen.pos.x),y.max(screen.pos.y+4.0),(if classic || next {244.0}else{CARD_WIDTH}).min(screen.size.x),height),visible)
+        menu_card_layout(&spec, screen)
     }
 
     /// Draw the whole surface into `screen` (scrim included).
@@ -1208,9 +1382,10 @@ impl ShellMenu {
             // the user wants one label column, so an icon-less row keeps an
             // EMPTY icon slot and every label starts at the same x.
             let label_x = ICON_MARGIN + ICON_COLUMN + ICON_GAP;
-            if let Some(name) = row.target.strip_prefix("apps.") {
+            if let Some(name) = row.target.strip_prefix("apps.").or_else(|| row.target.strip_prefix("dock.")) {
                 let size = if self.desktop_style == DesktopStyle::Windows2000 {16.0}else{24.0};
-                self.app_icons.draw(cx,name,self.desktop_style,rect(row_rect.pos.x+ICON_MARGIN+(ICON_COLUMN-size)*0.5,y+(rh-size)*0.5,size,size),dim as f32,text_color);
+                let icon_rect=rect(row_rect.pos.x+ICON_MARGIN+(ICON_COLUMN-size)*0.5,y+(rh-size)*0.5,size,size);
+                if !crate::wayland_view::draw_foreign_icon(cx,name,icon_rect,dim as f32) {self.app_icons.draw(cx,name,self.desktop_style,icon_rect,dim as f32,text_color);}
             } else if let Some(ico) = row.icon {
                 self.d.icon_centered(cx,ico,rect(row_rect.pos.x+ICON_MARGIN,y,ICON_COLUMN,rh),tok.font.icon_large,text_color);
             }
@@ -1534,9 +1709,47 @@ impl ShellMenu {
 }
 
 impl Widget for ShellMenu {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        let launcher = self.model.skin == MenuSkin::Launcher;
+        node.role = if launcher { a11y_tree::Role::ListBox } else { a11y_tree::Role::Menu };
+        node.name = if launcher { "Applications" } else { "Desktop menu" }.into();
+        node.states.set(a11y_tree::States::HIDDEN, !self.model.open || self.inert);
+    }
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        if !self.model.open || self.inert { return; }
+        for (i, rect) in self.row_rects.iter().enumerate() {
+            let index = self.model.scroll + i;
+            let Some(row) = self.model.rows.get(index) else { continue; };
+            let mut node = a11y_tree::Node {
+                role: if self.model.skin == MenuSkin::Launcher { a11y_tree::Role::Option } else { a11y_tree::Role::MenuItem },
+                name: row.label.clone(), description: row.detail.clone(),
+                bounds: makepad_platform::a11y::semantic_rect(*rect),
+                actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::SELECT,
+                pos_in_set: index as u32 + 1, set_size: self.model.rows.len() as u32,
+                ..Default::default()
+            };
+            node.states.set(a11y_tree::States::DISABLED, row.disabled);
+            node.states.insert(a11y_tree::States::SELECTABLE);
+            node.states.set(a11y_tree::States::SELECTED, self.model.sel == index);
+            out.push((LiveId::from_str(&row.target).0, None, node));
+        }
+    }
+    fn handle_action(&mut self, cx: &mut Cx, action: &a11y_tree::ActionRequest, _scope: &mut Scope) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult as R, Actions as A};
+        if !self.model.open || self.inert { return R::NoSuchNode; }
+        if action.action != A::PRESS && action.action != A::SELECT { return R::Unhandled; }
+        let Some(key) = cx.a11y.action_part_key(action.node) else { return R::Unhandled; };
+        let Some(index) = self.model.rows.iter().position(|row| LiveId::from_str(&row.target).0 == key) else { return R::NoSuchNode; };
+        if self.model.rows[index].disabled { return R::Disabled; }
+        self.model.sel = index;
+        if action.action == A::PRESS { self.activate_selected(cx); }
+        self.redraw(cx);
+        R::Handled
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
-        let screen = cx.turtle().rect();
+        let screen = self.target.unwrap_or_else(|| cx.turtle().rect());
         self.draw_surface(cx, screen);
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
@@ -1589,6 +1802,20 @@ mod tests {
         assert_eq!(m.rows[9].label, "System");
         // Submenu rows carry the chevron.
         assert!(m.rows[0].has_children);
+    }
+
+    #[test]
+    fn the_dock_rest_lists_only_the_apps_the_dock_had_no_room_for() {
+        let mut m = MenuModel::default();
+        let rest = vec![
+            MenuItem::new("apps.clock", "Clock", MenuKind::App),
+            MenuItem::new("apps.files", "Files", MenuKind::App),
+        ];
+        m.open_dock_rest(rest);
+        assert!(m.open);
+        let rows: Vec<_> = m.rows.iter().map(|r| (r.label.as_str(), r.target.as_str())).collect();
+        assert_eq!(rows, vec![("Clock", "dock.clock"), ("Files", "dock.files")]);
+        assert_eq!(m.header().0, "More apps\u{2026}");
     }
 
     #[test]

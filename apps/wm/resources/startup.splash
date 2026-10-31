@@ -5,21 +5,59 @@ View{
     startup_surface := RectView{
     width: Fill height: Fill
     flow: Down align: Align{x: 0.5 y: 0.5}
-    padding: 20 spacing: 10
+    padding: 20
     draw_bg +: {
         color: theme.color_bg_app
         opacity: instance(1.0)
         pixel: fn() {return vec4(self.color.rgb * self.color.a, self.color.a) * self.opacity}
     }
-    startup_icon := AppIcon{name: "app" width: 64 height: 64}
-    placeholder := Label{
-        text: "Starting…"
-        draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 14}}
-    }
-    status_line := Label{
-        text: "" width: Fill
-        align: Align{x: 0.5 y: 0.5}
-        draw_text +: {color: theme.color_text_disabled text_style: theme.font_regular{font_size: 10}}
+    // The card keeps the text readable on any wallpaper: in glass mode the
+    // surface above is nearly clear, the card stays a frosted theme panel.
+    startup_card := View{
+        width: Fit height: Fit
+        flow: Down align: Align{x: 0.5 y: 0.5}
+        padding: Inset{left: 28 right: 28 top: 22 bottom: 20} spacing: 10
+        show_bg: true new_batch: true
+        draw_bg +: {
+            color: theme.color_bg_app
+            edge: uniform(theme.color_text)
+            pixel: fn() {
+                let s = self.rect_size
+                let sdf = Sdf2d.viewport(self.pos * s)
+                sdf.box(0.5, 0.5, s.x - 1.0, s.y - 1.0, 14.0)
+                sdf.fill_keep(vec4(self.color.rgb, 0.88))
+                sdf.stroke(vec4(self.edge.rgb, 0.12), 1.0)
+                return sdf.result
+            }
+        }
+        startup_icon := AppIcon{a11y: {hidden: true} name: "app" width: 64 height: 64}
+        placeholder := Label{
+            text: "Starting…"
+            draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 14}}
+        }
+        status_line := Label{
+            text: ""
+            draw_text +: {color: mix(theme.color_text_meta, theme.color_text, 0.5) text_style: theme.font_regular{font_size: 11}}
+        }
+        // The N/M crates of the status line; hidden when it has none.
+        startup_progress := View{
+            width: 280 height: 4 margin: Inset{top: 2}
+            show_bg: true
+            draw_bg +: {
+                color: theme.color_focus
+                track: uniform(theme.color_text)
+                progress: instance(0.0)
+                pixel: fn() {
+                    let s = self.rect_size
+                    let sdf = Sdf2d.viewport(self.pos * s)
+                    sdf.box(0.0, 0.0, s.x, s.y, s.y * 0.5)
+                    sdf.fill(vec4(self.track.rgb, 0.14))
+                    sdf.box(0.0, 0.0, max(s.x * self.progress, s.y), s.y, s.y * 0.5)
+                    sdf.fill(self.color)
+                    return sdf.result
+                }
+            }
+        }
     }
 }
 }

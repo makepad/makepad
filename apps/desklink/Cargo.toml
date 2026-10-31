@@ -1,0 +1,24 @@
+# Desk Link — the viewer of the window manager's remote desktop: another
+# machine's desktop over its GPU's H.264 encoder, decoded by this machine's
+# hardware decoder, driven with this keyboard, mouse, wheel and gamepads.
+# The wire format: PROTOCOL.md (implementation: libs/desk_link).
+
+[package]
+name = "makepad-app-desklink"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+default-run = "makepad-app-desklink"
+
+[[bin]]
+name = "makepad-app-desklink"
+path = "src/main.rs"
+
+[dependencies]
+makepad-remote = { path = "../../libs/remote" }
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-desk-link = { path = "../../libs/desk_link" }
+makepad-network = { path = "../../platform/network" }
+makepad-shell-kit = { path = "../../libs/shell_kit" }
+makepad-core-util = { path = "../../libs/core_util" }
+makepad-civil-time = { path = "../../libs/civil_time" }

@@ -116,6 +116,10 @@ impl WindowFrame {
         self.pass.draw_pass_id()
     }
     pub fn texture(&self) -> &Texture { &self.texture }
+    /// The rect the capture was last made at.
+    pub fn made_at(&self) -> Rect {
+        self.rect
+    }
     /// The capture is going away: its gauss request state is keyed by the
     /// pass slot, which the next capture may reuse.
     pub fn forget(self, cx: &mut Cx) {
@@ -126,7 +130,10 @@ impl WindowFrame {
         if std::env::var_os("MAKEPAD_WM_TRACE_WARP").is_some() {
             log!("warp: capture begin {:?}", rect);
         }
-        let dpi = cx.current_dpi_factor();
+        // The window's content, at the window's density: also under a pixel-addressed target
+        // (Desk Link draws the desktop C inside its dpi-1 picture pass; at the picture's dpi C
+        // was half the screen's pixels at 2.0 and the panel and the stream showed it magnified).
+        let dpi = cx.owning_window_dpi_factor();
         let root_size = cx.owning_window_or_root_pass_size();
         self.pass.set_size(cx, rect.size);
         cx.set_pass_shift_scale(&self.pass, rect.pos, dvec2(1.0, 1.0));
@@ -180,42 +187,48 @@ impl WindowFrame {
 pub struct DockWarp {
     pub source: Rect,
     pub dock: Rect,
-    pub progress: f64,
+    /// 0 in place, 1 in the dock: the shared ease (`crate::motion`), so a
+    /// reversal mid-warp keeps its speed.
+    ease: crate::motion::Ease,
     pub minimized: bool,
     pub frame: Option<WindowFrame>,
     pub refresh: bool,
-    duration: f64,
 }
 impl DockWarp {
     pub fn new(source: Rect, dock: Rect, restoring: bool) -> Self {
         Self {
             source,
             dock,
-            progress: if restoring { 1.0 } else { 0.0 },
+            ease: crate::motion::Ease::at(if restoring { 1.0 } else { 0.0 }, Self::seconds()),
             minimized: !restoring,
             frame: None,
             refresh: false,
-            duration: if cfg!(test) {
-                0.62
-            } else {
-                std::env::var("MAKEPAD_WM_WARP_SECONDS")
-                    .ok()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .filter(|s| s.is_finite() && *s >= 0.1 && *s <= 30.0)
-                    .unwrap_or(0.62)
-            },
         }
+    }
+    fn seconds() -> f64 {
+        if cfg!(test) {
+            return 0.62;
+        }
+        std::env::var("MAKEPAD_WM_WARP_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|s| s.is_finite() && *s >= 0.1 && *s <= 30.0)
+            .unwrap_or(0.62)
+    }
+    /// How far the warp is, 0..1.
+    pub fn progress(&self) -> f64 {
+        self.ease.value()
     }
     pub fn active(&self) -> bool {
         if self.minimized {
-            self.progress < 1.0
+            self.progress() < 1.0
         } else {
-            self.progress > 0.0
+            self.progress() > 0.0
         }
     }
     pub fn step(&mut self, dt: f64) {
-        let direction = if self.minimized { 1.0 } else { -1.0 };
-        self.progress = (self.progress + direction * dt / self.duration).clamp(0.0, 1.0);
+        self.ease.retarget(if self.minimized { 1.0 } else { 0.0 });
+        self.ease.step(dt);
     }
     pub fn bounds(&self) -> Rect {
         let x = self.source.pos.x.min(self.dock.pos.x);
@@ -246,7 +259,7 @@ impl DockWarp {
             self.dock.size.x as f32,
             self.dock.size.y as f32,
         );
-        draw.progress = self.progress as f32;
+        draw.progress = self.progress() as f32;
         draw.draw_abs(cx, self.bounds());
     }
 }
@@ -254,6 +267,43 @@ impl DockWarp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Desk Link capture C (a `WindowFrame`) is drawn inside the dpi-1 picture target; its
+    /// pass rasterises at the window's dpi, so at 2.0 C is the screen's own pixels and the
+    /// window pass shows it 1:1 (it was dpi 1: half the pixels, magnified, on the panel and in
+    /// the stream; WMSHARP).
+    #[test]
+    fn a_window_frame_under_a_pixel_target_rasterises_at_the_windows_dpi() {
+        use makepad_widgets::makepad_draw::render_target::{RenderTarget, RenderTargetFormat};
+        use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+        for dpi in [1.0, 1.3, 2.0, 2.07] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let window = WindowHandle::new(&mut cx);
+            let window_id = window.window_id();
+            cx.windows[window_id].is_created = true;
+            cx.windows[window_id].window_geom.inner_size = dvec2(1920.0, 1080.0);
+            cx.windows[window_id].window_geom.dpi_factor = dpi;
+            let root_pass = DrawPass::new(&mut cx);
+            window.set_pass(&mut cx, &root_pass);
+            let mut picture = RenderTarget::new(&mut cx, "picture");
+            picture.ensure(&mut cx, (960, 6480), RenderTargetFormat::SharedBgra8);
+            let mut frame = WindowFrame::new_with_name(&mut cx, "c");
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            draw.begin_pass(&root_pass, Some(dpi));
+            {
+                let mut cx = Cx2d::new(&mut draw);
+                picture.begin(&mut cx, vec4(0.0, 0.0, 0.0, 0.0));
+                frame.begin(&mut cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(1920.0, 1080.0) });
+                assert_eq!(cx.current_dpi_factor(), dpi, "C draws at the window's dpi {dpi}");
+                frame.end(&mut cx);
+                picture.end(&mut cx);
+            }
+            draw.end_pass(&root_pass);
+            drop(draw);
+            assert_eq!(cx.passes[frame.pass_id()].dpi_factor, Some(dpi));
+        }
+    }
     #[test]
     fn reversal_keeps_the_same_surface_and_progress() {
         let source = Rect {
@@ -265,21 +315,30 @@ mod tests {
             size: dvec2(48.0, 48.0),
         };
         let mut warp = DockWarp::new(source, dock, false);
-        warp.step(0.2);
-        let progress = warp.progress;
+        let run = |warp: &mut DockWarp, secs: f64| {
+            let mut t = 0.0;
+            while t < secs {
+                warp.step(1.0 / 60.0);
+                t += 1.0 / 60.0;
+            }
+        };
+        run(&mut warp, 0.2);
+        let progress = warp.progress();
+        assert!(progress > 0.0 && progress < 1.0);
         warp.minimized = false;
-        assert_eq!(warp.progress, progress);
-        warp.step(0.1);
-        assert!(warp.progress < progress && warp.active());
-        warp.step(1.0);
-        assert_eq!(warp.progress, 0.0);
+        // Reversing does not move the surface: it bends from where it is.
+        assert_eq!(warp.progress(), progress);
+        warp.step(1.0 / 60.0);
+        assert!((warp.progress() - progress).abs() < 0.1 && warp.active());
+        run(&mut warp, 1.5);
+        assert_eq!(warp.progress(), 0.0);
         assert!(!warp.active());
         assert_eq!(warp.source, source);
         let bounds = warp.bounds();
         assert!(bounds.contains(source.pos) && bounds.contains(dock.pos));
         warp.minimized = true;
-        warp.step(1.0);
-        assert_eq!(warp.progress, 1.0);
+        run(&mut warp, 1.5);
+        assert_eq!(warp.progress(), 1.0);
         assert!(!warp.active());
     }
 }

@@ -21,6 +21,8 @@ TTYVHangup=yes
 TTYVTDisallocate=yes
 KillMode=control-group
 TimeoutStopSec=15
+RestartForceExitStatus=75
+SuccessExitStatus=75
 
 [Install]
 WantedBy=multi-user.target

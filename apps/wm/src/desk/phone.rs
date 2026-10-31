@@ -2,7 +2,7 @@ use super::*;
 use crate::mobile::{self, PhoneHit, PhoneScreen};
 use crate::mobile_tiles::{Face, HomeMetrics};
 use makepad_widgets::makepad_platform::event::{DigitDevice, DigitId, FingerCancelEvent, TouchPoint, TouchState, TouchUpdateEvent};
-use makepad_widgets::makepad_platform::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackRequest, ReadbackTicket, TextureReadback};
+use makepad_widgets::makepad_platform::{ReadbackError, ReadbackRequest, ReadbackTicket, TextureReadback};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -101,7 +101,10 @@ script_mod! {
             if self.radius<0.001 {
                 return self.image.sample(uv)*self.opacity
             }
-            let sdf=Sdf2d.viewport(self.pos*self.rect_size)
+            // Edges centred on the pixel: a window on whole pixels covers its outermost
+            // ones fully (`viewport` half-covered them: a line of the desktop showing
+            // through every window edge, flickering with what moved behind).
+            let sdf=Sdf2d.viewport_px(self.pos*self.rect_size,0.0)
             sdf.box(0.0,0.0,self.rect_size.x,self.rect_size.y,self.radius)
             // The capture is premultiplied already: `fill` would multiply
             // by alpha again — opacity squared, the grey ghost of a card
@@ -319,20 +322,20 @@ fn srgb(c: f32) -> f32 {
 /// readback: the band rows.
 fn band_sample(r: &TextureReadback, inset: usize, rows: usize) -> Option<(BandRows, BandRows)> {
     let data = r.data.as_ref().ok()?;
-    if r.width == 0 || rows == 0 || r.height < (inset + rows) * 2 || r.stride < r.width * 4 { return None; }
-    let (ri, bi) = match r.channel_order { ReadbackChannelOrder::Bgra => (2, 0), ReadbackChannelOrder::Rgba => (0, 2) };
+    if r.width == 0 || rows == 0 || r.height < (inset + rows) * 2 { return None; }
+    let stride = r.width * 4;
     let mean = |from: usize| {
         let mut sum = [0.0f32; 3];
         let mut edges = 0usize;
         for y in from..from + rows {
-            let row = &data[y * r.stride..y * r.stride + r.width * 4];
+            let row = &data[y * stride..(y + 1) * stride];
             let mut last: Option<f32> = None;
             for px in row.chunks_exact(4) {
-                let (red, green, blue) = (linear(px[ri]), linear(px[1]), linear(px[bi]));
+                let (red, green, blue) = (linear(px[0]), linear(px[1]), linear(px[2]));
                 sum[0] += red;
                 sum[1] += green;
                 sum[2] += blue;
-                let seen = (0.2126 * px[ri] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[bi] as f32) / 255.0;
+                let seen = (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32) / 255.0;
                 if let Some(last) = last { edges += usize::from((seen - last).abs() > BAND_EDGE); }
                 last = Some(seen);
             }
@@ -345,12 +348,7 @@ fn band_sample(r: &TextureReadback, inset: usize, rows: usize) -> Option<(BandRo
             plain: edges as f32 / (rows * (r.width - 1).max(1)) as f32 <= BAND_PLAIN,
         }
     };
-    // Rows count from the top of the texture unless it says otherwise.
-    let (top, bottom) = (mean(inset), mean(r.height - inset - rows));
-    Some(match r.origin {
-        ReadbackOrigin::TopLeft => (top, bottom),
-        ReadbackOrigin::BottomLeft => (bottom, top),
-    })
+    Some((mean(inset), mean(r.height - inset - rows)))
 }
 
 impl WmDesk {
@@ -785,7 +783,7 @@ impl WmDesk {
         }
         // Only windows in the layout join Recents: a tile client launched by
         // the home page stays out until the person opens it.
-        for c in state.layout.clients_on(state.layout.active) {
+        for c in state.layout().clients_on(state.layout().active) {
             if !state.phone.order.contains(&c) {state.phone.order.push(c);}
         }
         self.style=state.style.clone();
@@ -1017,14 +1015,7 @@ impl WmDesk {
         // What the simulated bars pick their ink against.
         self.phone_ui.band_luma=band_luma;
         self.phone_ui.draw_overlay(cx,state,screen,backdrop);
-        // The super-app's first run: what is streaming out of the APK,
-        // above the dock while the home page shows.
-        if let Some(text)=state.provision.clone() {
-            if state.phone.home_visible() {
-                let fade=(1.0-state.phone.openness).clamp(0.0,1.0) as f32;
-                self.phone_ui.draw_provision_band(cx,screen,state.phone.chrome,state.style.target,state.style.dark,fade,&text);
-            }
-        }
+        self.phone_ui.draw_settings_page(cx,state,screen);
     }
     pub(super) fn handle_phone_event(&mut self,cx:&mut Cx,event:&Event,scope:&mut Scope) {
         if let Event::Signal=event {self.take_band_readbacks(cx);}
@@ -1171,7 +1162,7 @@ mod tests {
         }
         TextureReadback {
             ticket: ReadbackTicket(1), allocation_generation: 0, producer_serial: 0,
-            width, height, stride: width * 4, channel_order: ReadbackChannelOrder::Rgba, origin: ReadbackOrigin::TopLeft,
+            width, height,
             data: Ok::<Arc<[u8]>, ReadbackError>(data.into()),
         }
     }

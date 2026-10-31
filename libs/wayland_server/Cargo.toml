@@ -1,0 +1,13 @@
+[package]
+name = "makepad-wayland-server"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Self-contained Wayland wire server core (no libwayland): wire codec, fd passing, object map, registry, epoll loop."
+
+[lib]
+name = "wayland_server"
+
+[dependencies]
+makepad-xkb-keymap = { path = "../xkb_keymap" }

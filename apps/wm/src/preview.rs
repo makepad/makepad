@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use makepad_wm_api::{viewer_for, WmRequest};
 
 use crate::clients::{spawn_client, AppDef, ClientLine};
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 
 /// The Quick Look warm-viewer cache, one live client per viewer TYPE
 /// (`makepad_wm_api::viewer_for`'s app id — "image", "pdf", …), kept alive
@@ -182,26 +182,30 @@ pub fn app_for_request(req: &OpenRequest) -> Option<(AppDef, Vec<String>)> {
     Some((app, extra))
 }
 
-/// Spawn the app for a request. Returns the new client slot.
+/// Spawn the app for a request. Returns the new client slot. A Quick-Look preview is the
+/// viewer's built binary (`Runner::Native`); an open is the app's ordinary launch (`runner`:
+/// the dock's, the JIT by default).
 pub fn spawn_for_request(
     pool: &makepad_widgets::makepad_platform::thread::TaskPool,
     spawner: &makepad_widgets::makepad_platform::thread::ThreadSpawner,
     req: &OpenRequest,
     id: ClientId,
     hub_port: u16,
+    runner: makepad_app_registry::Runner,
     lines: std::sync::mpsc::Sender<ClientLine>,
 ) -> Result<crate::clients::ClientSlot, String> {
     let (app, extra) = app_for_request(req)
         .ok_or_else(|| format!("no app '{}' for {}", req.app, req.path.display()))?;
+    let runner = if req.preview { makepad_app_registry::Runner::Native } else { runner };
     // A preview never compiles: the viewer runs only when it is built and
     // up to date.
-    if !app.is_current() {
+    if runner == makepad_app_registry::Runner::Native && !app.is_current() {
         return Err(format!("{} is not built or out of date", app.bin));
     }
     // Never `warm`: a Quick-Look viewer has its own warm-cache mechanism
     // (`PreviewCache`), which keeps a viewer alive between panels rather
     // than standing one by before the first.
-    spawn_client(pool, spawner, &app, id, hub_port, None, None, &extra, false, lines)
+    spawn_client(pool, spawner, &app, id, hub_port, None, None, &extra, false, makepad_app_registry::BuildPolicy::IfMissing, runner, lines)
 }
 
 #[cfg(test)]

@@ -1,0 +1,23 @@
+# Real-WM domain memory and first-frame numbers: one app is started at a time and settles before the next
+# (MAKEPAD_RUN_DOMAIN_REPORT=1 prints, per domain, RSS/PSS kB when its start began / at its first frame /
+# 5 s later, and the start-to-first-frame time).
+wait_frame
+sleep_frames 120
+key Space logo alt
+text "Calculator"
+key ReturnKey
+domain makepad-app-calculator
+sleep_frames 600
+domain -
+key Space logo alt
+text "Clock"
+key ReturnKey
+domain makepad-app-clock
+sleep_frames 600
+domain -
+key Space logo alt
+text "Notes"
+key ReturnKey
+domain makepad-app-notes
+sleep_frames 600
+domain -

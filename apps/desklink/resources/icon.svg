@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Desk Link: this machine's display showing another machine's desktop.
+       The shared app icon tile (x/y 64, 896, radius 200; tools/app_icons/render.sh
+       renders it to icon_1024.png). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7ef0da"/><stop offset="1" stop-color="#3fc9b0"/></linearGradient>
+    <linearGradient id="far" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2c5d8f"/><stop offset="1" stop-color="#1d3f66"/></linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- the remote desktop, behind -->
+  <rect x="452" y="214" width="372" height="252" rx="30" fill="url(#far)" stroke="#4aa3e0" stroke-width="18"/>
+  <!-- the link between them -->
+  <path d="M352 352 C352 262 392 236 430 236" fill="none" stroke="#4aa3e0" stroke-width="22" stroke-linecap="round" stroke-dasharray="1 44"/>
+  <!-- this display -->
+  <rect x="200" y="392" width="516" height="340" rx="36" fill="#0e1d33" stroke="#4aa3e0" stroke-width="22"/>
+  <rect x="236" y="428" width="444" height="268" rx="16" fill="url(#g)"/>
+  <path d="M424 732 L492 732 L506 794 L410 794 Z" fill="#4aa3e0"/>
+  <rect x="330" y="786" width="256" height="34" rx="17" fill="#4aa3e0"/>
+  <!-- the pointer driving the remote desktop -->
+  <path d="M420 476 L420 640 L460 602 L488 664 L516 652 L488 590 L544 586 Z" fill="#0e1d33" stroke="#0e1d33" stroke-width="10" stroke-linejoin="round"/>
+</svg>

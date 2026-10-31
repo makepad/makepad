@@ -1,0 +1,31 @@
+# Desk Host — Desk Link's server for a plain macOS or Windows desktop (the logged-in user's
+# session): the screen as hardware H.264, input as local events, the same protocol, TLS and
+# fleet credentials as the window manager's server. A tray app (menu bar / notification area):
+# its dropdown switches serving and shows the viewers; serves only while enabled.
+
+[package]
+name = "makepad-app-deskhost"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "makepad-app-deskhost"
+path = "src/main.rs"
+
+[dependencies]
+makepad-desk-link = { path = "../../libs/desk_link", features = ["host"] }
+makepad-network = { path = "../../platform/network" }
+makepad-platform-video = { path = "../../platform/video" }
+makepad-key-code = { path = "../../platform/key_code" }
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-shell-kit = { path = "../../libs/shell_kit" }
+makepad-desk-link-panel = { path = "../../libs/desk_link_panel" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+makepad-apple-sys = { path = "../../libs/apple_sys" }
+makepad-objc-sys = { path = "../../libs/objc-sys" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+makepad-hal = { path = "../../platform/hal" }
+makepad-windows-sys = { path = "../../libs/windows/sys" }

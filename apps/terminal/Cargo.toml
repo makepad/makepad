@@ -6,43 +6,41 @@
 # makepad-terminal-core, which had already solved spawn/resize/controlling-tty
 # on macOS, Linux and Windows (ConPTY).
 #
-# terminal runs standalone, and unmodified inside makepad-wm / Studio tiles via
+# terminal runs standalone, and unmodified inside makepad-app-wm / Studio tiles via
 # the shared --stdin-loop client runtime every Makepad app has.
 
 [package]
-name = "makepad-terminal"
+name = "makepad-app-terminal"
 version = "0.1.0"
 edition = "2021"
-default-run = "terminal"
+license = "MIT AND Unicode-3.0"
+default-run = "makepad-app-terminal"
 
 [lib]
-name = "makepad_terminal"
+name = "makepad_app_terminal"
 path = "src/lib.rs"
 
 [[bin]]
-name = "terminal"
+name = "makepad-app-terminal"
 path = "src/main.rs"
 
 [features]
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-cell-width = { path = "../../libs/cell_width" }
 makepad-wm-api = { path = "../../libs/wm_api" }
+# The environment its shell starts with (child_env::scrub).
+makepad-app-registry = { path = "../../libs/app_registry" }
 
 [target.'cfg(windows)'.dependencies.windows]
-path = "../../libs/windows/windows-rs"
-version = "0.62.2"
-features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_Console",
-    "Win32_System_Pipes",
-    "Win32_System_Threading",
-]
+package = "makepad-windows-sys"
+path = "../../libs/windows/sys"
+version = "0.1.0"

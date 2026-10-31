@@ -10,6 +10,12 @@ use crate::{
 };
 use makepad_widgets::*;
 
+/// The edge snap zones belong to the flat desktop: with spacewarp the
+/// screen edges are the shelves instead.
+pub fn zones_enabled(style: desktop_style::DesktopStyle, mode: crate::spacewarp::Mode) -> bool {
+    style == desktop_style::DesktopStyle::Windows && mode == crate::spacewarp::Mode::Classic
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Zone {
     Maximize,
@@ -57,21 +63,11 @@ impl Zone {
     }
 }
 
-pub fn edge_zone(p: Vec2d, area: LRect) -> Option<Zone> {
-    let left = p.x <= area.x + 16.;
-    let right = p.x >= area.x + area.w - 16.;
-    let top = p.y <= area.y + 54.;
-    let bottom = p.y >= area.y + area.h - 54.;
-    match (left, right, top, bottom) {
-        (true, _, true, _) => Some(Zone::TopLeft),
-        (_, true, true, _) => Some(Zone::TopRight),
-        (true, _, _, true) => Some(Zone::BottomLeft),
-        (_, true, _, true) => Some(Zone::BottomRight),
-        (true, _, _, _) => Some(Zone::Left),
-        (_, true, _, _) => Some(Zone::Right),
-        _ if p.y <= area.y + 10. => Some(Zone::Maximize),
-        _ => None,
-    }
+/// Only the top edge snaps by dragging (maximize): the side edges of the
+/// display are the spacewarp shelves. `band` is the centre band
+/// (`spacewarp::band_of`).
+pub fn edge_zone(p: Vec2d, band: LRect) -> Option<Zone> {
+    (p.y <= band.y + 10.).then_some(Zone::Maximize)
 }
 
 #[derive(Clone, Debug)]
@@ -156,7 +152,10 @@ impl SnapState {
     pub fn clear(&mut self) {
         *self = Self::default();
     }
+    /// A window is dragged to `p` on a display with `area`; snaps apply to
+    /// its centre band.
     pub fn drag(&mut self, client: ClientId, p: Vec2d, area: LRect) {
+        let area = crate::spacewarp::band_of(area);
         self.area = Some(area);
         if p.y <= area.y + 12. && p.x > area.x + 70. && p.x < area.x + area.w - 70. {
             if !self
@@ -279,13 +278,21 @@ impl Widget for SnapOverlay {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snap_zones_belong_to_the_classic_desktop() {
+        use crate::spacewarp::Mode;
+        use desktop_style::DesktopStyle;
+        assert!(zones_enabled(DesktopStyle::Windows, Mode::Classic));
+        assert!(!zones_enabled(DesktopStyle::Windows, Mode::Warp));
+        assert!(!zones_enabled(DesktopStyle::Macos, Mode::Classic));
+    }
+
     use super::*;
     #[test]
-    fn edges_and_corners_use_the_workarea() {
+    fn only_the_top_edge_snaps_and_zones_use_the_band() {
         let a = LRect::new(150., 40., 1200., 800.);
-        assert_eq!(edge_zone(dvec2(151., 500.), a), Some(Zone::Left));
-        assert_eq!(edge_zone(dvec2(1348., 837.), a), Some(Zone::BottomRight));
-        assert_eq!(edge_zone(dvec2(152., 42.), a), Some(Zone::TopLeft));
+        assert_eq!(edge_zone(dvec2(151., 500.), a), None);
+        assert_eq!(edge_zone(dvec2(1348., 837.), a), None);
         assert_eq!(edge_zone(dvec2(700., 41.), a), Some(Zone::Maximize));
         assert_eq!(edge_zone(dvec2(700., 837.), a), None);
         assert_eq!(
@@ -298,6 +305,7 @@ mod tests {
         let a = LRect::new(0., 30., 1200., 800.);
         let mut s = SnapState::default();
         s.drag(1, dvec2(600., 32.), a);
+        assert_eq!(s.area, Some(crate::spacewarp::band_of(a)));
         let cell = s.picker.as_ref().unwrap().cells[1];
         s.drag(1, cell.0.pos + cell.0.size * 0.5, a);
         assert_eq!(s.preview, Some(cell.1));

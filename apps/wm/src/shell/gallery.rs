@@ -97,7 +97,7 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         title: "OSD",
-        body: "Volume / brightness / mic. 28px glyph, 142x6 bar, bold 14px readout, centered 67px off the bottom edge, 1200ms.",
+        body: "Volume / mic. 28px glyph, 142x6 bar, bold 14px readout, centered 67px off the bottom edge, 1200ms.",
         height: 140.0,
     },
     Section {
@@ -164,6 +164,7 @@ impl ShellGallery {
         self.demo_toggle = true;
         self.bar.data = BarData::fixture();
         self.bar.pad_left = 8.0;
+        self.bar.launcher = true;
         // The gallery shows the window controls on every platform: this is
         // where their look is checked, macOS included.
         self.bar.window_controls = true;
@@ -173,6 +174,16 @@ impl ShellGallery {
         self.panel.data = PanelData::fixture();
         self.panel.open = Some(PanelKind::Clock);
         self.bar_panel.data = PanelData::fixture();
+        #[cfg(target_os = "linux")]
+        {
+            use super::wifi_linux::{WifiEvent, WifiSnapshot};
+            self.bar_panel.wifi.apply(WifiEvent::Snapshot(WifiSnapshot::fixture()));
+            let (displays, trials) = super::display_menu::gallery_fixture();
+            self.panel.display_snapshot = displays;
+            self.panel.display_trials = trials;
+            self.panel.current_dpi = 2.0;
+            self.panel.display_now = 3.0;
+        }
         self.osd.show = Some(OsdShow::volume(62, false));
         // The gallery's OSD never times out — it is a picture of one.
         if let Some(show) = self.osd.show.as_mut() {
@@ -562,7 +573,7 @@ impl ShellGallery {
                 continue;
             };
             match wa.cast::<ShellBarAction>() {
-                ShellBarAction::Press(module) => {
+                ShellBarAction::Press(seg, module) => {
                     if matches!(module, BarModule::WindowMin | BarModule::WindowMax | BarModule::WindowClose) {
                         // A picture of the controls: the gallery window is
                         // not minimized, maximized or closed by them.
@@ -574,7 +585,7 @@ impl ShellGallery {
                         continue;
                     }
                     if let Some(kind) = PanelKind::for_module(module) {
-                        let anchor = self.bar.module_rect(module).unwrap_or_default();
+                        let anchor = self.bar.module_rect(seg, module).unwrap_or_default();
                         self.bar_panel.toggle(cx, kind, anchor);
                         self.bar.data.open_panel = self.bar_panel.open.map(|k| k.module());
                     }
@@ -595,6 +606,7 @@ impl ShellGallery {
                 _ => {}
             }
             match wa.cast::<ShellPanelAction>() {
+                ShellPanelAction::TrayMenu { .. } | ShellPanelAction::DeskLinkDisconnect(_) => {}
                 ShellPanelAction::SetVolume(v) => {
                     self.bar_panel.data.volume = Some(v);
                     self.panel.data.volume = Some(v);
@@ -610,12 +622,6 @@ impl ShellGallery {
                     self.demo_toggle = !self.panel.data.muted;
                     self.redraw(cx);
                 }
-                ShellPanelAction::SetBrightness(v) => {
-                    self.bar_panel.data.brightness = Some(v);
-                    self.panel.data.brightness = Some(v);
-                    self.osd.present(cx, OsdShow::brightness(v));
-                    self.redraw(cx);
-                }
                 ShellPanelAction::SetTextSize(px) => {
                     self.panel.data.text_size = px;
                     self.redraw(cx);
@@ -625,7 +631,7 @@ impl ShellGallery {
                     self.redraw(cx);
                 }
                 ShellPanelAction::None => {}
-                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                #[cfg(target_os = "linux")]
                 ShellPanelAction::Wifi(_) | ShellPanelAction::System(_) => {}
             }
             match wa.cast::<ShellMenuAction>() {
