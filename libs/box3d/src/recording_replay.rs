@@ -734,6 +734,23 @@ impl<'a> RecCursor<'a> {
         Capsule { center1: self.r_vec3(), center2: self.r_vec3(), radius: self.r_f32() }
     }
 
+    pub fn r_tube(&mut self) -> crate::types::Tube {
+        let count = self.r_i32();
+        if !(3..=64).contains(&count) || !self.check_count(count, 12) {
+            self.ok = false;
+            return crate::types::Tube::default();
+        }
+        let mut points = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            points.push(self.r_vec3());
+        }
+        let tube = crate::types::Tube { points, radius: self.r_f32() };
+        if !crate::tube::is_valid_tube(&tube) {
+            self.ok = false;
+        }
+        tube
+    }
+
     /// C: b3RecR_GEOMID
     #[inline]
     pub fn r_geomid(&mut self) -> u32 {
@@ -901,6 +918,9 @@ impl<'a> RecCursor<'a> {
         base.constraint_damping_ratio = self.r_f32();
         base.draw_scale = self.r_f32();
         base.collide_connected = self.r_bool();
+        base.friction.coefficient = self.r_f32();
+        base.friction.radius = self.r_f32();
+        base.friction.torque = self.r_f32();
     }
 
     pub fn r_paralleljointdef(&mut self) -> ParallelJointDef {
@@ -1306,7 +1326,7 @@ fn rec_op_from_u8(v: u8) -> Option<RecOp> {
         BodySetAngularDamping, BodySetGravityScale, BodySetAwake, BodyEnableSleep,
         BodySetSleepThreshold, BodyDisable, BodyEnable, BodySetMotionLocks, BodySetBullet,
         BodyEnableContactRecycling, BodyEnableHitEvents,
-        CreateSphereShape, CreateCapsuleShape, CreateHullShape, CreateMeshShape,
+        CreateSphereShape, CreateCapsuleShape, CreateTubeShape, CreateHullShape, CreateMeshShape,
         CreateHeightFieldShape, CreateCompoundShape, DestroyShape,
         ShapeSetDensity, ShapeSetFriction, ShapeSetRestitution, ShapeSetSurfaceMaterial,
         ShapeSetFilter, ShapeEnableSensorEvents, ShapeEnableContactEvents, ShapeEnablePreSolveEvents,
@@ -1345,7 +1365,7 @@ fn rec_op_from_u8(v: u8) -> Option<RecOp> {
         WheelJointEnableSteeringLimit, WheelJointSetSteeringLimits, WheelJointSetTargetSteeringAngle,
         QueryOverlapAABB, QueryOverlapShape, QueryCastRay, QueryCastShape, QueryCastRayClosest,
         QueryCastMover, QueryCollideMover, QueryTag,
-        StateHash, RecordingBounds,
+        StateHash, RecordingBounds, JointSetFriction,
     )
 }
 
@@ -1809,6 +1829,16 @@ fn dispatch_one(
                 check_id(ok, "shape", got.index1, got.generation as u32, rec_id.index1, rec_id.generation as u32);
             }
         }
+        RecOp::CreateTubeShape => {
+            let body_id = remap_body_id(world, r.r_bodyid());
+            let def = r.r_shapedef();
+            let tube = r.r_tube();
+            let rec_id = r.r_shapeid();
+            if r.ok {
+                let got = crate::shape::create_tube_shape(world, body_id, &def, &tube);
+                check_id(ok, "shape", got.index1, got.generation as u32, rec_id.index1, rec_id.generation as u32);
+            }
+        }
         RecOp::CreateHullShape => {
             let body_id = remap_body_id(world, r.r_bodyid());
             let def = r.r_shapedef();
@@ -2108,6 +2138,15 @@ fn dispatch_one(
             let id = remap_joint_id(world, r.r_jointid());
             if r.ok {
                 crate::joint::joint_wake_bodies(world, id);
+            }
+        }
+        RecOp::JointSetFriction => {
+            let id = remap_joint_id(world, r.r_jointid());
+            let coefficient = r.r_f32();
+            let radius = r.r_f32();
+            let torque = r.r_f32();
+            if r.ok {
+                crate::joint::joint_set_friction(world, id, crate::types::JointFriction { coefficient, radius, torque });
             }
         }
         RecOp::JointSetConstraintTuning => {

@@ -3,6 +3,7 @@ mod merge;
 mod mkmap;
 mod ocean;
 mod pbf_audit;
+mod prefetch;
 mod testmap_cli;
 
 // The bake passes themselves live in the shared library, so an app can run
@@ -36,6 +37,7 @@ Usage:
   makepad-map-tiles transmux <source.mbtiles> <output.mkmap> [--shard-cap-bytes N]
   makepad-map-tiles mkmap-verify <source.mbtiles>... <dir.mkmap> [stride]
   makepad-map-tiles mkmap-extract <dir.mkmap> <output.mbtiles> [--bbox w,s,e,n] [--pad-tiles N] [--min-zoom N] [--max-zoom N]
+  makepad-map-tiles mkmap-prefetch <archive url> --bbox w,s,e,n [--min-zoom N] [--max-zoom N] [--pad-tiles N] [--plan-only|--verify] [--cache-root DIR]
   makepad-map-tiles weave-manifest <sources.txt> <output.manifest>
   makepad-map-tiles mbtiles-compare <original.mbtiles> <extracted.mbtiles> [--peer <source.mbtiles>]... [--peer-list <file>]
   makepad-map-tiles verify-mbtiles <archive.mbtiles> [--stride N]
@@ -193,6 +195,10 @@ fn run() -> Result<(), String> {
     // mkmap-extract <dir.mkmap> <out.mbtiles> [--bbox w,s,e,n] [--pad-tiles N] [--min-zoom N] [--max-zoom N]
     if args.first().is_some_and(|arg| arg == "mkmap-extract") {
         return mkmap::extract(mkmap::parse_extract_options(&args)?);
+    }
+    // mkmap-prefetch <url> --bbox w,s,e,n: fill the app's range cache for a region
+    if args.first().is_some_and(|arg| arg == "mkmap-prefetch") {
+        return prefetch::prefetch(prefetch::parse_options(&args)?);
     }
     // weave-manifest <sources.txt> <output.manifest>
     if args.first().is_some_and(|arg| arg == "weave-manifest") {

@@ -7,7 +7,13 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-draw = { path = "../../draw", version = "2.0.0" }
+makepad-stack = { path = "../stack", version = "1.0.0" }
+# The MrBox stage's clip box (the shared XR navigation's).
+makepad-xr-nav = { path = "../xr_nav" }
 makepad-scene = { path = "../scene" }
+# Materials: the Splash hook set, derived variants, diagnostics, IBL.
+makepad-render-material = { path = "../render_material" }
+makepad-render-graph = { path = "../render_graph" }
 makepad-soft-body = { path = "../soft_body" }
 # Generated skin material-atlas preparation uses the shared GLB reader.
 makepad-gltf = { path = "../gltf" }
@@ -15,6 +21,18 @@ makepad-raytrace = { path = "../raytrace" }
 # Inflate for the baked AO textures' zlib streams (tools/ao_bake writes
 # them); in-repo, so the no-external-crates rule holds.
 makepad-fast-inflate = { path = "../fast_inflate" }
+# Basis Universal (UASTC in KTX2) textures and their transcoders; in-repo.
+makepad-texcomp = { path = "../texcomp" }
+# EXR read/write for the HDRI generator (hdri/image.rs, hdri/export.rs), and
+# half floats for its half-precision EXR option; both in-repo. makepad-half is
+# a workspace.exclude crate (a vendored `half`), which a path dependency may
+# still use, as widgets/core does with libs/tween.
+makepad-openexr = { path = "../openexr" }
+makepad-half = { path = "../vulkan/makepad-half" }
+# The shape core flattens splines and SVG paths (hdri/shape.rs). libs/tween is
+# workspace-excluded (root Cargo.toml) and builds as a path dependency, as it
+# already does for makepad-widgets-core; it has no dependencies of its own.
+makepad-tween = { path = "../tween" }
 
 # Example-only: the ao_render probe software-rasterises props so the baked AO
 # can be judged by eye without a Cx or the app. Dev-only, so the shipped crate

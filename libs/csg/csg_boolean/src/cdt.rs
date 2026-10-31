@@ -14,7 +14,7 @@
 // and the specific shared edge.
 
 use makepad_csg_math::{in_circle, orient2d, thread_pool};
-use std::collections::HashMap;
+use makepad_csg_math::fast_hash::FastMap as HashMap;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Point2 {
@@ -257,7 +257,7 @@ impl CDT {
         // Fix adjacency for internal edges between new triangles.
         // Build lookup: from_vertex → boundary index (O(n) instead of O(n^2)).
         // edge 0 of tri i (to_i -> p): twin is edge 1 of tri j where from_j == to_i
-        let mut from_to_idx: HashMap<u32, usize> = HashMap::with_capacity(n_new);
+        let mut from_to_idx: HashMap<u32, usize> = HashMap::with_capacity_and_hasher(n_new, Default::default());
         for i in 0..n_new {
             let from_i = boundary[i].0;
             from_to_idx.insert(from_i, i);

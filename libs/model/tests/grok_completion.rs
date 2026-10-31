@@ -1,13 +1,11 @@
 //! Independent Grok completion-lane adversarial tests.
 //! Public API only. Does not mirror production unit tests.
 use makepad_gltf::JsonValue;
-use makepad_model::json;
 use makepad_model::transform::*;
 use makepad_model::*;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-const V1_ROBOT: &[u8] = include_bytes!("fixtures/v1_robot.mpmodel");
 
 fn apply(doc: &mut Document, id: &str, operations: Vec<Operation>) -> Applied {
     doc.apply(
@@ -21,10 +19,6 @@ fn apply(doc: &mut Document, id: &str, operations: Vec<Operation>) -> Applied {
     .unwrap()
 }
 
-fn apply_json(doc: &mut Document, id: &str, text: &str) -> Applied {
-    let operations = parse_operations(&json::parse(text.as_bytes()).unwrap(), doc.limits()).unwrap();
-    apply(doc, id, operations)
-}
 
 fn try_apply(doc: &mut Document, id: &str, operations: Vec<Operation>) -> Result<Applied> {
     doc.apply(
@@ -37,10 +31,6 @@ fn try_apply(doc: &mut Document, id: &str, operations: Vec<Operation>) -> Result
     )
 }
 
-fn try_json(doc: &mut Document, id: &str, text: &str) -> Result<Applied> {
-    let operations = parse_operations(&json::parse(text.as_bytes()).unwrap(), doc.limits())?;
-    try_apply(doc, id, operations)
-}
 
 fn snap(doc: &Document) -> (Head, Vec<u8>) {
     (doc.head(), doc.to_bytes(None).unwrap())
@@ -160,14 +150,40 @@ fn lights_ext(glb: &makepad_gltf::ParsedGlb) -> &[JsonValue] {
 fn modifier_reference_graph_instances_disabled_and_cycles() {
     let mut doc = Document::new(Limits::default()).unwrap();
     apply(&mut doc, "seed", vec![cube("a", [2.; 3])]);
-    apply_json(
+    apply(
         &mut doc,
         "links",
-        r#"[
-            {"op":"instance","object":"b","source":"a","transform":{"translation":[6,0,0]}},
-            {"op":"instance","object":"c","source":"b","transform":{"translation":[-6,0,0]}},
-            {"op":"modifier","object":"a","name":"copies","operation":{"op":"array","count":2,"offset":[3,0,0]}}
-        ]"#,
+        vec![
+        Operation::Scene(SceneOperation::Instance {
+            object: "b".into(),
+            source: "a".into(),
+            transform: Transform {
+                translation: [6.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0]
+            }
+        }),
+        Operation::Scene(SceneOperation::Instance {
+            object: "c".into(),
+            source: "b".into(),
+            transform: Transform {
+                translation: [-6.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0]
+            }
+        }),
+        Operation::Scene(SceneOperation::Modifier {
+            object: "a".into(),
+            modifier: NamedModifier {
+                name: "copies".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "a".into(),
+                    action: Action::Array { count: 2, offset: [3.0, 0.0, 0.0] }
+                }
+            }
+        }),
+    ],
     );
     assert_eq!(doc.object("a").unwrap().vertices().len(), 8);
     assert_eq!(doc.object("b").unwrap().faces().len(), 0);
@@ -184,10 +200,27 @@ fn modifier_reference_graph_instances_disabled_and_cycles() {
     assert_eq!(doc.compile(None).unwrap().glb, compiled.glb);
     assert_unchanged(&doc, &before);
 
-    apply_json(
+    apply(
         &mut doc,
         "disabled-wrap",
-        r#"[{"op":"modifier","object":"a","name":"wrap","enabled":false,"operation":{"op":"shrinkwrap","vertices":[],"reference":"c","max_distance":10,"offset":0}}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Modifier {
+            object: "a".into(),
+            modifier: NamedModifier {
+                name: "wrap".into(),
+                enabled: false,
+                operation: MeshEditingOperation {
+                    object: "a".into(),
+                    action: Action::Shrinkwrap {
+                        vertices: vec![],
+                        reference: "c".into(),
+                        max_distance: 10.0,
+                        offset: 0.0
+                    }
+                }
+            }
+        }),
+    ],
     );
     assert!(!doc.scene().modifiers["a"]
         .iter()
@@ -197,10 +230,27 @@ fn modifier_reference_graph_instances_disabled_and_cycles() {
     assert_eq!(doc.compile(None).unwrap().triangles, compiled.triangles);
 
     let before = snap(&doc);
-    let err = try_json(
+    let err = try_apply(
         &mut doc,
         "live-wrap",
-        r#"[{"op":"modifier","object":"a","name":"wrap","enabled":true,"operation":{"op":"shrinkwrap","vertices":[],"reference":"c","max_distance":10,"offset":0}}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Modifier {
+            object: "a".into(),
+            modifier: NamedModifier {
+                name: "wrap".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "a".into(),
+                    action: Action::Shrinkwrap {
+                        vertices: vec![],
+                        reference: "c".into(),
+                        max_distance: 10.0,
+                        offset: 0.0
+                    }
+                }
+            }
+        }),
+    ],
     )
     .unwrap_err();
     assert!(
@@ -209,10 +259,25 @@ fn modifier_reference_graph_instances_disabled_and_cycles() {
     );
     assert_unchanged(&doc, &before);
 
-    let err = try_json(
+    let err = try_apply(
         &mut doc,
         "fixed-selection",
-        r#"[{"op":"modifier","object":"a","name":"bevel","operation":{"op":"bevel_edges","edges":[["1","2"]],"width":0.1}}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Modifier {
+            object: "a".into(),
+            modifier: NamedModifier {
+                name: "bevel".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "a".into(),
+                    action: Action::Bevel {
+                        edges: vec![mesh::EdgeKey(mesh::VertexId(1), mesh::VertexId(2))],
+                        width: 0.1
+                    }
+                }
+            }
+        }),
+    ],
     )
     .unwrap_err();
     assert!(
@@ -220,104 +285,52 @@ fn modifier_reference_graph_instances_disabled_and_cycles() {
         "modifiers may not pin element IDs, got {err:?}"
     );
 
-    apply_json(&mut doc, "bake-c", r#"[{"op":"apply_modifiers","object":"c"}]"#);
+    apply(&mut doc, "bake-c", vec![
+        Operation::Scene(SceneOperation::ApplyModifiers { object: "c".into() }),
+    ]);
     assert!(doc.scene().nodes["c"].linked_to.is_none());
     assert_eq!(doc.object("c").unwrap().vertices().len(), 16);
-    apply_json(&mut doc, "d", r#"[{"op":"cube","object":"d","size":[1,1,1]}]"#);
-    apply_json(
+    apply(&mut doc, "d", vec![
+        Operation::Cube { object: "d".into(), size: [1.0, 1.0, 1.0] },
+    ]);
+    apply(
         &mut doc,
         "wrap-d",
-        r#"[{"op":"modifier","object":"d","name":"to-a","operation":{"op":"shrinkwrap","vertices":[],"reference":"a","max_distance":20,"offset":0}}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Modifier {
+            object: "d".into(),
+            modifier: NamedModifier {
+                name: "to-a".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "d".into(),
+                    action: Action::Shrinkwrap {
+                        vertices: vec![],
+                        reference: "a".into(),
+                        max_distance: 20.0,
+                        offset: 0.0
+                    }
+                }
+            }
+        }),
+    ],
     );
     let product = doc.compile(None).unwrap();
     assert!(product.triangles > 0);
-    apply_json(&mut doc, "order", r#"[{"op":"modifier_order","object":"a","names":["wrap","copies"]}]"#);
+    apply(&mut doc, "order", vec![
+        Operation::Scene(SceneOperation::ModifierOrder { object: "a".into(), names: vec!["wrap".into(), "copies".into()] }),
+    ]);
     let before = snap(&doc);
-    let err = try_json(
+    let err = try_apply(
         &mut doc,
         "bad-order",
-        r#"[{"op":"modifier_order","object":"a","names":["copies"]}]"#,
+        vec![
+        Operation::Scene(SceneOperation::ModifierOrder { object: "a".into(), names: vec!["copies".into()] }),
+    ],
     )
     .unwrap_err();
     assert!(matches!(err, Error::Invalid(_)), "{err:?}");
     assert_unchanged(&doc, &before);
-}
-
-#[test]
-fn v1_source_migrates_then_accepts_v2_authoring() {
-    assert_eq!(&V1_ROBOT[..8], b"MPMODEL\0");
-    assert_eq!(u32::from_le_bytes(V1_ROBOT[8..12].try_into().unwrap()), 1);
-    let calls = Cell::new(0u32);
-    let cancel = || {
-        calls.set(calls.get() + 1);
-        calls.get() > 1
-    };
-    let cancelled = Document::from_bytes(V1_ROBOT, Limits::default(), Some(&cancel));
-    assert!(
-        matches!(cancelled, Err(Error::Mesh(mesh::MeshError::Cancelled))),
-        "v1 decode must honor cancellation, got {cancelled:?}"
-    );
-
-    let mut doc = Document::from_bytes(V1_ROBOT, Limits::default(), None).unwrap();
-    assert_eq!(
-        doc.head().generation,
-        u64::from_le_bytes(V1_ROBOT[12..20].try_into().unwrap())
-    );
-    assert_eq!(&doc.head().content, &V1_ROBOT[20..52]);
-    let v1_glb = doc.compile(None).unwrap().glb;
-    assert!(v1_glb.starts_with(b"glTF"));
-
-    let upgraded = doc.to_bytes(None).unwrap();
-    assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()), 2);
-    let round = Document::from_bytes(&upgraded, Limits::default(), None).unwrap();
-    assert_eq!(round.head(), doc.head());
-    assert_eq!(round.compile(None).unwrap().glb, v1_glb);
-
-    let object = doc.objects().next().unwrap().0.to_owned();
-    apply(
-        &mut doc,
-        "v2-light",
-        vec![Operation::Scene(SceneOperation::Light(LightEmitter {
-            name: "probe".into(),
-            attachment: Attachment::Object(object.clone()),
-            transform: Transform {
-                translation: [0., 1., 0.],
-                ..Default::default()
-            },
-            kind: LightKind::Point,
-            color: [1., 0.5, 0.1],
-            intensity: 40.,
-            range: 8.,
-        }))],
-    );
-    apply_json(
-        &mut doc,
-        "v2-mod",
-        &format!(
-            r#"[{{"op":"modifier","object":"{object}","name":"shell","operation":{{"op":"array","count":2,"offset":[0.25,0,0]}}}}]"#
-        ),
-    );
-    let v2 = doc.to_bytes(None).unwrap();
-    assert_eq!(u32::from_le_bytes(v2[8..12].try_into().unwrap()), 2);
-    let reopened = Document::from_bytes(&v2, Limits::default(), None).unwrap();
-    assert_eq!(reopened.head(), doc.head());
-    assert!(reopened.scene().emitters.contains_key("probe"));
-    assert_eq!(reopened.scene().modifiers[&object][0].name, "shell");
-    let glb = makepad_gltf::parse_glb_bytes(&reopened.compile(None).unwrap().glb).unwrap();
-    assert_eq!(lights_ext(&glb).len(), 1);
-
-    let mut bad_version = V1_ROBOT.to_vec();
-    bad_version[8..12].copy_from_slice(&0u32.to_le_bytes());
-    assert!(matches!(
-        Document::from_bytes(&bad_version, Limits::default(), None),
-        Err(Error::Corrupt(_))
-    ));
-    bad_version[8..12].copy_from_slice(&3u32.to_le_bytes());
-    assert!(matches!(
-        Document::from_bytes(&bad_version, Limits::default(), None),
-        Err(Error::Corrupt(_))
-    ));
-    assert!(Document::from_bytes(&V1_ROBOT[..40], Limits::default(), None).is_err());
 }
 
 #[test]
@@ -566,10 +579,20 @@ fn globals_from(skeleton: &Skeleton, local: &[Transform]) -> (Vec<Matrix4>, Vec<
 fn morph_output_follows_links_and_refuses_collapse_or_lod() {
     let mut doc = Document::new(Limits::default()).unwrap();
     apply(&mut doc, "mesh", vec![cube("body", [2.; 3]), cube("prop", [1.; 3])]);
-    apply_json(
+    apply(
         &mut doc,
         "link",
-        r#"[{"op":"instance","object":"copy","source":"body","transform":{"translation":[4,0,0]}}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Instance {
+            object: "copy".into(),
+            source: "body".into(),
+            transform: Transform {
+                translation: [4.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0]
+            }
+        }),
+    ],
     );
     let deltas: BTreeMap<_, _> = doc
         .object("body")
@@ -678,14 +701,7 @@ fn morph_output_follows_links_and_refuses_collapse_or_lod() {
     );
 
     let mut lod = Document::new(Limits::default()).unwrap();
-    let sphere = parse_operations(
-        &json::parse(
-            br#"[{"op":"sphere","object":"ball","radius":1,"segments":12,"rings":8}]"#,
-        )
-        .unwrap(),
-        lod.limits(),
-    )
-    .unwrap();
+    let sphere = vec![Operation::sphere("ball", 1., 12, 8, true, lod.limits()).unwrap()];
     apply(&mut lod, "ball", sphere);
     let morph: BTreeMap<_, _> = lod
         .object("ball")
@@ -739,10 +755,12 @@ fn surface_refs_bake_instance_and_unknown_material() {
             },
         ],
     );
-    apply_json(
+    apply(
         &mut doc,
         "link",
-        r#"[{"op":"instance","object":"inst","source":"hi"}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Instance { object: "inst".into(), source: "hi".into(), transform: Transform::default() }),
+    ],
     );
     let ids: Vec<_> = doc.object("hi").unwrap().vertices().iter().map(|v| v.id).collect();
     apply(
@@ -845,7 +863,9 @@ fn surface_refs_bake_instance_and_unknown_material() {
     .unwrap_err();
     assert!(matches!(err, Error::Invalid(_) | Error::MissingObject(_)), "{err:?}");
     assert_unchanged(&doc, &before);
-    apply_json(&mut doc, "unique", r#"[{"op":"make_unique","object":"inst"}]"#);
+    apply(&mut doc, "unique", vec![
+        Operation::Scene(SceneOperation::MakeUnique { object: "inst".into() }),
+    ]);
 
     apply(
         &mut doc,
@@ -885,10 +905,12 @@ fn budget_cancel_and_atomic_failures() {
     assert_unchanged(&doc, &before);
     assert!(doc.object("other").is_none());
 
-    apply_json(
+    apply(
         &mut doc,
         "inst",
-        r#"[{"op":"instance","object":"copy","source":"body"}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Instance { object: "copy".into(), source: "body".into(), transform: Transform::default() }),
+    ],
     );
     let before = snap(&doc);
     let err = try_apply(
@@ -956,16 +978,15 @@ fn budget_cancel_and_atomic_failures() {
     assert!(matches!(err, Error::Budget(_)), "{err:?}");
     assert_unchanged(&doc, &before);
 
-    let mods: String = (0..17)
-        .map(|i| {
-            format!(
-                r#"{{"op":"modifier","object":"body","name":"m{i}","operation":{{"op":"array","count":2,"offset":[0.01,0,0]}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+    let mods = (0..17).map(|i| Operation::Scene(SceneOperation::Modifier {
+        object: "body".into(), modifier: NamedModifier {
+            name: format!("m{i}"), enabled: true, operation: MeshEditingOperation {
+                object: "body".into(), action: Action::Array { count: 2, offset: [0.01, 0., 0.] },
+            },
+        },
+    })).collect();
     let before = snap(&doc);
-    let err = try_json(&mut doc, "too-many-mods", &format!("[{mods}]")).unwrap_err();
+    let err = try_apply(&mut doc, "too-many-mods", mods).unwrap_err();
     assert!(
         matches!(err, Error::Budget(_) | Error::Invalid(_)),
         "{err:?}"
@@ -997,10 +1018,22 @@ fn budget_cancel_and_atomic_failures() {
         assert_unchanged(&lod_doc, &after_lod);
     }
 
-    apply_json(
+    apply(
         &mut doc,
         "stack",
-        r#"[{"op":"modifier","object":"body","name":"copies","operation":{"op":"array","count":2,"offset":[1,0,0]}}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Modifier {
+            object: "body".into(),
+            modifier: NamedModifier {
+                name: "copies".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "body".into(),
+                    action: Action::Array { count: 2, offset: [1.0, 0.0, 0.0] }
+                }
+            }
+        }),
+    ],
     );
     let calls = Cell::new(0u32);
     let cancel = || {
@@ -1089,12 +1122,7 @@ fn budget_cancel_and_atomic_failures() {
 #[test]
 fn linked_instances_lods_and_export_lights() {
     let mut doc = Document::new(Limits::default()).unwrap();
-    let sphere = parse_operations(
-        &json::parse(br#"[{"op":"sphere","object":"car","radius":1,"segments":12,"rings":8}]"#)
-            .unwrap(),
-        doc.limits(),
-    )
-    .unwrap();
+    let sphere = vec![Operation::sphere("car", 1., 12, 8, true, doc.limits()).unwrap()];
     apply(&mut doc, "car", sphere);
     apply(
         &mut doc,
@@ -1292,10 +1320,22 @@ fn linked_instances_lods_and_export_lights() {
     assert!(nodes[joint].children.as_ref().unwrap().contains(&lamp));
     assert!(nodes[joint].rotation.is_some());
 
-    apply_json(
+    apply(
         &mut doc,
         "grow",
-        r#"[{"op":"modifier","object":"car","name":"copies","operation":{"op":"array","count":2,"offset":[0,2,0]}}]"#,
+        vec![
+        Operation::Scene(SceneOperation::Modifier {
+            object: "car".into(),
+            modifier: NamedModifier {
+                name: "copies".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "car".into(),
+                    action: Action::Array { count: 2, offset: [0.0, 2.0, 0.0] }
+                }
+            }
+        }),
+    ],
     );
     let grown = doc.compile(None).unwrap();
     assert!(

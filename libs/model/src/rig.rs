@@ -2,6 +2,7 @@
 //! shared by document objects. Local rest translations determine inverse bind
 //! matrices; rest rotations, custom bind matrices, IK and constraints require
 //! separate future contracts and are not silently approximated here.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{
     canon::{Reader, Writer},
     mesh, Error, Limits, Result,
@@ -171,7 +172,7 @@ impl Skeleton {
                     (ab.iter().zip(ap).map(|(a, b)| a * b).sum::<f64>() / den).clamp(0., 1.)
                 };
                 let delta = std::array::from_fn::<_, 3, _>(|d| ap[d] - ab[d] * t);
-                let distance = delta[0].hypot(delta[1]).hypot(delta[2]);
+                let distance = delta[0].phypot(delta[1]).phypot(delta[2]);
                 if distance < best.0 {
                     best = (distance, i);
                 }

@@ -89,7 +89,7 @@ impl ParticleSpec {
 
 /// A request from script, drained by the host each frame. Mirrors the
 /// AudioRequest pattern: script queues, the device decides.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ParticleRequest {
     /// Continuous emitter; `id` lets script stop or replace it.
     Emitter {
@@ -101,4 +101,10 @@ pub enum ParticleRequest {
     Burst { at: Vec3f, spec: ParticleSpec },
     Stop { id: u64 },
     Clear,
+    /// A whole effect (`game.vfx`): a named or inline preset.
+    Vfx(crate::vfx::VfxRequest),
+    /// Define (or replace) a named preset for later `Vfx` requests.
+    Define { name: String, preset: std::sync::Arc<crate::vfx::VfxPreset> },
+    /// One surface mark (`game.decal`).
+    Decal(crate::vfx::DecalRequest),
 }

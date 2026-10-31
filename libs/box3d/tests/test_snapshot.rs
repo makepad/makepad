@@ -301,3 +301,73 @@ fn snapshot_rejects_corrupt_input() {
 
     destroy_world(world);
 }
+
+// A burst of overlapping bodies makes tens of thousands of pairs; most are
+// freed as the bodies fly apart, and the contact array and pair set keep
+// their high water. A snapshot writes a freed contact slot as its
+// generation only and the pair set's occupied slots only, and the
+// restored world still continues bit-identically, including when new
+// contacts reuse freed ids (bodies created on both worlds after the
+// restore).
+#[test]
+fn snapshot_of_freed_contacts_is_compact_and_exact() {
+    let world_def = default_world_def();
+    let mut world = create_world(&world_def);
+    let shape_def = default_shape_def();
+    let ground = create_body(&mut world, &default_body_def());
+    let _ = create_hull_shape(&mut world, ground, &shape_def, &make_box_hull(200.0, 0.5, 200.0));
+    let piece = make_box_hull(0.1, 0.02, 0.06);
+    let mut ids = Vec::new();
+    for i in 0..300 {
+        let mut bd = default_body_def();
+        bd.body_type = BodyType::Dynamic;
+        bd.position = pos(0.0, 1.0, 0.0);
+        let a = i as f32 * 0.37;
+        bd.linear_velocity = vec3(a.cos() * 4.0, 6.0 + (i % 7) as f32, a.sin() * 4.0);
+        let id = create_body(&mut world, &bd);
+        let _ = create_hull_shape(&mut world, id, &shape_def, &piece);
+        ids.push(id);
+    }
+    for _ in 0..40 {
+        world_step(&mut world, 1.0 / 240.0, 2);
+    }
+    let slots = world.contacts.len();
+    let live = world.contacts.iter().enumerate().filter(|(i, c)| c.contact_id == *i as i32).count();
+    assert!(live * 4 < slots, "the burst's pairs were mostly freed ({live} of {slots})");
+
+    let mut snap_buf = RecBuffer::new();
+    let mut rec = Recording::new();
+    let byte_count = serialize_world(&world, &mut snap_buf, &mut rec) as usize;
+    // Freed slots cost 8 bytes each (a full record is about 200): the
+    // image is what the live state needs. (Written in full, this world's
+    // ~22k freed slots alone would exceed the bound.)
+    let bound = slots * 16 + live * 800 + ids.len() * 1000;
+    assert!(byte_count < bound, "{byte_count} bytes for {slots} contact slots ({live} live), bound {bound}");
+    write_registry(&mut rec);
+    let rdr = load_registry(&rec.buffer.data).expect("registry should load");
+    let mut restored = create_world(&world_def);
+    ensure!(deserialize_into_shell(&snap_buf.data, &mut restored, &rdr));
+    ensure!(hash_bodies(&world, &ids) == hash_bodies(&restored, &ids));
+
+    for frame in 0..240 {
+        if frame % 40 == 0 {
+            // New bodies landing in the pile reuse freed contact ids.
+            for w in [&mut world, &mut restored] {
+                let mut bd = default_body_def();
+                bd.body_type = BodyType::Dynamic;
+                bd.position = pos(0.3 * (frame / 40) as f32, 3.0, 0.0);
+                let id = create_body(w, &bd);
+                let _ = create_hull_shape(w, id, &shape_def, &make_box_hull(0.4, 0.4, 0.4));
+            }
+        }
+        world_step(&mut world, 1.0 / 240.0, 2);
+        world_step(&mut restored, 1.0 / 240.0, 2);
+        if frame % 20 == 19 {
+            assert!(hash_bodies(&world, &ids) == hash_bodies(&restored, &ids), "restored world diverged at frame {}", frame);
+        }
+    }
+    let live_after = world.contacts.iter().enumerate().filter(|(i, c)| c.contact_id == *i as i32).count();
+    ensure!(live_after > 0);
+    destroy_world(restored);
+    destroy_world(world);
+}

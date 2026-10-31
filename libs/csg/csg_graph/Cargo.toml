@@ -1,0 +1,17 @@
+[package]
+name = "makepad-csg-graph"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The typed solid IR: a graph of primitives, sketch generators, modifiers, booleans, transforms and signed distance fields, each node keyed by a canonical hash and built once into a closed triangle mesh"
+
+[dependencies]
+makepad-core-util = { path = "../../core_util" }
+makepad-csg-math = { path = "../csg_math" }
+makepad-csg-mesh = { path = "../csg_mesh" }
+makepad-csg-primitives = { path = "../csg_primitives" }
+makepad-csg-cad = { path = "../csg_cad" }
+makepad-csg-sdf = { path = "../csg_sdf" }
+
+[dev-dependencies]
+makepad-csg-boolean = { path = "../csg_boolean" }

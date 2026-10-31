@@ -109,8 +109,7 @@ impl TriMesh {
         let inv_cell = 1.0 / cell;
 
         // Spatial hash grid: maps cell coordinate to list of (new_vert_index, position).
-        let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<(u32, Vec3d)>> =
-            std::collections::HashMap::new();
+        let mut grid: makepad_csg_math::fast_hash::FastMap<(i64, i64, i64), Vec<(u32, Vec3d)>> = Default::default();
         let mut remap = vec![0u32; n];
         let mut new_verts: Vec<Vec3d> = Vec::new();
 

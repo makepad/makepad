@@ -110,7 +110,7 @@ pub struct TaskContext {
 
     pub manifold_counts: [i32; CONTACT_MANIFOLD_COUNT_BUCKETS],
 
-    /// Deferred (color_index, local_index, manifold_count) mesh contact spec
+    /// Deferred (color_index, local_index, manifold_count) multi-manifold contact spec
     /// updates recorded during the parallel collide pass. C writes the specs
     /// inline from workers (each touching contact owns exactly one spec slot);
     /// the port defers them so workers never alias the constraint graph.
@@ -128,6 +128,9 @@ pub struct TaskContext {
     /// b3ComputeMeshManifolds). Capacity-preserving reuse across contacts;
     /// see MeshCollideScratch.
     pub mesh_scratch: crate::mesh_contact::MeshCollideScratch,
+
+    /// Reusable segment-pair manifolds for tube contacts.
+    pub tube_scratch: crate::tube_contact::TubeCollideScratch,
 
     /// Scratch shape for the compound collide path's temporary child shape
     /// (C stack-copies the compound b3Shape; the port reuses this so the
@@ -218,6 +221,8 @@ pub struct World {
     pub hit_event_threshold: f32,
     pub restitution_threshold: f32,
     pub max_linear_speed: f32,
+    pub speculative_distance: f32,
+    pub contact_hertz_ratio: f32,
     pub contact_speed: f32,
     pub contact_hertz: f32,
     pub contact_damping_ratio: f32,
@@ -327,7 +332,7 @@ use crate::constants::{
 use crate::constraint_graph::{add_contact_to_graph, remove_contact_from_graph, OVERFLOW_INDEX};
 use crate::contact::{
     update_contact, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_TOUCHING_FLAG, RELATIVE_TRANSFORM_VALID,
-    CONTACT_RECYCLE_FLAG, SIM_DISJOINT, SIM_MESH_CONTACT, SIM_STARTED_TOUCHING, SIM_STOPPED_TOUCHING,
+    CONTACT_RECYCLE_FLAG, SIM_DISJOINT, SIM_MESH_CONTACT, SIM_TUBE_CONTACT, SIM_STARTED_TOUCHING, SIM_STOPPED_TOUCHING,
     SIM_TOUCHING_FLAG,
 };
 use crate::core::{get_byte_count, NULL_INDEX, SECRET_COOKIE};
@@ -400,6 +405,7 @@ pub fn create_world(def: &WorldDef) -> World {
     b3_assert!(def.internal_value == SECRET_COOKIE);
 
     b3_assert!(linear_slop() <= mesh_rest_offset());
+    // static mesh/height contacts keep the default speculative distance
     b3_assert!(mesh_rest_offset() < speculative_distance());
 
     crate::contact::initialize_contact_registers();
@@ -486,6 +492,8 @@ pub fn create_world(def: &WorldDef) -> World {
     world.hit_event_threshold = def.hit_event_threshold;
     world.restitution_threshold = def.restitution_threshold;
     world.max_linear_speed = def.maximum_linear_speed;
+    world.contact_hertz_ratio = if def.contact_hertz_ratio > 0.0 { def.contact_hertz_ratio } else { 0.125 };
+    world.speculative_distance = if def.speculative_distance > 0.0 { def.speculative_distance } else { speculative_distance() };
     world.contact_speed = def.contact_speed;
     world.contact_hertz = def.contact_hertz;
     world.contact_damping_ratio = def.contact_damping_ratio;
@@ -615,7 +623,7 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
     let task_context = unsafe { ctx.task_contexts.get_mut(worker_index as usize) };
 
     let recycle_distance = world.contact_recycle_distance;
-    let speculative_distance = speculative_distance();
+    let speculative_distance = world.speculative_distance;
     let recycle_distance_non_touching = min_float(recycle_distance, speculative_distance);
 
     for i in start_index..end_index {
@@ -659,7 +667,7 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
         let is_static_a = type_a == BodyType::Static;
         let is_static_b = type_b == BodyType::Static;
         let was_touching = (contact_flags & SIM_TOUCHING_FLAG) != 0;
-        let is_mesh_contact = (contact_flags & SIM_MESH_CONTACT) != 0;
+        let multi_manifold = (contact_flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0;
 
         if was_touching {
             b3_assert!(set_index_a == AWAKE_SET || set_index_a == STATIC_SET);
@@ -687,7 +695,7 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
         // Contact recycling optimization. Please cite this library if you use this optimization.
         // This is inspired by persistent contact manifolds used in some physics engines, such as PhysX.
         // However, this allows larger relative motion and has fewer tuning parameters (just one).
-        if (!is_fast || !is_mesh_contact)
+        if (!is_fast || !multi_manifold)
             && recycle_distance > 0.0
             && (contact_flags & RELATIVE_TRANSFORM_VALID) != 0
             && (contact_flags & CONTACT_RECYCLE_FLAG) != 0
@@ -793,11 +801,11 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
             task_context.manifold_counts[bucket_index as usize - 1] += 1;
         }
 
-        // Update the mesh contact spec. C writes the constraint graph slot
+        // Update the multi-manifold contact spec. C writes the constraint graph slot
         // inline (slot-disjoint per contact); the port defers to keep workers
         // from aliasing the graph.
         let contact_flags = contact.flags;
-        if touching && was_touching && (contact_flags & SIM_MESH_CONTACT) != 0 {
+        if touching && was_touching && (contact_flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0 {
             let (color_index, local_index) = (contact.color_index, contact.local_index);
             b3_assert!(color_index != NULL_INDEX);
             b3_assert!(0 <= color_index && color_index < GRAPH_COLOR_COUNT as i32);
@@ -932,7 +940,7 @@ fn collide(world: &mut World, context: &mut StepContext) {
         world.pre_solve_fcn = pre_solve;
     }
 
-    // Apply the deferred mesh contact spec updates (slot-disjoint, so worker
+    // Apply the deferred multi-manifold contact spec updates (slot-disjoint, so worker
     // order does not matter; iterate in worker order like the C merges).
     for i in 0..world.worker_count as usize {
         for k in 0..world.task_contexts[i].mesh_spec_updates.len() {
@@ -1057,8 +1065,8 @@ fn collide(world: &mut World, context: &mut StepContext) {
 
                 add_non_touching_contact(world, contact_id);
 
-                let is_mesh_contact = (world.contacts[contact_id as usize].flags & SIM_MESH_CONTACT) != 0;
-                remove_contact_from_graph(world, body_id_a, body_id_b, color_index, local_index, is_mesh_contact);
+                let multi_manifold = (world.contacts[contact_id as usize].flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0;
+                remove_contact_from_graph(world, body_id_a, body_id_b, color_index, local_index, multi_manifold);
             }
 
             // Clear the smallest set bit
@@ -1165,7 +1173,7 @@ pub fn world_step(world: &mut World, time_step: f32, sub_step_count: i32) {
     world.inv_dt = context.inv_dt;
 
     // Hertz values get reduced for large time steps
-    let contact_hertz = min_float(world.contact_hertz, 0.125 * context.inv_h);
+    let contact_hertz = min_float(world.contact_hertz, world.contact_hertz_ratio * context.inv_h);
     context.contact_softness = make_soft(contact_hertz, world.contact_damping_ratio, context.h);
     context.static_softness = make_soft(2.0 * contact_hertz, 0.5 * world.contact_damping_ratio, context.h);
 
@@ -1609,6 +1617,21 @@ pub fn world_set_maximum_linear_speed(world: &mut World, maximum_linear_speed: f
 /// C: b3World_GetMaximumLinearSpeed.
 pub fn world_get_maximum_linear_speed(world: &World) -> f32 {
     world.max_linear_speed
+}
+
+/// Set the speculative contact distance in length units; 0 restores the default.
+pub fn world_set_speculative_distance(world: &mut World, d: f32) {
+    b3_assert!(!world.locked);
+    if world.locked {
+        return;
+    }
+
+    world.speculative_distance = if d > 0.0 { d } else { speculative_distance() };
+}
+
+/// Get the speculative contact distance in length units.
+pub fn world_get_speculative_distance(world: &World) -> f32 {
+    world.speculative_distance
 }
 
 /// C: b3World_GetProfile.
@@ -2535,19 +2558,24 @@ pub fn world_explode(world: &mut World, explosion_def: &ExplosionDef) {
         // far from the origin. Everything below runs in that near-origin frame.
         let local_position = inv_transform_world_point(xf, position);
 
-        let mut proxy_buffer = [MVec3::ZERO; 2];
-        let local_points = [local_position];
-        let input = DistanceInput {
-            proxy_a: make_shape_proxy(&shape, &mut proxy_buffer),
-            proxy_b: ShapeProxy { points: &local_points, radius: 0.0 },
-            transform: Transform::IDENTITY,
-            use_radii: true,
+        let (witness_point, distance) = match &shape.geom {
+            crate::shape::ShapeGeometry::Tube(tube) => crate::tube::closest_point_on_tube(tube, local_position, true),
+            _ => {
+                let mut proxy_buffer = [MVec3::ZERO; 2];
+                let local_points = [local_position];
+                let input = DistanceInput {
+                    proxy_a: make_shape_proxy(&shape, &mut proxy_buffer),
+                    proxy_b: ShapeProxy { points: &local_points, radius: 0.0 },
+                    transform: Transform::IDENTITY,
+                    use_radii: true,
+                };
+                let mut cache = SimplexCache::default();
+                let output = crate::distance::shape_distance(&input, &mut cache, None);
+                (output.point_a, output.distance)
+            }
         };
 
-        let mut cache = SimplexCache::default();
-        let output = crate::distance::shape_distance(&input, &mut cache, None);
-
-        if output.distance > radius + falloff {
+        if distance > radius + falloff {
             continue;
         }
 
@@ -2558,8 +2586,8 @@ pub fn world_explode(world: &mut World, explosion_def: &ExplosionDef) {
         }
 
         // Witness point is already in the body local query frame
-        let mut closest_point = output.point_a;
-        if output.distance == 0.0 {
+        let mut closest_point = witness_point;
+        if distance == 0.0 {
             closest_point = get_shape_centroid(&shape);
         }
 
@@ -2572,8 +2600,8 @@ pub fn world_explode(world: &mut World, explosion_def: &ExplosionDef) {
 
         let area = get_shape_projected_area(&shape, direction);
         let mut scale = 1.0;
-        if output.distance > radius && falloff > 0.0 {
-            scale = clamp_float((radius + falloff - output.distance) / falloff, 0.0, 1.0);
+        if distance > radius && falloff > 0.0 {
+            scale = clamp_float((radius + falloff - distance) / falloff, 0.0, 1.0);
         }
 
         let magnitude = impulse_per_area * area * scale * shape.explosion_scale;
@@ -2993,7 +3021,7 @@ pub fn validate_contacts(world: &World) {
                     b3_assert!(contact.body_sim_index_b == body_b.local_index);
                 }
 
-                if (contact.flags & SIM_MESH_CONTACT) != 0 || contact.color_index == OVERFLOW_INDEX {
+                if (contact.flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0 || contact.color_index == OVERFLOW_INDEX {
                     let color = &world.constraint_graph.colors[contact.color_index as usize];
                     let contact_id = color.contacts[contact.local_index as usize].contact_id;
                     b3_assert!(contact_id == contact_index);

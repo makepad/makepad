@@ -610,8 +610,8 @@ pub const SNAP_FNV_PRIME: u64 = 1099511628211;
 
 // Magic 'B3RC' in little-endian (C: B3_REC_MAGIC)
 pub const REC_MAGIC: u32 = 0x43523342;
-pub const REC_VERSION_MAJOR: u16 = 2;
-pub const REC_VERSION_MINOR: u16 = 2;
+pub const REC_VERSION_MAJOR: u16 = 3;
+pub const REC_VERSION_MINOR: u16 = 0;
 
 /// Fixed header size (C: sizeof(b3RecHeader) == 48).
 pub const REC_HEADER_SIZE: usize = 48;
@@ -701,6 +701,7 @@ pub enum RecOp {
     CreateHeightFieldShape = 0x44,
     CreateCompoundShape = 0x45,
     DestroyShape = 0x46,
+    CreateTubeShape = 0x47,
 
     ShapeSetDensity = 0x50,
     ShapeSetFriction = 0x51,
@@ -826,6 +827,8 @@ pub enum RecOp {
 
     StateHash = 0xF1,
     RecordingBounds = 0xF2,
+    /// Port extension: joint dry friction.
+    JointSetFriction = 0xF3,
 }
 
 // ---------------------------------------------------------------------------
@@ -945,6 +948,14 @@ impl RecBuffer {
         self.w_vec3(c.center1);
         self.w_vec3(c.center2);
         self.w_f32(c.radius);
+    }
+
+    pub fn w_tube(&mut self, tube: &crate::types::Tube) {
+        self.w_i32(tube.points.len() as i32);
+        for &point in &tube.points {
+            self.w_vec3(point);
+        }
+        self.w_f32(tube.radius);
     }
 
     /// C: b3RecW_GEOMID
@@ -1067,6 +1078,9 @@ impl RecBuffer {
         self.w_f32(base.constraint_damping_ratio);
         self.w_f32(base.draw_scale);
         self.w_bool(base.collide_connected);
+        self.w_f32(base.friction.coefficient);
+        self.w_f32(base.friction.radius);
+        self.w_f32(base.friction.torque);
         // internal_value omitted
     }
 

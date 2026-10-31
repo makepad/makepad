@@ -64,7 +64,7 @@ impl Fetch for SidecarFetch {
 fn limits() -> Limits {
     Limits {
         max_body_bytes: MAX_EXTRACT_BYTES,
-        total_timeout: FETCH_TIMEOUT,
+        idle_timeout: FETCH_TIMEOUT,
         ..Limits::default()
     }
 }

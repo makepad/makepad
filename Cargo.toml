@@ -10,8 +10,11 @@ workspace.members = [
     "libs/relax_api/macro",
     "libs/relax_api/macro_impl",
     "libs/civil_time",
+    "libs/wm_api",
     "libs/app_registry",
     "libs/app_host",
+    "libs/diskmap",
+    "libs/workspace",
     "libs/code_arch",
     "libs/code_language",
     "libs/search",
@@ -26,21 +29,44 @@ workspace.members = [
     # job (the one cross-model contract), llm and models/* (per-family model
     # crates), the generate hub and the live pipe.
     # Constructive solid geometry.
+    "libs/csg/csg",
+    "libs/csg/csg_cad",
+    "libs/csg/csg_graph",
+    "libs/csg/csg_boolean",
+    "libs/csg/csg_exact",
     "libs/csg/csg_math",
+    "libs/csg/csg_mech",
+    "libs/csg/csg_mesh",
+    "libs/csg/csg_primitives",
+    "libs/csg/csg_sdf",
+    "libs/csg/csg_sculpt",
+    "libs/sdf_engine",
+    "libs/render_kernels",
+    "libs/render_kernels/tools",
+    "libs/render_graph",
+    "libs/effect_sim",
+    "libs/render_material",
+    "libs/geom3d",
+    "libs/text_mesh",
     "libs/typography",
     "libs/web_manifest",
     "libs/font_subset",
+    "libs/scene",
     "libs/soft_body",
+    "libs/show_control",
     "libs/bounded_http",
     # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
     "libs/core_util",
     "libs/strict_json",
     "libs/cell_width",
+    "libs/source_slice",
     "libs/loader_bundle",
     "libs/change_report",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
+    "libs/remesh",
     "libs/xatlas",
     # Editable polygon topology and worker-owned model documents.
+    "libs/mesh_edit",
     # === examples ===
     # === digital-fabrication product ===
     "libs/fabric/measure",
@@ -72,19 +98,25 @@ workspace.members = [
     # === archive.org search + download content input (VJ / asset-ui) ===
     # === image tile wall: HEVC tape atlases + baker CLI + TileGrid widget
     # (the engine extracted from the Source Library picture wall) ===
+    "libs/image_tiles",
     # === mp4 sample index for range-streaming playback ===
     "libs/mp4_index",
     # === necessary tools ===
     "platform/video",
     "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
+    "libs/map_build",
+    "tools/map_tiles",
+    "tools/map_bake",
     "libs/remote",
     "libs/devhub",
     "libs/stack",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
+    "tools/run",
     "tools/run/runner",
     "tools/run/boot",
+    "tools/run/fixture/diffpkg",
     "tools/run/fixture/diffpkg/tables",
     "tools/run/android_exe",
     "tools/run/android_host/fixture",
@@ -106,6 +138,7 @@ workspace.members = [
     # Relax data-structure microbenchmarks (Vec, iterators, HashMap, BTreeMap, sort, strings, bounds loops)
     "libs/relax/compiler/dsbench",
     # Send feedback: caption icon + panel (Amp, Scope)
+    "widgets/feedback",
     # === tests ===
     "platform/shader",
     "platform/script/audio_aot",
@@ -114,8 +147,25 @@ workspace.members = [
     "platform/script/imports",
     "platform/script/compute_sched",
     "platform/script/census",
+    "libs/tween/script",
     # === makepad-widgets: the core and its family crates (widgets/ is the
     # front, a member through its dependents) ===
+    "widgets/core",
+    "widgets/families/tweaker",
+    "widgets/families/data",
+    "widgets/families/rich_text",
+    "widgets/families/menus",
+    "widgets/families/extras",
+    "widgets/families/maps",
+    "widgets/families/pdf",
+    "widgets/families/ai",
+    "widgets/families/catalog",
+    "widgets/families/pickers",
+    "widgets/families/collections",
+    "widgets/families/media",
+    "widgets/families/hotkeys",
+    "widgets/families/editors",
+    "widgets/families/fab",
     # === private app repositories ===
     # Every app directory with a `src/`: the public apps above, and a private
     # repository cloned into apps/<name> whose root Cargo.toml is a package

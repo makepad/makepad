@@ -1,5 +1,6 @@
 //! Seeded surface fibers as ordinary closed geometry. No transparent shell
 //! ordering, geometry shader, per-frame allocation or extra renderer is needed.
+use makepad_csg_math::portable::PortableFloat;
 use super::*;
 
 pub(super) const MAX_STRANDS: u32 = 32_768;
@@ -116,7 +117,7 @@ pub(super) fn generate(source:&Mesh,count:u32,length:f64,width:f64,seed:u32,mate
             let n=unit(std::array::from_fn(|axis|(0..3).map(|k|triangle.normals[k][axis]*weights[k]).sum()))?;
             let uv=std::array::from_fn(|axis|(0..3).map(|k|triangle.uv[k][axis]*weights[k]).sum());
             let t=frame_normal(n)?;let b=cross(n,t);let angle=random.next()*std::f64::consts::TAU;
-            let bend=add(mul(t,angle.cos()),mul(b,angle.sin()));
+            let bend=add(mul(t,angle.pcos()),mul(b,angle.psin()));
             let height=length*(0.65+random.next()*0.7);let radius=width*0.5*(0.7+random.next()*0.6);
             let centers=[-0.06,0.52,1.].map(|along|add(root,add(mul(n,height*along),mul(bend,height*0.18*along*along))));
             let padding=1e-9*(1.+centers.iter().flatten().map(|v|v.abs()).fold(0.,f64::max));
@@ -129,7 +130,7 @@ pub(super) fn generate(source:&Mesh,count:u32,length:f64,width:f64,seed:u32,mate
         for (center,size) in [(centers[0],1.),(centers[1],0.6)] {
             for side in 0..3 {
                 let turn=angle+side as f64*std::f64::consts::TAU/3.;
-                positions.push(add(center,add(mul(t,turn.cos()*radius*size),mul(b,turn.sin()*radius*size))));
+                positions.push(add(center,add(mul(t,turn.pcos()*radius*size),mul(b,turn.psin()*radius*size))));
             }
         }
         positions.push(centers[2]);

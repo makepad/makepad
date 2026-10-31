@@ -49,6 +49,15 @@ fn pattern_read(r: &mut Reader<'_>) -> Result<SurfacePattern> {
         4 => PatternKind::Perlin,
         5 => PatternKind::Fbm,
         6 => PatternKind::Yarn,
+        7 => PatternKind::Bricks,
+        8 => PatternKind::Tiles,
+        9 => PatternKind::Planks,
+        10 => PatternKind::Vents,
+        11 => PatternKind::Grille,
+        12 => PatternKind::Knurl,
+        13 => PatternKind::Camo,
+        14 => PatternKind::Leaves,
+        15 => PatternKind::Needles,
         _ => return Err(Error::Corrupt("surface pattern kind")),
     };
     Ok(SurfacePattern {
@@ -156,11 +165,24 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
     w.f64(m.emissive_strength)?;
     w.u8(m.alpha as u8)?;
     w.f64(m.alpha_cutoff)?;
-    // The legacy 0/1 layout stays byte-identical for materials without fur.
-    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1))?;
+    // The legacy 0/1 layout stays byte-identical for materials without fur
+    // or shading terms.
+    // Bit 3: the shading block carries a rim term (only when set).
+    let rim = m.shading.is_some_and(|s| s.rim > 0.0);
+    // Bit 4: a number-plate layout (only when set).
+    let plate = m.shading.is_some_and(|s| s.plate > 0.0);
+    // Bit 5: a vehicle lamp role (only when set).
+    let lamp = m.shading.and_then(|s| s.lamp);
+    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2) | ((rim as u8) << 3) | ((plate as u8) << 4) | ((lamp.is_some() as u8) << 5))?;
     if let Some(fur) = m.fur {
         for value in [fur.length, fur.density, fur.scale] { w.f64(value)?; }
         w.u32(fur.seed)?;
+    }
+    if let Some(s) = m.shading {
+        for value in [s.wind, s.clearcoat, s.flake, s.impostor] { w.f64(value)?; }
+        if rim { w.f64(s.rim)?; }
+        if plate { w.f64(s.plate)?; }
+        if let Some(lamp) = lamp { w.u8(lamp_code(lamp))?; }
     }
     w.count(m.channels.len())?;
     for (ch, layers) in &m.channels {
@@ -171,6 +193,21 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
         }
     }
     Ok(())
+}
+fn lamp_code(lamp: makepad_gltf::GlbLamp) -> u8 {
+    match lamp {
+        makepad_gltf::GlbLamp::Tail => 0,
+        makepad_gltf::GlbLamp::Brake => 1,
+        makepad_gltf::GlbLamp::Reverse => 2,
+    }
+}
+fn lamp_from_code(code: u8) -> Result<makepad_gltf::GlbLamp> {
+    match code {
+        0 => Ok(makepad_gltf::GlbLamp::Tail),
+        1 => Ok(makepad_gltf::GlbLamp::Brake),
+        2 => Ok(makepad_gltf::GlbLamp::Reverse),
+        _ => Err(Error::Corrupt("surface lamp role")),
+    }
 }
 fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     let base_color = read_array(r)?;
@@ -188,12 +225,19 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     };
     let alpha_cutoff = r.f64()?;
     let flags = r.u8()?;
-    if flags > 3 { return Err(Error::Corrupt("surface material flags")); }
+    if flags > 63 || (flags & 56 != 0 && flags & 4 == 0) { return Err(Error::Corrupt("surface material flags")); }
     let double_sided = flags & 1 != 0;
     let fur = if flags & 2 != 0 {
         Some(makepad_gltf::GlbFurMaterial {
             length: r.f64()?, density: r.f64()?, scale: r.f64()?, seed: r.u32()?,
         })
+    } else { None };
+    let shading = if flags & 4 != 0 {
+        let (wind, clearcoat, flake, impostor) = (r.f64()?, r.f64()?, r.f64()?, r.f64()?);
+        let rim = if flags & 8 != 0 { r.f64()? } else { 0.0 };
+        let plate = if flags & 16 != 0 { r.f64()? } else { 0.0 };
+        let lamp = if flags & 32 != 0 { Some(lamp_from_code(r.u8()?)?) } else { None };
+        Some(makepad_gltf::GlbShading { wind, clearcoat, flake, impostor, rim, plate, lamp })
     } else { None };
     let mut channels = BTreeMap::new();
     for _ in 0..r.count(5)? {
@@ -208,6 +252,7 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     }
     Ok(SurfaceMaterial {
         fur,
+        shading,
         base_color,
         metallic,
         roughness,
@@ -329,6 +374,15 @@ pub(crate) fn write_surface_operation(w: &mut Writer, op: &SurfaceOperation) -> 
             target_write(w, *material, *channel, layer)?;
             pattern_write(w, pattern)?;
         }
+        VertexColors { object, vertices, colors } => {
+            w.u8(14)?;
+            w.string(object)?;
+            w.count(vertices.len())?;
+            for (v, c) in vertices.iter().zip(colors) {
+                w.u64(v.0)?;
+                write_array(w, c)?;
+            }
+        }
         Derive { material, channel, layer, recipe } => {
             w.u8(13)?;
             target_write(w, *material, *channel, layer)?;
@@ -446,7 +500,7 @@ pub(crate) fn write_surface_operation(w: &mut Writer, op: &SurfaceOperation) -> 
 }
 pub(crate) fn read_surface_operation(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceOperation> {
     use SurfaceOperation::*;
-    Ok(match r.u8()? {
+    let value = match r.u8()? {
         0 => Material {
             material: r.u32()?,
             value: material_read(r, l)?,
@@ -584,8 +638,19 @@ pub(crate) fn read_surface_operation(r: &mut Reader<'_>, l: &Limits) -> Result<S
             recipe.validate(channel, l)?;
             Derive { material, channel, layer, recipe }
         }
+        14 => {
+            let object = r.string(l.max_name_bytes)?;
+            let (mut vertices, mut colors) = (Vec::new(), Vec::new());
+            for _ in 0..r.count(l.mesh.max_vertices)? {
+                vertices.push(mesh::VertexId(r.u64()?));
+                colors.push(read_array(r)?);
+            }
+            VertexColors { object, vertices, colors }
+        }
         _ => return Err(Error::Corrupt("surface operation tag")),
-    })
+    };
+    value.check(l)?;
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -605,5 +670,34 @@ mod compatibility_tests {
         let mut writer = Writer::new(1024);
         layer_write(&mut writer, &layer).unwrap();
         assert_eq!(writer.bytes, bytes);
+    }
+
+    #[test]
+    fn a_rim_term_roundtrips_and_leaves_older_shading_bytes_alone() {
+        let encode = |m: &SurfaceMaterial| { let mut w = Writer::new(4096); material_write(&mut w, m).unwrap(); w.bytes };
+        let coat = makepad_gltf::GlbShading { clearcoat: 1.0, flake: 0.5, ..Default::default() };
+        let plain = SurfaceMaterial { shading: Some(coat), ..Default::default() };
+        let toy = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading { rim: 0.6, ..coat }), ..Default::default() };
+        let (a, b) = (encode(&plain), encode(&toy));
+        // The rim is one f64 more, flagged in bit 3; without it nothing moves.
+        assert_eq!(b.len(), a.len() + 8);
+        for bytes in [a, b] {
+            let back = material_read(&mut Reader::new(&bytes), &Limits::default()).unwrap();
+            assert_eq!(encode(&back), bytes);
+        }
+        let back = material_read(&mut Reader::new(&encode(&toy)), &Limits::default()).unwrap();
+        assert_eq!(back.shading.unwrap().rim, 0.6);
+    }
+
+    #[test]
+    fn a_lamp_role_roundtrips_in_one_byte() {
+        let encode = |m: &SurfaceMaterial| { let mut w = Writer::new(4096); material_write(&mut w, m).unwrap(); w.bytes };
+        let plain = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading::default()), ..Default::default() };
+        let tail = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading { lamp: Some(makepad_gltf::GlbLamp::Reverse), ..Default::default() }), ..Default::default() };
+        let (a, b) = (encode(&plain), encode(&tail));
+        assert_eq!(b.len(), a.len() + 1);
+        let back = material_read(&mut Reader::new(&b), &Limits::default()).unwrap();
+        assert_eq!(back.shading.unwrap().lamp, Some(makepad_gltf::GlbLamp::Reverse));
+        assert_eq!(encode(&back), b);
     }
 }

@@ -1,4 +1,144 @@
 use super::*;
+fn map_write(w: &mut Writer, map: &BTreeMap<u32, u32>) -> Result<()> {
+    w.count(map.len())?;
+    for (&a, &b) in map { w.u32(a)?; w.u32(b)?; }
+    Ok(())
+}
+fn map_read(r: &mut Reader, l: &Limits) -> Result<BTreeMap<u32, u32>> {
+    let mut map = BTreeMap::new();
+    for _ in 0..r.count(l.max_joints)? {
+        let key = r.u32()?;
+        if map.last_key_value().is_some_and(|(&last, _)| last >= key) { return Err(Error::Corrupt("rig joint map order")); }
+        map.insert(key, r.u32()?);
+    }
+    Ok(map)
+}
+fn weight_write(w: &mut Writer, edit: &WeightEdit) -> Result<()> {
+    match edit {
+        WeightEdit::Assign { joint } => { w.u8(0)?; w.u32(*joint)?; }
+        WeightEdit::Normalize { max_influences } => { w.u8(1)?; w.count(*max_influences)?; }
+        WeightEdit::Smooth { iterations, factor } => { w.u8(2)?; w.u32(*iterations)?; w.f64(*factor)?; }
+        WeightEdit::Mirror { axis, joints, tolerance } => { w.u8(3)?; w.count(*axis)?; map_write(w, joints)?; w.f64(*tolerance)?; }
+        WeightEdit::Transfer { source, max_distance } => { w.u8(4)?; w.string(source)?; w.f64(*max_distance)?; }
+        WeightEdit::Bind { max_influences, power } => { w.u8(5)?; w.count(*max_influences)?; w.f64(*power)?; }
+    }
+    Ok(())
+}
+fn weight_read(r: &mut Reader, l: &Limits) -> Result<WeightEdit> {
+    Ok(match r.u8()? {
+        0 => WeightEdit::Assign { joint: r.u32()? },
+        1 => WeightEdit::Normalize { max_influences: r.u32()? as usize },
+        2 => WeightEdit::Smooth { iterations: r.u32()?, factor: r.f64()? },
+        3 => WeightEdit::Mirror { axis: r.u32()? as usize, joints: map_read(r, l)?, tolerance: r.f64()? },
+        4 => WeightEdit::Transfer { source: name_read(r, l)?, max_distance: r.f64()? },
+        5 => WeightEdit::Bind { max_influences: r.u32()? as usize, power: r.f64()? },
+        _ => return Err(Error::Corrupt("weight edit tag")),
+    })
+}
+impl RigOperation {
+    pub(crate) fn write(&self, w: &mut Writer) -> Result<()> {
+        use RigOperation::*;
+        match self {
+            MirrorJoints { joints, axis, names } => {
+                w.u8(0)?; w.count(joints.len())?; for j in joints { w.u32(*j)?; }
+                w.count(*axis)?; w.count(names.len())?; for (j, n) in names { w.u32(*j)?; w.string(n)?; }
+            }
+            Rest { joint, transform } => { w.u8(1)?; w.u32(*joint)?; transform_write(w, transform)?; }
+            RenameJoint { joint, name } => { w.u8(2)?; w.u32(*joint)?; w.string(name)?; }
+            ReparentJoint { joint, parent } => { w.u8(3)?; w.u32(*joint)?; w.u8(parent.is_some() as u8)?; if let Some(p) = parent { w.u32(*p)?; } }
+            Roll { joint, angle } => { w.u8(4)?; w.u32(*joint)?; w.f64(*angle)?; }
+            Pose(p) => { w.u8(5)?; pose_write(w, p)?; }
+            DeletePose { name } => { w.u8(6)?; w.string(name)?; }
+            Constraint(c) => { w.u8(7)?; constraint_write(w, c)?; }
+            DeleteConstraint { name } => { w.u8(8)?; w.string(name)?; }
+            SolvePose { pose } => { w.u8(9)?; w.string(pose)?; }
+            Ik { pose, root, middle, end, target, pole, clamp_reach } => {
+                w.u8(10)?; w.string(pose)?; w.u32(*root)?; w.u32(*middle)?; w.u32(*end)?;
+                array_write(w, target)?; array_write(w, pole)?; w.u8(*clamp_reach as u8)?;
+            }
+            BakeClip { name, poses, fps, solve_constraints } => {
+                w.u8(11)?; w.string(name)?; w.count(poses.len())?;
+                for (time, pose) in poses { w.f64(*time)?; w.string(pose)?; }
+                w.f64(*fps)?; w.u8(*solve_constraints as u8)?;
+            }
+            BlendClip { name, a, b, weight, fps } => { w.u8(12)?; w.string(name)?; w.string(a)?; w.string(b)?; w.f64(*weight)?; w.f64(*fps)?; }
+            RetargetClip { name, source, joints, translation_scale } => { w.u8(13)?; w.string(name)?; w.string(source)?; map_write(w, joints)?; w.f64(*translation_scale)?; }
+            ClipOptions { name, options } => { w.u8(14)?; w.string(name)?; options_write(w, options)?; }
+            WeightLocks { object, joints } => { w.u8(15)?; w.string(object)?; w.count(joints.len())?; for j in joints { w.u32(*j)?; } }
+            Weights { object, vertices, edit } => { w.u8(16)?; w.string(object)?; w.count(vertices.len())?; for v in vertices { w.u64(v.0)?; } weight_write(w, edit)?; }
+            Morph { name, object, deltas, weight } => {
+                w.u8(17)?; w.string(name)?; w.string(object)?; w.count(deltas.len())?;
+                for (id, delta) in deltas { w.u64(id.0)?; array_write(w, delta)?; }
+                w.f64(*weight)?;
+            }
+            CaptureMorph { name, object, target, weight } => { w.u8(18)?; w.string(name)?; w.string(object)?; w.string(target)?; w.f64(*weight)?; }
+            DeleteMorph { name } => { w.u8(19)?; w.string(name)?; }
+            MorphWeight { name, weight } => { w.u8(20)?; w.string(name)?; w.f64(*weight)?; }
+        }
+        Ok(())
+    }
+    pub(crate) fn read(r: &mut Reader, l: &Limits) -> Result<Self> {
+        use RigOperation::*;
+        let value = match r.u8()? {
+            0 => {
+                let mut joints = Vec::new(); for _ in 0..r.count(l.max_joints)? { joints.push(r.u32()?); }
+                let axis = r.u32()? as usize;
+                let mut names = BTreeMap::new();
+                for _ in 0..r.count(l.max_joints)? {
+                    let j = r.u32()?;
+                    if names.last_key_value().is_some_and(|(&last, _)| last >= j) { return Err(Error::Corrupt("mirror name order")); }
+                    names.insert(j, name_read(r, l)?);
+                }
+                MirrorJoints { joints, axis, names }
+            }
+            1 => Rest { joint: r.u32()?, transform: transform_read(r)? },
+            2 => RenameJoint { joint: r.u32()?, name: name_read(r, l)? },
+            3 => ReparentJoint { joint: r.u32()?, parent: if flag(r)? { Some(r.u32()?) } else { None } },
+            4 => Roll { joint: r.u32()?, angle: r.f64()? },
+            5 => Pose(pose_read(r, l)?),
+            6 => DeletePose { name: name_read(r, l)? },
+            7 => Constraint(constraint_read(r, l)?),
+            8 => DeleteConstraint { name: name_read(r, l)? },
+            9 => SolvePose { pose: name_read(r, l)? },
+            10 => Ik { pose: name_read(r, l)?, root: r.u32()?, middle: r.u32()?, end: r.u32()?, target: array_read(r)?, pole: array_read(r)?, clamp_reach: flag(r)? },
+            11 => {
+                let name = name_read(r, l)?; let mut poses = Vec::new();
+                for _ in 0..r.count(l.max_keyframes)? { poses.push((r.f64()?, name_read(r, l)?)); }
+                BakeClip { name, poses, fps: r.f64()?, solve_constraints: flag(r)? }
+            }
+            12 => BlendClip { name: name_read(r, l)?, a: name_read(r, l)?, b: name_read(r, l)?, weight: r.f64()?, fps: r.f64()? },
+            13 => RetargetClip { name: name_read(r, l)?, source: name_read(r, l)?, joints: map_read(r, l)?, translation_scale: r.f64()? },
+            14 => ClipOptions { name: name_read(r, l)?, options: options_read(r, l)? },
+            15 => {
+                let object = name_read(r, l)?; let mut joints = BTreeSet::new();
+                for _ in 0..r.count(l.max_joints)? {
+                    let j = r.u32()?; if joints.last().is_some_and(|last| *last >= j) { return Err(Error::Corrupt("locked joint order")); } joints.insert(j);
+                }
+                WeightLocks { object, joints }
+            }
+            16 => {
+                let object = name_read(r, l)?; let mut vertices = Vec::new();
+                for _ in 0..r.count(l.mesh.max_vertices)? { vertices.push(mesh::VertexId(r.u64()?)); }
+                Weights { object, vertices, edit: weight_read(r, l)? }
+            }
+            17 => {
+                let name = name_read(r, l)?; let object = name_read(r, l)?; let mut deltas = BTreeMap::new();
+                for _ in 0..r.count(l.mesh.max_vertices)? {
+                    let id = mesh::VertexId(r.u64()?);
+                    if deltas.last_key_value().is_some_and(|(last, _)| *last >= id) { return Err(Error::Corrupt("morph delta order")); }
+                    deltas.insert(id, array_read(r)?);
+                }
+                Morph { name, object, deltas, weight: r.f64()? }
+            }
+            18 => CaptureMorph { name: name_read(r, l)?, object: name_read(r, l)?, target: name_read(r, l)?, weight: r.f64()? },
+            19 => DeleteMorph { name: name_read(r, l)? },
+            20 => MorphWeight { name: name_read(r, l)?, weight: r.f64()? },
+            _ => return Err(Error::Corrupt("rig operation tag")),
+        };
+        value.check(l)?;
+        Ok(value)
+    }
+}
 fn array_write<const N: usize>(w: &mut Writer, a: &[f64; N]) -> Result<()> {
     for v in a {
         w.f64(*v)?;
@@ -53,6 +193,9 @@ fn pose_read(r: &mut Reader<'_>, l: &Limits) -> Result<Pose> {
     let mut joints = BTreeMap::new();
     for _ in 0..r.count(l.max_joints)? {
         let joint = r.u32()?;
+        if joints.last_key_value().is_some_and(|(&last, _)| last >= joint) {
+            return Err(Error::Corrupt("pose joint order"));
+        }
         if joints.insert(joint, transform_read(r)?).is_some() {
             return Err(Error::Corrupt("duplicate pose joint"));
         }
@@ -213,6 +356,9 @@ fn options_read(r: &mut Reader<'_>, l: &Limits) -> Result<ClipOptions> {
     let mut total = 0usize;
     for _ in 0..r.count(32)? {
         let name = name_read(r, l)?;
+        if morph_keys.last_key_value().is_some_and(|(last, _)| last >= &name) {
+            return Err(Error::Corrupt("morph animation order"));
+        }
         let mut keys = Vec::new();
         let mut previous = -1f64;
         for _ in 0..r.count(l.max_keyframes.saturating_sub(total))? {
@@ -377,6 +523,102 @@ fn size(s: &RigState, l: &Limits) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn roundtrip(op: &RigOperation, l: &Limits) {
+        op.check(l).unwrap();
+        let mut w = Writer::new(usize::MAX); op.write(&mut w).unwrap();
+        let mut r = Reader::new(&w.bytes); let decoded = RigOperation::read(&mut r, l).unwrap(); r.end().unwrap();
+        assert_eq!(&decoded, op);
+        let mut out = Writer::new(usize::MAX); decoded.write(&mut out).unwrap(); assert_eq!(out.bytes, w.bytes);
+        for cut in [0, 1, w.bytes.len() - 1] { assert!(RigOperation::read(&mut Reader::new(&w.bytes[..cut]), l).is_err()); }
+    }
+    fn options() -> ClipOptions {
+        ClipOptions {
+            interpolation: Interpolation::Cubic, root_motion: true,
+            events: vec![ClipEvent { time: 0.25, name: "step".into(), payload: "left\nfoot".into() }],
+            morph_keys: BTreeMap::from([("smile".into(), vec![MorphKey { time: 0., weight: -0.5 }, MorphKey { time: 1., weight: 1. }])]),
+        }
+    }
+    #[test]
+    fn literal_operations_cover_every_tag_and_nested_variant() {
+        let l = Limits::default();
+        let ops = vec![
+            RigOperation::MirrorJoints { joints: vec![1, 2], axis: 0, names: BTreeMap::from([(1, "arm_r".into()), (2, "hand_r".into())]) },
+            RigOperation::Rest { joint: 1, transform: Transform { translation: [1., 2., 3.], ..Default::default() } },
+            RigOperation::RenameJoint { joint: 1, name: "arm".into() },
+            RigOperation::ReparentJoint { joint: 1, parent: Some(0) },
+            RigOperation::Roll { joint: 1, angle: 0.5 },
+            RigOperation::Pose(Pose { name: "ready".into(), joints: BTreeMap::from([(1, Transform::default())]) }),
+            RigOperation::DeletePose { name: "ready".into() },
+            RigOperation::Constraint(RigConstraint { name: "copy".into(), joint: 1, enabled: false, kind: ConstraintKind::Copy { target: 0, translation: true, rotation: false, scale: true, influence: 0.5 } }),
+            RigOperation::DeleteConstraint { name: "copy".into() },
+            RigOperation::SolvePose { pose: "ready".into() },
+            RigOperation::Ik { pose: "ready".into(), root: 0, middle: 1, end: 2, target: [1., 2., 0.], pole: [0., 0., 1.], clamp_reach: true },
+            RigOperation::BakeClip { name: "walk".into(), poses: vec![(0., "ready".into()), (1., "step".into())], fps: 30., solve_constraints: true },
+            RigOperation::BlendClip { name: "blend".into(), a: "walk".into(), b: "run".into(), weight: 0.5, fps: 24. },
+            RigOperation::RetargetClip { name: "retarget".into(), source: "walk".into(), joints: BTreeMap::from([(0, 1), (1, 2)]), translation_scale: 2. },
+            RigOperation::ClipOptions { name: "walk".into(), options: options() },
+            RigOperation::WeightLocks { object: "body".into(), joints: BTreeSet::from([0, 2]) },
+            RigOperation::Weights { object: "body".into(), vertices: vec![mesh::VertexId(u64::MAX), mesh::VertexId(1)], edit: WeightEdit::Assign { joint: 1 } },
+            RigOperation::Morph { name: "smile".into(), object: "body".into(), deltas: BTreeMap::from([(mesh::VertexId(u64::MAX), [0.1, 0.2, 0.3])]), weight: -0.5 },
+            RigOperation::CaptureMorph { name: "smile".into(), object: "body".into(), target: "target".into(), weight: 1. },
+            RigOperation::DeleteMorph { name: "smile".into() },
+            RigOperation::MorphWeight { name: "smile".into(), weight: 0.25 },
+        ];
+        for (tag, op) in ops.iter().enumerate() {
+            roundtrip(op, &l); let mut w = Writer::new(usize::MAX); op.write(&mut w).unwrap(); assert_eq!(w.bytes[0], tag as u8);
+        }
+        for edit in [
+            WeightEdit::Normalize { max_influences: 4 }, WeightEdit::Smooth { iterations: 2, factor: 0.5 },
+            WeightEdit::Mirror { axis: 2, joints: BTreeMap::from([(0, 1), (1, 0)]), tolerance: 0.001 },
+            WeightEdit::Transfer { source: "source".into(), max_distance: 1. }, WeightEdit::Bind { max_influences: 4, power: 2. },
+        ] { roundtrip(&RigOperation::Weights { object: "body".into(), vertices: vec![], edit }, &l); }
+        for kind in [
+            ConstraintKind::Aim { target: 0, axis: [0., 2., 0.], influence: 1. },
+            ConstraintKind::Limit { min_translation: [-1.; 3], max_translation: [1.; 3], min_scale: [0.1; 3], max_scale: [2.; 3], max_angle: 1. },
+            ConstraintKind::TwoBoneIk { middle: 2, end: 3, target: 0, pole: [1., 0., 0.], clamp_reach: false },
+        ] { roundtrip(&RigOperation::Constraint(RigConstraint { name: "constraint".into(), joint: 1, enabled: true, kind }), &l); }
+        roundtrip(&RigOperation::ReparentJoint { joint: 1, parent: None }, &l);
+        for interpolation in [Interpolation::Linear, Interpolation::Step] {
+            roundtrip(&RigOperation::ClipOptions { name: "walk".into(), options: ClipOptions { interpolation, ..Default::default() } }, &l);
+        }
+    }
+    #[test]
+    fn typed_checks_keep_defaults_normalization_and_limits() {
+        let l = Limits::default();
+        for op in [
+            RigOperation::MirrorJoints { joints: vec![1, 2], axis: 0, names: BTreeMap::from([(1, "a".into()), (2, "b".into())]) },
+            RigOperation::Weights { object: "body".into(), vertices: vec![], edit: WeightEdit::Smooth { iterations: 1, factor: 0.5 } },
+            RigOperation::ClipOptions { name: "walk".into(), options: ClipOptions::default() },
+            RigOperation::Rest { joint: 0, transform: Transform::default() },
+        ] { roundtrip(&op, &l); }
+        for op in [
+            RigOperation::MirrorJoints { joints: vec![2, 1], axis: 0, names: BTreeMap::from([(1, "a".into()), (2, "b".into())]) },
+            RigOperation::Roll { joint: l.max_joints as u32, angle: 0. },
+            RigOperation::Roll { joint: 0, angle: f64::NAN },
+            RigOperation::RenameJoint { joint: 0, name: "bad\nname".into() },
+            RigOperation::Rest { joint: 0, transform: Transform { scale: [0.; 3], ..Default::default() } },
+            RigOperation::BakeClip { name: "walk".into(), poses: vec![(0., "a".into()), (0., "b".into())], fps: 30., solve_constraints: true },
+            RigOperation::BlendClip { name: "blend".into(), a: "a".into(), b: "b".into(), weight: 2., fps: 30. },
+            RigOperation::Morph { name: "shape".into(), object: "body".into(), deltas: BTreeMap::from([(mesh::VertexId(0), [0.; 3])]), weight: 0. },
+            RigOperation::MorphWeight { name: "shape".into(), weight: 3. },
+            RigOperation::ClipOptions { name: "walk".into(), options: ClipOptions { events: vec![ClipEvent { time: -1., name: "event".into(), payload: String::new() }], ..Default::default() } },
+        ] { assert!(op.check(&l).is_err()); }
+        for edit in [
+            WeightEdit::Assign { joint: l.max_joints as u32 }, WeightEdit::Normalize { max_influences: 0 },
+            WeightEdit::Smooth { iterations: 65, factor: 0.5 }, WeightEdit::Smooth { iterations: 1, factor: 2. },
+            WeightEdit::Mirror { axis: 3, joints: BTreeMap::new(), tolerance: 0.1 },
+            WeightEdit::Transfer { source: "source".into(), max_distance: 0. }, WeightEdit::Bind { max_influences: 4, power: 9. },
+        ] { assert!(RigOperation::Weights { object: "body".into(), vertices: vec![], edit }.check(&l).is_err()); }
+        for vertices in [vec![mesh::VertexId(0)], vec![mesh::VertexId(1); 2]] {
+            assert!(RigOperation::Weights { object: "body".into(), vertices, edit: WeightEdit::Assign { joint: 0 } }.check(&l).is_err());
+        }
+        let op = RigOperation::ClipOptions { name: "walk".into(), options: options() };
+        let tiny = Limits { max_keyframes: 1, ..l.clone() }; assert!(op.check(&tiny).is_err());
+        let tiny = Limits { max_transaction_bytes: 1, ..l.clone() }; assert!(op.check(&tiny).is_err());
+        assert!(matches!(RigOperation::read(&mut Reader::new(&[255]), &l), Err(Error::Corrupt(_))));
+        let mut w = Writer::new(32); w.u8(3).unwrap(); w.u32(1).unwrap(); w.u8(2).unwrap();
+        assert!(matches!(RigOperation::read(&mut Reader::new(&w.bytes), &l), Err(Error::Corrupt(_))));
+    }
     #[test]
     fn direct_rig_snapshot_preserves_topology_and_every_control() {
         let l = Limits::default();

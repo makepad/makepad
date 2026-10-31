@@ -1,0 +1,13 @@
+[package]
+name = "makepad-csg-mech"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Print-in-place mechanisms: joints declared once and written into both parts with swept clearances, field checks of every joint (gap, per-layer gap, fused risk, limits) and the assembled piece as a box3d world"
+
+[dependencies]
+makepad-csg-math = { path = "../csg_math" }
+makepad-csg-sdf = { path = "../csg_sdf" }
+makepad-csg-graph = { path = "../csg_graph" }
+makepad-csg-mesh = { path = "../csg_mesh" }
+makepad-box3d = { path = "../../box3d" }

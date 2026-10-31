@@ -985,3 +985,75 @@ fn test_cube_sphere_intersection() {
     );
     assert!(vol > 0.0);
 }
+
+// --- Coincident faces that are coplanar only up to rounding ---
+
+/// A rounded rectangle (centred, CCW), `seg` facets per quarter round.
+fn rounded_rect(w: f64, d: f64, r: f64, seg: u32) -> Vec<[f64; 2]> {
+    let (hx, hz) = (w / 2.0 - r, d / 2.0 - r);
+    let mut out = Vec::new();
+    for (k, (cx, cz)) in [(hx, -hz), (hx, hz), (-hx, hz), (-hx, -hz)].into_iter().enumerate() {
+        let start = -PI / 2.0 + k as f64 * PI / 2.0;
+        for i in 0..=seg {
+            let a = start + PI / 2.0 * i as f64 / seg as f64;
+            out.push([cx + r * a.cos(), cz + r * a.sin()]);
+        }
+    }
+    out
+}
+
+/// A shelf and the wall standing on its back edge, both with rounded vertical edges, each
+/// built centred and moved into place: their bottoms, back faces and the facets of the two
+/// shared rounded edges coincide, but only up to floating-point rounding (not bit-exactly).
+/// The union is one closed, manifold solid.
+#[test]
+fn test_union_rounded_coincident_faces_is_closed() {
+    let shelf = Solid::extrude(&rounded_rect(64.0, 46.0, 1.2, 3), 6.0);
+    let wall = Solid::extrude(&rounded_rect(64.0, 6.0, 1.2, 3), 52.0).translate(0.0, 0.0, -20.0);
+    let u = shelf.union(&wall);
+    let report = u.validate();
+    assert!(report.is_closed && report.is_manifold, "rounded shelf + wall: {report:?}");
+    let expected = shelf.volume() + wall.volume() - Solid::extrude(&rounded_rect(64.0, 6.0, 1.2, 3), 6.0).volume();
+    assert!((u.volume() - expected).abs() < 1e-6 * expected, "volume {} vs {expected}", u.volume());
+}
+
+/// Two boxes sharing three faces, both turned by an oblique rotation: the shared faces are
+/// coplanar only up to rounding. The union is one closed, manifold solid.
+#[test]
+fn test_union_rotated_boxes_sharing_faces_is_closed() {
+    let axis = dvec3(1.0, 2.0, 3.0).normalize();
+    let shelf = Solid::cube(64.0, 6.0, 46.0, false).rotate(axis, 33.0);
+    let wall = Solid::cube(64.0, 52.0, 6.0, false).rotate(axis, 33.0);
+    let u = shelf.union(&wall);
+    let report = u.validate();
+    assert!(report.is_closed && report.is_manifold, "rotated shelf + wall: {report:?}");
+    let expected = 64.0 * 6.0 * 46.0 + 64.0 * 52.0 * 6.0 - 64.0 * 6.0 * 6.0;
+    assert!((u.volume() - expected).abs() < 1e-6 * expected, "volume {} vs {expected}", u.volume());
+}
+
+// --- Solids touching face to face (coplanar faces with opposite normals) ---
+
+/// A box standing on a plate, a box against the plate's side, and a pocket
+/// flush with the plate's top: the touching faces are interior to a union,
+/// stay the plate's surface in a difference, and enclose nothing in an
+/// intersection. Every result is one closed, manifold solid of exact volume.
+#[test]
+fn test_touching_solids_union_difference_intersection() {
+    let plate = Solid::cube(80.0, 60.0, 8.0, false);
+    let check = |name: &str, s: &Solid, expected: f64| {
+        let r = s.validate();
+        assert!(r.is_closed && r.is_manifold, "{name}: {r:?}");
+        assert!((s.volume() - expected).abs() < 1e-6 * expected.max(1.0), "{name}: volume {} vs {expected}", s.volume());
+    };
+    // On top: the box's bottom touches the plate's top.
+    let on_top = Solid::cube(20.0, 20.0, 5.0, false).translate(5.3, 7.1, 8.0);
+    check("box on plate", &plate.union(&on_top), 80.0 * 60.0 * 8.0 + 20.0 * 20.0 * 5.0);
+    check("plate minus box on top", &plate.difference(&on_top), 80.0 * 60.0 * 8.0);
+    assert!(plate.intersection(&on_top).volume().abs() < 1e-6, "touching boxes enclose nothing");
+    // Side by side: half of the box's face against the plate's side.
+    let beside = Solid::cube(10.0, 10.0, 8.0, false).translate(80.0, 55.0, 0.0);
+    check("box beside plate", &plate.union(&beside), 80.0 * 60.0 * 8.0 + 10.0 * 10.0 * 8.0);
+    // A pocket whose top is flush with the plate's top.
+    let pocket = Solid::cube(10.0, 10.0, 3.0, false).translate(35.0, 25.0, 5.0);
+    check("flush pocket", &plate.difference(&pocket), 80.0 * 60.0 * 8.0 - 300.0);
+}

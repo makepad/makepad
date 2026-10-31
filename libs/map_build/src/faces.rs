@@ -21,9 +21,9 @@
 //! one ([`archive_has_faces`]).
 
 use makepad_mbtile_reader::{compress_tile, MbtilesReader, MbtilesWriter, TileCompression};
-use makepad_widgets::map::geometry::TileKey;
-use makepad_widgets::map::style::probe_compiled_theme;
-use makepad_widgets::map::tile::{
+use makepad_widgets_maps::map::geometry::TileKey;
+use makepad_widgets_maps::map::style::probe_compiled_theme;
+use makepad_widgets_maps::map::tile::{
     bake_tile_paint_faces, decode_vector_tile_payload, encode_baked_faces_field,
     try_bake_tile_paint_faces,
 };
@@ -599,7 +599,7 @@ mod tests {
         encode_tile_with_profile, GeometryType, Layer, OsmType, TileFeature, TilePoint,
     };
     use makepad_mbtile_reader::MbtilesWriter;
-    use makepad_widgets::map::tile::build_tile_buffers_from_mvt;
+    use makepad_widgets_maps::map::tile::build_tile_buffers_from_mvt;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn temp_path(name: &str) -> PathBuf {
@@ -784,8 +784,8 @@ mod tests {
             stalk_instances,
             stoplight_instances,
         );
-        let same_instances = |left: &[makepad_widgets::map::tile::IconInstances],
-                              right: &[makepad_widgets::map::tile::IconInstances]| {
+        let same_instances = |left: &[makepad_widgets_maps::map::tile::IconInstances],
+                              right: &[makepad_widgets_maps::map::tile::IconInstances]| {
             assert_eq!(left.len(), right.len());
             for (left, right) in left.iter().zip(right) {
                 assert_eq!(left.mesh_slot, right.mesh_slot);

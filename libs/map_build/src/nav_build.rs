@@ -46,11 +46,37 @@ pub struct NavBuildOptions {
     pub major_roads_only: bool,
 }
 
+/// The string a feature is searched and shown by: its `name`, followed by
+/// the English and pinyin names when the data has them and they differ, so a
+/// query in Chinese, English or pinyin finds it. Without a `name`, the
+/// English name stands in.
+fn searchable_name<S: std::borrow::Borrow<str>>(
+    get: impl Fn(&str) -> Option<S>,
+) -> Option<String> {
+    let mut name = get("name").map(|n| n.borrow().to_string());
+    for key in ["name:en", "name:zh-Latn-pinyin"] {
+        if let Some(extra) = get(key) {
+            let extra = extra.borrow();
+            match &mut name {
+                Some(name) if !name.contains(extra) => {
+                    name.push(' ');
+                    name.push_str(extra);
+                }
+                None => name = Some(extra.to_string()),
+                _ => {}
+            }
+        }
+    }
+    name
+}
+
 /// Way tags that matter for routing or search; everything else is dropped
 /// at scan time to keep the kept-way memory bounded.
 const KEPT_WAY_TAGS: &[&str] = &[
     "highway",
     "name",
+    "name:en",
+    "name:zh-Latn-pinyin",
     "ref",
     "oneway",
     "oneway:bicycle",
@@ -175,7 +201,7 @@ fn doc_from_tags(
             rank: category.base_rank(),
         });
     }
-    let name = tags.get("name")?.clone();
+    let name = searchable_name(|k| tags.get(k).map(|v| v.as_str()))?;
     Some(RawDoc {
         name,
         secondary: secondary_from_tags(tags),
@@ -304,7 +330,7 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
                                 doc.rank,
                             ));
                         } else if routable && !tags.contains_key("place") {
-                            if let Some(name) = tags.get("name") {
+                            if let Some(name) = searchable_name(|k| tags.get(k).map(|v| v.as_str())) {
                                 // Named street.
                                 let cat = Category::Street;
                                 acc.way_docs.push((
@@ -688,11 +714,11 @@ fn build_places_index(options: &NavBuildOptions) -> Result<(), String> {
                 ) {
                     return out;
                 }
-                let Some(name) = tags.get("name") else {
+                let Some(name) = searchable_name(|k| tags.get(k).map(|v| v.as_str())) else {
                     return out;
                 };
                 out.push(RawDoc {
-                    name: name.clone(),
+                    name,
                     secondary: String::new(),
                     lon,
                     lat,
@@ -893,9 +919,9 @@ fn build_searchdb(options: &NavBuildOptions) -> Result<(), String> {
                                     doc.name, doc.secondary, lon, lat, doc.category, doc.rank,
                                 ));
                             } else if tags.contains_key("highway") {
-                                if let Some(name) = tags.get("name") {
+                                if let Some(name) = searchable_name(|k| tags.get(k).map(|v| v.as_str())) {
                                     let _ = tx.send((
-                                        name.clone(),
+                                        name,
                                         String::new(),
                                         lon,
                                         lat,

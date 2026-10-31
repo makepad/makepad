@@ -16,8 +16,7 @@ fn main()->std::result::Result<(),Box<dyn std::error::Error>>{
         Operation::AssignMaterial{object:"headlamp-lens".into(),faces,material}];
     let curved=doc.objects().filter(|(name,_)|name.starts_with("headlamp")||*name=="hubcap"||name.contains("fender")||name.contains("tire")).map(|(name,_)|name.to_string()).collect::<Vec<_>>();
     for name in &curved {
-        let args=json::obj(vec![("op",json::s("normals")),("object",json::s(name)),("smooth",json::Value::Bool(true)),("angle",json::Value::F64(1.2))]);
-        operations.extend(parse_operations(&json::Value::Arr(vec![args]),doc.limits())?);
+        operations.push(Operation::MeshEditing(MeshEditingOperation{object:name.to_string(),action:Action::Normals{smooth:true,angle:1.2}}));
     }
     doc.apply(Transaction{request_id:"warm-luminous-headlamp-lenses".into(),expected:before,operations},None)?;
     assert_eq!(doc.scene(),&scene,"beam lights, wheel contracts and placement must stay identical");
@@ -26,5 +25,5 @@ fn main()->std::result::Result<(),Box<dyn std::error::Error>>{
     let compiled=doc.compile(None)?;let source=doc.to_snapshot_bytes(None)?;
     std::fs::write(&args[1],&source)?;
     let output=std::path::Path::new(&args[1]);std::fs::write(output.with_extension("glb"),&compiled.glb)?;
-    println!("{}",json::obj(vec![("head",head_json(doc.head())),("lens_material",json::Value::Int(material as i64)),("emissive_strength",json::Value::F64(3.5)),("smoothed",json::Value::Arr(curved.into_iter().map(json::s).collect())),("triangles",json::Value::Int(compiled.triangles as i64)),("vertices_unchanged",json::Value::Bool(true)),("lights_wheels_scene_unchanged",json::Value::Bool(true))]).to_json());Ok(())
+    println!("{}",json::obj(vec![("generation",json::Value::Int(doc.head().generation as i64)),("lens_material",json::Value::Int(material as i64)),("emissive_strength",json::Value::F64(3.5)),("smoothed",json::Value::Arr(curved.into_iter().map(json::s).collect())),("triangles",json::Value::Int(compiled.triangles as i64)),("vertices_unchanged",json::Value::Bool(true)),("lights_wheels_scene_unchanged",json::Value::Bool(true))]).to_json());Ok(())
 }
