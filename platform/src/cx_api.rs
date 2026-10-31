@@ -1719,8 +1719,11 @@ impl Cx {
         let Some(scrollable_area) = self.fingers.blocked_scrolling_exception_area() else {
             return true;
         };
+        // A drawn area keeps its rect as f32, so at a fractional dpi factor a scrollable flush
+        // with its edge sticks out by a rounding error.
+        let allowed_rect = scrollable_area.rect(self).add_margin(Vec2d::all(0.01));
         // The visible part, so a scrollable partly scrolled out of the allowed area still counts.
-        area.clipped_rect(self).is_inside_of(scrollable_area.rect(self))
+        area.clipped_rect(self).is_inside_of(allowed_rect)
     }
 
     /// Blocks scrolling events/hits in the app *EXCEPT* for within the given `scrollable_area`.
