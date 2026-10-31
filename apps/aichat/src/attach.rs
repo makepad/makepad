@@ -6,6 +6,7 @@
 //! Decoding and scaling are CPU work: hosts run [`normalize`] on the task
 //! pool, never on the UI thread.
 
+use makepad_widgets::makepad_platform::clipboard_read::{ClipboardContent, ClipboardImage};
 use makepad_widgets::*;
 use std::path::Path;
 use std::sync::Arc;
@@ -33,7 +34,13 @@ pub fn image_name_supported(name: &str) -> bool {
     Path::new(name)
         .extension()
         .and_then(|s| s.to_str())
-        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp"))
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "heic" | "heif"))
+}
+
+/// HEIC/HEIF photos are taken (a phone's default) but not decoded here yet:
+/// the person is told what to do instead of seeing a decode error.
+fn heic_name(name: &str) -> bool {
+    Path::new(name).extension().and_then(|s| s.to_str()).is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif"))
 }
 
 /// Where a dropped picture comes from.
@@ -41,6 +48,8 @@ pub fn image_name_supported(name: &str) -> bool {
 pub enum Source {
     Path(std::path::PathBuf),
     Bytes { name: String, bytes: Arc<[u8]> },
+    /// Pixels already decoded (a pasted bitmap): top-down RGBA8.
+    Rgba { name: String, width: usize, height: usize, rgba: Arc<Vec<u8>> },
 }
 
 impl Source {
@@ -69,7 +78,24 @@ impl Source {
     pub fn name(&self) -> String {
         match self {
             Source::Path(path) => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into()),
-            Source::Bytes { name, .. } => name.clone(),
+            Source::Bytes { name, .. } | Source::Rgba { name, .. } => name.clone(),
+        }
+    }
+
+    /// The picture on the clipboard (a copied image, or a copied image file),
+    /// numbered so several pasted pictures keep apart in the transcript.
+    pub fn from_clipboard(content: &ClipboardContent, n: usize) -> Option<Source> {
+        let name = format!("pasted-{n}.png");
+        match &content.image {
+            Some(ClipboardImage::Png(png)) => Some(Source::Bytes { name, bytes: Arc::from(png.as_slice()) }),
+            Some(ClipboardImage::Rgba { width, height, rgba }) => {
+                Some(Source::Rgba { name, width: *width as usize, height: *height as usize, rgba: rgba.clone() })
+            }
+            None => content
+                .files
+                .iter()
+                .find(|file| image_name_supported(&file.path) && Path::new(&file.path).is_absolute())
+                .map(|file| Source::Path(std::path::PathBuf::from(&file.path))),
         }
     }
 }
@@ -77,7 +103,18 @@ impl Source {
 /// Read, decode and bring a dropped picture down to the model's size.
 pub fn load(source: Source) -> Result<Attachment, String> {
     let name = source.name();
+    if heic_name(&name) {
+        return Err(format!("{name}: HEIC photos cannot be read here yet; save it as JPEG or PNG and drop that"));
+    }
     let bytes: Arc<[u8]> = match source {
+        Source::Rgba { width, height, rgba, .. } => {
+            if width == 0 || height == 0 || width.saturating_mul(height) > MAX_PIXELS || rgba.len() < width * height * 4 {
+                return Err(format!("{name}: the picture is empty or too large"));
+            }
+            let mut out = normalize(name.clone(), width, height, &rgba)?;
+            out.thumb = scale_to(name, width, height, &rgba, 96).ok().map(|t| t.png);
+            return Ok(out);
+        }
         Source::Path(path) => {
             let meta = std::fs::metadata(&path).map_err(|e| format!("{name}: {e}"))?;
             if !meta.is_file() || meta.len() as usize > MAX_FILE_BYTES {

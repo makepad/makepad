@@ -8,7 +8,7 @@
 //
 #pragma once
 // Official llama.cpp ggml-cuda/norm.cu rms_norm_f32 fused with MUL (+ ADD).
-// Source: /Users/admin/llama.cpp/ggml/src/ggml-cuda/norm.cu:74-384
+// Source: llama.cpp/ggml/src/ggml-cuda/norm.cu:74-384
 // Dispatch: ggml-cuda.cu:3994-4004 ggml_cuda_op_rms_norm_fused[_add].
 
 #include "common.cuh"

@@ -525,7 +525,7 @@ impl BackendType {
     fn status_label(self) -> &'static str {
         match self {
             Self::ClaudeSplash => "Active: Claude Splash (Claude Code)",
-            Self::LocalOpenAi => "Active: Local OpenAI stream at 10.0.0.168:8080",
+            Self::LocalOpenAi => "Active: Local OpenAI stream at 192.0.2.168:8080",
         }
     }
 }
@@ -618,7 +618,7 @@ fn ai_worker_loop(command_rx: Receiver<AiWorkerCommand>, event_tx: Sender<AiWork
                 ProviderEvent::FunctionCall { .. } => Some(AiWorkerEvent::Error(
                     "AI provider requested an unsupported function".to_string(),
                 )),
-                ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => None,
+                ProviderEvent::Status { .. } | ProviderEvent::Serving(_) | ProviderEvent::FunctionCallPartial { .. } => None,
             };
             if let Some(event) = event {
                 if !emit_ai_worker_event(&event_tx, event) {
@@ -832,6 +832,8 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         crate::makepad_code_editor::script_mod(vm);
         self::script_mod(vm)

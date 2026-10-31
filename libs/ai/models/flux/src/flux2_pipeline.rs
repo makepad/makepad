@@ -549,13 +549,17 @@ impl Flux2DevPipeline {
     }
 
     pub fn generate(&mut self, request: &Flux2GenerateRequest) -> Result<Flux2GenerateResult> {
-        self.generate_with_hooks(request, None)
+        self.generate_with_hooks(request, None, &|| false)
     }
 
+    /// `cancelled` is asked before every denoise step: true ends the run with
+    /// [`DiffusionError::Cancelled`] (a job cancelled for local use gives the GPU back
+    /// within one step, not after all of them).
     pub fn generate_with_hooks(
         &mut self,
         request: &Flux2GenerateRequest,
         mut on_stage: Option<&mut dyn FnMut(&str, usize, usize)>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Flux2GenerateResult> {
         if request.width % 16 != 0 || request.height % 16 != 0 {
             return Err(DiffusionError::workflow(format!(
@@ -656,6 +660,9 @@ impl Flux2DevPipeline {
             }
         }
         for step in start_step..request.steps {
+            if cancelled() {
+                return Err(DiffusionError::Cancelled);
+            }
             if let Some(hook) = on_stage.as_deref_mut() {
                 hook("denoise", step + 1, request.steps);
             }
@@ -734,6 +741,7 @@ impl Flux2DevPipeline {
         request: &Flux2EditRequest,
         guidance: f32,
         mut on_stage: Option<&mut dyn FnMut(&str, usize, usize)>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Flux2EditResult> {
         if request.width % 16 != 0 || request.height % 16 != 0 {
             return Err(DiffusionError::workflow(format!(
@@ -855,6 +863,9 @@ impl Flux2DevPipeline {
         let denoise_started = std::time::Instant::now();
         let mut step_residuals = Vec::new();
         for step in start_step..request.steps {
+            if cancelled() {
+                return Err(DiffusionError::Cancelled);
+            }
             if let Some(hook) = on_stage.as_deref_mut() {
                 hook("denoise", step + 1, request.steps);
             }

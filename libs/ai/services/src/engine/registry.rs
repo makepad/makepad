@@ -17,8 +17,8 @@ use crate::wire::*;
 use crate::engine::ToolDefinition;
 use makepad_platform::thread::SignalToUI;
 use std::collections::HashMap;
-use std::sync::mpsc::TryRecvError;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Instances one host will register at once.
 pub const MAX_INSTANCES: usize = 32;
@@ -44,6 +44,12 @@ struct Inner {
     launchable: Vec<(String, String)>,
     /// Per app id: the least risk any of its tools is treated as.
     risk_floors: HashMap<String, Risk>,
+    /// Calls made through [`ServiceRegistry::call_remote`] (the process's `app` service): their
+    /// progress and result go to the waiting caller, whoever drains the links.
+    remote: HashMap<String, (EndpointId, Sender<RegistryUp>)>,
+    /// Up-frames for the conversation (the core's calls, publications) drained by a remote
+    /// caller's pump, kept for the core's next [`ServiceRegistry::pump`].
+    queued: Vec<RegistryUp>,
 }
 
 /// One frame from a service, as the core receives it.
@@ -62,6 +68,55 @@ pub struct ServiceRegistry {
 impl ServiceRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The process's registry: every in-process service of this process, whichever chat panel
+    /// shows them, and what the process's `app` service lists and calls. Created on first use,
+    /// which also serves `app` on the process's endpoint, except in a process the window
+    /// manager hosts: its services are the WM's to serve.
+    pub fn process() -> ServiceRegistry {
+        static PROCESS: OnceLock<ServiceRegistry> = OnceLock::new();
+        PROCESS
+            .get_or_init(|| {
+                #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+                if !makepad_platform::should_run_stdin_loop_from_env() {
+                    crate::app_service::serve();
+                }
+                ServiceRegistry::new()
+            })
+            .clone()
+    }
+
+    /// Sends `call` to `endpoint` for a caller outside the conversation (the `app` service): its
+    /// progress and result arrive on the returned channel, whoever drains the links; drive them
+    /// with [`pump_remote`](Self::pump_remote). `None` when the endpoint is gone.
+    pub fn call_remote(&self, endpoint: &EndpointId, call: ServiceCall) -> Option<Receiver<RegistryUp>> {
+        let (tx, rx) = channel();
+        let call_id = call.call_id.clone();
+        self.inner.lock().unwrap().remote.insert(call_id.clone(), (endpoint.clone(), tx));
+        if self.send(endpoint, ServiceDown::Call(call)) {
+            Some(rx)
+        } else {
+            self.inner.lock().unwrap().remote.remove(&call_id);
+            None
+        }
+    }
+
+    /// The remote caller stopped waiting (answered, cancelled, or gave up): later frames of the
+    /// call are dropped.
+    pub fn end_remote(&self, call_id: &str) {
+        self.inner.lock().unwrap().remote.remove(call_id);
+    }
+
+    /// Drains every link for a remote caller: remote calls' frames go to their callers, the rest
+    /// is kept for the conversation (woken to take it).
+    pub fn pump_remote(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let before = inner.queued.len();
+        Self::drain(&mut inner);
+        if inner.queued.len() != before {
+            SignalToUI::set_ui_signal();
+        }
     }
 
     /// Plug a service in. Issues its endpoint at once (the manifest came
@@ -95,6 +150,7 @@ impl ServiceRegistry {
             parent,
             location,
             focus_epoch: 0,
+            pid: 0,
         };
         inner.entries.insert(
             endpoint.clone(),
@@ -157,7 +213,7 @@ impl ServiceRegistry {
         };
         let mut location = location.to_string();
         truncate_to_char_boundary(&mut location, MAX_META_BYTES);
-        let meta = InstanceMeta { app_id: link.manifest.id.clone(), display_name, parent, location, focus_epoch: 0 };
+        let meta = InstanceMeta { app_id: link.manifest.id.clone(), display_name, parent, location, focus_epoch: 0, pid: 0 };
         inner.entries.insert(
             endpoint.clone(),
             Entry { manifest: link.manifest.clone(), meta, context: String::new(), link, port_tag: None },
@@ -177,6 +233,14 @@ impl ServiceRegistry {
         if inner.entries.remove(endpoint).is_none() {
             return;
         }
+        // a remote caller waiting on the instance hears that it went away
+        inner.remote.retain(|call_id, (to, tx)| {
+            if to != endpoint {
+                return true;
+            }
+            let _ = tx.send(RegistryUp::Result(to.clone(), ToolResult::unavailable(call_id.as_str(), "the app went away")));
+            false
+        });
         inner.order.retain(|e| e != endpoint);
         inner.generation += 1;
         let children: Vec<EndpointId> = inner
@@ -197,6 +261,13 @@ impl ServiceRegistry {
         let epoch = inner.next_focus;
         if let Some(e) = inner.entries.get_mut(endpoint) {
             e.meta.focus_epoch = epoch;
+        }
+    }
+
+    /// The process an instance runs in, when it is not this one.
+    pub fn set_pid(&self, endpoint: &EndpointId, pid: u32) {
+        if let Some(e) = self.inner.lock().unwrap().entries.get_mut(endpoint) {
+            e.meta.pid = pid;
         }
     }
 
@@ -354,6 +425,13 @@ impl ServiceRegistry {
     /// The services section of the system prompt: each app's brief once,
     /// then where its instances are.
     pub fn briefs(&self) -> String {
+        self.briefs_for(None)
+    }
+
+    /// The briefs a turn scoped to the app `only` reads: that app's alone
+    /// (the other apps' tools are not in the turn, so their briefs would
+    /// only cost context and invite calls that do not exist). `None`: all.
+    pub fn briefs_for(&self, only: Option<&str>) -> String {
         let inner = self.inner.lock().unwrap();
         let mut out = String::new();
         let mut seen: Vec<String> = Vec::new();
@@ -364,6 +442,9 @@ impl ServiceRegistry {
                 continue;
             }
             seen.push(m.id.clone());
+            if only.is_some_and(|only| only != m.id) {
+                continue;
+            }
             let instances: Vec<String> = inner
                 .order
                 .iter()
@@ -396,7 +477,7 @@ impl ServiceRegistry {
             }
             out.push('\n');
         }
-        if !inner.launchable.is_empty() {
+        if !inner.launchable.is_empty() && only.is_none() {
             let names: Vec<String> = inner
                 .launchable
                 .iter()
@@ -479,6 +560,29 @@ impl ServiceRegistry {
     /// dead links removed; results and progress go to the caller.
     pub fn pump(&self) -> Vec<RegistryUp> {
         let mut inner = self.inner.lock().unwrap();
+        Self::drain(&mut inner);
+        std::mem::take(&mut inner.queued)
+    }
+
+    /// A result or progress frame: to its remote caller, or kept for the conversation.
+    fn deliver(inner: &mut Inner, up: RegistryUp) {
+        let (call_id, done) = match &up {
+            RegistryUp::Result(_, r) => (r.call_id.as_str(), true),
+            RegistryUp::Progress { call_id, .. } => (call_id.as_str(), false),
+            RegistryUp::Message { .. } => return inner.queued.push(up),
+        };
+        if let Some((_, tx)) = inner.remote.get(call_id) {
+            let _ = tx.send(up.clone());
+            if done {
+                let call_id = call_id.to_string();
+                inner.remote.remove(&call_id);
+            }
+            return;
+        }
+        inner.queued.push(up);
+    }
+
+    fn drain(inner: &mut Inner) {
         let mut out = Vec::new();
         let mut dead: Vec<EndpointId> = Vec::new();
         let endpoints: Vec<EndpointId> = inner.order.clone();
@@ -534,10 +638,12 @@ impl ServiceRegistry {
                 }
             }
         }
-        for d in dead {
-            Self::remove(&mut inner, &d);
+        for up in out {
+            Self::deliver(inner, up);
         }
-        out
+        for d in dead {
+            Self::remove(inner, &d);
+        }
     }
 }
 
@@ -617,7 +723,7 @@ mod tests {
         let e = reg.register(link, "", None).unwrap();
         reg.pump();
         port.test_drain();
-        assert!(reg.send(&e, ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into() })));
+        assert!(reg.send(&e, ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into(), caller: None })));
         let ev = port.test_drain();
         assert!(matches!(&ev[0], crate::port::PortEvent::Call(c) if c.call_id == "c1"));
         port.set_context("cwd=~");

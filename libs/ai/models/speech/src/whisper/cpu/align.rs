@@ -36,6 +36,24 @@ fn median_width() -> usize {
     })
 }
 
+/// Where inside its DTW span a row's word starts: the first frame whose
+/// attention reaches this share of the span's peak. Measured on Kokoro takes
+/// (2 takes, 89 words; `local/agent_state/edits/reports/L9-ai-timings.md`):
+/// span starts ran 0.12-0.16 s early after pauses; at 0.4 the starts sit
+/// +0.02..+0.04 s from the acoustic onsets of words after a pause and
+/// -0.02 s from Kokoro's own phoneme clock (0.3 and 0.5 bracket it).
+/// `MAKEPAD_VOICE_ALIGN_ONSET` overrides for experiments (0 = span starts).
+fn onset_fraction() -> f32 {
+    static FRACTION: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *FRACTION.get_or_init(|| {
+        std::env::var("MAKEPAD_VOICE_ALIGN_ONSET")
+            .ok()
+            .and_then(|text| text.trim().parse::<f32>().ok())
+            .filter(|fraction| (0.0..1.0).contains(fraction))
+            .unwrap_or(0.4)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // which heads align
 // ---------------------------------------------------------------------------
@@ -409,7 +427,7 @@ pub fn align_rows(
     for value in &mut matrix {
         *value = -*value;
     }
-    let (starts, ends) = dtw_spans(&matrix, n, m);
+    let (mut starts, ends) = dtw_spans(&matrix, n, m);
     let mut scores = vec![0.0f32; n];
     for i in 0..n {
         let total: f32 = raw[i * m..(i + 1) * m].iter().sum();
@@ -417,7 +435,49 @@ pub fn align_rows(
         let mass: f32 = span.iter().sum();
         scores[i] = if total > 0.0 { (mass / total).clamp(0.0, 1.0) } else { 0.0 };
     }
+    // The DTW hands a pause to the row after it: the row that predicts the
+    // word following the pause. Start each row where its attention actually
+    // rises inside its span, not where the span begins (scores above stay
+    // those of the whole span).
+    let onset = onset_fraction();
+    if onset > 0.0 {
+        for i in 0..n {
+            let (from, to) = (starts[i], ends[i].max(starts[i] + 1).min(m));
+            let span = &raw[i * m + from..i * m + to];
+            let top = span.iter().cloned().fold(0.0f32, f32::max);
+            if let Some(rise) = span.iter().position(|value| *value >= top * onset) {
+                starts[i] = from + rise;
+            }
+        }
+    }
     Some(TokenAlignment { starts, ends, scores })
+}
+
+// ---------------------------------------------------------------------------
+// which rows time which token
+// ---------------------------------------------------------------------------
+
+/// Prompt rows kept ahead of the rows that time the text: the DTW path starts
+/// in the window's corner, and this row takes the audio before the first
+/// token instead of the first token taking it.
+pub const LEAD_ROWS: usize = 1;
+
+/// The capture rows to align for `n_tokens` tokens decoded after a prompt of
+/// `n_prompt` tokens, as `(row_from, row_to, lead)`: aligned row
+/// `lead + i` times token `i`.
+///
+/// The decoder looks at the audio of a token while PREDICTING it, so token
+/// `i` is timed by the row of the input position BEFORE it (for token 0, the
+/// prompt's last row), as in OpenAI's `find_alignment`. Timing a token by its
+/// own input row, which predicts the NEXT token, places every word one token
+/// late (measured on Kokoro takes: +0.12 s, and a collapsed last word). One
+/// row past the last token's (its own input row, which predicts what follows
+/// it) absorbs the audio after the text when it was captured.
+pub fn token_rows(n_prompt: usize, n_tokens: usize, n_rows: usize) -> (usize, usize, usize) {
+    let predicting = n_prompt.saturating_sub(1);
+    let lead = LEAD_ROWS.min(predicting);
+    let row_to = (predicting + n_tokens + 1).min(n_rows);
+    (predicting - lead, row_to, lead)
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +569,84 @@ pub fn words_from_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Word starts through `token_rows` + `align_rows` + `words_from_tokens`
+    /// for a capture whose rows attend where the decoder really looks: the
+    /// row at input position p attends to the audio of token p + 1, the token
+    /// it predicts. `spans` are the planted (start, end) frames per token;
+    /// silence before, between and after.
+    fn planted_starts(spans: &[(usize, usize)]) -> (Vec<i64>, Vec<i64>) {
+        // Prompt of 4 (sot, lang, transcribe, notimestamps), then the tokens
+        // and eot.
+        let n_prompt = 4;
+        let n_frames = 60;
+        let lead = (0, spans[0].0);
+        let tail = (spans.last().unwrap().1, n_frames);
+        let n_rows = n_prompt + spans.len() + 1;
+        let heads = AlignmentHeads { pairs: vec![(0, 0)] };
+        let mut capture = AlignCapture::new(&heads, 1, 1, n_frames);
+        capture.begin_rows(n_rows);
+        for row in 0..n_rows {
+            // Input position `row` predicts sequence position row + 1.
+            let predicted = row + 1;
+            let (target, pause) = if predicted < n_prompt {
+                (lead, None) // prompt rows: the audio before the text
+            } else if predicted - n_prompt < spans.len() {
+                let k = predicted - n_prompt;
+                // A row predicting a word after a pause also looks, weakly,
+                // across the pause (the model is waiting for the word).
+                let before = if k == 0 { spans[0].0 } else { spans[k - 1].1 };
+                (spans[k], (before < spans[k].0).then_some((before, spans[k].0)))
+            } else {
+                (tail, None) // predicting eot / past it
+            };
+            let offset = row * n_frames;
+            for frame in 0..n_frames {
+                capture.rows[offset + frame] = if frame >= target.0 && frame < target.1 {
+                    1.0
+                } else if pause.is_some_and(|(a, b)| frame >= a && frame < b) && predicted > n_prompt {
+                    0.25
+                } else {
+                    0.0
+                };
+            }
+        }
+        let (row_from, row_to, lead) = token_rows(n_prompt, spans.len(), capture.n_rows);
+        assert_eq!((row_from, row_to, lead), (2, 4 + spans.len(), 1));
+        let alignment = align_rows(&capture, row_from, row_to, n_frames).unwrap();
+        let names = [" one", " two", " three", " four"];
+        let texts: Vec<(usize, &str)> = (0..spans.len()).map(|k| (lead + k, names[k])).collect();
+        let words = words_from_tokens(&texts, &alignment, 0);
+        (words.iter().map(|w| w.start_ms).collect(), words.iter().map(|w| w.end_ms).collect())
+    }
+
+    fn assert_starts(spans: &[(usize, usize)]) {
+        let (starts, ends) = planted_starts(spans);
+        let expected: Vec<i64> = spans.iter().map(|(a, _)| *a as i64 * AUDIO_FRAME_MS).collect();
+        for (got, want) in starts.iter().zip(&expected) {
+            // The median filter may move an edge by a frame.
+            assert!((got - want).abs() <= AUDIO_FRAME_MS, "{starts:?} vs {expected:?}");
+        }
+        let last = spans.last().unwrap().1 as i64 * AUDIO_FRAME_MS;
+        assert!((ends.last().unwrap() - last).abs() <= 2 * AUDIO_FRAME_MS, "{ends:?}");
+    }
+
+    #[test]
+    fn tokens_are_timed_by_the_row_that_predicts_them() {
+        // Back-to-back tokens. An off-by-one row mapping is a whole token
+        // (10 frames) late.
+        assert_starts(&[(10, 20), (20, 30), (30, 40)]);
+        // Without a lead row (an English-only prompt of just sot) nothing
+        // underflows.
+        assert_eq!(token_rows(1, 3, 10), (0, 4, 0));
+    }
+
+    #[test]
+    fn a_word_after_a_pause_starts_where_it_is_heard() {
+        // The DTW gives each pause to the row after it; the onset trim must
+        // start the word at its own audio, not at the pause.
+        assert_starts(&[(10, 18), (26, 34), (42, 50)]);
+    }
 
     #[test]
     fn median_filter_smooths_a_spike_and_keeps_a_step() {

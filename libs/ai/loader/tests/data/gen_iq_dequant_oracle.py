@@ -12,13 +12,13 @@ Fixture format (little-endian):
   per case: ggml_type u32 | n_elems u32 | n_bytes u32 | raw bytes | f32[n_elems]
 """
 import struct, sys, os, hashlib
-sys.path.insert(0, "/Users/admin/llama.cpp/gguf-py")
+sys.path.insert(0, "/Users/me/llama.cpp/gguf-py")
 
 import numpy as np
 from gguf.constants import GGMLQuantizationType
 from gguf import quants
 
-OUT = "/Users/admin/makepad/makepad/libs/ai/loader/tests/data/iq_dequant_oracle.bin"
+OUT = "/Users/me/makepad/makepad/libs/ai/loader/tests/data/iq_dequant_oracle.bin"
 
 TYPE_IDS = {
     "Q2_K": 10, "Q3_K": 11,
@@ -94,7 +94,7 @@ def dequant(tn, raw):
 
 def main():
     cases = []
-    model = "/Users/admin/makepad/makepad/local/models/Qwen3.8-27B-UD-Q4_K_M.gguf"
+    model = "/Users/me/makepad/makepad/local/models/Qwen3.8-27B-UD-Q4_K_M.gguf"
     real = read_gguf_tensor_bytes(model, {"IQ4_XS", "IQ4_NL", "IQ3_S", "Q3_K"})
     for tn, (name, raw) in sorted(real.items()):
         vals = dequant(tn, raw)

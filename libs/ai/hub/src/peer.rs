@@ -492,7 +492,7 @@ pub const MAX_PLAN_TICKETS: usize = 1024;
 pub struct PeerPlan {
     /// This box's durable node_key (the ticket receiver scope).
     pub receiver_key: String,
-    /// Service base URLs, e.g. "http://10.0.0.217:8765".
+    /// Service base URLs, e.g. "http://192.0.2.217:8765".
     pub sources: Vec<String>,
     /// Coordinator-minted tickets (self-describing scope).
     pub tickets: Vec<PeerTicket>,
@@ -535,6 +535,12 @@ impl PeerPlan {
             let Some(base) = normalize_source(raw) else {
                 continue;
             };
+            // Only verified fleet nodes (endorsed, pinned): a request cannot
+            // make this node dial an arbitrary address.
+            if !is_fleet_endpoint(&base) {
+                eprintln!("peer: ignoring request source {base}: not a verified fleet node");
+                continue;
+            }
             if !sources.contains(&base) {
                 sources.push(base);
             }
@@ -574,7 +580,7 @@ impl PeerPlan {
     }
 
     /// `MAKEPAD_AI_PEER_SOURCES`: comma/whitespace-separated service base
-    /// URLs ("http://10.0.0.217:8765, http://10.0.0.123:8765").
+    /// URLs ("http://192.0.2.217:8765, http://192.0.2.123:8765").
     pub fn env_sources() -> Vec<String> {
         let Ok(text) = std::env::var("MAKEPAD_AI_PEER_SOURCES") else {
             return Vec::new();
@@ -615,6 +621,26 @@ impl PeerPlan {
             now_unix + TICKET_TTL_SECS,
         ))
     }
+}
+
+fn is_fleet_endpoint(base: &str) -> bool {
+    let Ok(url) = crate::http_client::parse_url(base) else { return false };
+    url.https && makepad_network::fleet::id::is_fleet_endpoint(&format!("{}:{}", url.host, url.port))
+}
+
+/// The operator's peer list (`MAKEPAD_AI_PEER_SOURCES`, any scheme and
+/// port) mapped onto the verified roster: the endorsed TLS endpoint of each
+/// listed host this node has heard a signed beacon from. Hosts not in the
+/// roster are left out.
+pub fn roster_sources(env_sources: &[String], roster: &[String]) -> Vec<String> {
+    let host_of = |u: &str| crate::http_client::parse_url(u).ok().map(|p| p.host);
+    env_sources
+        .iter()
+        .filter_map(|raw| {
+            let host = host_of(raw)?;
+            roster.iter().find(|r| host_of(r).as_deref() == Some(host.as_str())).cloned()
+        })
+        .collect()
 }
 
 /// Peer sources are origins, not general URLs. Besides making source/ticket
@@ -802,15 +828,16 @@ mod tests {
 
     #[test]
     fn plan_bounds_and_ticket_selection() {
+        makepad_network::fleet::id::mark_fleet_endpoint("192.0.2.1:8765");
         let receiver = "b".repeat(32);
         let source = "a".repeat(32);
         let digest = "c".repeat(64);
         let now = 1_700_000_000u64;
         let minted = PeerTicket::mint(&secret(), &source, &receiver, &digest, now + 60);
         let plan = PeerPlan::for_job(
-            &["http://10.0.0.1:8765/".into(), "not-a-url".into()],
+            &["http://192.0.2.1:8765/".into(), "not-a-url".into()],
             &[minted.clone(), "garbage".into()],
-            &["http://10.0.0.1:8765".into(), "http://10.0.0.2:8765".into()],
+            &["https://192.0.2.1:8765".into(), "http://192.0.2.2:8765".into()],
             &receiver,
             None,
         )
@@ -818,20 +845,20 @@ mod tests {
         assert_eq!(
             plan.sources,
             vec![
-                "http://10.0.0.1:8765".to_string(),
-                "http://10.0.0.2:8765".to_string()
+                "https://192.0.2.1:8765".to_string(),
+                "http://192.0.2.2:8765".to_string()
             ]
         );
         assert_eq!(plan.tickets.len(), 1);
         // Coordinator ticket matched by scope.
         assert_eq!(
-            plan.ticket_for("http://10.0.0.1:8765", &source, &digest, now),
+            plan.ticket_for("https://192.0.2.1:8765", &source, &digest, now),
             Some(minted)
         );
         // No ticket for an unknown source without a secret.
         assert!(plan
             .ticket_for(
-                "http://10.0.0.1:8765",
+                "https://192.0.2.1:8765",
                 &"f".repeat(32),
                 &digest,
                 now
@@ -840,7 +867,7 @@ mod tests {
         // A request-provided URL must never turn the receiver's shared secret
         // into a signing oracle.
         let plan = PeerPlan::for_job(
-            &["http://10.0.0.1:8765".into()],
+            &["https://192.0.2.1:8765".into()],
             &[],
             &[],
             &receiver,
@@ -848,19 +875,19 @@ mod tests {
         )
         .unwrap();
         assert!(plan
-            .ticket_for("http://10.0.0.1:8765", &source, &digest, now)
+            .ticket_for("https://192.0.2.1:8765", &source, &digest, now)
             .is_none());
         // Operator-configured sources may self-mint in shared-secret mode.
         let plan = PeerPlan::for_job(
             &[],
             &[],
-            &["http://10.0.0.1:8765".into()],
+            &["https://192.0.2.1:8765".into()],
             &receiver,
             Some(secret()),
         )
         .unwrap();
         let text = plan
-            .ticket_for("http://10.0.0.1:8765", &source, &digest, now)
+            .ticket_for("https://192.0.2.1:8765", &source, &digest, now)
             .unwrap();
         let ticket = PeerTicket::parse(&text).unwrap();
         ticket
@@ -876,6 +903,7 @@ mod tests {
 
     #[test]
     fn plan_accepts_origins_only() {
+        makepad_network::fleet::id::mark_fleet_endpoint("example.com:8765");
         let receiver = "b".repeat(32);
         let plan = PeerPlan::for_job(
             &[
@@ -884,7 +912,8 @@ mod tests {
                 "http://example.com/path".into(),
                 "http://example.com/?query".into(),
                 "http://example.com\r\nX-Evil: yes".into(),
-                "http://EXAMPLE.com:8765/".into(),
+                "https://EXAMPLE.com:8765/".into(),
+                "https://192.0.2.66:8765".into(),
             ],
             &[],
             &[],
@@ -892,6 +921,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(plan.sources, vec!["http://example.com:8765"]);
+        // Only the verified (pinned) fleet endpoint survives.
+        assert_eq!(plan.sources, vec!["https://example.com:8765"]);
     }
 }

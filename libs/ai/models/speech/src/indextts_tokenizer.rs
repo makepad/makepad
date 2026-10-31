@@ -9,18 +9,15 @@
 //! TTS vocal tokens, and 1501 timestamp tokens — 60509 ids total, matching
 //! `number_text_tokens` in config.yaml.
 //!
-//! Pre-tokenization is the GPT-2 pattern
-//! `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
-//! hand-rolled below (no regex dependency). `\p{L}`/`\p{N}` are approximated
-//! with `char::is_alphabetic`/`char::is_numeric`, which match exactly on the
-//! model's target languages (en/zh/ja/es); combining marks (e.g. Arabic
-//! harakat) can differ from the reference — acceptable for now and called
-//! out here on purpose.
+//! Pre-tokenization is the GPT-2 pattern, shared with Whisper's text encoder
+//! in [`crate::gpt2_split`]; its `\p{L}` approximation matches exactly on the
+//! model's target languages (en/zh/ja/es).
 //!
 //! Validated against the reference oracle: the fixed sentence in
 //! `local/indextts_ref/dumps/meta.json` token-exact (see tests).
 
 use crate::error::{DiffusionError, Result};
+use crate::gpt2_split::Gpt2Splitter;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -215,111 +212,6 @@ impl IndexTtsTokenizer {
     }
 }
 
-/// Hand-rolled GPT-2 pre-tokenizer:
-/// `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
-struct Gpt2Splitter<'a> {
-    text: &'a str,
-    pos: usize,
-}
-
-impl<'a> Gpt2Splitter<'a> {
-    fn new(text: &'a str) -> Self {
-        Self { text, pos: 0 }
-    }
-}
-
-fn is_letter(c: char) -> bool {
-    c.is_alphabetic()
-}
-
-fn is_number(c: char) -> bool {
-    c.is_numeric()
-}
-
-impl<'a> Iterator for Gpt2Splitter<'a> {
-    type Item = &'a str;
-
-    fn next(&mut self) -> Option<&'a str> {
-        let rest = &self.text[self.pos..];
-        if rest.is_empty() {
-            return None;
-        }
-        let start = self.pos;
-        let mut chars = rest.chars();
-        let first = chars.next().unwrap();
-
-        // Contractions: 's 't 're 've 'm 'll 'd (case-sensitive, as in the
-        // reference pattern; input is lowercased upstream anyway).
-        if first == '\'' {
-            for suffix in ["'s", "'t", "'re", "'ve", "'m", "'ll", "'d"] {
-                if rest.starts_with(suffix) {
-                    self.pos += suffix.len();
-                    return Some(&self.text[start..self.pos]);
-                }
-            }
-        }
-
-        // ` ?\p{L}+`, ` ?\p{N}+`, ` ?[^\s\p{L}\p{N}]+` — one optional leading
-        // ASCII space, then a run of one class.
-        let (lead_space, class_first) = if first == ' ' {
-            match chars.next() {
-                Some(c) => (true, c),
-                None => {
-                    // Lone trailing space: falls through to the whitespace arm.
-                    self.pos += 1;
-                    return Some(&self.text[start..self.pos]);
-                }
-            }
-        } else {
-            (false, first)
-        };
-
-        if !class_first.is_whitespace() {
-            let class: fn(char) -> bool = if is_letter(class_first) {
-                is_letter
-            } else if is_number(class_first) {
-                is_number
-            } else {
-                |c: char| !c.is_whitespace() && !is_letter(c) && !is_number(c)
-            };
-            let mut end = start + lead_space as usize + class_first.len_utf8();
-            for c in self.text[end..].chars() {
-                if class(c) && !c.is_whitespace() {
-                    end += c.len_utf8();
-                } else {
-                    break;
-                }
-            }
-            self.pos = end;
-            return Some(&self.text[start..end]);
-        }
-
-        // Whitespace run (first char is whitespace, or the lone-space case
-        // above already returned). `\s+(?!\S)` keeps the final whitespace
-        // char for the next token when non-space follows.
-        let mut end = start;
-        for c in self.text[start..].chars() {
-            if c.is_whitespace() {
-                end += c.len_utf8();
-            } else {
-                break;
-            }
-        }
-        let followed_by_nonspace = end < self.text.len();
-        if followed_by_nonspace {
-            // Leave the last whitespace char to prefix the next token
-            // (`\s+(?!\S)` semantics) — unless the run is a single char, in
-            // which case `\s+` takes it whole.
-            let last_len = self.text[start..end].chars().last().unwrap().len_utf8();
-            if end - last_len > start {
-                end -= last_len;
-            }
-        }
-        self.pos = end;
-        Some(&self.text[start..end])
-    }
-}
-
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(b: u8) -> Option<u32> {
         match b {
@@ -365,19 +257,6 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn splitter(text: &str) -> Vec<&str> {
-        Gpt2Splitter::new(text).collect()
-    }
-
-    #[test]
-    fn gpt2_pattern_splits() {
-        assert_eq!(splitter("hello world"), vec!["hello", " world"]);
-        assert_eq!(splitter("it's 42 items."), vec!["it", "'s", " 42", " items", "."]);
-        assert_eq!(splitter("a  b"), vec!["a", " ", " b"]);
-        assert_eq!(splitter("a \n"), vec!["a", " \n"]);
-        assert_eq!(splitter("ab12cd"), vec!["ab", "12", "cd"]);
-    }
 
     #[test]
     fn oracle_sentence_token_exact() {

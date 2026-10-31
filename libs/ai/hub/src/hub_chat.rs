@@ -32,17 +32,18 @@
 //! node if it is back, another fleet node, or the local weights. Nothing
 //! silently loads gigabytes in the middle of a conversation.
 //!
-//! The surface is [`crate::local_llm`]'s: same [`ChatEvent`]s, same four
-//! methods, so a consumer cannot tell which route it landed on except by
+//! The surface extends [`crate::local_llm`]'s with image attachments and the
+//! same [`ChatEvent`]s, so a consumer sees which route it landed on through
 //! its `Loading` phases and [`HubChatSession::route`].
 
 use crate::chat_wire::{ChatMessage, ChatRole, ProviderAvailability};
-use crate::local_llm::WorkerMsg;
-use crate::local_llm::{
-    build_prefix, parse_tool_call, system_text, ChatEvent, LocalLlmConfig, ToolSpec, WakeHook,
-};
-use crate::machine::{self, Claim, ResidencyState};
-use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
+#[cfg(feature = "llm")]
+use crate::local_llm::build_prefix;
+use crate::local_llm::{parse_tool_call, system_text, ChatEvent, HiddenWork, LocalLlmConfig, ToolSpec, WakeHook};
+#[cfg(feature = "llm")]
+use crate::machine::Claim;
+use crate::machine::{self, ResidencyState};
+use crate::providers::provider::{validate_tool_images, ChatProvider, ProviderEvent, ToolImage, TurnInput};
 use crate::providers::qwen::{FleetQwenChatProvider, FleetTransport, HttpFleetTransport};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,6 +62,14 @@ const POLL: Duration = Duration::from_millis(150);
 /// bound needs one full interval, and a second one covers a lost packet.
 const FLEET_PATIENCE: Duration = Duration::from_millis(4500);
 const FLEET_POLL: Duration = Duration::from_millis(250);
+/// Set once the app shuts down: a fleet probe stops listening at its next poll.
+static FLEET_PROBES_STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// Stops every running and future [`probe_fleet_inventory`] (the app is shutting down: its
+/// threads must end so a relaunch does not wait for them).
+pub fn stop_fleet_probes() {
+    FLEET_PROBES_STOPPED.store(true, Ordering::Relaxed);
+}
 
 /// Where the conversation actually runs, once the election settled.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +83,7 @@ pub enum ChatRoute {
 }
 
 impl ChatRoute {
-    /// One phrase for a status chip: `qwen3.8-27b on 10.0.0.165`.
+    /// One phrase for a status chip: `qwen3.8-27b on 192.0.2.165`.
     pub fn label(&self) -> String {
         match self {
             ChatRoute::MachineNode { port } => format!("this machine's node :{port}"),
@@ -84,10 +93,16 @@ impl ChatRoute {
     }
 }
 
-/// `http://10.0.0.165:8123` → `10.0.0.165`.
+/// `http://192.0.2.165:8123` → `192.0.2.165`.
 fn host_of(base: &str) -> &str {
     let rest = base.trim_start_matches("http://").trim_start_matches("https://");
     rest.split([':', '/']).next().unwrap_or(rest)
+}
+
+enum WorkerMsg {
+    UserTurn(String),
+    ToolResults(Vec<(String, bool)>),
+    AttachImages(Vec<ToolImage>),
 }
 
 /// A running hub chat. Same shape as [`crate::local_llm::LocalLlmSession`].
@@ -143,6 +158,13 @@ impl HubChatSession {
         let _ = self.to_worker.send(WorkerMsg::ToolResults(results));
     }
 
+    /// Queue pictures on the same channel so the next input cannot overtake them.
+    pub fn attach_images(&self, images: Vec<ToolImage>) -> Result<(), String> {
+        validate_tool_images(&images)?;
+        self.to_worker.send(WorkerMsg::AttachImages(images))
+            .map_err(|_| "the hub chat worker stopped".to_string())
+    }
+
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -186,6 +208,84 @@ enum ProxyExit {
     Reelect(WorkerMsg),
 }
 
+/// The model a person is told to pick when theirs cannot call tools.
+const PREFERRED_TOOL_MODEL: &str = "qwen3.8-27b";
+/// A tool call for the check fits well inside this.
+const TOOL_CHECK_TOKENS: u32 = 128;
+
+/// Whether the elected models can call tools, found by asking each one once:
+/// the served model itself is the only thing that knows (its weights, its
+/// template, its runtime), and a model that cannot writes plausible chat.
+#[derive(Default)]
+struct ToolCheck {
+    passed: Vec<String>,
+    failed: Vec<String>,
+    warned: Vec<String>,
+}
+
+impl ToolCheck {
+    /// `None`: no verdict (the node failed, or the person stopped): nothing is
+    /// held against the model.
+    fn judge(&mut self, base: &str, model: &str, thinking: Option<bool>, cancel: &Arc<AtomicBool>, send: &impl Fn(ChatEvent)) -> Option<bool> {
+        if model == crate::claude_cli::MODEL_ID || self.passed.iter().any(|m| m == model) {
+            return Some(true);
+        }
+        if self.failed.iter().any(|m| m == model) {
+            return Some(false);
+        }
+        send(ChatEvent::Loading { phase: format!("checking that {model} can call tools"), fraction: 0.0 });
+        let mut provider = FleetQwenChatProvider::new(HttpFleetTransport, vec![base.to_string()])
+            .with_preferred_model(Some(model.to_string()))
+            .with_max_tokens(Some(TOOL_CHECK_TOKENS))
+            .with_thinking(thinking)
+            .with_cancel_signal(cancel.clone());
+        let tool = ToolSpec::new("add", "Add two numbers.", r#"{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]}"#);
+        let system = system_text("Answer by calling the tool.", &[tool]);
+        let input = TurnInput::new(system, vec![ChatMessage::new(ChatRole::User, "What is 17 + 25?")]);
+        provider.begin_turn(&input).ok()?;
+        let mut reply = String::new();
+        let verdict = loop {
+            if cancel.load(Ordering::Relaxed) {
+                provider.cancel();
+                return None;
+            }
+            for event in provider.poll() {
+                match event {
+                    ProviderEvent::Delta(text) => reply.push_str(&text),
+                    ProviderEvent::Done { .. } => return Some(self.record(model, calls_the_check_tool(&reply))),
+                    ProviderEvent::Error(_) => return None,
+                    _ => {}
+                }
+            }
+            if reply.len() > TOOL_CHECK_TOKENS as usize * 32 {
+                break calls_the_check_tool(&reply);
+            }
+            std::thread::sleep(POLL);
+        };
+        provider.cancel();
+        Some(self.record(model, verdict))
+    }
+
+    fn record(&mut self, model: &str, passed: bool) -> bool {
+        if passed { &mut self.passed } else { &mut self.failed }.push(model.to_string());
+        passed
+    }
+}
+
+/// Whether a reply is a well-formed call of the check's `add` tool.
+fn calls_the_check_tool(reply: &str) -> bool {
+    let mut splitter = MarkupSplitter::default();
+    splitter.push(reply);
+    let (_, bodies) = splitter.finish();
+    bodies.iter().any(|body| {
+        let calls = match parse_tool_call(body) {
+            Ok(call) => vec![call],
+            Err(_) => contract_calls(body).unwrap_or_default(),
+        };
+        calls.iter().any(|(name, args)| name == "add" && args.len() == 2)
+    })
+}
+
 fn elect_and_run(
     config: HubChatConfig,
     msg_rx: Receiver<WorkerMsg>,
@@ -207,11 +307,20 @@ fn elect_and_run(
     // A turn that arrived while a previous route was failing: served first
     // on the next one.
     let mut first: Option<WorkerMsg> = None;
+    let mut images = Vec::new();
+    // The conversation outlives a route: a node that failed a turn is
+    // re-elected (or replaced) with everything said so far.
+    let mut history: Vec<ChatMessage> = Vec::new();
+    let mut tool_check = ToolCheck::default();
+    let mut nothing_passed = false;
     loop {
         set_route(None);
 
         // 1. A co-located holder serving this model over loopback.
-        let has_local_file = config.llm.model.is_file();
+        // A named model is strict: only a node serving exactly that id answers;
+        // this machine's own weights are never loaded in its place.
+        let strict = config.preferred_model.is_some();
+        let has_local_file = config.llm.model.is_file() && !strict;
         if has_local_file {
             let key = election_key(&config.llm);
             if let Some(port) = machine_holder_port(&key, &send) {
@@ -222,7 +331,7 @@ fn elect_and_run(
                     .with_preferred_model(config.preferred_model.clone())
                     .with_max_tokens(config.max_tokens)
                     .with_thinking(config.thinking);
-                match run_proxy(provider, &config, first.take(), &msg_rx, &send, &cancel, route) {
+                match run_proxy(provider, &config, first.take(), &msg_rx, &mut images, &mut history, &send, &cancel, route) {
                     ProxyExit::Ended => return,
                     ProxyExit::Reelect(msg) => {
                         first = Some(msg);
@@ -232,16 +341,35 @@ fn elect_and_run(
             }
         }
 
-        // 2. A fleet chat node on the LAN.
+        // 2. A fleet chat node on the LAN: one whose model can call tools, when
+        // this chat has tools and any can.
+        let excluded = if nothing_passed { Vec::new() } else { tool_check.failed.clone() };
         let fleet_reason = match fleet_provider(
             &send,
             config.preferred_model.as_deref(),
             config.max_tokens,
             config.thinking,
+            excluded,
         ) {
             Ok((provider, route)) => {
+                if let (false, ChatRoute::Fleet { base, model }) = (config.tools.is_empty(), &route) {
+                    if tool_check.judge(base, model, config.thinking, &cancel, &send) == Some(false) {
+                        if config.preferred_model.is_none() && !nothing_passed {
+                            continue;
+                        }
+                        // Named, or the only one there is: it answers, and the
+                        // person is told what it cannot do and what to pick.
+                        if tool_check.warned.iter().all(|warned| warned != model) {
+                            tool_check.warned.push(model.clone());
+                            send(ChatEvent::Delta(format!(
+                                "{model} did not pass the tool check: it can talk, but it cannot use this app's tools. \
+                                 Choose {PREFERRED_TOOL_MODEL} or Claude Code in the chat's model menu.\n\n"
+                            )));
+                        }
+                    }
+                }
                 set_route(Some(route.clone()));
-                match run_proxy(provider, &config, first.take(), &msg_rx, &send, &cancel, route) {
+                match run_proxy(provider, &config, first.take(), &msg_rx, &mut images, &mut history, &send, &cancel, route) {
                     ProxyExit::Ended => return,
                     ProxyExit::Reelect(msg) => {
                         first = Some(msg);
@@ -249,10 +377,16 @@ fn elect_and_run(
                     }
                 }
             }
+            // Every model failed: the best of them answers, with the warning.
+            Err(_) if !tool_check.failed.is_empty() && !nothing_passed => {
+                nothing_passed = true;
+                continue;
+            }
             Err(reason) => reason,
         };
 
-        // 3. The weights on this machine.
+        // 3. The weights on this machine (a build with the `llm` runtime).
+        #[cfg(feature = "llm")]
         if has_local_file {
             eprintln!("[hub-chat] no fleet chat node ({fleet_reason}); loading {}", config.llm.model.display());
             let key = election_key(&config.llm);
@@ -265,11 +399,12 @@ fn elect_and_run(
             };
             set_route(Some(ChatRoute::InProcess { model: key }));
             let prefix = build_prefix(&config.system_prompt, &config.tools);
+            let local_rx = local_commands(first, msg_rx, images, event_tx.clone(), config.wake.clone());
             crate::local_llm::worker_main(
                 config.llm,
                 prefix,
-                first,
-                msg_rx,
+                None,
+                local_rx,
                 event_tx,
                 cancel,
                 config.wake,
@@ -282,8 +417,14 @@ fn elect_and_run(
         // next line — a fleet node may have come up by then. The line that
         // just failed is dropped: handing it back would retry it forever.
         eprintln!("[hub-chat] no model: {fleet_reason}; local {}", config.llm.model.display());
-        send(ChatEvent::Failed(no_model_message(&config.llm.model)));
-        match wait_next_user(&msg_rx, None) {
+        match config.preferred_model.as_deref() {
+            Some(wanted) => send(ChatEvent::Failed(format!(
+                "The required AI model {wanted} is not available: {fleet_reason}. No other model is used (MAKEPAD_AI_MODEL)."
+            ))),
+            None => send(ChatEvent::Failed(no_model_message(&config.llm.model))),
+        }
+        images.clear();
+        match wait_next_user(&msg_rx, &mut images) {
             Some(msg) => first = Some(msg),
             None => return,
         }
@@ -348,6 +489,7 @@ fn fleet_provider(
     preferred_model: Option<&str>,
     max_tokens: Option<u32>,
     thinking: Option<bool>,
+    excluded: Vec<String>,
 ) -> Result<(FleetQwenChatProvider<HttpFleetTransport>, ChatRoute), String> {
     let discovery = crate::discovery::start_listener();
     fleet_provider_with(
@@ -355,22 +497,99 @@ fn fleet_provider(
         preferred_model,
         max_tokens,
         thinking,
-        || {
-            let mut bases = fleet_chat_bases(&discovery.nodes());
-            // A serving node on this machine does not need to announce over
-            // LAN discovery. Entries may be stale; probing, not mere presence,
-            // decides whether they are usable.
-            bases.extend(crate::machine::read_node_entries().into_iter().filter_map(
-                |(_, entry)| (entry.port != 0).then(|| format!("http://127.0.0.1:{}", entry.port)),
-            ));
-            bases.sort();
-            bases.dedup();
-            bases
-        },
+        excluded,
+        || chat_bases(&discovery),
         || HttpFleetTransport,
         FLEET_PATIENCE,
         FLEET_POLL,
     )
+}
+
+/// The hubs a chat may reach, ranked (this machine, pinned, the LAN).
+fn chat_bases(discovery: &crate::discovery::Discovery) -> Vec<String> {
+    let mut bases = fleet_chat_bases(&discovery.nodes());
+    // A serving node on this machine does not need to announce over
+    // LAN discovery. Entries may be stale; probing, not mere presence,
+    // decides whether they are usable.
+    bases.extend(crate::machine::read_node_entries().into_iter().filter_map(
+        |(_, entry)| (entry.port != 0).then(|| format!("http://127.0.0.1:{}", entry.port)),
+    ));
+    // A pinned hub (MAKEPAD_AI_HUB, the client's `pinned` file) is
+    // reached without its LAN beacon.
+    bases.extend(crate::hub_order::pinned_bases());
+    crate::hub_order::order(&mut bases);
+    dedup_in_order(bases)
+}
+
+/// One chat model a hub offers, at the best-ranked hub that offers it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HubOffer {
+    pub base: String,
+    /// The id a chat names to get exactly it ([`HubChatConfig::preferred_model`]).
+    pub model: String,
+    /// What serves it: `claude-cli` is the hub's own Claude Code.
+    pub backend: String,
+}
+
+/// The hubs' chat inventory: every chat model the reachable hubs serve, each
+/// once (at the best-ranked hub offering it), in hub order — the same
+/// discovery and `/models` probe the election runs; nothing loaded, no
+/// prompt. `update` hears each growing answer while the fleet patience runs
+/// (a LAN beacon may land after this machine's hub answered). Blocks up to
+/// the patience: call it from a worker thread. `Err` when no hub offers any.
+pub fn probe_fleet_inventory(mut update: impl FnMut(&[HubOffer])) -> Result<Vec<HubOffer>, String> {
+    // `MAKEPAD_AI_MODEL` names the one model every app chat here must use:
+    // only it is offered.
+    let required = std::env::var(crate::hub::REQUIRED_MODEL_ENV).ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    if FLEET_PROBES_STOPPED.load(Ordering::Relaxed) {
+        return Err("the app is shutting down".into());
+    }
+    let discovery = crate::discovery::start_listener();
+    let started = Instant::now();
+    let mut offers: Vec<HubOffer> = Vec::new();
+    let mut probed: Vec<String> = Vec::new();
+    let mut last_reason = None;
+    loop {
+        if FLEET_PROBES_STOPPED.load(Ordering::Relaxed) {
+            break;
+        }
+        let fresh: Vec<String> = chat_bases(&discovery).into_iter().filter(|b| !probed.contains(b)).collect();
+        let mut grew = false;
+        for base in &fresh {
+            probed.push(base.clone());
+            match crate::providers::qwen::chat_offers(&mut HttpFleetTransport, base) {
+                Ok(found) => {
+                    for offer in found {
+                        if required.as_deref().is_some_and(|r| r != offer.model) {
+                            continue;
+                        }
+                        if !offers.iter().any(|o| o.model == offer.model) {
+                            offers.push(HubOffer { base: base.clone(), model: offer.model, backend: offer.backend });
+                            grew = true;
+                        }
+                    }
+                }
+                Err(reason) => last_reason = Some(reason),
+            }
+        }
+        if grew {
+            update(&offers);
+        }
+        if started.elapsed() >= FLEET_PATIENCE {
+            break;
+        }
+        std::thread::sleep(FLEET_POLL);
+    }
+    if offers.is_empty() {
+        return Err(last_reason.unwrap_or_else(|| format!("no fleet chat node heard on the LAN in {:.1} s", FLEET_PATIENCE.as_secs_f64())));
+    }
+    Ok(offers)
+}
+
+/// The first of each base, in the order given.
+fn dedup_in_order(bases: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    bases.into_iter().filter(|b| seen.insert(b.clone())).collect()
 }
 
 fn fleet_provider_with<T: FleetTransport>(
@@ -378,6 +597,7 @@ fn fleet_provider_with<T: FleetTransport>(
     preferred_model: Option<&str>,
     max_tokens: Option<u32>,
     thinking: Option<bool>,
+    excluded: Vec<String>,
     mut discovered_bases: impl FnMut() -> Vec<String>,
     mut transport: impl FnMut() -> T,
     patience: Duration,
@@ -388,14 +608,16 @@ fn fleet_provider_with<T: FleetTransport>(
     let mut last_reason = None;
     let mut final_pass = false;
     loop {
-        let mut bases = discovered_bases();
-        bases.sort();
-        bases.dedup();
+        // Keep the ranking `discovered_bases` made (this machine's hub,
+        // then a pinned one, then the LAN): sorting here put a LAN node
+        // ahead of 127.0.0.1 ("10." < "127").
+        let bases = dedup_in_order(discovered_bases());
         if !bases.is_empty() {
             let mut provider = FleetQwenChatProvider::new(transport(), bases.clone())
                 .with_preferred_model(preferred_model.map(str::to_string))
                 .with_max_tokens(max_tokens)
-                .with_thinking(thinking);
+                .with_thinking(thinking)
+                .with_excluded_models(excluded.clone());
             match provider.availability() {
                 ProviderAvailability::Available { model, detail } => {
                     let route = ChatRoute::Fleet { base: detail, model: model.clone() };
@@ -416,15 +638,13 @@ fn fleet_provider_with<T: FleetTransport>(
             // snapshot so a LAN node announced during that probe is still
             // considered instead of being hidden by the stale file.
             if !final_pass {
-                let mut latest = discovered_bases();
-                latest.sort();
-                latest.dedup();
+                let latest = dedup_in_order(discovered_bases());
                 if latest != bases {
                     final_pass = true;
                     continue;
                 }
             }
-            if let Some(fallback) = fallback {
+            if let Some(fallback) = fallback.filter(|_| preferred_model.is_none()) {
                 return Ok(fallback);
             }
             return Err(last_reason.unwrap_or_else(|| {
@@ -462,19 +682,83 @@ pub fn no_model_message(model: &Path) -> String {
     }
 }
 
+/// Pictures attached before the next input add up (a tool's render and a
+/// look at the view both reach the model), the newest kept within the
+/// providers' per-turn limit.
+fn queue_images(images: &mut Vec<ToolImage>, attached: Vec<ToolImage>) {
+    const MAX_TURN_IMAGES: usize = 4;
+    images.extend(attached);
+    if images.len() > MAX_TURN_IMAGES {
+        images.drain(..images.len() - MAX_TURN_IMAGES);
+    }
+}
+
+/// A call block in the contract's JSON form (`{"name", "arguments"}`, or a
+/// spelling the contract parser hears), as names and string arguments.
+fn contract_calls(body: &str) -> Option<Vec<(String, Vec<(String, String)>)>> {
+    let text = format!("<tool_call>{body}</tool_call>");
+    let (_, calls) = crate::claude_cli_calls::parse_calls(&text).ok()??;
+    if calls.is_empty() {
+        return None;
+    }
+    Some(calls.into_iter().map(|c| {
+        let args = c.args.into_iter().map(|(k, v)| {
+            let v = match v {
+                makepad_strict_json::Value::Str(s) => s,
+                other => other.to_json(),
+            };
+            (k, v)
+        }).collect();
+        (c.name, args)
+    }).collect())
+}
+
 /// Block for the person's next line; stale tool results from the turn
 /// that failed are dropped. `None` when the consumer is gone.
-fn wait_next_user(msg_rx: &Receiver<WorkerMsg>, held: Option<WorkerMsg>) -> Option<WorkerMsg> {
-    if let Some(msg @ WorkerMsg::UserTurn(_)) = held {
-        return Some(msg);
-    }
+fn wait_next_user(msg_rx: &Receiver<WorkerMsg>, images: &mut Vec<ToolImage>) -> Option<WorkerMsg> {
     loop {
         match msg_rx.recv() {
             Ok(msg @ WorkerMsg::UserTurn(_)) => return Some(msg),
-            Ok(WorkerMsg::ToolResults(_)) => continue,
+            Ok(WorkerMsg::ToolResults(_)) => images.clear(),
+            Ok(WorkerMsg::AttachImages(attached)) => queue_images(images, attached),
             Err(_) => return None,
         }
     }
+}
+
+// The in-process worker only accepts text; reject image turns before forwarding.
+#[cfg(feature = "llm")]
+fn local_commands(
+    first: Option<WorkerMsg>,
+    msg_rx: Receiver<WorkerMsg>,
+    images: Vec<ToolImage>,
+    event_tx: Sender<ChatEvent>,
+    wake: Option<WakeHook>,
+) -> Receiver<crate::local_llm::WorkerMsg> {
+    let (to_local, local_rx) = channel();
+    let mut has_images = !images.is_empty();
+    std::thread::Builder::new()
+        .name("ai-hub-chat-input".into())
+        .spawn(move || {
+            for msg in first.into_iter().chain(msg_rx) {
+                let msg = match msg {
+                    WorkerMsg::AttachImages(images) => {
+                        has_images = !images.is_empty();
+                        continue;
+                    }
+                    WorkerMsg::UserTurn(text) => crate::local_llm::WorkerMsg::UserTurn(text),
+                    WorkerMsg::ToolResults(results) => crate::local_llm::WorkerMsg::ToolResults(results),
+                };
+                if std::mem::take(&mut has_images) {
+                    let _ = event_tx.send(ChatEvent::Failed("the in-process model cannot look at pictures".into()));
+                    if let Some(wake) = &wake { wake(); }
+                    continue;
+                }
+                if to_local.send(msg).is_err() { break; }
+            }
+        })
+        .expect("spawn hub chat input worker");
+    local_rx
 }
 
 /// The proxy branch: the conversation runs on a node; this worker holds
@@ -486,6 +770,8 @@ fn run_proxy<T: FleetTransport>(
     config: &HubChatConfig,
     first: Option<WorkerMsg>,
     msg_rx: &Receiver<WorkerMsg>,
+    images: &mut Vec<ToolImage>,
+    history: &mut Vec<ChatMessage>,
     send: &impl Fn(ChatEvent),
     cancel: &Arc<AtomicBool>,
     route: ChatRoute,
@@ -496,7 +782,6 @@ fn run_proxy<T: FleetTransport>(
         prefill_tokens: 0,
         secs: 0.0,
     });
-    let mut history: Vec<ChatMessage> = Vec::new();
     let mut next: Option<WorkerMsg> = first;
     loop {
         let msg = match next.take() {
@@ -507,6 +792,10 @@ fn run_proxy<T: FleetTransport>(
             },
         };
         match msg {
+            WorkerMsg::AttachImages(attached) => {
+                queue_images(images, attached);
+                continue;
+            }
             WorkerMsg::UserTurn(text) => history.push(ChatMessage::new(ChatRole::User, text)),
             WorkerMsg::ToolResults(results) => {
                 // One `<tool_response>` turn per result, in call order — the
@@ -517,15 +806,34 @@ fn run_proxy<T: FleetTransport>(
                 }
             }
         }
+        // A turn the node refuses for its context (the conversation outgrew
+        // it) is retried once with the oldest tool results elided.
+        let mut compacted = false;
+        // Replies whose tool calls could not be read, sent back to the model.
+        let mut rewrites = 0usize;
+        loop {
+        let mut retry = false;
+        // Keep the prompt inside the node's context before sending it: a
+        // refused prompt costs a round trip (and has knocked a node's model
+        // over). About 3 bytes a token for code and JSON, room to answer.
+        if let Some(max) = provider.context_tokens() {
+            let estimate = (system.len() + history.iter().map(|m| m.text.len() + 16).sum::<usize>()) / 3 + ANSWER_ROOM;
+            if estimate > max && elide_old_tool_results(history, estimate, max) {
+                send(ChatEvent::Loading { phase: "shortening the conversation".into(), fraction: 0.0 });
+            }
+        }
         let input = TurnInput::new(system.clone(), history.clone());
         'attempt: {
             if cancel.load(Ordering::Relaxed) {
                 provider.cancel();
+                images.clear();
                 break 'attempt;
             }
-            if let Err(error) = provider.begin_turn(&input) {
+            let result = provider.attach_tool_images(std::mem::take(images))
+                .and_then(|()| provider.begin_turn(&input));
+            if let Err(error) = result {
                 send(ChatEvent::Failed(format!("{}: {error}", route.label())));
-                return match wait_next_user(msg_rx, None) {
+                return match wait_next_user(msg_rx, images) {
                     Some(msg) => ProxyExit::Reelect(msg),
                     None => ProxyExit::Ended,
                 };
@@ -535,6 +843,9 @@ fn run_proxy<T: FleetTransport>(
             let mut gen_tokens = 0u32;
             let mut pending_visible = String::new();
             let mut has_visible_text = false;
+            let mut hidden = HiddenWork::default();
+            let mut last_progress = Instant::now();
+            let mut last_note = String::from("submitted");
             'turn: loop {
             if cancel.load(Ordering::Relaxed) {
                 provider.cancel();
@@ -544,10 +855,13 @@ fn run_proxy<T: FleetTransport>(
             // is abandoned and that line is served next.
             match msg_rx.try_recv() {
                 Err(TryRecvError::Empty) => {}
+                Ok(WorkerMsg::AttachImages(attached)) => queue_images(images, attached),
                 Ok(msg) => {
                     provider.cancel();
                     if matches!(msg, WorkerMsg::UserTurn(_)) {
                         next = Some(msg);
+                    } else {
+                        images.clear();
                     }
                     break 'turn;
                 }
@@ -557,10 +871,33 @@ fn run_proxy<T: FleetTransport>(
                 }
             }
             let mut done = false;
-            for event in provider.poll() {
+            let events = provider.poll();
+            if !events.is_empty() {
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() >= STALL && !last_note.contains("queued") {
+                // Nothing came from the hub for a while: say so (with the last
+                // thing it said) and give the line back, instead of a bar that
+                // never moves. The hub's own job is cancelled; nothing is retried.
+                provider.cancel();
+                send(ChatEvent::Failed(format!(
+                    "{}: no progress from the AI hub for {} s (last: {last_note}); send the message again to retry",
+                    route.label(),
+                    STALL.as_secs()
+                )));
+                return match wait_next_user(msg_rx, images) {
+                    Some(msg) => ProxyExit::Reelect(msg),
+                    None => ProxyExit::Ended,
+                };
+            }
+            for event in events {
                 match event {
                     ProviderEvent::Delta(text) => {
                         let visible = splitter.push(&text);
+                        if let Some(in_call) = splitter.hidden() {
+                            if let Some(note) = hidden.wrote(in_call, text.len()) {
+                                send(ChatEvent::Working(note));
+                            }
+                        }
                         if !visible.is_empty() {
                             if has_visible_text {
                                 send(ChatEvent::Delta(visible));
@@ -574,11 +911,12 @@ fn run_proxy<T: FleetTransport>(
                         }
                     }
                     ProviderEvent::Serving(facts) => gen_tokens = facts.gen_tokens,
-                    ProviderEvent::Status { note, permille } => send(ChatEvent::Loading {
-                        phase: note,
-                        fraction: permille as f64 / 1000.0,
-                    }),
+                    ProviderEvent::Status { note, permille } => {
+                        last_note = note.clone();
+                        send(ChatEvent::Loading { phase: note, fraction: permille as f64 / 1000.0 })
+                    }
                     ProviderEvent::Done { text } => {
+                        let cut_call = splitter.unfinished_call();
                         let (visible, bodies) = splitter.finish();
                         if !visible.is_empty() {
                             if has_visible_text {
@@ -590,6 +928,12 @@ fn run_proxy<T: FleetTransport>(
                                     send(ChatEvent::Delta(std::mem::take(&mut pending_visible)));
                                 }
                             }
+                        }
+                        if let Some(body) = cut_call {
+                            // The reply stopped inside a call: say so instead of ending silently.
+                            let tail: String = body.chars().rev().take(80).collect::<Vec<_>>().into_iter().rev().collect();
+                            send(ChatEvent::Delta(format!("[bad tool call: the reply ended inside a tool call, after ...{tail:?}]")));
+                            has_visible_text = true;
                         }
                         if !has_visible_text && bodies.is_empty() {
                             // An accepted job is never a reason to replay
@@ -605,14 +949,44 @@ fn run_proxy<T: FleetTransport>(
                             history.push(ChatMessage::new(ChatRole::Assistant, text));
                         }
                         let mut tool_calls = 0usize;
+                        let mut unreadable: Vec<(String, String)> = Vec::new();
                         for body in bodies {
                             match parse_tool_call(&body) {
                                 Ok((name, args)) => {
                                     tool_calls += 1;
                                     send(ChatEvent::ToolCall { name, args });
                                 }
-                                Err(error) => send(ChatEvent::Delta(format!("[bad tool call: {error}]"))),
+                                // Not the standard markup: the contract's JSON form (a
+                                // relay that could not convert one block of a reply
+                                // passes the whole reply through as written).
+                                Err(error) => match contract_calls(&body) {
+                                    Some(calls) => {
+                                        for (name, args) in calls {
+                                            tool_calls += 1;
+                                            send(ChatEvent::ToolCall { name, args });
+                                        }
+                                    }
+                                    None => {
+                                        let head: String = body.trim().chars().take(120).collect();
+                                        unreadable.push((error, head));
+                                    }
+                                },
                             }
+                        }
+                        // Nothing ran: tell the model why and let it write the call
+                        // again (twice at most) instead of ending the turn silently.
+                        if tool_calls == 0 && !unreadable.is_empty() && rewrites < 2 {
+                            rewrites += 1;
+                            let (error, head) = &unreadable[0];
+                            history.push(ChatMessage::new(ChatRole::Tool, format!(
+                                "ERROR: your tool call could not be read ({error}); it began {head:?}. Nothing ran. Write the call again: one valid JSON object {{\"name\": \"TOOL\", \"arguments\": {{...}}}} inside <tool_call> tags (strings quoted, no comments, no trailing commas)."
+                            )));
+                            send(ChatEvent::Loading { phase: "the model is rewriting a tool call".into(), fraction: 0.0 });
+                            retry = true;
+                            break 'attempt;
+                        }
+                        for (error, head) in unreadable {
+                            send(ChatEvent::Delta(format!("[bad tool call: {error}; it began {head:?}]")));
                         }
                         send(ChatEvent::TurnDone {
                             tool_calls,
@@ -624,13 +998,36 @@ fn run_proxy<T: FleetTransport>(
                         done = true;
                     }
                     ProviderEvent::Error(error) => {
+                        // The desktop needs the GPU right now. The turn is not
+                        // lost: it waits, saying so, until the model fits or
+                        // the person stops it.
+                        if is_ui_priority_refusal(&error) {
+                            send(ChatEvent::Loading { phase: format!("waiting for GPU memory ({error})"), fraction: 0.0 });
+                            let mut waited = Duration::ZERO;
+                            while waited < UI_PRIORITY_RETRY && !cancel.load(Ordering::Relaxed) {
+                                std::thread::sleep(POLL);
+                                waited += POLL;
+                            }
+                            retry = true;
+                            break 'attempt;
+                        }
+                        if !compacted {
+                            if let Some((need, max)) = context_overflow(&error) {
+                                compacted = true;
+                                if elide_old_tool_results(history, need, max) {
+                                    send(ChatEvent::Loading { phase: "shortening the conversation".into(), fraction: 0.0 });
+                                    retry = true;
+                                    break 'attempt;
+                                }
+                            }
+                        }
                         send(ChatEvent::Failed(format!("{}: {error}", route.label())));
-                        return match wait_next_user(msg_rx, None) {
+                        return match wait_next_user(msg_rx, images) {
                             Some(msg) => ProxyExit::Reelect(msg),
                             None => ProxyExit::Ended,
                         };
                     }
-                    ProviderEvent::FunctionCall { .. } => {}
+                    ProviderEvent::FunctionCall { .. } | ProviderEvent::FunctionCallPartial { .. } => {}
                 }
             }
             if done {
@@ -639,7 +1036,62 @@ fn run_proxy<T: FleetTransport>(
             std::thread::sleep(POLL);
             }
         }
+        if !retry {
+            break;
+        }
+        }
     }
+}
+
+/// How long a turn may go without any event from the hub (a status change,
+/// text, the end) before the person is told and can send again. Not a limit
+/// on work: a loading model and a long prefill report progress all along, and
+/// a turn waiting in the hub's queue (behind a long image or music job) is
+/// not stalled.
+const STALL: Duration = Duration::from_secs(60);
+
+/// How often a turn the desktop's GPU use refused asks again.
+const UI_PRIORITY_RETRY: Duration = Duration::from_secs(5);
+
+/// A node's "not enough GPU memory ..., UI has priority" (`gpu_yield`).
+fn is_ui_priority_refusal(error: &str) -> bool {
+    error.contains("UI has priority")
+}
+
+/// Tokens kept free for the answer when a conversation is fitted to a node.
+const ANSWER_ROOM: usize = 4096;
+
+/// `need` and `max_context` of a node's context-overflow refusal
+/// ("session context overflow: need 37934 tokens, max_context is 32768").
+fn context_overflow(error: &str) -> Option<(usize, usize)> {
+    let rest = &error[error.find("context overflow")?..];
+    let number_after = |key: &str| -> Option<usize> {
+        let tail = &rest[rest.find(key)? + key.len()..];
+        tail.trim_start().split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+    };
+    Some((number_after("need")?, number_after("max_context is")?))
+}
+
+/// Make room for a turn that needs `need` tokens in a `max` context: the
+/// oldest tool results (file reads, listings: what the model can ask for
+/// again) become a one-line note, oldest first, until the estimate fits
+/// with room to answer; the newest two results stay. False when nothing
+/// could be elided.
+fn elide_old_tool_results(history: &mut [ChatMessage], need: usize, max: usize) -> bool {
+    const NOTE: &str = "[an earlier tool result, elided to keep the conversation within the model's context; call the tool again if you need it]";
+    // About 3 bytes a token for code and JSON; aim for 80 % of the context.
+    let target = need.saturating_sub(max * 4 / 5);
+    let mut freed = 0usize;
+    let tools: Vec<usize> = history.iter().enumerate().filter(|(_, m)| m.role == ChatRole::Tool && m.text.len() > NOTE.len() * 2).map(|(i, _)| i).collect();
+    let keep = tools.len().saturating_sub(2);
+    for &index in &tools[..keep] {
+        if freed >= target {
+            break;
+        }
+        freed += (history[index].text.len() - NOTE.len()) / 3;
+        history[index].text = NOTE.to_string();
+    }
+    freed > 0
 }
 
 // ------------------------------------------------------------ the markup
@@ -703,6 +1155,17 @@ impl MarkupSplitter {
         visible
     }
 
+    /// What the reply is writing out of sight right now: `Some(true)` a tool
+    /// call, `Some(false)` its reasoning, `None` the visible answer.
+    pub(crate) fn hidden(&self) -> Option<bool> {
+        if self.in_tool { Some(true) } else if self.in_think { Some(false) } else { None }
+    }
+
+    /// The body of a `<tool_call>` that was opened and never closed.
+    pub(crate) fn unfinished_call(&self) -> Option<String> {
+        self.in_tool.then(|| format!("{}{}", self.tool_body, self.pending))
+    }
+
     /// The turn ended: whatever is still held is text; the tool bodies
     /// collected so far are returned in order.
     pub(crate) fn finish(&mut self) -> (String, Vec<String>) {
@@ -747,6 +1210,43 @@ mod tests {
     use std::collections::VecDeque;
 
     #[test]
+    fn the_tool_check_wants_a_well_formed_call() {
+        assert!(calls_the_check_tool("<tool_call>{\"name\": \"add\", \"arguments\": {\"a\": 17, \"b\": 25}}</tool_call>"));
+        assert!(calls_the_check_tool("<think>\nadd them\n</think>\n<tool_call>\n<function=add>\n<parameter=a>\n17\n</parameter>\n<parameter=b>\n25\n</parameter>\n</function>\n</tool_call>"));
+        // What the broken 9B wrote.
+        assert!(!calls_the_check_tool("I'll make a new scorecard for each part of the next step"));
+        assert!(!calls_the_check_tool("17 + 25 is 42."));
+        assert!(!calls_the_check_tool("<tool_call>{\"name\": \"other\", \"arguments\": {}}</tool_call>"));
+    }
+
+    #[test]
+    fn a_gpu_refusal_is_told_apart_from_a_failure() {
+        assert!(is_ui_priority_refusal("qwen3.8-27b on 192.0.2.101: model unavailable: not enough GPU memory for qwen3.8-27b, UI has priority: it needs 17994 MB, 19198 MB are free and the UI keeps 2048 MB"));
+        assert!(!is_ui_priority_refusal("empty completion"));
+    }
+
+    #[test]
+    fn a_context_overflow_elides_the_oldest_tool_results_but_the_newest_two() {
+        let error = "qwen3.8-27b: backend error: llm: prefill: Format(\"session context overflow: need 37934 tokens, max_context is 32768\")";
+        assert_eq!(context_overflow(error), Some((37934, 32768)));
+        assert_eq!(context_overflow("timeout"), None);
+        let big = "x".repeat(30_000);
+        let mut history = vec![ChatMessage::new(ChatRole::User, "change it")];
+        for _ in 0..4 {
+            history.push(ChatMessage::new(ChatRole::Assistant, "<tool_call>…</tool_call>"));
+            history.push(ChatMessage::new(ChatRole::Tool, big.clone()));
+        }
+        assert!(elide_old_tool_results(&mut history, 37934, 32768));
+        let elided: Vec<bool> = history.iter().filter(|m| m.role == ChatRole::Tool).map(|m| m.text.starts_with("[an earlier tool result")).collect();
+        // 11 712 tokens to free: one 10 000-token result is not enough, two are.
+        assert_eq!(elided, vec![true, true, false, false]);
+        assert_eq!(history[0].text, "change it");
+        // Only the newest two results left: nothing to elide.
+        let mut short = vec![ChatMessage::new(ChatRole::Tool, big.clone()), ChatMessage::new(ChatRole::Tool, big)];
+        assert!(!elide_old_tool_results(&mut short, 40000, 32768));
+    }
+
+    #[test]
     fn dropping_a_session_signals_cancellation_before_worker_disconnect() {
         let (to_worker, msg_rx) = channel();
         let (_event_tx, from_worker) = channel();
@@ -771,8 +1271,8 @@ mod tests {
     #[test]
     fn routes_read_as_one_phrase() {
         assert_eq!(
-            ChatRoute::Fleet { base: "http://10.0.0.165:8123".into(), model: "qwen3.8-27b".into() }.label(),
-            "qwen3.8-27b on 10.0.0.165"
+            ChatRoute::Fleet { base: "http://192.0.2.165:8123".into(), model: "qwen3.8-27b".into() }.label(),
+            "qwen3.8-27b on 192.0.2.165"
         );
         assert_eq!(ChatRoute::MachineNode { port: 8123 }.label(), "this machine's node :8123");
         assert_eq!(ChatRoute::InProcess { model: "x.gguf".into() }.label(), "in-process");
@@ -808,12 +1308,12 @@ mod tests {
         use crate::discovery::DiscoveredNode;
         let node = |base: &str| DiscoveredNode { base_url: base.into(), node_id: 1, fleet: "gen".into() };
         let bases = fleet_chat_bases(&[
-            node("http://10.0.0.9:8123"),
-            node("http://10.0.0.165:8123"),
-            node("http://10.0.0.165:8123"),
+            node("http://192.0.2.9:8123"),
+            node("http://192.0.2.165:8123"),
+            node("http://192.0.2.165:8123"),
         ]);
         // The default roles restrict .165 TO chat and leave others open.
-        assert_eq!(bases, vec!["http://10.0.0.165:8123", "http://10.0.0.9:8123"]);
+        assert_eq!(bases, vec!["http://192.0.2.165:8123", "http://192.0.2.9:8123"]);
     }
 
     #[test]
@@ -910,7 +1410,7 @@ mod tests {
             "<think>which app?</think>\n\n<tool_call>\n<function=os.launch>\n<parameter=app>\nterminal\n</parameter>\n</function>\n</tool_call>".into(),
         );
         node.replies.lock().unwrap().push_back("<think>done</think>\n\nOpened the terminal.".into());
-        let provider = FleetQwenChatProvider::new(node.clone(), vec!["http://10.0.0.165:8123".into()]);
+        let provider = FleetQwenChatProvider::new(node.clone(), vec!["http://192.0.2.165:8123".into()]);
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
             preferred_model: None,
@@ -927,8 +1427,8 @@ mod tests {
             let send = |ev: ChatEvent| {
                 let _ = event_tx.send(ev);
             };
-            let route = ChatRoute::Fleet { base: "http://10.0.0.165:8123".into(), model: "qwen3.8-27b".into() };
-            run_proxy(provider, &config, None, &msg_rx, &send, &cancel, route)
+            let route = ChatRoute::Fleet { base: "http://192.0.2.165:8123".into(), model: "qwen3.8-27b".into() };
+            run_proxy(provider, &config, None, &msg_rx, &mut Vec::new(), &mut Vec::new(), &send, &cancel, route)
         });
         to_worker.send(WorkerMsg::UserTurn("open the terminal".into())).unwrap();
         let first = collect_until_turn_done(&events);
@@ -982,7 +1482,7 @@ mod tests {
         to_worker.send(WorkerMsg::UserTurn("and now?".into())).unwrap();
         let third = collect_until_turn_done(&events);
         match third.last() {
-            Some(ChatEvent::Failed(text)) => assert!(text.contains("qwen3.8-27b on 10.0.0.165"), "{text}"),
+            Some(ChatEvent::Failed(text)) => assert!(text.contains("qwen3.8-27b on 192.0.2.165"), "{text}"),
             other => panic!("expected Failed, got {other:?}"),
         }
         to_worker.send(WorkerMsg::UserTurn("hello again".into())).unwrap();
@@ -999,7 +1499,7 @@ mod tests {
             .unwrap()
             .extend(replies.iter().map(|reply| (*reply).to_string()));
         let provider =
-            FleetQwenChatProvider::new(node.clone(), vec!["http://10.0.0.165:8123".into()]);
+            FleetQwenChatProvider::new(node.clone(), vec!["http://192.0.2.165:8123".into()]);
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
             preferred_model: None,
@@ -1021,10 +1521,12 @@ mod tests {
                 &config,
                 None,
                 &msg_rx,
+                &mut Vec::new(),
+                &mut Vec::new(),
                 &send,
                 &cancel,
                 ChatRoute::Fleet {
-                    base: "http://10.0.0.165:8123".into(),
+                    base: "http://192.0.2.165:8123".into(),
                     model: "qwen3.8-27b".into(),
                 },
             )
@@ -1042,7 +1544,7 @@ mod tests {
         *node.think_open.lock().unwrap() = Some(false);
         node.replies.lock().unwrap().push_back(reply.to_string());
         let provider =
-            FleetQwenChatProvider::new(node.clone(), vec!["http://10.0.0.165:8123".into()]);
+            FleetQwenChatProvider::new(node.clone(), vec!["http://192.0.2.165:8123".into()]);
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
             preferred_model: None,
@@ -1064,10 +1566,12 @@ mod tests {
                 &config,
                 None,
                 &msg_rx,
+                &mut Vec::new(),
+                &mut Vec::new(),
                 &send,
                 &cancel,
                 ChatRoute::Fleet {
-                    base: "http://10.0.0.165:8123".into(),
+                    base: "http://192.0.2.165:8123".into(),
                     model: "qwen3.8-27b".into(),
                 },
             )
@@ -1159,6 +1663,7 @@ mod tests {
             Some("qwen3.6-27b"),
             None,
             None,
+            Vec::new(),
             || {
                 let call = calls.get();
                 calls.set(call + 1);
@@ -1182,5 +1687,39 @@ mod tests {
         );
         drop(provider);
         assert!(calls.get() >= 2);
+    }
+
+    #[test]
+    fn this_machines_hub_is_elected_before_a_lan_node_listed_first_alphabetically() {
+        // Both serve a chat model; the caller ranked loopback first.
+        let (_provider, route) = fleet_provider_with(
+            &|_| {},
+            None,
+            None,
+            None,
+            Vec::new(),
+            || vec!["http://127.0.0.1:8123".into(), "http://192.0.2.235:8123".into(), "http://127.0.0.1:8123".into()],
+            || DelayedModels,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(matches!(route, ChatRoute::Fleet { ref base, .. } if base == "http://127.0.0.1:8123"), "{route:?}");
+    }
+
+    #[test]
+    fn a_named_model_that_no_node_serves_is_an_error_not_another_model() {
+        let result = fleet_provider_with(
+            &|_| {},
+            Some("qwen3.8-27b"),
+            None,
+            None,
+            Vec::new(),
+            || vec!["http://n1:1".into()],
+            || DelayedModels,
+            Duration::from_millis(50),
+            Duration::ZERO,
+        );
+        assert!(result.is_err());
     }
 }

@@ -4,7 +4,7 @@
 //! ONE COMMAND:
 //!
 //! ```text
-//! cargo run --release --bin context-ladder -- http://10.0.0.165:8123
+//! cargo run --release --bin context-ladder -- http://192.0.2.165:8123
 //! ```
 //!
 //! **The report this exists for.** A conversation on Qwen3.8-27B "goes insane

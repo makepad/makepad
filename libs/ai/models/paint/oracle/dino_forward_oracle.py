@@ -27,11 +27,11 @@ import torch
 
 DINO_SNAP = os.environ.get(
     "MAKEPAD_DINO_PATH",
-    r"C:\Users\playe\.cache\huggingface\hub\models--facebook--dinov2-giant\snapshots\611a9d42f2335e0f921f1e313ad3c1b7178d206d",
+    r"C:\Users\me\.cache\huggingface\hub\models--facebook--dinov2-giant\snapshots\611a9d42f2335e0f921f1e313ad3c1b7178d206d",
 )
 OUT_DIR = os.environ.get(
     "MAKEPAD_DINO_ORACLE_DIR",
-    r"C:\Users\playe\makepad\local\pbrpaint\dino",
+    r"C:\Users\me\makepad\local\pbrpaint\dino",
 )
 UNET_BIN = os.environ.get(
     "MAKEPAD_HUNYUAN_UNET",

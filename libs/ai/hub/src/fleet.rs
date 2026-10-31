@@ -83,9 +83,14 @@ impl FleetConfig {
 /// Roles are DATA. `MAKEPAD_FLEET_ROLES` names them:
 ///
 /// ```text
-/// MAKEPAD_FLEET_ROLES="10.0.0.217=chat,text;10.0.0.9=image,edit"
+/// MAKEPAD_FLEET_ROLES="192.0.2.217=chat,text;192.0.2.9=image,edit"
 /// MAKEPAD_FLEET_ROLES=off      # no box is restricted (tests, one-box rigs)
 /// ```
+///
+/// A domain written with a trailing `?` is a FALLBACK role: the box serves it,
+/// but only ahead of boxes that would have to download the model first — a
+/// primary box with the weights on disk always wins (`audio?`: the chat box
+/// takes sound jobs the sound boxes refuse or lack).
 ///
 /// A host the variable does not name is unrestricted, so adding a box never
 /// needs a config edit. With the variable unset the built-in list below
@@ -96,14 +101,13 @@ pub struct FleetRoles {
     rules: Vec<(String, Vec<String>)>,
 }
 
-/// The ratified fleet end state: `.165` (RTX PRO 6000) carries chat, the
-/// prompt expander and image generation (user's order 2026-09-04: "let the
-/// rtx serve images too" — the 5090 cannot fit flux2-dev at the default
-/// reserve); every other generative domain lives on the other nodes.
-const DEFAULT_FLEET_ROLES: &str = "10.0.0.165=chat,text,image";
-
-/// Env var naming the roles; `off` disables the built-in list too.
+/// Env var naming the roles; it wins over the local file. `off` means no rules.
 pub const FLEET_ROLES_ENV: &str = "MAKEPAD_FLEET_ROLES";
+/// The machine's own roles, under the home directory, same text as the env var. No file: no rules.
+const FLEET_ROLES_FILE: &str = ".makepad/fleet-roles";
+/// What this crate's tests schedule against, whatever the machine they run on has configured.
+#[cfg(test)]
+const TEST_FLEET_ROLES: &str = "192.0.2.165=chat,text,image,audio?";
 
 impl FleetRoles {
     /// Parse `host=domain[,domain][;host=…]`. `off`/`none` = no rules.
@@ -154,10 +158,21 @@ impl FleetRoles {
         let domain = domain.to_ascii_lowercase();
         for (rule_host, domains) in &self.rules {
             if *rule_host == host {
-                return domains.iter().any(|d| *d == domain);
+                return domains
+                    .iter()
+                    .any(|d| d.strip_suffix('?').unwrap_or(d) == domain);
             }
         }
         true
+    }
+
+    /// Does the box serve `domain` only as a fallback (`domain?`)?
+    pub fn is_fallback(&self, base_url: &str, domain: &str) -> bool {
+        let host = host_of(base_url);
+        let domain = domain.to_ascii_lowercase();
+        self.rules.iter().any(|(rule_host, domains)| {
+            *rule_host == host && domains.iter().any(|d| d.strip_suffix('?') == Some(domain.as_str()))
+        })
     }
 
     /// Is this box NAMED by the role list — i.e. dedicated to the domains
@@ -215,12 +230,19 @@ pub fn node_label(base_url: &str) -> String {
 pub fn fleet_roles() -> &'static FleetRoles {
     static ROLES: std::sync::OnceLock<FleetRoles> = std::sync::OnceLock::new();
     ROLES.get_or_init(|| {
-        let text = std::env::var(FLEET_ROLES_ENV).unwrap_or_default();
-        if text.trim().is_empty() {
-            FleetRoles::parse(DEFAULT_FLEET_ROLES)
-        } else {
-            FleetRoles::parse(&text)
-        }
+        #[cfg(test)]
+        return FleetRoles::parse(TEST_FLEET_ROLES);
+        #[cfg(not(test))]
+        let text = std::env::var(FLEET_ROLES_ENV)
+            .ok()
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+                std::fs::read_to_string(std::path::Path::new(&home).join(FLEET_ROLES_FILE)).ok()
+            })
+            .unwrap_or_default();
+        #[cfg(not(test))]
+        FleetRoles::parse(&text)
     })
 }
 
@@ -234,6 +256,21 @@ pub fn role_names(base_url: &str) -> bool {
 
 pub fn role_allows(base_url: &str, domain: &str) -> bool {
     fleet_roles().allows(base_url, domain)
+}
+
+#[cfg(test)]
+pub(crate) fn standing_for_test(base_url: &str, domain: &str, affinity: u32) -> (bool, bool, bool, bool) {
+    role_standing(base_url, domain, affinity)
+}
+
+/// Rank prefix for a candidate: weights on disk first, then a primary box
+/// before a fallback one (see [`FleetRoles`]). Compared before everything
+/// else, so a fallback box wins only against boxes that would download.
+fn role_standing(base_url: &str, domain: &str, affinity: u32) -> (bool, bool, bool, bool) {
+    // The client election's tiers come before everything else: this machine's own
+    // hub, then a pinned one, then the LAN (see `hub_order`).
+    let tier = crate::hub_order::tier(base_url);
+    (tier == 0, tier <= 1, affinity >= 3, !fleet_roles().is_fallback(base_url, domain))
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,7 +1055,9 @@ fn preferred_on_disk(model: &ModelInfoJson, score: u32) -> bool {
 /// `pick_box*` remains the explicit model-pin path and does not apply this
 /// filter.
 fn is_explicit_only(model: &ModelInfoJson) -> bool {
-    model.backend.ends_with("-oracle")
+    // claude-cli runs on someone's own Claude account: only a client that
+    // names it gets it (crate::claude_cli).
+    model.backend.ends_with("-oracle") || model.backend == crate::claude_cli::BACKEND
 }
 
 #[derive(Clone, Copy)]
@@ -1108,7 +1147,7 @@ pub fn pick_for_domain_scored(
     snapshots: &[BoxSnapshot],
     domain: &str,
 ) -> Option<(usize, String, u32)> {
-    let mut best: Option<(bool, bool, u32, u32, u64, usize, &str)> = None;
+    let mut best: Option<((bool, bool, bool, bool), bool, bool, u32, u32, u64, usize, &str)> = None;
     let has_compatible_real = has_compatible_real_backend(snapshots, domain, None);
     for (i, snap) in snapshots.iter().enumerate() {
         if !snap.activity_admission_open() || !role_allows(&snap.base_url, domain) {
@@ -1131,19 +1170,20 @@ pub fn pick_for_domain_scored(
             let preferred = preferred_on_disk(model, score);
             let pending = snap.jobs_pending();
             let speed = gpu_rank(snap);
+            let standing = role_standing(&snap.base_url, domain, score);
             let better = match &best {
                 None => true,
-                Some((br, bf, bs, bg, bp, bi, _)) => {
-                    (real, preferred, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
-                        > (*br, *bf, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
+                Some((bst, br, bf, bs, bg, bp, bi, _)) => {
+                    (standing, real, preferred, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
+                        > (*bst, *br, *bf, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
                 }
             };
             if better {
-                best = Some((real, preferred, score, speed, pending, i, model.id.as_str()));
+                best = Some((standing, real, preferred, score, speed, pending, i, model.id.as_str()));
             }
         }
     }
-    best.map(|(_, _, score, _, _, i, id)| (i, id.to_string(), score))
+    best.map(|(_, _, _, score, _, _, i, id)| (i, id.to_string(), score))
 }
 
 /// Aggregate admission state for automatic domain routing on one node.
@@ -1290,18 +1330,20 @@ fn pick_for_domain_eta_inputs(
     job_cost_units: f64,
     request: Option<&GenerateRequestJson>,
 ) -> Option<(usize, String, u64, EtaInputs)> {
-    let mut best: Option<(bool, u64, u32, u32, u64, usize, &str, EtaInputs)> = None;
+    let mut best: Option<((bool, bool, bool, bool), bool, u64, u32, u32, u64, usize, &str, EtaInputs)> = None;
     for candidate in admitted_domain_candidates(snapshots, domain, request, false) {
         let inputs = eta_inputs_for_candidate(candidate, job_cost_units);
         let eta_ms = estimate_eta_ms(&inputs);
+        let standing = role_standing(&candidate.snapshot.base_url, domain, candidate.affinity);
         let preferred = preferred_on_disk(candidate.model, candidate.affinity);
         let pending = candidate.snapshot.jobs_pending();
         let speed = gpu_rank(candidate.snapshot);
         let better = match &best {
             None => true,
-            Some((best_preferred, best_eta, best_affinity, best_speed, best_pending, best_i, _, _)) => {
-                preferred > *best_preferred
-                    || (preferred == *best_preferred
+            Some((best_standing, best_preferred, best_eta, best_affinity, best_speed, best_pending, best_i, _, _)) => {
+                standing > *best_standing
+                    || standing == *best_standing && preferred > *best_preferred
+                    || (standing == *best_standing && preferred == *best_preferred
                         && (eta_ms < *best_eta
                             || (eta_ms == *best_eta
                                 && (
@@ -1319,6 +1361,7 @@ fn pick_for_domain_eta_inputs(
         };
         if better {
             best = Some((
+                standing,
                 preferred,
                 eta_ms,
                 candidate.affinity,
@@ -1330,7 +1373,7 @@ fn pick_for_domain_eta_inputs(
             ));
         }
     }
-    best.map(|(_, eta_ms, _, _, _, index, id, inputs)| {
+    best.map(|(_, _, eta_ms, _, _, _, index, id, inputs)| {
         (index, id.to_string(), eta_ms, inputs)
     })
 }
@@ -1345,7 +1388,7 @@ pub fn pick_for_model_eta(
     model_id: &str,
     request: &GenerateRequestJson,
 ) -> Option<(usize, u64)> {
-    let mut best: Option<(u64, u32, u32, u64, usize)> = None;
+    let mut best: Option<((bool, bool, bool, bool), u64, u32, u32, u64, usize)> = None;
     for (index, snapshot) in snapshots.iter().enumerate() {
         if !snapshot.activity_admission_open() {
             continue;
@@ -1374,9 +1417,11 @@ pub fn pick_for_model_eta(
         ));
         let speed = gpu_rank(snapshot);
         let pending = snapshot.jobs_pending();
-        let better = best.is_none_or(|(best_eta, best_affinity, best_speed, best_pending, best_i)| {
-            eta_ms < best_eta
-                || (eta_ms == best_eta
+        let standing = role_standing(&snapshot.base_url, &model.domain, affinity);
+        let better = best.is_none_or(|(best_standing, best_eta, best_affinity, best_speed, best_pending, best_i)| {
+            standing > best_standing
+                || standing == best_standing && eta_ms < best_eta
+                || (standing == best_standing && eta_ms == best_eta
                     && (
                         affinity,
                         speed,
@@ -1390,10 +1435,10 @@ pub fn pick_for_model_eta(
                     ))
         });
         if better {
-            best = Some((eta_ms, affinity, speed, pending, index));
+            best = Some((standing, eta_ms, affinity, speed, pending, index));
         }
     }
-    best.map(|(eta_ms, _, _, _, index)| (index, eta_ms))
+    best.map(|(_, eta_ms, _, _, _, index)| (index, eta_ms))
 }
 
 /// Pick an admitted real backend by estimated time to finish. A preferred
@@ -1454,6 +1499,38 @@ pub fn pick_for_domain_eta_request_label(
     .map(|(index, model, eta_ms, inputs)| {
         (index, model, eta_ms, eta_breakdown_label(&inputs))
     })
+}
+
+/// The readiness filter: a job goes only to nodes that already have its
+/// model ready or loaded, so it never makes a node download weights.
+/// Returns the model to run and the nodes that do not have it. `wanted`
+/// empty takes the domain's model loaded on most nodes, else ready on most
+/// (ties by id); a pinned model is taken whatever its domain.
+pub fn installed_model(snapshots: &[BoxSnapshot], domain: &str, wanted: &str) -> Option<(String, Vec<String>)> {
+    let offers: Vec<(&str, Vec<(&str, bool)>)> = snapshots.iter().map(|snapshot| {
+        (snapshot.base_url.as_str(), snapshot.models.iter()
+            .filter(|info| info.available && (info.domain == domain || (!wanted.is_empty() && info.id == wanted))
+                && matches!(info.state.as_str(), "ready" | "loaded"))
+            .map(|info| (info.id.as_str(), info.state == "loaded")).collect())
+    }).collect();
+    let model = if wanted.is_empty() {
+        let mut counts: Vec<(&str, usize, usize)> = Vec::new();
+        for (_, models) in &offers {
+            for (id, loaded) in models {
+                match counts.iter_mut().find(|(known, _, _)| known == id) {
+                    Some(entry) => { entry.1 += *loaded as usize; entry.2 += 1; }
+                    None => counts.push((id, *loaded as usize, 1)),
+                }
+            }
+        }
+        counts.sort_by(|a, b| (b.1, b.2).cmp(&(a.1, a.2)).then_with(|| a.0.cmp(b.0)));
+        counts.first()?.0.to_string()
+    } else {
+        wanted.to_string()
+    };
+    let without: Vec<String> = offers.iter().filter(|(_, models)| !models.iter().any(|(id, _)| *id == model))
+        .map(|(url, _)| url.to_string()).collect();
+    (without.len() < offers.len()).then_some((model, without))
 }
 
 /// Explain why no request-aware ETA route exists without echoing prompts,
@@ -1689,21 +1766,21 @@ mod tests {
 
     #[test]
     fn a_role_names_the_domains_a_box_may_serve() {
-        let roles = FleetRoles::parse("10.0.0.217=chat,text; 10.0.0.9 = image , edit ");
+        let roles = FleetRoles::parse("192.0.2.217=chat,text; 192.0.2.9 = image , edit ");
         // Named host: exactly its listed domains, nothing else.
-        assert!(roles.allows("http://10.0.0.217:8123", "chat"));
-        assert!(roles.allows("http://10.0.0.217:8123", "text"));
-        assert!(!roles.allows("http://10.0.0.217:8123", "video"));
-        assert!(!roles.allows("http://10.0.0.217:8123", "image"));
+        assert!(roles.allows("http://192.0.2.217:8123", "chat"));
+        assert!(roles.allows("http://192.0.2.217:8123", "text"));
+        assert!(!roles.allows("http://192.0.2.217:8123", "video"));
+        assert!(!roles.allows("http://192.0.2.217:8123", "image"));
         // Port and scheme are not identity; the host is.
-        assert!(!roles.allows("https://10.0.0.217:9999/", "video"));
-        assert!(roles.allows("10.0.0.9:8123", "edit"));
-        assert!(!roles.allows("10.0.0.9:8123", "video"));
+        assert!(!roles.allows("https://192.0.2.217:9999/", "video"));
+        assert!(roles.allows("192.0.2.9:8123", "edit"));
+        assert!(!roles.allows("192.0.2.9:8123", "video"));
         // A host nobody named is unrestricted, so adding a box needs no
         // config edit.
-        assert!(roles.allows("http://10.0.0.123:8123", "video"));
+        assert!(roles.allows("http://192.0.2.123:8123", "video"));
         // Case folds on both sides.
-        assert!(roles.allows("http://10.0.0.217:8123", "CHAT"));
+        assert!(roles.allows("http://192.0.2.217:8123", "CHAT"));
     }
 
     #[test]
@@ -1712,11 +1789,11 @@ mod tests {
         assert!(FleetRoles::parse("NONE").is_empty());
         assert!(FleetRoles::parse("").is_empty());
         // Empty rules restrict nothing at all.
-        assert!(FleetRoles::parse("off").allows("http://10.0.0.217:8123", "video"));
+        assert!(FleetRoles::parse("off").allows("http://192.0.2.217:8123", "video"));
         // A clause without domains would otherwise silence a whole box.
-        let junk = FleetRoles::parse("10.0.0.217=;  ;nonsense;=video");
+        let junk = FleetRoles::parse("192.0.2.217=;  ;nonsense;=video");
         assert!(junk.is_empty());
-        assert!(junk.allows("http://10.0.0.217:8123", "video"));
+        assert!(junk.allows("http://192.0.2.217:8123", "video"));
     }
 
     #[test]
@@ -1724,26 +1801,67 @@ mod tests {
         // The ratified fleet end state, as data: chat and text live on the
         // Blackwell (82 GB free beside the live model) since the 5090 was
         // turned over to the live-feed pool on the user's order.
-        let roles = FleetRoles::parse(DEFAULT_FLEET_ROLES);
-        assert!(roles.allows("http://10.0.0.165:8123", "chat"));
-        assert!(roles.allows("http://10.0.0.165:8123", "text"));
-        assert!(roles.allows("http://10.0.0.165:8123", "image"));
+        let roles = FleetRoles::parse(TEST_FLEET_ROLES);
+        assert!(roles.allows("http://192.0.2.165:8123", "chat"));
+        assert!(roles.allows("http://192.0.2.165:8123", "text"));
+        assert!(roles.allows("http://192.0.2.165:8123", "image"));
+        assert!(roles.is_fallback("http://192.0.2.165:8123", "audio"));
         for domain in ["video", "music", "mesh", "vision"] {
             assert!(
-                !roles.allows("http://10.0.0.165:8123", domain),
+                !roles.allows("http://192.0.2.165:8123", domain),
                 "the dedicated chat box must not serve {domain}"
             );
         }
         assert_eq!(
             roles.filter_domains(
-                "http://10.0.0.165:8123",
+                "http://192.0.2.165:8123",
                 &["chat".to_string(), "video".to_string(), "text".to_string()]
             ),
             vec!["chat".to_string(), "text".to_string()]
         );
         // Every other box keeps everything it advertises.
         let all = ["chat".to_string(), "video".to_string()];
-        assert_eq!(roles.filter_domains("http://10.0.0.123:8123", &all), all);
+        assert_eq!(roles.filter_domains("http://192.0.2.123:8123", &all), all);
+    }
+
+    #[test]
+    fn a_fallback_role_serves_only_where_no_primary_has_the_weights() {
+        let roles = FleetRoles::parse("192.0.2.165=chat,audio?");
+        assert!(roles.allows("http://192.0.2.165:8785", "audio"));
+        assert!(roles.is_fallback("http://192.0.2.165:8785", "audio"));
+        assert!(!roles.is_fallback("http://192.0.2.165:8785", "chat"));
+        assert!(!roles.is_fallback("http://192.0.2.123:8123", "audio"));
+        assert!(!roles.allows("http://192.0.2.165:8785", "video"));
+        // The process-wide default names .165 as the audio fallback; a
+        // deployment that overrode the roles has nothing to prove here.
+        if std::env::var(FLEET_ROLES_ENV).is_ok() {
+            return;
+        }
+        let sfx = |url: &str, state: &str| {
+            let mut snapshot = snap(url, 24 * 1024, 24 * 1024);
+            snapshot.models = vec![m("sa3-sfx", "audio", state, 4.0)];
+            snapshot
+        };
+        let mut request = GenerateRequestJson::default();
+        request.model = "sa3-sfx".to_string();
+        // A sound box with the weights beats the chat box, even a loaded one,
+        // when both are LAN boxes. The hub tier ranks first (this machine's
+        // hub, then a pinned one, then the LAN; see `hub_order`), so where the
+        // chat box is this machine (the test running on .165) or pinned, its
+        // loaded model serves the job here instead.
+        let chat_box_ranks_higher = crate::hub_order::tier("http://192.0.2.165:8785") < crate::hub_order::tier("http://192.0.2.100:8123");
+        let expected = Some(if chat_box_ranks_higher { 0 } else { 1 });
+        let snaps = vec![sfx("http://192.0.2.165:8785", MODEL_STATE_LOADED), sfx("http://192.0.2.100:8123", MODEL_STATE_READY)];
+        assert_eq!(pick_for_model_eta(&snaps, "sa3-sfx", &request).map(|(i, _)| i), expected);
+        assert_eq!(pick_for_domain_eta_request(&snaps, "audio", &GenerateRequestJson::default()).map(|(i, ..)| i), expected);
+        assert_eq!(pick_for_domain(&snaps, "audio").map(|(i, _)| i), expected);
+        // One that would download loses to the chat box's cached weights.
+        let snaps = vec![sfx("http://192.0.2.165:8785", MODEL_STATE_READY), sfx("http://192.0.2.100:8123", MODEL_STATE_ABSENT)];
+        assert_eq!(pick_for_model_eta(&snaps, "sa3-sfx", &request).map(|(i, _)| i), Some(0));
+        assert_eq!(pick_for_domain(&snaps, "audio").map(|(i, _)| i), Some(0));
+        // Alone, the chat box serves it.
+        let snaps = vec![sfx("http://192.0.2.165:8785", MODEL_STATE_ABSENT)];
+        assert_eq!(pick_for_model_eta(&snaps, "sa3-sfx", &request).map(|(i, _)| i), Some(0));
     }
 
     #[test]
@@ -1754,7 +1872,7 @@ mod tests {
             return;
         }
         let chat_box = {
-            let mut snapshot = snap("http://10.0.0.165:8123", 32 * 1024, 32 * 1024);
+            let mut snapshot = snap("http://192.0.2.165:8123", 32 * 1024, 32 * 1024);
             snapshot.models = vec![
                 m("qwen3.8-27b", "chat", MODEL_STATE_LOADED, 24.0),
                 m("minimax-h3-q4-24g", "video", MODEL_STATE_READY, 20.0),
@@ -1842,9 +1960,9 @@ mod tests {
 
     #[test]
     fn a_host_is_read_out_of_any_url_shape() {
-        assert_eq!(host_of("http://10.0.0.217:8123"), "10.0.0.217");
+        assert_eq!(host_of("http://192.0.2.217:8123"), "192.0.2.217");
         assert_eq!(host_of("https://Box-A:8123/models"), "box-a");
-        assert_eq!(host_of("10.0.0.217"), "10.0.0.217");
+        assert_eq!(host_of("192.0.2.217"), "192.0.2.217");
         assert_eq!(host_of("http://[::1]:8123"), "::1");
     }
 
@@ -1889,6 +2007,11 @@ mod tests {
                 started_ms: None,
                 capabilities: None,
                 vram_reserve_mb: Some(1024),
+                llm_context_configured: None,
+                llm_context_loaded: None,
+                llm_context_max: None,
+                llm_kv: None,
+                llm_kv_loaded: None,
                 queue_limit: Some(8),
                 max_job_body_bytes: None,
                 fleet: None,
@@ -1942,6 +2065,11 @@ mod tests {
                 started_ms: None,
                 capabilities: None,
                 vram_reserve_mb: None,
+                llm_context_configured: None,
+                llm_context_loaded: None,
+                llm_context_max: None,
+                llm_kv: None,
+                llm_kv_loaded: None,
                 queue_limit: None,
                 max_job_body_bytes: None,
                 fleet: None,
@@ -2336,13 +2464,13 @@ mod tests {
     #[test]
     fn config_parses_lines_comments_schemes() {
         let config = FleetConfig::parse(
-            "# fleet\n10.0.0.217:8767\nhttp://10.0.0.169:8765/  # video box\n\n10.0.0.217:8767\n",
+            "# fleet\n192.0.2.217:8767\nhttp://192.0.2.169:8765/  # video box\n\n192.0.2.217:8767\n",
         );
         assert_eq!(
             config.boxes,
             vec![
-                "http://10.0.0.217:8767".to_string(),
-                "http://10.0.0.169:8765".to_string(),
+                "http://192.0.2.217:8767".to_string(),
+                "http://192.0.2.169:8765".to_string(),
             ]
         );
     }
@@ -2474,19 +2602,19 @@ mod tests {
             // MiB. The RTX 6000 can fit it in total, but not while only 24
             // GiB is free.
             with_vram(
-                snapshot("http://10.0.0.169:8123", 0, vec![h3.clone()]),
+                snapshot("http://192.0.2.169:8123", 0, vec![h3.clone()]),
                 24 * 1024,
                 96 * 1024,
                 2 * 1024,
             ),
             with_vram(
-                snapshot("http://10.0.0.98:8767", 0, vec![h3.clone()]),
+                snapshot("http://192.0.2.98:8767", 0, vec![h3.clone()]),
                 24 * 1024,
                 24 * 1024,
                 2 * 1024,
             ),
             with_vram(
-                snapshot("http://10.0.0.100:8767", 0, vec![h3]),
+                snapshot("http://192.0.2.100:8767", 0, vec![h3]),
                 32 * 1024,
                 32 * 1024,
                 2 * 1024,
@@ -2537,7 +2665,7 @@ mod tests {
         let mut flux2 = model("flux2-dev", "image", MODEL_STATE_READY, true);
         flux2.vram_gb = Some(29.0);
         let mut rtx5090 = with_vram(
-            snapshot("http://10.0.0.217", 0, vec![flux2.clone()]),
+            snapshot("http://192.0.2.217", 0, vec![flux2.clone()]),
             29_785,
             32_607,
             2_048,
@@ -2802,7 +2930,7 @@ mod tests {
         woosh.vram_gb = Some(3.0);
         let models = vec![flux, moss, sa3, woosh];
         let legacy = with_legacy_vram(
-            snapshot("http://10.0.0.99:8765", 0, models.clone()),
+            snapshot("http://192.0.2.99:8765", 0, models.clone()),
             155,
             32_607,
         );
@@ -2828,7 +2956,7 @@ mod tests {
         // retires moss+sa3 before the job runs (resident fast path), and a
         // cold target earns the reclaim-by-eviction credit.
         let enforcing = with_vram(
-            snapshot("http://10.0.0.99:8765", 0, models),
+            snapshot("http://192.0.2.99:8765", 0, models),
             155,
             32_607,
             2 * 1024,
@@ -2910,7 +3038,7 @@ mod tests {
         let mut synthetic = model("testpattern", "image", MODEL_STATE_READY, true);
         synthetic.backend = "testpattern".to_string();
         let legacy = with_legacy_vram(
-            snapshot("http://10.0.0.99:8765", 0, vec![flux, moss, sa3, synthetic]),
+            snapshot("http://192.0.2.99:8765", 0, vec![flux, moss, sa3, synthetic]),
             155,
             32_607,
         );

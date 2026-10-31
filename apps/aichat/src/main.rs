@@ -6,7 +6,7 @@
 //! as studio `Custom` frames, which the panel turns into registry links.
 
 pub use makepad_widgets;
-use makepad_aichat::AiChatPanelAction;
+use makepad_app_aichat::AiChatPanelAction;
 use makepad_widgets::*;
 
 app_main!(App);
@@ -57,9 +57,10 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
-        makepad_aichat::script_mod(vm);
+        makepad_app_aichat::script_mod(vm);
         self::script_mod(vm)
     }
 

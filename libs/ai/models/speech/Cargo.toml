@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = ["whisper", "vad", "kokoro", "indextts"]
-# Whisper speech-to-text (CPU SIMD / Metal / CUDA).
+# Whisper speech-to-text (CPU SIMD / Metal / CUDA / Vulkan).
 whisper = []
 # Silero voice-activity detection.
 vad = []
@@ -23,6 +23,11 @@ makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
 # Only the IndexTTS modules use the SA3/MOSS/Woosh kernels (and so pull in ai-h3).
 makepad-ai-sfx = { path = "../sfx", optional = true }
+
+# Model-dependent word-timing checks (ignored by default; see the file).
+[[test]]
+name = "timings"
+required-features = ["kokoro", "whisper"]
 
 [[bin]]
 name = "g2p_test"
@@ -45,6 +50,11 @@ path = "src/bin/parity.rs"
 required-features = ["kokoro"]
 
 [[bin]]
+name = "zh-eval"
+path = "src/bin/zh_eval.rs"
+required-features = ["kokoro", "whisper"]
+
+[[bin]]
 name = "tts_test"
 path = "src/bin/tts_test.rs"
 required-features = ["kokoro"]
@@ -56,8 +66,16 @@ required-features = ["kokoro"]
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 makepad-ai-cuda = { path = "../../cuda" }
 
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+makepad-ai-vulkan = { path = "../../vulkan" }
+
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 makepad-objc-sys = { path = "../../../objc-sys", version = "1.0.0" }
+
+[[bin]]
+name = "whisper-quantize"
+path = "src/bin/whisper_quantize.rs"
+required-features = ["whisper"]
 
 [[bin]]
 name = "whisper-test"

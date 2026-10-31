@@ -42,6 +42,9 @@ fn native_main() -> Result<(), String> {
         println!("agents {} (protocol 1)", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if operation == "shim" {
+        return shim(args.collect());
+    }
     if ![
         "agents", "tui", "start", "serve", "attach", "status", "list", "stop", "name",
     ]
@@ -254,5 +257,63 @@ fn native_main() -> Result<(), String> {
         }
         _ => unreachable!(),
     }
+    Ok(())
+}
+
+/// `agents shim [--state-dir <dir>]` prints shell functions (zsh and bash)
+/// that run `claude`, `codex` and `grok` inside this PTY host, attached to
+/// the terminal they were typed in (`start --attach`), under a fresh
+/// terminal identity. Any client of this host then sees each one as a host
+/// session and can attach to it without restarting it. Opt in by
+/// adding `eval "$(<path>/agents shim)"` to the shell's startup file; unset
+/// the functions (or set MAKEPAD_AGENTS_SHIM_OFF=1) to opt out. Nothing is
+/// written by this command.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn shim(args: Vec<std::ffi::OsString>) -> Result<(), String> {
+    use std::path::PathBuf;
+    let mut state_dir = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--state-dir") => {
+                state_dir = Some(PathBuf::from(args.next().ok_or("--state-dir requires a path")?))
+            }
+            _ => return Err("shim accepts only --state-dir".into()),
+        }
+    }
+    let state_dir = match state_dir {
+        Some(dir) => dir,
+        None => PathBuf::from(std::env::var_os("HOME").ok_or("HOME is unset")?)
+            .join(".makepad/studio/agent_sessions"),
+    };
+    let state_dir = state_dir.canonicalize().unwrap_or(state_dir);
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    let mut out = String::new();
+    out.push_str("# makepad-agents shim: claude/codex/grok run inside the makepad-agents persistent PTY host.\n");
+    out.push_str("__makepad_agents_run() {\n  local real=\"$1\"; shift\n");
+    out.push_str(&format!("  local agents={}\n", quote(&exe.to_string_lossy())));
+    out.push_str("  if [ -x \"$agents\" ] && [ -t 0 ] && [ -t 1 ] && [ -z \"$MAKEPAD_AGENTS_SESSION\" ] && [ -z \"$MAKEPAD_AGENTS_SHIM_OFF\" ]; then\n");
+    out.push_str("    local id=\"term-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \\n')\"\n");
+    out.push_str(&format!(
+        "    \"$agents\" start --attach --state-dir {} --session \"$id\" --cwd \"$PWD\" -- \"$real\" \"$@\"\n",
+        quote(&state_dir.to_string_lossy())
+    ));
+    out.push_str("  else\n    \"$real\" \"$@\"\n  fi\n}\n");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for name in ["claude", "codex", "grok"] {
+        let Some(real) = std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+        else {
+            out.push_str(&format!("# {name}: not found on PATH, not wrapped\n"));
+            continue;
+        };
+        out.push_str(&format!(
+            "{name}() {{ __makepad_agents_run {} \"$@\"; }}\n",
+            quote(&real.to_string_lossy())
+        ));
+    }
+    print!("{out}");
     Ok(())
 }

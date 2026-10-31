@@ -20,6 +20,7 @@ pub mod driver;
 pub mod launch;
 pub mod llm_ops;
 pub mod roformer_ops;
+pub mod train;
 
 pub use driver::*;
 // `launch` is an empty stub off linux/windows-with-kernels (e.g. this

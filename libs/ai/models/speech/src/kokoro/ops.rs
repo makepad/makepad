@@ -4,6 +4,8 @@
 //! Convention matches PyTorch: activations are channel-major `[channels, time]`,
 //! conv weights are `[out, in, kernel]`.
 
+use super::weights::WeightData;
+
 /// Row-major matrix. For activations, `rows` is channels and `cols` is time.
 #[derive(Clone, Debug)]
 pub struct Mat {
@@ -53,6 +55,39 @@ impl Mat {
     }
 }
 
+
+/// `KOKORO_PROFILE=1`: wall time per op name, printed by [`print_op_profile`].
+pub struct OpTimer(&'static str, std::time::Instant);
+
+static OP_TIMES: std::sync::Mutex<Vec<(&'static str, u128, u32)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn op_timer(name: &'static str) -> Option<OpTimer> {
+    std::env::var_os("KOKORO_PROFILE").map(|_| OpTimer(name, std::time::Instant::now()))
+}
+
+impl Drop for OpTimer {
+    fn drop(&mut self) {
+        let ns = self.1.elapsed().as_nanos();
+        let mut t = OP_TIMES.lock().unwrap();
+        match t.iter_mut().find(|e| e.0 == self.0) {
+            Some(e) => {
+                e.1 += ns;
+                e.2 += 1;
+            }
+            None => t.push((self.0, ns, 1)),
+        }
+    }
+}
+
+pub fn print_op_profile() {
+    let mut t = OP_TIMES.lock().unwrap();
+    t.sort_by(|a, b| b.1.cmp(&a.1));
+    for (name, ns, n) in t.iter() {
+        eprintln!("[kokoro-op] {name:<28} {:>8.1} ms  x{n}", *ns as f64 / 1e6);
+    }
+    t.clear();
+}
+
 /// Gather embedding rows: `tokens` -> `[embed_dim, time]`.
 pub fn embed(tokens: &[u16], table: &[f32], embed_dim: usize) -> Mat {
     let mut out = Mat::zeros(embed_dim, tokens.len());
@@ -78,6 +113,7 @@ pub fn conv1d(x: &Mat, weight: &[f32], bias: &[f32], out_channels: usize, pad: u
 /// `F.layer_norm` over the channel dimension, then transposes back — so this
 /// normalizes over channels, never over time.
 pub fn layer_norm_channels(x: &Mat, gamma: &[f32], beta: &[f32], eps: f32) -> Mat {
+    let _t = op_timer("layer_norm_channels");
     let channels = x.rows;
     let time = x.cols;
     let mut out = Mat::zeros(channels, time);
@@ -104,6 +140,7 @@ pub fn layer_norm_channels(x: &Mat, gamma: &[f32], beta: &[f32], eps: f32) -> Ma
 /// The axis is the trap: normalizing over channels instead of time produces
 /// audio that is recognizably speech and subtly wrong.
 pub fn instance_norm_time(x: &Mat, eps: f32) -> Mat {
+    let _t = op_timer("instance_norm_time");
     let mut out = Mat::zeros(x.rows, x.cols);
     for_each_channel(&mut out, |channel, target| {
         let input = x.row(channel);
@@ -119,6 +156,7 @@ pub fn instance_norm_time(x: &Mat, eps: f32) -> Mat {
 
 /// Nearest-neighbour upsample along time, factor two.
 pub fn nearest_upsample2(x: &Mat) -> Mat {
+    let _t = op_timer("nearest_upsample2");
     let mut out = Mat::zeros(x.rows, x.cols * 2);
     for channel in 0..x.rows {
         let input = x.row(channel);
@@ -141,6 +179,7 @@ pub fn conv_transpose1d_depthwise(
     pad: usize,
     output_pad: usize,
 ) -> Mat {
+    let _t = op_timer("conv_transpose1d_depthwise");
     let channels = x.rows;
     let kernel = weight.len() / channels;
     let out_time = (x.cols - 1) * stride + kernel + output_pad - 2 * pad;
@@ -178,6 +217,11 @@ pub fn conv_transpose1d(
     stride: usize,
     pad: usize,
 ) -> Mat {
+    let _t = op_timer("conv_transpose1d");
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(out) = super::vulkan::conv(x, weight, bias, out_channels, pad, stride, 1, true) {
+        return out;
+    }
     let in_channels = x.rows;
     let kernel = weight.len() / (in_channels * out_channels);
     let time = x.cols;
@@ -280,6 +324,7 @@ pub fn expand_to_frames(rows: &Mat, durations: &[usize]) -> Mat {
 }
 
 pub fn leaky_relu(x: &mut Mat, slope: f32) {
+    let _t = op_timer("leaky_relu");
     for value in &mut x.data {
         if *value < 0.0 {
             *value *= slope;
@@ -294,6 +339,7 @@ fn sigmoid(x: f32) -> f32 {
 
 /// `y = x W^T + b`, with `x` `[n, in]` and `weight` `[out, in]`.
 pub fn linear(x: &Mat, weight: &[f32], bias: &[f32], out_dim: usize) -> Mat {
+    let _t = op_timer("linear");
     let in_dim = x.cols;
 
     if let Some(mut data) = super::accel::matmul_nt(&x.data, weight, x.rows, in_dim, out_dim) {
@@ -468,11 +514,20 @@ pub fn conv1d_general(
     stride: usize,
     dilation: usize,
 ) -> Mat {
+    let _t = op_timer("conv1d_general");
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(out) = super::vulkan::conv(x, weight, bias, out_channels, pad, stride, dilation, false) {
+        return out;
+    }
     let in_channels = x.rows;
     let time = x.cols;
     let kernel = weight.len() / (out_channels * in_channels);
     let span = dilation * (kernel - 1) + 1;
     let out_time = (time + 2 * pad).saturating_sub(span) / stride + 1;
+
+    if let Some(out) = super::accel::conv1d(x, weight, bias, out_channels, pad, stride, dilation) {
+        return out;
+    }
 
     // The GPU path: unfold the input into one patch row per output position, so
     // the convolution is a single `[out, in * kernel] x patches^T` matmul. The
@@ -540,6 +595,7 @@ pub fn conv1d_general(
 /// `nn.ReflectionPad1d`: the padding mirrors around the edge sample without
 /// repeating it, so a left pad of 1 copies `input[1]`, not `input[0]`.
 pub fn reflect_pad(x: &Mat, left: usize, right: usize) -> Mat {
+    let _t = op_timer("reflect_pad");
     let time = x.cols;
     let mut out = Mat::zeros(x.rows, time + left + right);
     for channel in 0..x.rows {
@@ -562,6 +618,7 @@ pub fn reflect_pad(x: &Mat, left: usize, right: usize) -> Mat {
 /// Threaded: the generator calls this on `[128, 14521]` maps thirty-odd times,
 /// and `sin` dominates the whole decoder if left on one core.
 pub fn snake(x: &mut Mat, alpha: &[f32]) {
+    let _t = op_timer("snake");
     for_each_channel(x, |channel, row| {
         let a = alpha[channel];
         let inv = 1.0 / a;
@@ -578,6 +635,7 @@ pub fn snake(x: &mut Mat, alpha: &[f32]) {
 /// upstream's source passing `align_corners=True` on the second one. The export
 /// is what we match.
 pub fn resize_linear(x: &Mat, scale: f32) -> Mat {
+    let _t = op_timer("resize_linear");
     let time = x.cols;
     let out_time = (time as f32 * scale).floor() as usize;
     let last = (time - 1) as f32;
@@ -600,6 +658,7 @@ pub fn resize_linear(x: &Mat, scale: f32) -> Mat {
 
 /// `nn.Upsample(scale_factor, mode="nearest")`: `out[t] = in[t / factor]`.
 pub fn nearest_repeat(x: &Mat, factor: usize) -> Mat {
+    let _t = op_timer("nearest_repeat");
     let mut out = Mat::zeros(x.rows, x.cols * factor);
     for channel in 0..x.rows {
         let input = x.row(channel);
@@ -635,15 +694,18 @@ pub fn concat_rows(parts: &[&Mat]) -> Mat {
 pub struct LstmLayer {
     pub hidden: usize,
     pub input: usize,
-    pub weight_ih: Vec<f32>,
-    pub weight_hh: Vec<f32>,
-    pub bias_ih: Vec<f32>,
-    pub bias_hh: Vec<f32>,
+    pub weight_ih: WeightData,
+    pub weight_hh: WeightData,
+    pub bias_ih: WeightData,
+    pub bias_hh: WeightData,
 }
 
 impl LstmLayer {
     /// `x` is `[time, input]` row-major. Returns `[time, hidden]`.
     pub fn run(&self, x: &Mat, reverse: bool) -> Mat {
+        if let Some(out) = super::accel::lstm(self, x, reverse) {
+            return out;
+        }
         let time = x.rows;
         let hidden = self.hidden;
         let mut out = Mat::zeros(time, hidden);
@@ -694,6 +756,7 @@ pub struct BiLstm {
 impl BiLstm {
     /// `x` is `[time, input]`. Returns `[time, 2 * hidden]`.
     pub fn run(&self, x: &Mat) -> Mat {
+        let _t = op_timer("bilstm");
         let forward = self.forward.run(x, false);
         let reverse = self.reverse.run(x, true);
         let hidden = self.forward.hidden;

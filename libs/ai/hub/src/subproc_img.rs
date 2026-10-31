@@ -10,12 +10,15 @@
 //! - [`run_blocking`]: a small legacy/test utility using `Command::status()`
 //!   with inherited stdio, no cancel, and no timeout. No canonical character
 //!   pipeline backend calls it.
-//! - [`run_cancellable`]: spawns with piped stdout, polls the child, kills it
-//!   when the job's [`CancelToken`] is raised or the deadline passes (the
-//!   world_backend pattern). Child stdout lines `@P <fraction> <stage...>`
+//! - [`run_cancellable`]: spawns with piped stdout and stderr, polls the child,
+//!   kills it only when the job's [`CancelToken`] is raised. Elapsed time never
+//!   ends a run: a child that stays silent for `STALL_AFTER` is reported as
+//!   "not responding" through the progress callback and keeps running until it
+//!   exits or the client stops it. Child stdout lines `@P <fraction> <stage...>`
 //!   become progress callbacks; everything else is passed through to our
-//!   stdout so reference prints stay visible in the service log. Stderr
-//!   inherits the service's stream, so python tracebacks land in svc.log.
+//!   stdout so reference prints stay visible in the service log. Stderr is
+//!   forwarded to the service's stderr (python tracebacks land in svc.log) and
+//!   counts as activity.
 //!
 //! Output contract: the command must write `{out}`; it may also write a
 //! metadata sidecar at `{out}.json` (the depth backend requires one). Both
@@ -23,12 +26,12 @@
 
 use crate::backend::CancelToken;
 use crate::child_process;
+use crate::progress_watch::{ProcessOutput, ProgressWatch, POLL, STALL_AFTER};
 use makepad_micro_serde::*;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// What one subprocess run produced.
 #[derive(Debug)]
@@ -44,8 +47,6 @@ pub struct SubprocOutput {
 pub enum SubprocError {
     /// The job's cancel flag was raised; the child was killed.
     Cancelled,
-    /// The deadline passed; the child was killed.
-    TimedOut(Duration),
     /// Anything else: spawn/io failure or a non-zero exit.
     Failed(String),
 }
@@ -54,7 +55,6 @@ impl std::fmt::Display for SubprocError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SubprocError::Cancelled => write!(f, "cancelled"),
-            SubprocError::TimedOut(t) => write!(f, "timed out after {t:?}"),
             SubprocError::Failed(m) => write!(f, "{m}"),
         }
     }
@@ -175,17 +175,16 @@ pub fn run_blocking(
     result
 }
 
-/// Runs the command template with cancel + deadline supervision: the child
-/// is spawned with piped stdout and polled; a raised cancel flag or an
-/// elapsed deadline kills it (partial temp files discarded). Stdout lines
-/// `@P <fraction 0..1> <stage text>` are forwarded to `progress`; other
-/// lines pass through to our stdout (service log).
+/// Runs the command template under cancel supervision: the child is spawned
+/// with piped stdout/stderr and polled; a raised cancel flag kills it (partial
+/// temp files discarded). Silence is reported as "not responding", never
+/// killed. Stdout lines `@P <fraction 0..1> <stage text>` are forwarded to
+/// `progress`; other lines pass through to our stdout (service log).
 pub fn run_cancellable(
     cmd_template: &str,
     tmp_dir: &Path,
     tag: &str,
     input: &[u8],
-    timeout: Duration,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(&str, f64),
 ) -> Result<SubprocOutput, SubprocError> {
@@ -197,7 +196,6 @@ pub fn run_cancellable(
             ext: "png",
             input,
             input_sidecar_json: None,
-            timeout,
         },
         cancel,
         progress,
@@ -218,7 +216,6 @@ pub struct SubprocRequest<'a> {
     /// free-text params reach the script without fighting the
     /// whitespace-split command template.
     pub input_sidecar_json: Option<&'a str>,
-    pub timeout: Duration,
 }
 
 /// [`run_cancellable`] generalized over temp-file extension + params sidecar.
@@ -242,7 +239,7 @@ fn run_cancellable_at(
     cancel: &CancelToken,
     progress: &mut dyn FnMut(&str, f64),
 ) -> Result<SubprocOutput, SubprocError> {
-    let (cmd_template, input, timeout) = (req.cmd_template, req.input, req.timeout);
+    let (cmd_template, input) = (req.cmd_template, req.input);
     let fail = |m: String| SubprocError::Failed(m);
     std::fs::write(in_path, input).map_err(|e| fail(format!("write: {e}")))?;
     if let Some(json) = req.input_sidecar_json {
@@ -256,38 +253,22 @@ fn run_cancellable_at(
         .env("PYTHONUNBUFFERED", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        // stderr inherits the service's stream -> tracebacks in svc.log.
+        .stderr(Stdio::piped())
     )
         .map_err(|e| fail(format!("spawn {exe}: {e}")))?;
 
-    // Reader thread: ends (and disconnects the channel) when the child
-    // closes stdout, i.e. exits or crashes.
+    // Reader threads: the line channel disconnects when the child closes
+    // stdout, i.e. exits or crashes.
     let stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if tx.send(line).is_err() {
-                        return;
-                    }
-                }
-                Err(_) => return,
-            }
-        }
-    });
+    let stderr = child.stderr.take().expect("piped stderr");
+    let output = ProcessOutput::new(stdout, stderr);
+    let rx = &output.lines;
 
-    let started = Instant::now();
     let forward = |line: String, progress: &mut dyn FnMut(&str, f64)| {
         // "@P 0.42 load model" -> progress("load model", 0.42)
-        if let Some(rest) = line.strip_prefix("@P ") {
-            if let Some((frac, stage)) = rest.split_once(' ') {
-                if let Ok(frac) = frac.trim().parse::<f64>() {
-                    progress(stage.trim(), frac.clamp(0.0, 1.0));
-                    return;
-                }
-            }
+        if let Some((stage, frac)) = parse_progress(&line) {
+            progress(stage, frac);
+            return;
         }
         // Reference prints stay visible in the service log.
         println!("{line}");
@@ -296,17 +277,34 @@ fn run_cancellable_at(
         let _ = child_process::kill_tree(child);
         let _ = child.wait();
     };
+    let mut watch = ProgressWatch::new(Instant::now());
+    let mut seen_bytes = 0;
+    let mut stage = (String::from("running"), 0.0);
     loop {
         if cancel.is_cancelled() {
             kill(&mut child);
             return Err(SubprocError::Cancelled);
         }
-        if started.elapsed() > timeout {
-            kill(&mut child);
-            return Err(SubprocError::TimedOut(timeout));
+        let now = Instant::now();
+        let bytes = output.bytes();
+        if bytes != seen_bytes {
+            seen_bytes = bytes;
+            if watch.progress(now) {
+                progress(&stage.0, stage.1);
+            }
+        } else if watch.stalled(now, STALL_AFTER) {
+            progress(
+                &format!("not responding: no output for {} min; Stop to cancel", STALL_AFTER.as_secs() / 60),
+                stage.1,
+            );
         }
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) => forward(line, progress),
+        match rx.recv_timeout(POLL) {
+            Ok(line) => {
+                if let Some((text, frac)) = parse_progress(&line) {
+                    stage = (text.to_string(), frac);
+                }
+                forward(line, progress)
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -317,6 +315,13 @@ fn run_cancellable_at(
         return Err(fail(format!("exit {status}")));
     }
     read_outputs(out_path).map_err(fail)
+}
+
+/// `@P 0.42 load model` -> `("load model", 0.42)`.
+fn parse_progress(line: &str) -> Option<(&str, f64)> {
+    let (frac, stage) = line.strip_prefix("@P ")?.split_once(' ')?;
+    let frac = frac.trim().parse::<f64>().ok()?;
+    Some((stage.trim(), frac.clamp(0.0, 1.0)))
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +530,6 @@ mod tests {
                 ext: "glb",
                 input: b"GLBBYTES",
                 input_sidecar_json: Some(r#"{"prompt":"knight"}"#),
-                timeout: Duration::from_secs(30),
             },
             &CancelToken::new(),
             &mut |_, _| {},
@@ -591,7 +595,6 @@ mod tests {
             &tmp,
             "t",
             b"BYTES",
-            Duration::from_secs(30),
             &CancelToken::new(),
             &mut |stage, frac| stages.push((stage.to_string(), frac)),
         )
@@ -609,28 +612,25 @@ mod tests {
             &tmp,
             "t",
             b"x",
-            Duration::from_secs(60),
             &token,
             &mut |_, _| {},
         )
         .unwrap_err();
         assert!(matches!(err, SubprocError::Cancelled));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
 
-        // Deadline kills too.
+        // A quiet child is not killed by elapsed time: it finishes on its own.
         let started = std::time::Instant::now();
-        let err = run_cancellable(
-            "/bin/sleep 30",
+        let out = run_cancellable(
+            "/bin/sleep 1",
             &tmp,
             "t",
             b"x",
-            Duration::from_millis(300),
             &CancelToken::new(),
             &mut |_, _| {},
-        )
-        .unwrap_err();
-        assert!(matches!(err, SubprocError::TimedOut(_)));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        assert!(matches!(out, Err(SubprocError::Failed(m)) if m.starts_with("read out")));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -3,7 +3,7 @@
 use makepad_ai_hub::license::LicensePrompt;
 use makepad_ai_hub::local::{InstallHandle, InstallMsg, InstallState, LocalModels};
 use makepad_ai_hub::registry::LicenseRestriction;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::collections::HashMap;
 
 script_mod! {

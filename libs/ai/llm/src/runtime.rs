@@ -1755,13 +1755,13 @@ fn build_attention_mha_output(
             v = ctx.transpose(v).map_err(LlamaError::format)?;
         }
 
-        if require_tensor(ctx, k)?.desc.ty == TensorType::F32 {
+        if matches!(require_tensor(ctx, k)?.desc.ty, TensorType::F32 | TensorType::Q8_0) {
             k = cast_tensor_to_type(ctx, k, TensorType::F16, BufferUsage::Activations)?;
             ctx.set_tensor_name(k, format!("{prefix}.k_flash"))
                 .map_err(LlamaError::format)?;
         }
 
-        if require_tensor(ctx, v)?.desc.ty == TensorType::F32 {
+        if matches!(require_tensor(ctx, v)?.desc.ty, TensorType::F32 | TensorType::Q8_0) {
             v = cast_tensor_to_type(ctx, v, TensorType::F16, BufferUsage::Activations)?;
             ctx.set_tensor_name(v, format!("{prefix}.v_flash"))
                 .map_err(LlamaError::format)?;
@@ -8904,12 +8904,12 @@ fn row_size(ty: TensorType, ne: i64) -> Result<usize> {
 }
 
 fn bytes_for_elements(ty: TensorType, elements: u64) -> Result<usize> {
-    let scalar_size = ty.scalar_size_bytes().ok_or_else(|| {
-        LlamaError::unsupported(format!(
-            "cache layout requires scalar tensor types, got {}",
-            ty.name()
-        ))
-    })?;
+    let Some(scalar_size) = ty.scalar_size_bytes() else {
+        // A block-quantized type (q8_0 KV cache): bytes follow from whole blocks.
+        let n = i64::try_from(elements)
+            .map_err(|_| LlamaError::format(format!("{} elements do not fit in i64", elements)))?;
+        return row_size(ty, n);
+    };
     usize::try_from(elements)
         .ok()
         .and_then(|elements| elements.checked_mul(scalar_size))

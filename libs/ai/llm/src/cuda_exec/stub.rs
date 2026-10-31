@@ -32,6 +32,14 @@ pub(super) enum Compiled {}
 pub(super) enum RawSession {}
 
 impl Runtime {
+    pub(super) fn create_raw_sessions(
+        &self,
+        _ctx: &Context,
+        _graphs: &[(&crate::Graph, &[crate::TensorId])],
+    ) -> Result<Vec<RawSession>> {
+        Err(LlamaError::unsupported(unavailable_reason()))
+    }
+
     pub(super) fn new() -> Result<Self> {
         Err(LlamaError::unsupported(unavailable_reason()))
     }
@@ -92,6 +100,15 @@ impl Runtime {
         _offset: usize,
         _len: usize,
     ) -> Result<Vec<u8>> {
+        match *arena {}
+    }
+
+    pub(super) fn write_arena_bytes(
+        &self,
+        arena: &Arena,
+        _offset: usize,
+        _bytes: &[u8],
+    ) -> Result<()> {
         match *arena {}
     }
 

@@ -19,46 +19,10 @@
 //                     [--max-new-tokens N] [--max-context N] [--limit N]
 
 use makepad_ai_llm::{
-    preprocess_rgb8, LlamaSession, LlamaSessionConfig, VisionConfig, VisionTower,
+    preprocess_rgb8, read_ppm, LlamaSession, LlamaSessionConfig, VisionConfig, VisionTower,
 };
 use std::io::Write;
 use std::time::Instant;
-
-fn read_ppm(path: &str) -> Result<(Vec<u8>, usize, usize), String> {
-    let data = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    let mut fields = Vec::new();
-    let mut pos = 0usize;
-    while fields.len() < 4 {
-        while pos < data.len() && (data[pos] as char).is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos >= data.len() {
-            return Err(format!("{path}: truncated ppm header"));
-        }
-        if data[pos] == b'#' {
-            while pos < data.len() && data[pos] != b'\n' {
-                pos += 1;
-            }
-            continue;
-        }
-        let start = pos;
-        while pos < data.len() && !(data[pos] as char).is_ascii_whitespace() {
-            pos += 1;
-        }
-        fields.push(String::from_utf8_lossy(&data[start..pos]).into_owned());
-    }
-    pos += 1;
-    if fields[0] != "P6" || fields[3] != "255" {
-        return Err(format!("{path}: not binary P6/255 ppm"));
-    }
-    let w: usize = fields[1].parse().map_err(|_| format!("{path}: bad width"))?;
-    let h: usize = fields[2].parse().map_err(|_| format!("{path}: bad height"))?;
-    let need = w * h * 3;
-    if data.len() < pos + need {
-        return Err(format!("{path}: short pixel payload"));
-    }
-    Ok((data[pos..pos + need].to_vec(), w, h))
-}
 
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
@@ -83,6 +47,8 @@ struct Args {
     max_new_tokens: usize,
     max_context: u32,
     limit: usize,
+    /// Prompt tokens per prefill step (the session default otherwise).
+    prefill_batch: Option<usize>,
 }
 
 fn parse_args() -> Args {
@@ -90,7 +56,7 @@ fn parse_args() -> Args {
     if a.len() < 3 {
         eprintln!(
             "usage: {} <model.gguf> <mmproj.gguf> --jobs J --prompt-file P --out O \
-             [--max-new-tokens N] [--max-context N] [--limit N]",
+             [--max-new-tokens N] [--max-context N] [--limit N] [--prefill-batch N]",
             a[0]
         );
         std::process::exit(2);
@@ -104,6 +70,7 @@ fn parse_args() -> Args {
         max_new_tokens: 220,
         max_context: 4096,
         limit: usize::MAX,
+        prefill_batch: None,
     };
     let mut i = 3;
     while i < a.len() {
@@ -121,6 +88,7 @@ fn parse_args() -> Args {
             "--max-new-tokens" => args.max_new_tokens = need(i).parse().expect("max-new-tokens"),
             "--max-context" => args.max_context = need(i).parse().expect("max-context"),
             "--limit" => args.limit = need(i).parse().expect("limit"),
+            "--prefill-batch" => args.prefill_batch = Some(need(i).parse().expect("prefill-batch")),
             other => {
                 eprintln!("unknown arg {other}");
                 std::process::exit(2);
@@ -197,6 +165,7 @@ fn main() {
         &args.model,
         LlamaSessionConfig {
             max_context: Some(args.max_context),
+            prefill_batch_size: args.prefill_batch.unwrap_or(LlamaSessionConfig::default().prefill_batch_size),
             ..LlamaSessionConfig::default()
         },
     )

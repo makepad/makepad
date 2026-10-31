@@ -15,8 +15,8 @@ if os.path.isfile(VENV) and os.path.normcase(os.path.abspath(sys.executable)) !=
 import numpy as np
 import torch
 
-DINO = r"C:\Users\playe\.cache\huggingface\hub\models--facebook--dinov2-giant\snapshots\611a9d42f2335e0f921f1e313ad3c1b7178d206d"
-DUMP = r"C:\Users\playe\makepad\local\pbrpaint\dino\black_last_hidden.f32"
+DINO = r"C:\Users\me\.cache\huggingface\hub\models--facebook--dinov2-giant\snapshots\611a9d42f2335e0f921f1e313ad3c1b7178d206d"
+DUMP = r"C:\Users\me\makepad\local\pbrpaint\dino\black_last_hidden.f32"
 
 
 def sha(t):

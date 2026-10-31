@@ -12,8 +12,8 @@
 //! read the chat in a hidden instance.
 
 pub use makepad_widgets;
+use makepad_ai_services::provider::{CLAUDE_DESKTOP, PROVIDER_ENV};
 use makepad_widgets::ai_slot::AiSlotRequests;
-use makepad_widgets::makepad_platform::mcp_relay;
 use makepad_widgets::makepad_platform::ScriptVmCx;
 use makepad_widgets::*;
 
@@ -36,9 +36,9 @@ pub use settings::AiSettings;
 pub fn script_mod(vm: &mut ScriptVm) {
     let requests = vm.cx_mut().global::<AiSlotRequests>();
     requests.feedback_enabled = crate::feedback::enabled_from_env();
-    // Started for Claude Desktop (its `--mcp` relay sets the provider): the
-    // engine and its MCP endpoint come up now, not on the first F10.
-    requests.engine_at_start = std::env::var(mcp_relay::PROVIDER_ENV).is_ok_and(|p| p.trim() == mcp_relay::CLAUDE_DESKTOP);
+    // The Claude Desktop bundle chooses the provider at launch, so its
+    // panel is ready before the person opens F10.
+    requests.engine_at_start = std::env::var(PROVIDER_ENV).is_ok_and(|p| p.trim() == CLAUDE_DESKTOP);
     crate::panel::script_mod(vm);
     crate::feedback::script_mod(vm);
     crate::overlay::script_mod(vm);
@@ -86,6 +86,16 @@ fn ai_callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<Strin
             cx.redraw_all();
             Ok("{\"ok\":1}".into())
         }
+        "confirm" => {
+            let how = arg(args, &["confirm", "how"]).unwrap_or("run").trim().to_string();
+            if !matches!(how.as_str(), "run" | "always" | "cancel") {
+                return Err("need confirm=run|always|cancel".into());
+            }
+            cx.global::<AiSlotRequests>().confirm.push(how);
+            cx.new_next_frame();
+            cx.redraw_all();
+            Ok("{\"ok\":1}".into())
+        }
         "transcript" => {
             let json = cx.global::<AiTranscript>().json.clone();
             if json.is_empty() {
@@ -94,6 +104,6 @@ fn ai_callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<Strin
                 Ok(json)
             }
         }
-        other => Err(format!("no ai op `{other}`; there are toggle, say, transcript")),
+        other => Err(format!("no ai op `{other}`; there are toggle, say, confirm, transcript")),
     }
 }

@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn addresses_pack_and_unpack() {
-        let a: SocketAddr = "10.0.0.184:41531".parse().unwrap();
+        let a: SocketAddr = "192.0.2.184:41531".parse().unwrap();
         assert_eq!(unpack_addr(pack_addr(a)), Some(a));
         let v6: SocketAddr = "[::1]:41531".parse().unwrap();
         assert_eq!(pack_addr(v6), 0);

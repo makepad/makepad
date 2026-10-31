@@ -3,7 +3,7 @@
 //! ONE COMMAND, any time:
 //!
 //! ```text
-//! cargo run --release --bin chat-bench -- http://10.0.0.165:8123
+//! cargo run --release --bin chat-bench -- http://192.0.2.165:8123
 //! ```
 //!
 //! Add `--interleave` for the second arm (below). `--turns N` changes the

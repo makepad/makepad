@@ -1,18 +1,24 @@
 //! The Claude Desktop extension for an app: `<app-id>.mcpb`.
 //!
 //! An MCP Bundle is a zip with a `manifest.json` (manifest_version 0.3).
-//! Ours is a `binary` server whose command is the app's own executable,
-//! by absolute path, with `--mcp`: nothing is copied into the bundle, so
-//! the installed extension always starts the app as it is on disk now.
+//! Ours is a `binary` server whose command is `makepad-remote mcp <app-id>
+//! --launch <app exe>`. The adapter sits beside the app executable and
+//! reaches its `app` service. Nothing is copied into the bundle, so the
+//! installed extension starts the executables as they are on disk now.
 //! The file is handed to Claude Desktop itself ([`open_in_claude_desktop`]),
 //! which shows its install dialog.
 
-use super::server::ToolDef;
+use crate::provider::{CLAUDE_DESKTOP, PROVIDER_ENV};
+use crate::wire::ToolDef;
 use makepad_strict_json::{self as json, Value};
 use std::path::{Path, PathBuf};
 
 /// The bundle manifest's format version.
 pub const MANIFEST_VERSION: &str = "0.3";
+
+fn adapter_path(exe: &Path) -> PathBuf {
+    exe.with_file_name(format!("makepad-remote{}", std::env::consts::EXE_SUFFIX))
+}
 
 /// The platform name the manifest's `compatibility.platforms` uses.
 fn platform() -> &'static str {
@@ -27,6 +33,7 @@ fn platform() -> &'static str {
 
 /// The bundle's `manifest.json`.
 pub fn manifest(app_id: &str, title: &str, exe: &Path, tools: &[ToolDef]) -> String {
+    let adapter = adapter_path(exe).to_string_lossy().into_owned();
     let exe = exe.to_string_lossy().into_owned();
     json::obj(vec![
         ("manifest_version", json::s(MANIFEST_VERSION)),
@@ -35,22 +42,20 @@ pub fn manifest(app_id: &str, title: &str, exe: &Path, tools: &[ToolDef]) -> Str
         ("version", json::s(env!("CARGO_PKG_VERSION"))),
         (
             "description",
-            json::s(format!(
-                "Lets Claude use {title}'s tools while you work in it. Every call shows in the app's AI panel (F10), and calls that change things outside the app wait for your confirm there."
-            )),
+            json::s(format!("Lets Claude use {title}'s tools while you work in it.")),
         ),
         ("author", json::obj(vec![("name", json::s("Makepad"))])),
         (
             "server",
             json::obj(vec![
                 ("type", json::s("binary")),
-                ("entry_point", json::s(exe.clone())),
+                ("entry_point", json::s(adapter.clone())),
                 (
                     "mcp_config",
                     json::obj(vec![
-                        ("command", json::s(exe)),
-                        ("args", Value::Arr(vec![json::s("--mcp")])),
-                        ("env", json::obj(vec![])),
+                        ("command", json::s(adapter)),
+                        ("args", Value::Arr(vec![json::s("mcp"), json::s(app_id), json::s("--launch"), json::s(exe)])),
+                        ("env", json::obj(vec![(PROVIDER_ENV, json::s(CLAUDE_DESKTOP))])),
                     ]),
                 ),
             ]),
@@ -71,6 +76,14 @@ pub fn manifest(app_id: &str, title: &str, exe: &Path, tools: &[ToolDef]) -> Str
 
 /// Write `<dir>/<app-id>.mcpb` and return its path.
 pub fn write(dir: &Path, app_id: &str, title: &str, exe: &Path, tools: &[ToolDef]) -> Result<PathBuf, String> {
+    let adapter = adapter_path(exe);
+    if !adapter.is_file() {
+        return Err(format!(
+            "makepad-remote is missing next to this app: expected {} beside {}",
+            adapter.display(),
+            exe.display()
+        ));
+    }
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = dir.join(format!("{app_id}.mcpb"));
     let manifest = manifest(app_id, title, exe, tools);
@@ -80,7 +93,7 @@ pub fn write(dir: &Path, app_id: &str, title: &str, exe: &Path, tools: &[ToolDef
 }
 
 /// What the person reads when there is no Claude Desktop to open it in.
-pub const NOT_INSTALLED: &str = "Claude Desktop isn't installed";
+pub const NOT_INSTALLED: &str = "the desktop assistant isn't installed";
 
 /// Open the bundle in Claude Desktop itself, which shows its install
 /// dialog. Windows associates no program with `.mcpb`, but Claude Desktop

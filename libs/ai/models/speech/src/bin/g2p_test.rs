@@ -5,6 +5,7 @@
 use makepad_ai_speech::g2p;
 
 fn main() {
+    makepad_ai_speech::g2p::data::load_default().unwrap_or_else(|e| panic!("{e}"));
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // `--ids "text"` prints just the token ids, for the ONNX reference harness.

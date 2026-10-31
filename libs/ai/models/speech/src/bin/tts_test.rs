@@ -3,7 +3,10 @@
 //!     cargo run --release --manifest-path libs/ai/models/speech/Cargo.toml --bin tts_test -- "Hello there" [voice.mkvoice] [out.wav]
 //!
 //! Weights resolve through the working directory or next to the executable
-//! (`kokoro-v1_0.mktts`, `bm_daniel.mkvoice`).
+//! (`kokoro-v1_0.mktts`, `bm_daniel.mkvoice`); `KOKORO_MODEL=<path>` names the
+//! model file. A fourth argument picks the text front end: `v10` or `v11` for
+//! Mandarin (with that release's model and a zf_/zm_ voice), `en11` for English
+//! on the v1.1-zh model; the default is English on v1.0.
 
 use makepad_ai_speech::kokoro::{self, KokoroSpeaker};
 use makepad_ai_speech::SpeechAudio;
@@ -13,7 +16,8 @@ fn main() {
     let text = args.get(0).cloned().unwrap_or_else(|| "Hello from Kokoro.".to_string());
     let out = args.get(2).cloned().unwrap_or_else(|| "tts_test.wav".to_string());
 
-    let Some(model) = kokoro::model_path_if_present() else {
+    let model = std::env::var("KOKORO_MODEL").ok().or_else(kokoro::model_path_if_present);
+    let Some(model) = model else {
         eprintln!("kokoro weights not found (put {} in the cwd)", kokoro::DEFAULT_MODEL_PATH);
         std::process::exit(1);
     };
@@ -34,7 +38,21 @@ fn main() {
         }
     };
     eprintln!("loaded {model} + {voice} in {:.2}s", started.elapsed().as_secs_f64());
+    match args.get(3).map(String::as_str) {
+        Some("v10") => speaker.set_frontend(makepad_ai_speech::g2p::Frontend::MandarinV10),
+        Some("v11") => speaker.set_frontend(makepad_ai_speech::g2p::Frontend::MandarinV11),
+        Some("en11") => speaker.set_frontend(makepad_ai_speech::g2p::Frontend::EnglishV11),
+        _ => {}
+    }
 
+    if std::env::var("KOKORO_CPU").is_ok() {
+        makepad_ai_speech::kokoro::accel::force_cpu(true);
+    }
+    if std::env::var("KOKORO_WARM").is_ok() {
+        let started = std::time::Instant::now();
+        let _ = speaker.synthesize(&text);
+        eprintln!("first synthesis (cold device) {:.2}s", started.elapsed().as_secs_f64());
+    }
     let started = std::time::Instant::now();
     let audio = match speaker.synthesize(&text) {
         Ok(audio) => audio,

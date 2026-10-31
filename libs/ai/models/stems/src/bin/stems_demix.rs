@@ -15,10 +15,18 @@
 //!
 //! The same for the vocals-only model: writes `vocals.wav` and
 //! `instrumental.wav`, the second being the mix less the first.
+//!
+//! ```text
+//! stems_demix --dereverb <dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt> <vocal.wav> <out_dir>
+//! ```
+//!
+//! Splits a vocal into `dry.wav` and `wet.wav` (the vocal less the dry
+//! voice), written as 32-bit float so they can be held against a reference
+//! without 16-bit rounding in the way.
 
 use makepad_ai_stems::config::{Stem, SAMPLE_RATE};
 use makepad_ai_stems::demix::{demix_all, demix_all_lanes};
-use makepad_ai_stems::melband::{instrumental, VocalsModel};
+use makepad_ai_stems::melband::{instrumental, reverb, DereverbModel, VocalsModel};
 use makepad_ai_stems::model::{StemsModel, StereoBuf};
 use std::io::Write;
 use std::path::Path;
@@ -84,6 +92,30 @@ fn write_wav_pcm16(path: &Path, buf: &StereoBuf, rate: u32) {
     std::fs::write(path, out).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
+fn write_wav_f32(path: &Path, buf: &StereoBuf, rate: u32) {
+    let frames = buf.frames();
+    let data_bytes = (frames * 8) as u32;
+    let mut out = Vec::with_capacity(44 + frames * 8);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+    out.extend_from_slice(&2u16.to_le_bytes()); // stereo
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * 8).to_le_bytes()); // byte rate
+    out.extend_from_slice(&8u16.to_le_bytes()); // block align
+    out.extend_from_slice(&32u16.to_le_bytes()); // bits
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_bytes.to_le_bytes());
+    for frame in 0..frames {
+        for ch in 0..2 {
+            out.extend_from_slice(&buf.channel(ch)[frame].to_le_bytes());
+        }
+    }
+    std::fs::write(path, out).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
 fn stats(buf: &StereoBuf) -> (f32, f32) {
     let mut sum = 0.0f64;
     let mut peak = 0.0f32;
@@ -134,14 +166,48 @@ fn demix_vocals(checkpoint: &str, track: &StereoBuf, rate: u32, out_dir: &Path) 
     println!("wrote vocals and instrumental to {}", out_dir.display());
 }
 
+/// The `--dereverb` run: the vocals run's stream over the de-reverb weights.
+fn demix_dereverb(checkpoint: &str, vocal: &StereoBuf, rate: u32, out_dir: &Path) {
+    assert_eq!(rate, SAMPLE_RATE, "the de-reverb model runs at 44.1 kHz only");
+
+    let load = std::time::Instant::now();
+    let mut model = DereverbModel::load(checkpoint).expect("load separator");
+    println!("load+compile {:.2}s", load.elapsed().as_secs_f64());
+
+    let run = std::time::Instant::now();
+    let dry = demix_all_lanes(&mut model, vocal, |done, total| {
+        print!("\rchunk {done}/{total}");
+        let _ = std::io::stdout().flush();
+    })
+    .expect("demix")
+    .remove(0);
+    let secs = run.elapsed().as_secs_f64();
+    let audio_secs = vocal.frames() as f64 / rate as f64;
+    println!(
+        "\ndemix {secs:.1}s for {audio_secs:.1}s of audio = {:.2}x realtime",
+        audio_secs / secs
+    );
+
+    let wet = reverb(vocal, &dry);
+    let (vocal_rms, vocal_peak) = stats(vocal);
+    println!("vocal rms {:>6.1} dB  peak {:>6.1} dB", db(vocal_rms), db(vocal_peak));
+    for (name, buf) in [("dry", &dry), ("wet", &wet)] {
+        let (rms, peak) = stats(buf);
+        write_wav_f32(&out_dir.join(format!("{name}.wav")), buf, rate);
+        println!("{name:<5} rms {:>6.1} dB  peak {:>6.1} dB", db(rms), db(peak));
+    }
+    println!("wrote dry and wet to {}", out_dir.display());
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
     let vocals_only = args.get(1).map(String::as_str) == Some("--vocals");
-    if vocals_only {
+    let dereverb = args.get(1).map(String::as_str) == Some("--dereverb");
+    if vocals_only || dereverb {
         args.remove(1);
     }
     if args.len() < 4 {
-        eprintln!("usage: stems_demix [--vocals] <checkpoint.ckpt> <track.wav> <out_dir>");
+        eprintln!("usage: stems_demix [--vocals | --dereverb] <checkpoint.ckpt> <track.wav> <out_dir>");
         std::process::exit(2);
     }
     let out_dir = Path::new(&args[3]);
@@ -152,6 +218,10 @@ fn main() {
 
     if vocals_only {
         demix_vocals(&args[1], &track, rate, out_dir);
+        return;
+    }
+    if dereverb {
+        demix_dereverb(&args[1], &track, rate, out_dir);
         return;
     }
 

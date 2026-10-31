@@ -15,8 +15,8 @@
 use crate::filter::{FilterDecision, FilterJob, FilterWorker, TranscriptFilter};
 use crate::speech::SpeechOutput;
 use crate::agent_seam::{Agent, AgentEvent, PromptId, SessionConfig, SessionId};
-use makepad_widgets::{Cx, Event};
-use makepad_widgets::makepad_draw::thread::ThreadSpawner;
+use makepad_widgets_core::{Cx, Event};
+use makepad_widgets_core::makepad_draw::thread::ThreadSpawner;
 use std::collections::VecDeque;
 
 /// How many recent dialog lines the filter sees for context.

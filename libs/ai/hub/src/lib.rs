@@ -39,6 +39,8 @@ pub mod beats_backend;
 pub mod stems_backend;
 pub mod body_native_backend;
 pub mod chat_wire;
+pub mod claude_cli;
+pub mod claude_cli_calls;
 pub use makepad_base64;
 pub mod client;
 mod child_process;
@@ -50,11 +52,22 @@ mod disk_volume;
 pub mod error;
 pub mod fabric;
 pub mod fleet;
-pub mod generate;
+// Which hub routes each fleet role reaches (the front itself is
+// makepad_network::fleet).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fleet_routes;
+pub mod job;
+// Splash compute kernels on fleet CPUs: the wire and the client are
+// featureless; the node side is the `kernel` feature.
+pub mod kernel_wire;
+pub mod kernel_client;
+#[cfg(feature = "kernel")]
+pub mod kernel_compute;
 pub mod gpu;
+pub mod gpu_yield;
 pub mod home;
+pub mod node_conf;
 pub mod hub;
-#[cfg(feature = "llm")]
 pub mod hub_chat;
 pub mod machine;
 pub mod fast_backend;
@@ -71,8 +84,10 @@ pub mod kokoro_backend;
 pub mod whisper_backend;
 #[cfg(feature = "speech")]
 pub mod speech;
+pub mod hub_order;
 pub mod llm_backend;
-#[cfg(feature = "llm")]
+pub mod control;
+pub mod llm_context;
 pub mod local_llm;
 #[cfg(feature = "local")]
 pub mod local;
@@ -93,10 +108,16 @@ pub mod peer;
 pub mod pipe;
 pub mod peer_fetch;
 pub mod peer_serve;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod prefetch;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod catalogue;
 pub mod protocol;
+mod progress_watch;
 pub mod providers;
 pub mod realtime;
 pub mod realtime_wire;
+pub mod model_store;
 pub mod ram;
 pub mod registry;
 pub mod resample;
@@ -105,6 +126,7 @@ pub mod rig_backend;
 #[cfg(feature = "rig-native")]
 pub mod rig_native_backend;
 pub mod ace_backend;
+pub mod yue2_backend;
 pub mod moss_backend;
 pub mod sa3_backend;
 #[cfg(not(target_arch = "wasm32"))]

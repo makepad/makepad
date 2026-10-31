@@ -41,7 +41,7 @@ use makepad_ai_llm::{
 const DEFAULT_PROMPT: &str = "The capital of France is";
 const DEFAULT_TOP_K: usize = 10;
 const DEFAULT_UPSTREAM_DEBUG: &str =
-    "/Users/admin/llama.cpp/build-arm64-apple-clang-release/bin/llama-debug";
+    "/Users/me/llama.cpp/build-arm64-apple-clang-release/bin/llama-debug";
 const COMPARE_EXTRA_CONTEXT_BYTES: usize = 512 << 20;
 const COMPARE_SHARED_HYBRID_EXTRA_CONTEXT_BYTES: usize = 1536 << 20;
 const TENSOR_PREVIEW_EDGE_COUNT: usize = 3;

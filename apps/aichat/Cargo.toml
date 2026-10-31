@@ -5,7 +5,7 @@
 # manager as a special child seated in the pane slot (this binary,
 # `--stdin-loop`), standalone as its own window (this binary), and inside
 # any app's Window as the F10 overlay or inside the mobile/web superbuild
-# (this crate's lib, `makepad_aichat::script_mod` + `AiChatPanel{}`).
+# (this crate's lib, `makepad_app_aichat::script_mod` + `AiChatPanel{}`).
 #
 # The panel widget OWNS the engine: the service registry, the model, the
 # transcript. Hosts only feed it links (in-process) or bus frames (the
@@ -14,24 +14,25 @@
 # Plan of record: repo-root aicontrol.md.
 
 [package]
-name = "makepad-aichat"
+name = "makepad-app-aichat"
 version = "0.1.0"
 edition = "2021"
-default-run = "aichat"
+license = "MIT OR Apache-2.0"
+default-run = "makepad-app-aichat"
 
 [lib]
-name = "makepad_aichat"
+name = "makepad_app_aichat"
 path = "src/lib.rs"
 
 [[bin]]
-name = "aichat"
+name = "makepad-app-aichat"
 path = "src/main.rs"
 
 [features]
 default = ["tweaker", "engine", "gen"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 # The chat backends: the person's own Claude Code / Codex CLIs, Claude
 # Desktop over MCP, the Claude API. No model runtime. Off for a build
 # without any backend — the web page answers with NoModel and the tool
@@ -49,9 +50,9 @@ gen = ["dep:makepad-ai-hub"]
 # The `ai` family is the F10 slot this chat fills: an app gets the slot by
 # linking the chat, and no other app has it.
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["rich_text", "ai"] }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-wm-api = { path = "../../libs/wm_api" }
-makepad-ai-services = { path = "../../libs/ai/services", default-features = false }
+makepad-ai-services = { path = "../../libs/ai/services", default-features = false, features = ["platform"] }
 makepad-strict-json = { path = "../../libs/strict_json" }
 # The fleet client behind `gen`. Native only.
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, optional = true }

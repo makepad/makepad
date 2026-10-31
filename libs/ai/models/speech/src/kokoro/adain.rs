@@ -16,7 +16,7 @@ use super::ops::{
     conv1d, conv_transpose1d_depthwise, instance_norm_time, leaky_relu, linear, nearest_upsample2,
     Mat,
 };
-use super::weights::Weights;
+use super::weights::{WeightData, Weights};
 use crate::TtsError;
 
 const STYLE: usize = 128;
@@ -26,9 +26,9 @@ const EPS: f32 = 1e-5;
 /// `(1 + gamma) * instance_norm(x) + beta`, with gamma and beta produced from
 /// the style vector. Gamma is the *first* half of the `fc` output.
 pub struct AdaIn1d {
-    fc_weight: Vec<f32>,
-    fc_bias: Vec<f32>,
-    channels: usize,
+    pub(super) fc_weight: WeightData,
+    pub(super) fc_bias: WeightData,
+    pub(super) channels: usize,
 }
 
 impl AdaIn1d {
@@ -41,6 +41,7 @@ impl AdaIn1d {
     }
 
     pub fn forward(&self, x: &Mat, style: &[f32]) -> Mat {
+        let _t = super::ops::op_timer("adain_a");
         let style_row = Mat::from_vec(1, STYLE, style.to_vec());
         let h = linear(&style_row, &self.fc_weight, &self.fc_bias, 2 * self.channels);
         let (gamma, beta) = h.data.split_at(self.channels);
@@ -58,26 +59,36 @@ impl AdaIn1d {
 }
 
 pub struct AdainResBlk1d {
-    norm1: AdaIn1d,
-    norm2: AdaIn1d,
-    conv1: (Vec<f32>, Vec<f32>),
-    conv2: (Vec<f32>, Vec<f32>),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) vulkan_id: std::sync::Arc<()>,
+    pub(super) norm1: AdaIn1d,
+    pub(super) norm2: AdaIn1d,
+    pub(super) conv1: (WeightData, WeightData),
+    pub(super) conv2: (WeightData, WeightData),
     /// Present only when `dim_in != dim_out`. Weight-normed, no bias.
-    conv1x1: Option<Vec<f32>>,
+    pub(super) conv1x1: Option<WeightData>,
     /// Depthwise transposed conv, present only in upsampling blocks.
-    pool: Option<(Vec<f32>, Vec<f32>)>,
-    dim_out: usize,
-    upsample: bool,
+    pub(super) pool: Option<(WeightData, WeightData)>,
+    pub(super) dim_out: usize,
+    pub(super) upsample: bool,
 }
 
-fn need(weights: &Weights, name: &str) -> Result<Vec<f32>, TtsError> {
+fn need(weights: &Weights, name: &str) -> Result<WeightData, TtsError> {
     weights
-        .get(name)
-        .map(<[f32]>::to_vec)
+        .take(name)
         .ok_or_else(|| TtsError::Backend(format!("missing tensor {name}")))
 }
 
 impl AdainResBlk1d {
+    /// Frees cached folded kernels (see [`WeightData::drop_host_copy`]).
+    #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+    pub(crate) fn drop_host_copies(&mut self) {
+        self.conv1.0.drop_host_copy();
+        self.conv2.0.drop_host_copy();
+        if let Some(w) = &mut self.conv1x1 { w.drop_host_copy(); }
+        if let Some((w, _)) = &mut self.pool { w.drop_host_copy(); }
+    }
+
     pub fn load(
         weights: &Weights,
         prefix: &str,
@@ -99,6 +110,8 @@ impl AdainResBlk1d {
             .transpose()?;
 
         Ok(Self {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            vulkan_id: std::sync::Arc::new(()),
             norm1: AdaIn1d::load(weights, &format!("{prefix}.norm1"), dim_in)?,
             norm2: AdaIn1d::load(weights, &format!("{prefix}.norm2"), dim_out)?,
             conv1: (
@@ -117,6 +130,9 @@ impl AdainResBlk1d {
     }
 
     pub fn forward(&self, x: &Mat, style: &[f32]) -> Mat {
+        let _t = super::ops::op_timer("adain_resblock");
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(out) = super::vulkan::adain_block(self, x, style) { return out; }
         // Residual path.
         let mut h = self.norm1.forward(x, style);
         leaky_relu(&mut h, LEAKY_SLOPE);

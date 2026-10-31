@@ -99,11 +99,20 @@ pub trait ContentProvider {
 }
 
 /// `ContentProvider` over a `makepad-asset-ai` service at `base_url`,
-/// e.g. `http://10.0.0.217:8765`.
+/// e.g. `http://192.0.2.217:8765`.
 pub struct LocalService {
     base_url: String,
     auth_headers: Vec<(String, String)>,
     lease_origin: Mutex<Option<(String, u64)>>,
+}
+
+/// `https://host:port` given for a hub service is a fleet node.
+pub fn mark_if_fleet(base_url: &str) {
+    if let Ok(url) = crate::http_client::parse_url(base_url) {
+        if url.https {
+            makepad_network::fleet::id::mark_fleet_endpoint(&format!("{}:{}", url.host, url.port));
+        }
+    }
 }
 
 const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
@@ -113,15 +122,18 @@ const MAX_ARTIFACT_BODY: usize = 1024 * 1024 * 1024;
 impl LocalService {
     pub fn new(base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
-        let secret = std::env::var("MAKEPAD_AI_HUB_SECRET").ok();
+        // An https service is a fleet node (discovered, or configured by
+        // URL): its TLS certificate is checked against the fleet root, and
+        // the HTTP client adds this machine's proof for that certificate.
+        mark_if_fleet(&base_url);
         Self {
             base_url,
-            auth_headers: Self::auth_headers(secret.as_deref()),
+            auth_headers: Vec::new(),
             lease_origin: Mutex::new(None),
         }
     }
 
-    /// Override the environment-provided fabric secret for this service.
+    /// An explicit bearer for this service (tests; fleet nodes need none).
     pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
         let secret = secret.into();
         self.auth_headers = Self::auth_headers(Some(&secret));
@@ -160,6 +172,12 @@ impl LocalService {
         let mut request = HttpClientRequest::post(url, content_type, body);
         request.extra_headers = &self.auth_headers;
         request
+    }
+
+    /// Every voice the node can speak with (`GET /voices`); an older node has no
+    /// such route and the caller falls back to the built-in catalogue.
+    pub fn list_voices(&self) -> Result<Vec<crate::protocol::VoiceJson>, AssetAiError> {
+        Ok(self.get_json::<crate::protocol::VoicesJson>("/voices")?.voices)
     }
 
     fn get_json<T: DeJson>(&self, path: &str) -> Result<T, AssetAiError> {

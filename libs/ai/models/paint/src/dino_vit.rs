@@ -320,9 +320,8 @@ pub fn default_snapshot_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("MAKEPAD_DINO_PATH") {
         return std::path::PathBuf::from(p);
     }
-    std::path::PathBuf::from(
-        r"C:\Users\playe\.cache\huggingface\hub\models--facebook--dinov2-giant\snapshots\611a9d42f2335e0f921f1e313ad3c1b7178d206d",
-    )
+    std::path::PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default())
+        .join(r".cache\huggingface\hub\models--facebook--dinov2-giant\snapshots\611a9d42f2335e0f921f1e313ad3c1b7178d206d")
 }
 
 #[cfg(all(feature = "cuda-taps", any(target_os = "linux", target_os = "windows")))]

@@ -48,6 +48,12 @@
 //! [`VocalsModel`], one target on an 8-second chunk. It is added beside the
 //! four-stem model and changes nothing of it; the accompaniment of a track
 //! it separates is the mix less the vocal ([`melband::instrumental`]).
+//!
+//! The same Mel-Band RoFormer, fine-tuned to keep a voice and drop its
+//! reverb, is [`DereverbModel`]: one dry-voice target, the reverb being the
+//! input less the dry voice ([`melband::reverb`]). Its checkpoint has the
+//! vocals model's every tensor and extent, so it is that model given other
+//! weights and another name.
 
 pub mod cache;
 pub mod config;
@@ -71,7 +77,7 @@ pub use demix::{
     chunk_count, demix_all, demix_all_lanes, ChunkSeparator, DemixCursor, Demixer, LaneCursor,
     LaneDemixer, LaneSpan, StemSpan,
 };
-pub use melband::VocalsModel;
+pub use melband::{DereverbModel, VocalsModel};
 pub use model::{StemSet, StemsModel, StereoBuf};
 pub use weights::StemsWeights;
 
@@ -125,3 +131,22 @@ pub const VOCALS_MODEL_COMMERCIAL_USE: bool = false;
 pub const VOCALS_MODEL_SHA256: &str =
     "87201f4d31afb5bc79993230fc49446918425574db48c01c405e44f365c7559e";
 pub const VOCALS_MODEL_BYTES: u64 = 913_106_900;
+
+/// The same provenance record for the de-reverb Mel-Band RoFormer
+/// ([`DereverbModel`]): anvuew's fine-tune of the vocals model above, which
+/// keeps the dry voice of a vocal and leaves its reverb.
+pub const DEREVERB_MODEL_ID: &str = "mel-band-roformer-dereverb";
+pub const DEREVERB_MODEL_CHECKPOINT: &str = "dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt";
+pub const DEREVERB_MODEL_SOURCE: &str = "https://huggingface.co/anvuew/dereverb_mel_band_roformer";
+pub const DEREVERB_MODEL_LICENSE: &str =
+    "GPL-3.0 (weights repository licence tag; fine-tuned from KimberleyJSN/melbandroformer, training data undisclosed)";
+/// Whether these weights may go into something sold. They are tagged GPL-3.0:
+/// a host that ships them takes on the GPL's terms for them, and they are a
+/// fine-tune of the vocals weights, whose own standing is not settled (see
+/// [`VOCALS_MODEL_COMMERCIAL_USE`]). So a host that ships to customers must
+/// refuse to bundle or install them; a user may still fetch them.
+pub const DEREVERB_MODEL_COMMERCIAL_USE: bool = false;
+/// SHA-256 of the published checkpoint (the LFS object id on the hub).
+pub const DEREVERB_MODEL_SHA256: &str =
+    "9262877b87e9ebb0fb808a456b0a411fa677f5df31c8383c1254af531c078970";
+pub const DEREVERB_MODEL_BYTES: u64 = 913_107_578;
