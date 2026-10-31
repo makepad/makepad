@@ -28,7 +28,7 @@ pub use sampler::{
     TimedEvent,
 };
 pub use sf2::{
-    parse_sf2, parse_sf2_with_limits, Generator, GeneratorAmount, InfoEntry, Instrument,
+    parse_sf2, parse_sf2_with_limits, Generator, ATTENUATION_SCALE, GeneratorAmount, InfoEntry, Instrument,
     InstrumentZone, Modulator, ParseLimits, Preset, PresetZone, SampleHeader, SampleKind,
     SoundFont,
 };

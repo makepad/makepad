@@ -11,6 +11,13 @@
 //! The host bundle needs NSAudioCaptureUsageDescription; the first play
 //! asks for system audio recording permission.
 
+// The privacy usage descriptions macOS requires of the host process, embedded in the example
+// binary's __TEXT,__info_plist section the way `app_main!` does for apps.
+#[cfg(target_os = "macos")]
+#[used]
+#[link_section = "__TEXT,__info_plist"]
+static INFO_PLIST: [u8; include_bytes!("Info.plist").len()] = *include_bytes!("Info.plist");
+
 use makepad_audio_route::{Equalizer, FrameInfo, Gain, Mute, Passthrough, Processor, Route, RouteConfig, Source};
 use std::env;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

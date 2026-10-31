@@ -1,0 +1,21 @@
+// A new score.
+use mod.score.*
+
+let clock = Clock{bpm: 120 sig: [4 4] seed: 1}
+
+let kit = Drums{kit: @analog_hybrid}
+let keys = Synth{preset: @epiano}
+
+let kick = Loop{play: kit hits: "x...x...x...x..."}
+let chords = Loop{play: keys beats: 8 amp: 0.5
+    code: fn(i) {
+        play(chord(@c3, @maj7), {dur: 3.8})
+        sleep(4)
+        play(chord(@a2, @m7), {dur: 3.8})
+        sleep(4)
+    }
+}
+
+let room = Reverb{in: [chords] room: 0.5 mix: 0.25}
+
+Score{label: "Untitled" clock kit keys kick chords room}

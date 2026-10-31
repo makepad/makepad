@@ -1,0 +1,317 @@
+// First Frame: a product-video score fitted to a 30 second cut, at 120 in
+// C minor, resolving to C major for the logo (a bar is 2 s, so every cut
+// lands on a downbeat).
+//
+// The cut sheet (seconds -> beat):
+//   0.0  open on black: a piano motif, a ticking clock, low strings  beat 0
+//   4.0  cut: first shot (hit)                                 beat 8
+//   8.0  cut: second shot (hit), strings join                  beat 16
+//   9.0-15.0  voice-over: the music ducks 8 dB (one-beat ramps)
+//  12.0  cut: third shot (a soft hit, under the VO)            beat 24
+//  16.0  product reveal (the big hit): the theme in brass and
+//        strings over the choir, driving drums                 beat 32
+//  22.0  riser into the logo on G7sus, drums building          beat 44
+//  25.75 a quarter-beat of silence                             beat 51.5
+//  26.0  logo sting: C major (the minor resolves up), choir,
+//        bell, timpani; it rings to the end                    beat 52
+//  30.0  end                                                   beat 60
+// Harmony: Cm Ab Fm Gsus (open and shots, a chord a bar), Cm Ab Bb (the
+// reveal), G7sus (the riser), C major.
+// The motif: G C Eb D, stated by the piano, answered by the strings,
+// and grown into the reveal's theme (C Eb G F Eb D, up to the high G).
+use mod.score.*
+
+let clock = Clock{bpm: 120 sig: [4 4] seed: 3030 params: {swell: 0 rise: 0}}
+
+/// The cut, as data the loops read.
+let hits = [8 16 24 32 52]
+let vo = [18 30]
+
+/// The music's level at an absolute beat: 8 dB down under the voice-over.
+let duck = fn(b) {
+    if b < vo[0] - 1 || b >= vo[1] + 1 { 1.0 }
+    else { if b < vo[0] { 1 - (b - vo[0] + 1) * 0.6 }
+    else { if b >= vo[1] { 0.4 + (b - vo[1]) * 0.6 } else { 0.4 } } }
+}
+
+let boom = Synth{recipe: "sine freq=440>110 glide=0.6 a=0.001 d=2.8 s=0 r=0.6 gain=0.9 drive=0.6; noise=brown lp=500 a=0.001 d=0.35 gain=0.5; noise=white bp=2500 q=0.8 a=0.001 d=0.12 gain=0.25"}
+let piano = Instrument{kind: @piano}
+let kit = Instrument{kind: @drums}
+let low = Synth{recipe: "saw freq=440 detune=6 a=0.004 d=0.2 s=0.25 r=0.08 gain=0.22 lp=1200; saw freq=440 detune=-6 a=0.005 d=0.2 s=0.25 r=0.08 gain=0.2 lp=1000; sine freq=440 a=0.003 d=0.2 s=0.4 r=0.06 gain=0.2"}
+let strings = Instrument{kind: @soundfont program: @strings}
+let pad_syn = Synth{preset: @warm_pad attack: 1.2 release: 2.5}
+let brass = Instrument{kind: @soundfont program: @brass}
+let choir = Voice{profile: @soprano choir: 8 parts: 3 vibrato: 0.2 breath: 0.15}
+let bell = Shader{lib: "modal_bell" t60: 5 stiffness: 0.25}
+let timp = Instrument{kind: @soundfont program: @timpani}
+let whoosh = Synth{recipe: "noise=white bp=600>5000 glide=0.9 q=1.2 a=0.9 d=0.05 s=0 r=0.1 gain=0.45"}
+let rise_noise = Synth{recipe: "noise=white bp=300>9000 glide=3.8 q=1.5 a=3.7 d=0.02 s=0 r=0.02 gain=0.4"}
+let rise_tone = Synth{recipe: "saw freq=440>1760 glide=3.8 detune=8 a=3 d=0.02 s=0 r=0.02 gain=0.12 lp=3000; saw freq=440>1760 glide=3.8 detune=-8 a=3 d=0.02 s=0 r=0.02 gain=0.12 lp=3000"}
+
+// A chord a bar: the root and the voicing.
+let roots = [@c2 @ab1 @f1 @g1 @c2 @ab1 @f1 @g1 @c2 @ab1 @bb1 @g1 @g1 @c2 @c2]
+let chords = [
+    [@g3 @c4 @eb4], [@ab3 @c4 @eb4], [@ab3 @c4 @f4], [@g3 @c4 @d4],
+    [@g3 @c4 @eb4], [@ab3 @c4 @eb4], [@ab3 @c4 @f4], [@g3 @c4 @d4],
+    [@g3 @c4 @eb4 @g4], [@ab3 @c4 @eb4 @ab4], [@f3 @bb3 @d4 @f4],
+    [@f3 @c4 @d4 @g4], [@f3 @c4 @d4 @g4],
+    [@g3 @c4 @e4 @g4], [@g3 @c4 @e4 @g4]
+]
+/// The bar of a beat.
+let bar_at = fn(beat) { min(14, floor(beat / 4)) }
+
+let phrase = fn(ns, ds, tr, amp, leg) {
+    let k = 0
+    for d in ds {
+        let n = ns[k]
+        if n != @r { play(note(n) + tr, {dur: d * leg amp: amp}) }
+        sleep(d)
+        k = k + 1
+    }
+}
+
+/// A hit on every cut, and a whoosh into each of the first four.
+let impacts = Loop{play: boom beats: 64 amp: 0.6 sends: {room: 0.3 hall: 0.2}
+    code: fn(i) {
+        if i == 0 {
+            for h in hits {
+                sleep(h - beat())
+                play(@c3, {amp: if h == 24 { 0.45 } else { 1.0 } dur: 2})
+            }
+        }
+        sleep(64 - beat())
+    }
+}
+let impact_kit = Loop{play: kit beats: 64 amp: 1.4 sends: {room: 0.3 smash: 0.3}
+    code: fn(i) {
+        if i == 0 {
+            for h in hits {
+                sleep(h - beat())
+                let soft = h == 24
+                hit(@floortom, {amp: if soft { 0.4 } else { 1.0 }})
+                hit(@crash, {amp: if soft { 0.3 } else { 0.9 }})
+            }
+        }
+        sleep(64 - beat())
+    }
+}
+let swells = Loop{play: whoosh beats: 64 amp: 0.4 sends: {hall: 0.4}
+    code: fn(i) {
+        if i == 0 {
+            for h in [8 16 32] {
+                sleep(h - 2 - beat())
+                play(@a4, {dur: 1.85})
+            }
+        }
+        sleep(64 - beat())
+    }
+}
+
+/// The piano motif, G C Eb D, in eighths over each bar, under the ducking.
+let motif = Loop{play: piano beats: 2 amp: 0.8 sends: {hall: 0.25 throw: 0.2}
+    code: fn(i) {
+        let b = bar_at(i * 2)
+        let c = chords[b]
+        // An octave higher on black, dropping into place at the first cut.
+        let up = if i < 4 { 24 } else { 12 }
+        let notes = [note(c[0]) + up note(c[1]) + up note(c[2]) + up note(c[1]) + up]
+        for s in 0..4 {
+            play(notes[s], {dur: 0.6 amp: duck(i * 2 + s * 0.5) * if s == 0 { 0.55 } else { 0.42 }})
+            sleep(0.5)
+        }
+    }
+}
+
+/// A ticking pulse on the eighths until the reveal.
+let ticks = Loop{play: kit beats: 4 amp: 4.0 sends: {room: 0.15}
+    code: fn(i) {
+        for s in 0..8 {
+            let b = i * 4 + beat()
+            hit(if s % 2 == 0 { @rim } else { @hat }, {amp: duck(b) * if s % 2 == 0 { 0.5 } else { 0.32 } pan: if s % 2 == 0 { -0.3 } else { 0.3 }})
+            sleep(0.5)
+        }
+    }
+}
+
+/// The low strings pulse: roots in eighths, opening at the reveal.
+let pulse = Loop{play: low beats: 2 amp: 0.55 sends: {room: 0.15}
+    code: fn(i) {
+        let b = bar_at(i * 2)
+        let r = note(roots[b])
+        for s in 0..4 {
+            let at_beat = i * 2 + s * 0.5
+            if at_beat < 44 || (at_beat >= 48 && at_beat < 51.5) {
+                play(r + if s % 2 == 1 { 12 } else { 0 }, {dur: 0.3 amp: duck(at_beat) * if s % 2 == 0 { 1.0 } else { 0.7 }})
+            }
+            sleep(0.5)
+        }
+    }
+}
+
+/// Strings answer the motif from the second shot (a long line) and carry
+/// the theme's harmony after the reveal.
+let answer = Loop{play: strings beats: 8 amp: 0.32 pan: 0.25 sends: {hall: 0.3}
+    code: fn(i) {
+        if i == 2 { phrase([@eb5 @d5 @c5 @b4], [2 2 2 2], 0, 0.7 * duck(18), 1.0) }
+        if i == 3 { phrase([@c5 @eb5 @d5 @g4], [2 2 2 2], 0, 0.7 * duck(26), 1.0) }
+        sleep(8 - beat())
+    }
+}
+let pad = Loop{play: pad_syn beats: 4 amp: 0.25 sends: {hall: 0.3}
+    code: fn(i) {
+        let b = i * 4
+        if b < 52 { play(chords[bar_at(b)], {dur: 3.9 amp: duck(b + 2)}) }
+        sleep(4)
+    }
+}
+
+/// The reveal: the theme in brass and violins in octaves, the choir.
+let theme_notes = [@c5 @eb5 @g5 @f5 @eb5 @d5 @eb5 @f5 @g5 @ab5 @g5 @f5 @eb5 @d5 @c5 @d5]
+let theme_lens = [1 0.5 0.5 1 0.5 0.5 1 1 1 0.5 0.5 1 0.5 0.5 1 1]
+let theme_brass = Loop{play: brass beats: 64 amp: 0.248 sends: {hall: 0.3}
+    code: fn(i) {
+        sleep(32)
+        phrase(theme_notes, theme_lens, -12, 0.9, 0.95)
+    }
+}
+let theme_strings = Loop{play: strings beats: 64 amp: 0.18 pan: -0.2 sends: {hall: 0.3}
+    code: fn(i) {
+        sleep(32)
+        phrase(theme_notes, theme_lens, 0, 0.85, 1.0)
+    }
+}
+let voices = Loop{play: choir beats: 4 amp: 1.6 sends: {hall: 0.35}
+    code: fn(i) {
+        let b = i * 4
+        if b >= 32 && b < 44 {
+            let c = chords[bar_at(b)]
+            sing([[note(c[1]) + 12 note(c[2]) + 12 note(c[3]) + 12]], "ah", {dur: 3.8 vel: 0.7})
+        }
+        if b == 52 { sing([[@c5 @e5 @g5]], "ah", {dur: 7 vel: 0.75}) }
+        sleep(4)
+    }
+}
+
+/// Driving drums after the reveal; a build into the logo.
+let drums = Loop{play: kit beats: 4 amp: 2.0 sends: {room: 0.25 smash: 0.35}
+    code: fn(i) {
+        let k = steps("x.....x.x.......")
+        for s in 0..16 {
+            let b = i * 4 + beat()
+            if b >= 32 && b < 44 {
+                if k[s] != nil { hit(@kick, {amp: 0.95}) }
+                if s == 4 || s == 12 { hit(@snare, {amp: rand(0.9, 1.0)}) }
+                if s % 2 == 0 { hit(@hat, {amp: if s % 4 == 2 { 0.6 } else { 0.35 } pan: 0.3}) }
+                if s >= 12 && i == 10 { hit(@tom2, {amp: 0.5 + (s - 12) * 0.1}) }
+            }
+            if b >= 44 && b < 51.5 {
+                // The build: snare in eighths, then sixteenths, rising.
+                if (b < 48 && s % 2 == 0) || b >= 48 { hit(@snare, {amp: 0.25 + (b - 44) * 0.08}) }
+                if s % 4 == 0 { hit(@floortom, {amp: 0.5 + (b - 44) * 0.06}) }
+            }
+            sleep(0.25)
+        }
+    }
+}
+
+let riser = Loop{play: rise_noise beats: 4 amp: 1.3 sends: {hall: 0.4}
+    code: fn(i) {
+        if i == 11 { play(@a4, {dur: 7.7}) }
+        sleep(4)
+    }
+}
+let riser_tone = Loop{play: rise_tone beats: 4 amp: 0.8
+    code: fn(i) {
+        if i == 11 { play([@c3 @g3], {dur: 7.7}) }
+        sleep(4)
+    }
+}
+
+/// The logo: C major in brass, strings, the piano low and high, the bell,
+/// timpani, all left to ring.
+let sting = Loop{play: brass beats: 4 amp: 0.225 sends: {hall: 0.4}
+    code: fn(i) {
+        if i == 13 { play([@c3 @g3 @c4 @e4 @g4], {dur: 3 amp: 1.0}) }
+        sleep(4)
+    }
+}
+let sting_strings = Loop{play: strings beats: 4 amp: 0.16 sends: {hall: 0.4}
+    code: fn(i) {
+        if i == 13 { play([@c4 @e4 @g4 @c5 @e5], {dur: 7}) }
+        sleep(4)
+    }
+}
+let sting_piano = Loop{play: piano beats: 4 amp: 0.9 sends: {hall: 0.35}
+    code: fn(i) {
+        if i == 13 {
+            play([@c1 @c2 @g2], {dur: 7 amp: 0.7})
+            sleep(0.5)
+            for n in [@c5 @e5 @g5 @c6] { play(n, {dur: 6 amp: 0.4}) sleep(0.25) }
+        }
+        sleep(4 - beat())
+    }
+}
+let sting_bell = Loop{play: bell beats: 4 amp: 0.35 sends: {hall: 0.4 throw: 0.2}
+    code: fn(i) {
+        if i == 13 {
+            sleep(0.02)
+            play(@c6, {dur: 4})
+            sleep(0.5)
+            play(@g6, {dur: 4 amp: 0.5})
+        }
+        sleep(4 - beat())
+    }
+}
+let sting_timp = Loop{play: timp beats: 4 amp: 1.08 sends: {room: 0.3 hall: 0.2}
+    code: fn(i) {
+        if i == 12 {
+            sleep(2)
+            for s in 0..6 { play(@g1, {amp: 0.3 + s * 0.1 dur: 0.3}) sleep(0.25) }
+        }
+        if i == 13 { play(@c2, {amp: 1.0 dur: 4}) }
+        sleep(4 - beat())
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: a big room for hits and drums, a hall for the orchestra that
+// swells on the reveal and the logo, a half-note throw.
+let room = Reverb{room: 0.6 mix: 1 damp: 6000}
+let hall = Reverb{room: 0.88 mix: 1 damp: 6500}
+let throw = Delay{time: 1 feedback: 0.35 mix: 1 spread: 1}
+let hall_level = Bus{in: [hall] gain: {param: @swell from: 0.8 to: 1.6 ramp: 4}}
+let returns = Highpass{in: [room hall_level throw] cutoff: 200}
+
+// Hits and drums: glued hard, a parallel smash, tape.
+let hit_bus = Comp{in: [impacts impact_kit drums sting_timp ticks] threshold: -18 ratio: 4 makeup: 3}
+let hit_tape = Drive{in: [hit_bus] amount: 0.2 mix: 0.35 tone: 10000}
+let smash = Comp{threshold: -34 ratio: 12 makeup: 10}
+let low_comp = Comp{in: [pulse] threshold: -18 ratio: 3 makeup: 1}
+// Orchestra and choir: carved, compressed, wide.
+let lift = Highpass{in: [pad answer theme_strings voices sting_strings] cutoff: 160}
+let upper_comp = Comp{in: [lift] threshold: -20 ratio: 2 makeup: 2}
+let upper_wide = Chorus{in: [upper_comp] rate: 0.3 depth: 5 mix: 0.25}
+let brass_bus = Comp{in: [theme_brass sting] threshold: -18 ratio: 2.5 makeup: 2}
+let keys_hp = Highpass{in: [motif sting_piano sting_bell] cutoff: 60}
+/// The riser opens its own filter as it climbs.
+let rise_sweep = Lowpass{in: [riser riser_tone swells] cutoff: {param: @rise from: 1500 to: 16000 ramp: 16}}
+
+/// The master: glue (the master limiter follows).
+let glue = Comp{in: [returns hit_tape smash low_comp upper_wide brass_bus keys_hp rise_sweep] threshold: -12 ratio: 2 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.84}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let open_s = Section{bars: 2 loops: [motif ticks pulse impacts impact_kit swells]}
+let shots = Section{bars: 6 loops: [motif ticks pulse pad answer impacts impact_kit swells]}
+let reveal = Section{bars: 3 set: {swell: 1} loops: [pulse pad theme_brass theme_strings voices drums impacts impact_kit swells]}
+let rise = Section{bars: 2 set: {rise: 1 swell: 0.3} loops: [riser riser_tone drums pulse pad impacts impact_kit sting_timp]}
+let logo = Section{bars: 2 set: {swell: 1} loops: [sting sting_strings sting_piano sting_bell sting_timp voices impacts impact_kit] next: @stop}
+
+Score{label: "First Frame" clock boom piano kit low strings pad_syn brass choir bell timp whoosh rise_noise rise_tone impacts impact_kit swells motif ticks pulse answer pad theme_brass theme_strings voices drums riser riser_tone sting sting_strings sting_piano sting_bell sting_timp room hall throw hall_level returns hit_bus hit_tape smash low_comp lift upper_comp upper_wide brass_bus keys_hp rise_sweep glue master_eq master_width master_peak master_limit master_lp open_s shots reveal rise logo ceiling: -1 master: 1.0 arrange: [open_s shots reveal rise logo]}

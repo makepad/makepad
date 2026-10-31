@@ -1,7 +1,7 @@
 use crate::error::LoadError;
 use crate::model::{
-    cents_to_hz, select_zones, timecents_to_seconds, Envelope, LoopMode, Range, SampleRead,
-    SampleSource, VoiceParameters, VoiceSource, Zone,
+    cents_to_hz, select_zones, timecents_to_seconds, Envelope, Lfo, LoopMode, Modulation, Range,
+    SampleRead, SampleSource, VoiceParameters, VoiceSource, Zone,
 };
 
 const GEN_COUNT: usize = 61;
@@ -9,6 +9,9 @@ const INSTRUMENT: u16 = 41;
 const KEY_RANGE: u16 = 43;
 const VEL_RANGE: u16 = 44;
 const SAMPLE_ID: u16 = 53;
+/// The share of the initial-attenuation generator that is applied (see
+/// `resolve_parameters`).
+pub const ATTENUATION_SCALE: f32 = 0.4;
 
 /// Bounds all allocations made while parsing untrusted SF2 data.
 #[derive(Clone, Copy, Debug)]
@@ -314,8 +317,9 @@ pub fn parse_sf2_with_limits(bytes: &[u8], limits: ParseLimits) -> Result<SoundF
     let hydra = parse_hydra(pdta, pdta_offset, limits)?;
     let presets = build_presets(&hydra)?;
     let instruments = build_instruments(&hydra)?;
-    let samples = parse_sample_headers(hydra.shdr, limits)?;
+    let mut samples = parse_sample_headers(hydra.shdr, limits)?;
     validate_samples(&samples, pcm.len())?;
+    unlink_broken_pairs(&mut samples);
     let zones = resolve_zones(&presets, &instruments, &samples, pcm.len())?;
 
     Ok(SoundFont {
@@ -795,25 +799,35 @@ fn validate_samples(samples: &[SampleHeader], pcm_len: usize) -> Result<(), Load
         if !sample.is_rom && sample.end as usize > pcm_len {
             return Err(LoadError::InvalidSample { sample: index, reason: "sample exceeds smpl data" });
         }
-        if matches!(sample.kind, SampleKind::Left | SampleKind::Right | SampleKind::Linked) {
-            let Some(linked) = samples.get(sample.link as usize) else {
-                return Err(LoadError::InvalidSample { sample: index, reason: "stereo link is out of range" });
-            };
-            if linked.link as usize != index {
-                return Err(LoadError::InvalidSample { sample: index, reason: "stereo link is not reciprocal" });
+    }
+    Ok(())
+}
+
+/// A stereo half whose partner is missing, does not link back or is not
+/// its other half plays as mono, as other SF2 players do: released fonts
+/// (FluidR3 GM among them) carry such links, and the samples are sound.
+fn unlink_broken_pairs(samples: &mut [SampleHeader]) {
+    let broken: Vec<usize> = (0..samples.len())
+        .filter(|&index| {
+            let sample = &samples[index];
+            if !matches!(sample.kind, SampleKind::Left | SampleKind::Right | SampleKind::Linked) {
+                return false;
             }
-            let compatible = matches!(
+            let Some(linked) = samples.get(sample.link as usize) else {
+                return true;
+            };
+            let paired = matches!(
                 (sample.kind, linked.kind),
                 (SampleKind::Left, SampleKind::Right)
                     | (SampleKind::Right, SampleKind::Left)
                     | (SampleKind::Linked, SampleKind::Linked)
             );
-            if !compatible {
-                return Err(LoadError::InvalidSample { sample: index, reason: "stereo link type mismatch" });
-            }
-        }
+            linked.link as usize != index || !paired
+        })
+        .collect();
+    for index in broken {
+        samples[index].kind = SampleKind::Mono;
     }
-    Ok(())
 }
 
 fn level_set(global: Option<&[Generator]>, local: &[Generator]) -> GeneratorSet {
@@ -1101,11 +1115,39 @@ fn resolve_parameters(
             sustain: 10.0_f32.powf(-(sustain_cb as f32) / 200.0),
             release: time(38),
         },
-        gain: 10.0_f32.powf(-(attenuation_cb as f32) / 200.0),
+        // The attenuation generator at 0.4 of its nominal centibels: the
+        // scale of the hardware General MIDI fonts were voiced on (and of the
+        // synth they are played on), so a font's programs balance as its
+        // author heard them. Full scale buried a GM kit's hats and cymbals
+        // 13 dB under its snare and the piano 14 dB under a whistle.
+        gain: 10.0_f32.powf(-(attenuation_cb as f32 * ATTENUATION_SCALE) / 200.0),
         pan: (combined_signed(instrument, preset, 17, 0) as f32 / 500.0).clamp(-1.0, 1.0),
         filter_cutoff_hz: cents_to_hz(cutoff_cents),
         filter_resonance_db: combined_signed(instrument, preset, 9, 0) as f32 / 10.0,
         exclusive_class: instrument.signed(57, 0).max(0) as u16,
+        modulation: Modulation {
+            decibel_release: true,
+            dc_block: true,
+            envelope: Envelope {
+                delay: time(25),
+                attack: time(26),
+                hold: time(27),
+                decay: time(28),
+                // 0.1 % units of decrease from full.
+                sustain: 1.0 - combined_signed(instrument, preset, 29, 0).clamp(0, 1000) as f32 / 1000.0,
+                release: time(30),
+            },
+            env_to_pitch: combined_signed(instrument, preset, 7, 0).clamp(-12_000, 12_000) as f32,
+            env_to_filter: combined_signed(instrument, preset, 11, 0).clamp(-12_000, 12_000) as f32,
+            mod_lfo: Lfo { delay: time(21), hz: cents_to_hz(combined_signed(instrument, preset, 22, 0).clamp(-16_000, 4_500)) },
+            mod_lfo_to_pitch: combined_signed(instrument, preset, 5, 0).clamp(-12_000, 12_000) as f32,
+            mod_lfo_to_filter: combined_signed(instrument, preset, 10, 0).clamp(-12_000, 12_000) as f32,
+            mod_lfo_to_volume_db: combined_signed(instrument, preset, 13, 0).clamp(-960, 960) as f32 / 10.0,
+            vib_lfo: Lfo { delay: time(23), hz: cents_to_hz(combined_signed(instrument, preset, 24, 0).clamp(-16_000, 4_500)) },
+            vib_lfo_to_pitch: combined_signed(instrument, preset, 6, 0).clamp(-12_000, 12_000) as f32,
+            reverb_send: combined_signed(instrument, preset, 16, 0).clamp(0, 1000) as f32 / 1000.0,
+            chorus_send: combined_signed(instrument, preset, 15, 0).clamp(0, 1000) as f32 / 1000.0,
+        },
     })
 }
 

@@ -52,6 +52,7 @@ pub(super) fn run() {
             AudioFormat::Mp3 => "mp3",
             AudioFormat::OggVorbis => "ogg",
             AudioFormat::Flac => "flac",
+            AudioFormat::Wav => "wav",
         };
         println!(
             "{:<40} {:>8} {:>7.1} {:>9.0} {:>12.3} {:>12.0}",

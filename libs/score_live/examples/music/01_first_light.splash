@@ -1,0 +1,386 @@
+// First Light: a cinematic orchestral piece in D minor at 84 that climbs,
+// lifts a whole step into E minor for its climax and resolves to E major.
+//
+// Form (52 bars): intro 8 (piano alone with the motif, the choir enters) ·
+// build 8 (low strings ostinato, cellos sing the motif, harp) · rise 8
+// (horns take the motif, violins answer, taiko, the ostinato goes to
+// sixteenths, a roll and a riser) · climax 16 in E minor (the full theme in
+// brass and violins in octaves, horn counter-line, the choir on "ah",
+// walking low brass, taiko, timpani, crashes) · resolution 12 (piano and
+// strings remember the motif, a Picardy E major to close).
+// The motif: a rising step and a leap of a third (D E F A), answered by a
+// falling line; stated, answered, sequenced upward, augmented in the
+// cellos, and developed into the long climax melody.
+use mod.score.*
+
+let clock = Clock{bpm: 84 sig: [4 4] seed: 1701 params: {swell: 0}}
+
+let piano = Instrument{kind: @piano}
+let kit = Instrument{kind: @drums}
+let strings = Instrument{kind: @soundfont program: @strings}
+let violins = Instrument{kind: @soundfont program: @string_ensemble_1}
+let low = Synth{recipe: "saw freq=440 detune=6 a=0.004 d=0.2 s=0.2 r=0.09 gain=0.22 lp=1500; saw freq=440 detune=-7 a=0.005 d=0.2 s=0.2 r=0.09 gain=0.2 lp=1300; sine freq=440 a=0.003 d=0.25 s=0.25 r=0.08 gain=0.16"}
+let cellos = Instrument{kind: @soundfont program: @cello}
+let horns = Instrument{kind: @soundfont program: @french_horn}
+let trumpets = Instrument{kind: @soundfont program: @trumpet}
+let tuba = Instrument{kind: @soundfont program: @trombone}
+let choir = Voice{profile: @soprano choir: 8 parts: 3 vibrato: 0.25 breath: 0.15}
+let harp = Instrument{kind: @soundfont program: @harp}
+let celesta = Instrument{kind: @soundfont program: @celesta}
+let timp = Instrument{kind: @soundfont program: @timpani}
+let air = Synth{recipe: "noise=white bp=500>7000 glide=5.6 q=1.5 a=5.5 d=0.05 s=0 r=0.05 gain=0.4"}
+
+// ---- the harmony, one chord a bar: the bass and a voice-led upper voicing
+let bass = [
+    @d2 @bb1 @g1 @a1 @f2 @g1 @bb1 @a1,
+    @d2 @e2 @f2 @c2 @bb1 @g1 @e2 @a1,
+    @d2 @c2 @bb1 @g1 @a1 @bb1 @gs1 @a1,
+    @e2 @c2 @g1 @fs2 @e2 @c2 @a1 @b1 @c2 @d2 @b1 @e2 @a1 @d2 @c2 @b1,
+    @e2 @e2 @e2 @ds2 @g2 @c2 @a1 @b1 @e1 @e1 @e1 @e1
+]
+let upper = [
+    [@a3 @e4 @f4], [@a3 @d4 @f4], [@bb3 @d4 @f4], [@a3 @cs4 @e4], [@a3 @d4 @f4], [@bb3 @d4 @a4], [@c4 @d4 @g4], [@g3 @cs4 @e4],
+    [@a3 @d4 @f4], [@g3 @c4 @e4], [@a3 @c4 @f4], [@g3 @c4 @e4], [@f3 @bb3 @d4], [@f3 @bb3 @d4], [@gs3 @d4 @f4], [@g3 @cs4 @e4],
+    [@f3 @a3 @d4], [@f3 @a3 @d4], [@f3 @a3 @d4], [@e3 @bb3 @d4], [@f3 @a3 @d4], [@f3 @bb3 @d4], [@e3 @b3 @d4], [@e3 @g3 @cs4],
+    [@g3 @b3 @e4], [@g3 @b3 @e4], [@g3 @b3 @d4], [@fs3 @a3 @d4], [@g3 @b3 @e4], [@g3 @c4 @e4], [@g3 @c4 @e4], [@fs3 @a3 @ds4],
+    [@g3 @c4 @e4], [@fs3 @a3 @d4], [@fs3 @a3 @d4], [@g3 @b3 @e4], [@g3 @c4 @b4], [@fs3 @a3 @c4], [@g3 @b3 @e4], [@fs3 @a3 @ds4],
+    [@g3 @b3 @e4], [@g3 @c4 @e4], [@a3 @c4 @e4], [@fs3 @a3 @b3], [@g3 @b3 @e4], [@g3 @b3 @e4], [@g3 @c4 @e4], [@fs3 @a3 @ds4],
+    [@gs3 @b3 @e4], [@gs3 @b3 @e4], [@gs3 @b3 @e4], [@gs3 @b3 @e4]
+]
+
+/// The dynamic arc, bar by bar.
+let dyn = fn(b) {
+    if b < 8 { 0.42 + b * 0.02 }
+    else { if b < 16 { 0.56 + (b - 8) * 0.015 }
+    else { if b < 24 { 0.7 + (b - 16) * 0.02 }
+    else { if b < 40 { 0.9 + if b >= 30 && b < 34 { 0.08 } else { 0 } }
+    else { max(0.3, 0.72 - (b - 40) * 0.04) } } } }
+}
+
+/// A phrase from here: notes (or @r to rest), lengths, a transposition,
+/// a level and an articulation (1 legato .. 0.5 detached).
+let phrase = fn(ns, ds, tr, amp, leg) {
+    let k = 0
+    for d in ds {
+        let r = rand(0, 0.025)
+        sleep(r)
+        let n = ns[k]
+        if n != @r { play(note(n) + tr, {dur: d * leg amp: amp * if d >= 1.5 { 1.0 } else { rand(0.8, 0.92) }}) }
+        sleep(d - r)
+        k = k + 1
+    }
+}
+
+// ---- the motif and its developments ---------------------------------------
+
+let m_a = [@d5 @e5 @f5 @a5 @g5 @f5 @d5 @r]
+let m_ad = [1 0.5 0.5 2 1.5 0.5 1 1]
+let m_b = [@bb4 @c5 @d5 @g5 @f5 @e5 @cs5]
+let m_bd = [1 0.5 0.5 2 1.5 0.5 2]
+let m_c = [@f5 @g5 @a5 @d6 @bb5 @a5 @g5 @r]
+let m_d = [@g5 @a5 @bb5 @d6 @cs6 @a5 @e5]
+let m_dd = [1 0.5 0.5 2 1.5 0.5 2]
+
+// The climax melody in E minor, two bars a line.
+let tune = [
+    [[@e5 @fs5 @g5 @b5 @a5 @g5 @e5 @r], [1 0.5 0.5 2 1.5 0.5 1 1]],
+    [[@d5 @e5 @g5 @d6 @b5 @a5 @fs5 @r], [1 0.5 0.5 2 1.5 0.5 1 1]],
+    [[@e5 @fs5 @g5 @b5 @c6 @b5 @g5], [1 0.5 0.5 2 2 1 1]],
+    [[@a5 @b5 @c6 @e6 @ds6 @b5 @fs5], [1 0.5 0.5 2 2 1 1]],
+    [[@e6 @d6 @c6 @g5 @fs5 @g5 @a5 @d6], [1.5 0.5 1 1 1.5 0.5 1 1]],
+    [[@d6 @b5 @a5 @fs5 @g5 @e5], [1.5 0.5 1 1 2 2]],
+    [[@a5 @b5 @c6 @e6 @d6 @c6 @a5 @fs5], [1.5 0.5 1 1 1.5 0.5 1 1]],
+    [[@g5 @a5 @b5 @e6 @ds6 @r], [1.5 0.5 1 1 3 1]]
+]
+// The horns' counter-line: half notes moving against the tune.
+let counter = [@b4 @a4 @g4 @e4 @d4 @b3 @a3 @d4 @e4 @fs4 @g4 @e4 @c4 @e4 @fs4 @ds4 @e4 @g4 @a4 @fs4 @fs4 @d4 @e4 @b3 @c4 @e4 @fs4 @a4 @g4 @e4 @fs4 @ds4]
+
+/// Intro: the piano states the motif, answers it, and sequences it up.
+let piano_intro = Loop{play: piano beats: 32 amp: 0.9 sends: {plate: 0.3}
+    code: fn(i) {
+        if i == 0 {
+            phrase(m_a, m_ad, 0, 0.62, 0.95)
+            phrase(m_b, m_bd, 0, 0.58, 0.95)
+            phrase(m_c, m_ad, 0, 0.66, 0.95)
+            phrase(m_d, m_dd, 0, 0.62, 1.0)
+        }
+        sleep(32 - beat())
+    }
+}
+
+/// The piano's left hand under the intro and the resolution: the chord
+/// rolled from the bass, then its tones rising in eighths.
+let piano_left = Loop{play: piano beats: 4 amp: 0.8 sends: {plate: 0.3}
+    code: fn(i) {
+        let u = upper[i]
+        let v = dyn(i) * 0.75
+        let b = note(bass[i]) + 12
+        let pattern = [b note(u[0]) note(u[1]) note(u[2]) note(u[1]) note(u[0]) note(u[2]) note(u[1])]
+        if i >= 48 {
+            if i == 48 { play([note(bass[i]) + 12 @b3 @e4 @gs4 @b4 @e5], {amp: 0.4 dur: 14}) }
+            sleep(4)
+        } else {
+            for s in 0..8 {
+                let r = rand(0, 0.02)
+                sleep(r)
+                play(pattern[s], {amp: v * if s == 0 { 1.0 } else { rand(0.65, 0.8) } dur: if s == 0 { 3.8 } else { 1.2 }})
+                sleep(0.5 - r)
+            }
+        }
+    }
+}
+
+/// The resolution: the piano sings the motif in E minor, slower and softer.
+let piano_coda = Loop{play: piano beats: 32 amp: 0.9 sends: {plate: 0.3}
+    code: fn(i) {
+        if i == 5 {
+            phrase(m_a, m_ad, 2, 0.55, 0.95)
+            phrase([@c5 @d5 @e5 @a5 @fs5 @ds5 @b4], m_bd, 0, 0.5, 0.95)
+            phrase([@g5 @fs5 @e5 @b4 @c5 @b4 @a4 @r], [1.5 0.5 1 1 2 1 0.5 0.5], 0, 0.45, 1.0)
+            phrase([@e5 @ds5 @e5 @gs5], [1.5 0.5 2 4], 0, 0.42, 1.0)
+        }
+        sleep(32 - beat())
+    }
+}
+
+let bells = Loop{play: celesta beats: 16 amp: 0.24 pan: 0.35 sends: {hall: 0.4}
+    code: fn(i) {
+        if i == 1 {
+            phrase(m_c, m_ad, 12, 0.5, 0.9)
+            phrase(m_d, m_dd, 12, 0.45, 0.9)
+        }
+        if i == 12 { play([@gs6 @b6 @e7], {amp: 0.5 dur: 6}) }
+        sleep(16 - beat())
+    }
+}
+
+/// The string pad under everything, swelling with the arc.
+let pad = Loop{play: strings beats: 4 amp: 0.16 sends: {hall: 0.35}
+    code: fn(i) {
+        let u = upper[i]
+        if i >= 48 {
+            if i == 48 { play([@e3 @b3 @e4 @gs4 @b4], {dur: 15 amp: 0.7}) }
+        } else {
+            play([note(u[0]) note(u[1]) note(u[2]) note(u[2]) + 5], {dur: 3.9 amp: dyn(i) * rand(0.92, 1.0)})
+        }
+        sleep(4)
+    }
+}
+
+/// Low strings: the bass line under the intro, then an ostinato (root,
+/// octave and fifth in eighths; sixteenths with accents from the rise).
+let ostinato = Loop{play: low beats: 4 amp: 0.93 pan: -0.15 sends: {stage_room: 0.2}
+    code: fn(i) {
+        let r = note(bass[i])
+        let cell = [0 0 12 0 7 0 12 7]
+        let six = i >= 16 && i < 40
+        if i < 8 || i >= 44 {
+            if i < 48 { play(r, {dur: 3.8 amp: dyn(i)}) }
+            sleep(4)
+        } else {
+            if six {
+                for s in 0..16 {
+                    let accent = if s % 4 == 0 { 1.0 } else { if s % 4 == 3 { 0.78 } else { 0.55 } }
+                    play(r + cell[s % 8], {dur: 0.18 amp: accent * dyn(i) * rand(0.88, 1.0)})
+                    sleep(0.25)
+                }
+            } else {
+                for s in 0..8 {
+                    play(r + cell[s], {dur: 0.4 amp: dyn(i) * if s % 2 == 0 { 0.95 } else { 0.62 }})
+                    sleep(0.5)
+                }
+            }
+        }
+    }
+}
+
+/// The cellos sing the motif at half speed in the build.
+let cello_line = Loop{play: cellos beats: 32 amp: 0.22 pan: -0.25 sends: {hall: 0.3}
+    code: fn(i) {
+        if i == 1 {
+            phrase([@d4 @e4 @f4 @a4], [2 1 1 4], 0, 0.7, 1.0)
+            phrase([@g4 @f4 @e4 @d4], [3 1 2 2], 0, 0.7, 1.0)
+            phrase([@bb3 @c4 @d4 @g4], [2 1 1 4], 0, 0.75, 1.0)
+            phrase([@f4 @e4 @d4 @cs4], [2 1 1 4], 0, 0.8, 1.0)
+        }
+        sleep(32 - beat())
+    }
+}
+
+/// The harp: the upper voicing over two octaves in sixteenths, up and down.
+let harp_arp = Loop{play: harp beats: 4 amp: 0.256 pan: 0.3 sends: {hall: 0.3}
+    code: fn(i) {
+        let u = upper[i]
+        let tones = [note(u[0]) note(u[1]) note(u[2]) note(u[0]) + 12 note(u[1]) + 12 note(u[2]) + 12 note(u[0]) + 24 note(u[2]) + 12]
+        for s in 0..16 {
+            let k = if s < 8 { s } else { 15 - s }
+            play(tones[k], {dur: 0.5 amp: dyn(i) * if s % 4 == 0 { 0.9 } else { 0.6 }})
+            sleep(0.25)
+        }
+    }
+}
+
+/// The rise: horns carry the motif, sequenced, while violins answer.
+let horn_rise = Loop{play: horns beats: 32 amp: 0.279 pan: -0.1 sends: {hall: 0.35}
+    code: fn(i) {
+        if i == 2 {
+            phrase(m_a, m_ad, -12, 0.75, 1.0)
+            phrase(m_b, m_bd, -12, 0.78, 1.0)
+            phrase([@d4 @e4 @f4 @a4 @bb4 @a4 @g4 @f4], [1 0.5 0.5 2 1 1 1 1], 0, 0.82, 1.0)
+            phrase([@e4 @f4 @g4 @bb4 @a4 @r], [1 0.5 0.5 2 3 1], 0, 0.88, 1.0)
+        }
+        sleep(32 - beat())
+    }
+}
+let violin_answer = Loop{play: violins beats: 8 amp: 0.26 pan: 0.3 sends: {hall: 0.3}
+    code: fn(i) {
+        let lines = [[@a5 @g5 @f5 @e5], [@f5 @e5 @d5 @cs5], [@d6 @c6 @bb5 @a5], [@bb5 @a5 @gs5 @a5]]
+        sleep(4)
+        phrase(lines[i % 4], [1 1 1 1], 0, dyn(i * 2) * 0.9, 0.95)
+    }
+}
+
+/// The climax: the tune in trumpets and violins in octaves.
+let theme_brass = Loop{play: trumpets beats: 8 amp: 0.248 sends: {hall: 0.25}
+    code: fn(i) {
+        let line = tune[(i - 12) % 8]
+        phrase(line[0], line[1], -12, dyn(i * 2), 1.0)
+    }
+}
+let theme_violins = Loop{play: violins beats: 8 amp: 0.2 pan: 0.25 sends: {hall: 0.3}
+    code: fn(i) {
+        let line = tune[(i - 12) % 8]
+        phrase(line[0], line[1], 0, dyn(i * 2) * 0.95, 1.0)
+    }
+}
+let horn_counter = Loop{play: horns beats: 4 amp: 0.248 pan: -0.3 sends: {hall: 0.3}
+    code: fn(i) {
+        let k = (i - 24) * 2
+        phrase([counter[k] counter[k + 1]], [2 2], 0, dyn(i) * 0.8, 1.0)
+    }
+}
+
+/// Low brass: the bass line walking, a chromatic approach into each bar.
+let low_brass = Loop{play: tuba beats: 4 amp: 0.315 sends: {stage_room: 0.2 hall: 0.15}
+    code: fn(i) {
+        let r = note(bass[i])
+        let next = note(bass[min(i + 1, 51)])
+        let approach = if next > r { next - 1 } else { next + 1 }
+        phrase([r r + 7 approach], [2 1 1], 0, dyn(i) * 0.85, 0.9)
+    }
+}
+
+/// The choir on "ah" and "ooh": the chord an octave up, one a bar.
+let voices = Loop{play: choir beats: 4 amp: 1.3 sends: {hall: 0.4}
+    code: fn(i) {
+        let u = upper[i]
+        let c = [note(u[0]) + 12 note(u[1]) + 12 note(u[2]) + 12]
+        let word = if i >= 24 && i < 40 { "ah" } else { "ooh" }
+        let v = if i >= 24 && i < 40 { 0.85 } else { 0.5 }
+        if i < 48 { sing([c], word, {dur: 3.9 vel: v}) }
+        if i == 48 { sing([[@gs4 @b4 @e5]], "ah", {dur: 14 vel: 0.55}) }
+        sleep(4)
+    }
+}
+
+/// Timpani: roots on one and three, rolls into each section.
+let timpani = Loop{play: timp beats: 4 amp: 0.96 sends: {stage_room: 0.3 hall: 0.15}
+    code: fn(i) {
+        let r = note(bass[i])
+        let roll = i == 7 || i == 15 || i == 23 || i == 39 || i == 47
+        if roll {
+            for s in 0..16 {
+                play(if i == 47 { @b1 } else { @a1 }, {amp: 0.2 + s * 0.045 + rand(0, 0.05) dur: 0.3})
+                sleep(0.25)
+            }
+        } else {
+            if i == 48 { play(@e2, {amp: 1.0 dur: 4}) }
+            if i >= 8 && i < 48 {
+                play(r, {amp: dyn(i) * rand(0.9, 1.0)})
+                sleep(2)
+                play(r, {amp: dyn(i) * 0.6})
+                if i >= 24 && i % 2 == 1 {
+                    sleep(1.5)
+                    play(r + 7, {amp: 0.5})
+                    sleep(0.5)
+                } else { sleep(2) }
+            } else { sleep(4 - beat()) }
+        }
+    }
+}
+
+/// Taiko and toms from the rise: a low call and a two-bar answer, denser
+/// in the climax, a tom run into every fourth bar.
+let taiko = Loop{play: kit beats: 4 amp: 1.4 sends: {stage_room: 0.3 hall: 0.1}
+    code: fn(i) {
+        let pattern = if i >= 24 { "X..x..x.x.o.x..." } else { "X.......x..x...." }
+        let p = steps(pattern)
+        for s in 0..16 {
+            if i % 4 == 3 && s >= 8 {
+                if s % 2 == 0 || i >= 24 { hit(if s < 12 { @tom2 } else { @floortom }, {amp: 0.5 + (s - 8) * 0.06}) }
+            } else {
+                if p[s] != nil { hit(if s % 8 == 0 { @floortom } else { @tom3 }, {amp: p[s] * rand(0.88, 1.0)}) }
+            }
+            sleep(0.25)
+        }
+    }
+}
+
+let cymbals = Loop{play: kit beats: 4 amp: 1.2 sends: {hall: 0.35}
+    code: fn(i) {
+        if i == 8 || i == 16 || i == 24 || i == 28 || i == 32 || i == 36 || i == 48 { hit(@crash, {amp: if i == 24 { 1.0 } else { 0.7 }}) }
+        sleep(4)
+    }
+}
+
+let riser = Loop{play: air beats: 4 amp: 0.35 sends: {hall: 0.5}
+    code: fn(i) {
+        if i == 22 { play(@a4, {dur: 7.8}) }
+        sleep(4)
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns (fed by sends): a stage room for the percussion and low strings,
+// a plate for the piano, a concert hall for the orchestra and choir whose
+// level swells into the climax and the resolution (`swell`).
+let stage_room = Reverb{room: 0.55 mix: 1 damp: 5000}
+let plate = Reverb{room: 0.6 mix: 1 damp: 7000}
+let hall = Reverb{room: 0.88 mix: 1 damp: 6000}
+let hall_level = Bus{in: [hall] gain: {param: @swell from: 0.8 to: 1.5 ramp: 16}}
+let returns = Highpass{in: [stage_room plate hall_level] cutoff: 180}
+
+// Percussion: timpani, taiko and cymbals glued, a little tape.
+let perc_bus = Comp{in: [timpani taiko cymbals] threshold: -18 ratio: 2.5 makeup: 2}
+let perc_tape = Drive{in: [perc_bus] amount: 0.1 mix: 0.25 tone: 12000}
+// The low strings and low brass: one bus, gently compressed.
+let low_bus = Comp{in: [ostinato low_brass cello_line] threshold: -18 ratio: 2.5 makeup: 1}
+// The choir: compressed, then with the strings, harp and bells, high-passed
+// and a little wider.
+let vox_comp = Comp{in: [voices] threshold: -20 ratio: 2.5 makeup: 3}
+let upper_hp = Highpass{in: [pad theme_violins violin_answer harp_arp bells vox_comp] cutoff: 140}
+let upper_wide = Chorus{in: [upper_hp] rate: 0.25 depth: 4 mix: 0.2}
+// Brass: glued and high-passed.
+let brass_bus = Comp{in: [theme_brass horn_counter horn_rise] threshold: -18 ratio: 2 makeup: 2}
+let brass_hp = Highpass{in: [brass_bus] cutoff: 90}
+let piano_hp = Highpass{in: [piano_intro piano_left piano_coda] cutoff: 50}
+
+/// The master: gentle glue over everything (the master limiter follows).
+let glue = Comp{in: [riser returns perc_tape low_bus upper_wide brass_hp piano_hp] threshold: -14 ratio: 1.6 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.55}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let intro = Section{bars: 8 loops: [piano_intro piano_left pad voices ostinato bells]}
+let build = Section{bars: 8 loops: [pad voices ostinato cello_line harp_arp timpani bells cymbals]}
+let rise = Section{bars: 8 set: {swell: 1} loops: [pad voices ostinato harp_arp timpani taiko horn_rise violin_answer cymbals riser]}
+let climax = Section{bars: 16 set: {swell: 0.4} loops: [pad voices ostinato harp_arp timpani taiko theme_brass theme_violins horn_counter low_brass cymbals]}
+let resolve = Section{bars: 12 set: {swell: 1} loops: [pad voices piano_left piano_coda ostinato timpani bells cymbals] next: @stop}
+
+Score{label: "First Light" clock piano kit strings violins low cellos horns trumpets tuba choir harp celesta timp air piano_intro piano_left piano_coda bells pad ostinato cello_line harp_arp horn_rise violin_answer theme_brass theme_violins horn_counter low_brass voices timpani taiko cymbals riser stage_room plate hall hall_level returns perc_bus perc_tape low_bus vox_comp upper_hp upper_wide brass_bus brass_hp piano_hp glue master_eq master_width master_peak master_limit master_lp intro build rise climax resolve ceiling: -1 master: 1.0 arrange: [intro build rise climax resolve]}

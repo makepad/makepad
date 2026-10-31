@@ -1,0 +1,15 @@
+# Audio-reactive input for looks and games: the played sound analysed into
+# a GPU texture (a scrolling log spectrogram, the waveform, the stereo side)
+# plus levels, onsets (kick, snare, hat), loudness drive and song form,
+# bound onto any draw call by name; Splash helpers a shader reads it with;
+# and a deterministic music bed for tools that have no music.
+[package]
+name = "makepad-audio-reactive"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Audio-reactive input: the played sound as a GPU texture and signals for looks and games"
+
+[dependencies]
+makepad-draw = { path = "../../draw", version = "2.0.0" }
+makepad-audio-picture = { path = "../audio_picture" }

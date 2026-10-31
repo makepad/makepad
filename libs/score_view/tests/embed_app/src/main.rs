@@ -1,5 +1,5 @@
 use makepad_score_view::{
-    build_drum_score, makepad_widgets::*, BuildOptions, DrumHit, DrumVoice,
+    build_drum_score, makepad_widgets_core::*, BuildOptions, DrumHit, DrumVoice,
 };
 
 app_main!(App);
@@ -15,7 +15,7 @@ script_mod! {
         draw_tex +: {
             tex: texture_2d(float)
             pixel: fn() {
-                return self.tex.sample_as_bgra(self.pos)
+                return self.tex.sample(self.pos)
             }
         }
     }
@@ -32,6 +32,7 @@ script_mod! {
                     draw_bg +: { color: #182029 }
 
                     score_host := View {
+                        a11y: {role: "group" label: "Score preview"}
                         width: 1318
                         height: 181
                         score := ScoreView {
@@ -49,6 +50,7 @@ script_mod! {
                         status := Label { text: "1318x181" }
                     }
                     texture_host := View {
+                        a11y: {role: "group" label: "Texture preview"}
                         width: 600
                         height: 64
                         texture_sibling := mod.widgets.TextureSibling {
@@ -165,7 +167,7 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        makepad_score_view::makepad_widgets::script_mod(vm);
+        makepad_score_view::makepad_widgets_core::script_mod(vm);
         makepad_score_view::script_mod(vm);
         self::script_mod(vm)
     }

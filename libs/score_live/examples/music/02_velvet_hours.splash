@@ -1,0 +1,408 @@
+// Velvet Hours: deep house at 122 in F minor, with a sung hook.
+//
+// Form (80 bars): intro 8 (kick, hats, shaker and the chords behind a
+// filter that opens) · groove 16 (the moving bass, the clap, electric
+// piano comping) · vocal 16 (the alto sings the hook, a plucked arpeggio
+// answers it, congas and rims) · breakdown 16 (no kick: grand piano and pad
+// under the hook, the harmony wanders through Dbmaj9 Eb/Db Cm7 Fm9 Bbm9
+// Eb13 Abmaj9 C7b9 and a snare roll, a riser and a reverse swell build the
+// return) · drop 16 (everything, organ stabs on the offbeats, the choir, and
+// a lift a whole step up to G minor for its second half) · outro 8 (layers
+// leave; it ends on a held Fm9).
+// Harmony: Fm9 Dbmaj9 Ebsus-Eb Cm11, varied with Bbm9 and a C7b9
+// secondary dominant; the bass walks with octaves, fifths and chromatic
+// approaches into each chord.
+// The hook: "stay with me tonight / hold on till the light / we can dance
+// away the night / don't let go", a rising third-and-fourth shape answered
+// by a falling one.
+use mod.score.*
+
+let clock = Clock{bpm: 122 sig: [4 4] seed: 2203 swing: 0.14 params: {sweep: 1 swell: 0}}
+
+let kit = Drums{kit: @analog_hybrid tune: {kick: -2} gain: {hat: 0.8 ohat: 0.7 clap: 1.4 ride: 0.7 conga: 1.1}}
+let sub = Synth{recipe: "sine freq=440 a=0.004 d=0.35 s=0.8 r=0.09 gain=0.72; tri freq=880 a=0.003 d=0.12 s=0.15 r=0.05 gain=0.1 lp=1400"}
+let rhodes = Shader{lib: "epiano" tremolo: 0.25 bright: 1.2}
+let filtered = Synth{recipe: "saw freq=440 detune=7 a=0.004 d=0.5 s=0.4 r=0.3 gain=0.16 lp=600 q=2; saw freq=440 detune=-7 a=0.004 d=0.5 s=0.4 r=0.3 gain=0.16 lp=600 q=2"}
+let pluck = Shader{lib: "pluck" t60: 1.2 bright: 0.7}
+let organ = Synth{preset: @organ}
+let padsyn = Synth{preset: @warm_pad attack: 1.2 release: 2.5}
+let piano = Instrument{kind: @piano}
+let vox = Voice{profile: @alto vibrato: 0.28 vibrato_delay: 0.25 breath: 0.1}
+let choir = Voice{profile: @soprano choir: 6 parts: 3 vibrato: 0.2 breath: 0.2}
+let air = Synth{recipe: "noise=white bp=500>8000 glide=7.5 q=1.4 a=7.4 d=0.05 s=0 r=0.05 gain=0.35"}
+let swell = Synth{recipe: "noise=pink bp=3000 q=0.7 a=1.9 d=0.02 s=0 r=0.02 gain=0.4; saw freq=440 a=1.9 d=0.02 s=0 r=0.02 gain=0.05 lp=2000"}
+
+// ---- harmony ---------------------------------------------------------------
+
+// Chords: the bass note and a voice-led upper voicing.
+let roots = [@f1 @db2 @eb2 @eb2 @c2 @bb1 @c2 @db2 @ab1 @eb2]
+let voicings = [
+    [@ab3 @c4 @eb4 @g4], [@ab3 @c4 @eb4 @f4], [@ab3 @bb3 @eb4 @f4], [@g3 @bb3 @eb4 @f4], [@g3 @bb3 @eb4 @f4],
+    [@ab3 @c4 @db4 @f4], [@g3 @bb3 @db4 @e4], [@g3 @bb3 @eb4 @f4], [@g3 @bb3 @c4 @eb4], [@g3 @db4 @f4 @c5]
+]
+let main_prog = [0 0 1 1 2 3 4 4]
+let vocal_prog = [0 0 1 1 5 5 6 6]
+let break_prog = [1 1 7 7 4 4 0 0 5 5 9 9 8 8 6 6]
+
+/// The chord of bar `b`.
+let chord_of = fn(b) {
+    if b < 24 { main_prog[b % 8] }
+    else { if b < 40 { vocal_prog[b % 8] }
+    else { if b < 56 { break_prog[b - 40] }
+    else { if b < 64 { main_prog[b % 8] }
+    else { if b < 72 { vocal_prog[b % 8] } else { main_prog[b % 8] } } } } }
+}
+/// The lift: the drop's second half sits a whole step up.
+let lift_of = fn(b) { if b >= 64 && b < 72 { 2 } else { 0 } }
+let root_of = fn(b) { note(roots[chord_of(b)]) + lift_of(b) }
+let voicing_of = fn(b) {
+    let v = voicings[chord_of(b)]
+    let t = lift_of(b)
+    [note(v[0]) + t note(v[1]) + t note(v[2]) + t note(v[3]) + t]
+}
+
+// ---- drums -----------------------------------------------------------------
+
+/// Four on the floor; out for the last beat before a section, and for the
+/// breakdown.
+let kick = Loop{play: kit beats: 4 amp: 0.92 sends: {room: 0.12 smash: 0.3}
+    code: fn(i) {
+        if i == 79 { hit(@kick, {amp: 1.0}) sleep(4) }
+        else { for b in 0..4 {
+            let gap = (i == 7 || i == 23 || i == 39 || i == 71) && b == 3
+            if gap == false { hit(@kick, {amp: if b == 0 { 1.0 } else { 0.93 }}) }
+            sleep(1)
+        } }
+    }
+}
+
+/// Hats: sixteenths with an accent cell that changes every eight bars,
+/// open hats on the offbeat, the shaker, the ride in the drop.
+let tops = Loop{play: kit beats: 4 amp: 0.8 sends: {room: 0.15}
+    code: fn(i) {
+        let cells = [[0.55 0.22 0.42 0.28], [0.5 0.25 0.5 0.2 0.45 0.2 0.55 0.3], [0.52 0.2 0.38 0.3 0.48 0.22]]
+        let v = cells[((i - i % 8) / 8) % 3]
+        let busy = i >= 8
+        let quiet = i >= 40 && i < 52
+        for s in 0..16 {
+            let r = rand(0, 0.012)
+            sleep(r)
+            if s % 4 == 2 && busy && quiet == false { hit(@ohat, {amp: 0.55 pan: 0.15}) }
+            else { if (busy && quiet == false) || s % 2 == 0 { hit(@hat, {amp: at(v, s) * rand(0.85, 1.1) * if quiet { 0.6 } else { 1.0 } pan: -0.25}) } }
+            if i >= 4 && s % 2 == 1 && quiet == false { hit(@shaker, {amp: rand(0.18, 0.3) pan: 0.45}) }
+            if i >= 56 && i < 72 && s % 4 == 0 { hit(@ride, {amp: rand(0.35, 0.45) pan: 0.3}) }
+            sleep(0.25 - r)
+        }
+    }
+}
+
+/// Clap on two and four, a ghost pickup every fourth bar, a fill at the
+/// end of every eighth, and the snare roll that builds the breakdown's end.
+let claps = Loop{play: kit beats: 4 amp: 0.9 sends: {room: 0.3 plate: 0.15 smash: 0.35}
+    code: fn(i) {
+        if (i >= 40 && i < 52) || i == 79 { sleep(4) }
+        else { if i >= 52 && i < 56 {
+            let n = if i < 54 { 8 } else { 16 }
+            for s in 0..n {
+                hit(@snare, {amp: 0.2 + ((i - 52) * n + s) * 0.012 + (i - 52) * 0.08})
+                sleep(4 / n)
+            }
+        } else {
+            sleep(1)
+            hit(@clap, {amp: rand(0.9, 1.0)})
+            sleep(1)
+            if i % 4 == 3 { sleep(0.75) hit(@clap, {amp: 0.3}) sleep(0.25) } else { sleep(1) }
+            hit(@clap, {amp: rand(0.9, 1.0)})
+            if i % 8 == 7 {
+                for s in 0..4 { sleep(0.25) hit(@snare, {amp: 0.35 + s * 0.12 pan: 0.1}) }
+            } else { sleep(1) }
+        } }
+    }
+}
+
+/// Congas and rims in the vocal and the drop: euclidean, rotating.
+let perc = Loop{play: kit beats: 4 amp: 0.55 sends: {room: 0.25}
+    code: fn(i) {
+        let rot = ((i - i % 4) / 4) % 3
+        let rim = euclid(5, 16, 2 + rot)
+        let conga = euclid(7, 16, rot)
+        for s in 0..16 {
+            if rim[s] { hit(@rim, {amp: rand(0.4, 0.65) pan: 0.4}) }
+            if conga[s] { hit(@conga, {amp: rand(0.45, 0.8) pan: -0.45 tune: if s % 3 == 0 { 5 } else { 0 }}) }
+            sleep(0.25)
+        }
+    }
+}
+
+let impact = Loop{play: kit beats: 4 amp: 0.6 sends: {hall: 0.4}
+    code: fn(i) {
+        if i == 8 || i == 24 || i == 56 || i == 64 || i == 72 { hit(@crash, {amp: 0.85}) }
+        sleep(4)
+    }
+}
+
+// ---- bass --------------------------------------------------------------------
+
+/// Two cells, alternating by bar; the last eighth of a bar approaches the
+/// next chord's root by a semitone when the chord changes.
+let bass = Loop{play: sub beats: 4 amp: 0.55
+    code: fn(i) {
+        let r = root_of(i)
+        let n = root_of(i + 1)
+        let change = n != r
+        let approach = if n > r { n - 1 } else { n + 1 }
+        if i >= 40 && i < 56 {
+            // The breakdown: long roots under the piano.
+            play(r, {dur: 3.8 amp: 0.6})
+            sleep(4)
+        } else {
+            if i % 2 == 0 {
+                play(r, {dur: 0.6 amp: 1.0})
+                sleep(0.75)
+                play(r, {dur: 0.2 amp: 0.6})
+                sleep(0.75)
+                play(r + 12, {dur: 0.2 amp: 0.55})
+                sleep(0.5)
+                play(r, {dur: 0.6 amp: 0.85})
+                sleep(1)
+                play(r + 7, {dur: 0.3 amp: 0.6})
+                sleep(0.5)
+                play(if change { approach } else { r + 10 }, {dur: 0.3 amp: 0.62})
+                sleep(0.5)
+            } else {
+                play(r, {dur: 1.3 amp: 1.0})
+                sleep(1.5)
+                play(r, {dur: 0.3 amp: 0.6})
+                sleep(1)
+                play(r + 12, {dur: 0.3 amp: 0.6})
+                sleep(0.5)
+                play(r + 7, {dur: 0.3 amp: 0.62})
+                sleep(0.5)
+                play(if change { approach } else { r + 3 }, {dur: 0.3 amp: 0.65})
+                sleep(0.5)
+            }
+        }
+    }
+}
+
+// ---- keys --------------------------------------------------------------------
+
+/// The intro's chords, behind a low-pass that opens bar by bar.
+let intro_chords = Loop{play: filtered beats: 4 amp: 0.55
+    code: fn(i) {
+        let v = voicing_of(i)
+        let cut = 350 + i * 330
+        for t in [0.5 1.75 2.5 3.5] {
+            sleep(t - beat())
+            play(v, {dur: 0.35 cutoff: cut amp: rand(0.8, 0.95)})
+        }
+        sleep(4 - beat())
+    }
+}
+
+/// Electric piano comping: a rhythm cell per bar from a pool, the voicing
+/// with the top note moved up an octave on accents.
+let comp = Loop{play: rhodes beats: 4 amp: 0.62 pan: -0.12 sends: {plate: 0.15}
+    code: fn(i) {
+        let v = voicing_of(i)
+        let cells = [[0.5 1.75 2.5], [0.75 2.5 3.25], [0.5 1.5 2.75 3.5], [0 1.75 3.5]]
+        let cell = cells[(i * 3 + irand(0, 1)) % 4]
+        for t in cell {
+            sleep(t - beat() + rand(0, 0.02))
+            let top = if t == cell[0] { [v[0] v[1] v[2] v[3] + 12] } else { v }
+            play(top, {dur: if t == 0 { 1.4 } else { 0.35 } amp: rand(0.72, 0.9)})
+        }
+        sleep(4 - beat())
+    }
+}
+
+/// The breakdown's grand piano: the chord rolled, then a rising line of
+/// its tones, the melody's top notes singing through.
+let piano_break = Loop{play: piano beats: 4 amp: 0.6 sends: {hall: 0.3}
+    code: fn(i) {
+        let v = voicing_of(i)
+        let r = root_of(i) + 12
+        play(r, {dur: 3.8 amp: 0.55})
+        for n in 0..4 {
+            sleep(0.04)
+            play(v[n], {dur: 3.6 amp: 0.42 + n * 0.03})
+        }
+        sleep(2 - beat())
+        play(v[3] + 12, {dur: 1.2 amp: 0.45})
+        sleep(0.5)
+        play(v[2] + 12, {dur: 1.0 amp: 0.38})
+        sleep(0.5)
+        play(v[1] + 12, {dur: 1.5 amp: 0.4})
+        sleep(4 - beat())
+    }
+}
+
+/// A sixteenth arpeggio that answers the vocal: accents on a 3-3-2 grouping.
+let arp = Loop{play: pluck beats: 4 amp: 0.4 pan: 0.3 sends: {throw: 0.2 hall: 0.15}
+    code: fn(i) {
+        let v = voicing_of(i)
+        let order = [0 2 1 3 2 0 3 1 2 3 1 2 0 3 2 1]
+        for s in 0..16 {
+            let accent = s == 0 || s == 3 || s == 6 || s == 8 || s == 11 || s == 14
+            play(v[order[s]] + 12, {dur: 0.3 amp: if accent { 0.95 } else { rand(0.45, 0.6) }})
+            sleep(0.25)
+        }
+    }
+}
+
+/// Organ stabs on the offbeats in the drop.
+let stabs = Loop{play: organ beats: 4 amp: 0.32 pan: 0.2 sends: {plate: 0.2}
+    code: fn(i) {
+        let v = voicing_of(i)
+        for b in 0..4 {
+            sleep(0.5)
+            play([v[1] + 12 v[2] + 12 v[3] + 12], {dur: 0.2 amp: if b == 3 { 0.8 } else { rand(0.6, 0.72) }})
+            sleep(0.5)
+        }
+    }
+}
+
+let pads = Loop{play: padsyn beats: 4 amp: 0.3 sends: {hall: 0.35}
+    code: fn(i) {
+        let v = voicing_of(i)
+        if i < 79 { play(v, {dur: 3.9 amp: if i >= 40 && i < 56 { 0.9 } else { 0.55 }}) }
+        if i == 79 { play(v, {dur: 8}) }
+        sleep(4)
+    }
+}
+
+// ---- voices --------------------------------------------------------------------
+
+/// The hook, eight bars: four lines of two bars.
+let hook = [
+    [[@r @ab4 @bb4 @c5 @eb5 @c5 @r], [0.5 0.5 0.5 1 1.5 2 2], "stay with me to-night"],
+    [[@bb4 @c5 @bb4 @g4 @ab4 @r], [0.5 1 0.5 1 3 2], "hold on till the light"],
+    [[@ab4 @bb4 @c5 @eb5 @f5 @eb5 @c5], [0.5 0.5 0.5 1 1.5 1 3], "we can dance a-way the night"],
+    [[@eb5 @db5 @c5 @r], [1 1 4 2], "don't let go"]
+]
+
+/// Sing line `k` of the hook, transposed by `t`, from here.
+let sing_line = fn(k, t, vel) {
+    let line = hook[k]
+    let ns = line[0]
+    let notes = []
+    for n in ns {
+        notes.push(if n == @r { nil } else { note(n) + t })
+    }
+    sing(notes, line[2], {durs: line[1] vel: vel})
+    sleep(8)
+}
+
+let lead = Loop{play: vox beats: 8 amp: 1.4 sends: {plate: 0.25 throw: 0.12}
+    code: fn(i) {
+        let bar = i * 2
+        let k = i % 4
+        let vel = if bar >= 56 { 0.9 } else { if bar >= 40 { 0.6 } else { 0.78 } }
+        sing_line(k, lift_of(bar), vel)
+    }
+}
+
+/// In the groove, fragments of the hook: "stay" and "night", pitched to the
+/// chord.
+let chops = Loop{play: vox beats: 8 amp: 1.6 sends: {plate: 0.2 throw: 0.2}
+    code: fn(i) {
+        if i % 2 == 1 {
+            sleep(2.5)
+            sing([@c5], "stay", {dur: 0.4 vel: 0.7})
+            sleep(1.5)
+            // A delay throw on the phrase end.
+            fx(@delay, {time: 0.75 feedback: 0.55 mix: 0.45 spread: 1}, fn() { sing([@eb5 @c5], "night _", {durs: [0.5 1.5] vel: 0.7}) })
+        }
+        sleep(8 - beat())
+    }
+}
+
+/// The choir: "ooh" chords a bar each in the breakdown's second half and the
+/// drop.
+let ooh = Loop{play: choir beats: 4 amp: 1.5 sends: {hall: 0.4}
+    code: fn(i) {
+        let v = voicing_of(i)
+        sing([[v[1] + 12 v[2] + 12 v[3] + 12]], if i >= 56 { "ah" } else { "ooh" }, {dur: 3.8 vel: if i >= 56 { 0.7 } else { 0.5 }})
+        sleep(4)
+    }
+}
+
+// ---- transitions ---------------------------------------------------------------
+
+let riser = Loop{play: air beats: 4 amp: 0.32 sends: {hall: 0.5}
+    code: fn(i) {
+        if i == 52 { play(@a4, {dur: 15.8}) }
+        sleep(4)
+    }
+}
+/// A reverse swell into the bar after each marked one.
+let reverse = Loop{play: swell beats: 4 amp: 0.3 pan: -0.2 sends: {hall: 0.5}
+    code: fn(i) {
+        if i == 7 || i == 23 || i == 39 || i == 55 || i == 63 { sleep(2) play(@c5, {dur: 2}) }
+        sleep(4 - beat())
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns (fed by sends): a short room for the drums, a plate for the vocal
+// and the keys, a hall for pads and effects, a dotted-eighth delay throw.
+let room = Reverb{room: 0.3 mix: 1 damp: 7000}
+let plate = Reverb{room: 0.55 mix: 1 damp: 6500}
+let hall = Reverb{room: 0.85 mix: 1 damp: 5000}
+let throw = Delay{time: 0.75 feedback: 0.4 mix: 1 spread: 1}
+/// The hall swells on the transitions (a Section raises `swell`).
+let hall_level = Bus{in: [hall] gain: {param: @swell from: 0.8 to: 1.8 ramp: 8}}
+let returns = Highpass{in: [room plate hall_level throw] cutoff: 280}
+
+// Drums: bus glue, tape on the bus, parallel smash fed by sends.
+let drum_bus = Comp{in: [kick tops claps perc impact] threshold: -16 ratio: 3 makeup: 2}
+let drum_tape = Drive{in: [drum_bus] amount: 0.15 mix: 0.35 tone: 11000}
+let smash = Comp{threshold: -34 ratio: 12 makeup: 11}
+
+// Bass: mono, ducked under the kick.
+let pump = Duck{in: [bass] key: kick depth: 6 release: 0.2}
+
+// Keys: high-passed, a little duck, a touch of width.
+let keys_hp = Highpass{in: [comp stabs arp intro_chords] cutoff: 180}
+let keys_duck = Duck{in: [keys_hp] key: kick depth: 3 release: 0.18}
+let keys_wide = Chorus{in: [keys_duck] rate: 0.5 depth: 3 mix: 0.25}
+
+// Pads and the choir: carved (high-pass, a scooped mid, a softer top),
+// pumped, wide.
+let pad_hp = Highpass{in: [pads ooh] cutoff: 240}
+let pad_lp = Eq{in: [pad_hp] b1: [@peak, 500, -3, 1] b2: [@highshelf, 9000, -2]}
+let padduck = Duck{in: [pad_lp] key: kick depth: 5 release: 0.25}
+let pad_wide = Chorus{in: [padduck] rate: 0.3 depth: 6 mix: 0.5}
+
+/// The music bus's filter: closes over the breakdown and opens into the
+/// drop (sections set `sweep`), and opens over the intro.
+let sweep = Lowpass{in: [keys_wide pad_wide] cutoff: {param: @sweep from: 450 to: 18000 ramp: 16}}
+let music_tape = Drive{in: [sweep] amount: 0.12 mix: 0.3 tone: 12000}
+
+// The vocal: high-passed and compressed.
+let vox_hp = Highpass{in: [lead chops] cutoff: 120}
+let vox_comp = Comp{in: [vox_hp] threshold: -20 ratio: 3 makeup: 4}
+
+let piano_hp = Highpass{in: [piano_break] cutoff: 90}
+
+/// The master: gentle glue over everything (the master limiter follows).
+let glue = Comp{in: [riser reverse returns drum_tape smash pump music_tape vox_comp piano_hp] threshold: -12 ratio: 1.8 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 2.02}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let intro = Section{bars: 8 loops: [kick tops intro_chords reverse] set: {sweep: 0 swell: 0}}
+let groove = Section{bars: 16 loops: [kick tops claps bass comp chops impact reverse] set: {sweep: 1}}
+let vocal = Section{bars: 16 loops: [kick tops claps perc bass comp lead arp impact reverse]}
+let breakdown = Section{bars: 12 loops: [tops claps bass piano_break pads lead ooh riser reverse] set: {sweep: 0 swell: 1}}
+let build = Section{bars: 4 loops: [tops claps bass piano_break pads lead ooh riser reverse] set: {sweep: 1}}
+let drop = Section{bars: 16 loops: [kick tops claps perc bass comp stabs arp pads lead ooh impact reverse] set: {swell: 0}}
+let outro = Section{bars: 8 loops: [kick tops claps bass comp pads impact] set: {swell: 1} next: @stop}
+
+Score{label: "Velvet Hours" clock kit sub rhodes filtered pluck organ padsyn piano vox choir air swell kick tops claps perc impact bass intro_chords comp piano_break arp stabs pads lead chops ooh riser reverse room plate hall throw hall_level returns drum_bus drum_tape smash pump keys_hp keys_duck keys_wide pad_hp pad_lp padduck pad_wide sweep music_tape vox_hp vox_comp piano_hp glue master_eq master_width master_peak master_limit master_lp intro groove vocal breakdown build drop outro ceiling: -1 master: 1.0 arrange: [intro groove vocal breakdown build drop outro]}

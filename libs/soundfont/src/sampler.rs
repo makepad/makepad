@@ -45,9 +45,13 @@ pub enum EnvelopeStage {
     Finished,
 }
 
-/// Sample-counted linear DAHDSR. Durations are rounded to the nearest frame;
-/// attack reaches 1.0 on its last frame, decay reaches sustain on its last
-/// frame, and release reaches zero on its last frame.
+/// Sample-counted DAHDSR. Durations are rounded to the nearest frame;
+/// attack reaches 1.0 on its last frame. Linear (the default): decay
+/// reaches sustain on its last frame and release reaches zero on its last
+/// frame. Decibel ([`EnvelopeRunner::decibel`], a SoundFont's volume
+/// envelope): decay and release fall 100 dB over their time at a constant
+/// rate in dB, decay stopping at the sustain level, and the voice ends
+/// 100 dB down.
 #[derive(Clone, Copy, Debug)]
 pub struct EnvelopeRunner {
     pub stage: EnvelopeStage,
@@ -60,9 +64,56 @@ pub struct EnvelopeRunner {
     release: u64,
     sustain: f32,
     release_start: f32,
+    /// Per-frame gain of the decibel decay and release (1 = linear mode).
+    decay_factor: f32,
+    release_factor: f32,
 }
 
 impl EnvelopeRunner {
+    const EMPTY: Self = Self {
+        stage: EnvelopeStage::Finished,
+        level: 0.0,
+        position: 0,
+        delay: 0,
+        attack: 0,
+        hold: 0,
+        decay: 0,
+        release: 0,
+        sustain: 0.0,
+        release_start: 0.0,
+        decay_factor: 1.0,
+        release_factor: 1.0,
+    };
+}
+
+/// 100 dB below full scale: where a decibel envelope ends.
+const FLOOR: f32 = 1.0e-5;
+
+fn factor(frames: u64) -> f32 {
+    if frames == 0 {
+        0.0
+    } else {
+        10.0_f32.powf(-5.0 / frames as f32)
+    }
+}
+
+impl EnvelopeRunner {
+    /// A SoundFont volume envelope: decay and release fall in dB.
+    pub fn decibel(envelope: Envelope, sample_rate: f32) -> Self {
+        let mut result = Self::new(envelope, sample_rate);
+        result.decay_factor = factor(result.decay);
+        result.release_factor = factor(result.release);
+        if result.stage == EnvelopeStage::Sustain && result.sustain < FLOOR {
+            result.level = 0.0;
+            result.stage = EnvelopeStage::Finished;
+        }
+        result
+    }
+
+    fn is_decibel(&self) -> bool {
+        self.decay_factor != 1.0 || self.release_factor != 1.0
+    }
+
     pub fn new(envelope: Envelope, sample_rate: f32) -> Self {
         let mut result = Self {
             stage: EnvelopeStage::Delay,
@@ -75,6 +126,8 @@ impl EnvelopeRunner {
             release: duration_frames(envelope.release, sample_rate),
             sustain: envelope.sustain.clamp(0.0, 1.0),
             release_start: 0.0,
+            decay_factor: 1.0,
+            release_factor: 1.0,
         };
         result.skip_zero_stages();
         result
@@ -108,13 +161,32 @@ impl EnvelopeRunner {
                 self.level = 1.0;
                 self.advance_if_done(self.hold, EnvelopeStage::Decay);
             }
+            EnvelopeStage::Decay if self.is_decibel() => {
+                self.level *= self.decay_factor;
+                if self.level <= self.sustain.max(FLOOR) {
+                    self.level = self.sustain;
+                    self.position = 0;
+                    self.stage = if self.sustain < FLOOR { EnvelopeStage::Finished } else { EnvelopeStage::Sustain };
+                }
+            }
             EnvelopeStage::Decay => {
                 let progress =
                     (self.position.saturating_add(1) as f32 / self.decay as f32).min(1.0);
                 self.level = 1.0 + (self.sustain - 1.0) * progress;
                 self.advance_if_done(self.decay, EnvelopeStage::Sustain);
             }
+            EnvelopeStage::Sustain if self.is_decibel() && self.sustain < FLOOR => {
+                self.level = 0.0;
+                self.stage = EnvelopeStage::Finished;
+            }
             EnvelopeStage::Sustain => self.level = self.sustain,
+            EnvelopeStage::Release if self.is_decibel() => {
+                self.level *= self.release_factor;
+                if self.level < FLOOR {
+                    self.level = 0.0;
+                    self.stage = EnvelopeStage::Finished;
+                }
+            }
             EnvelopeStage::Release => {
                 let progress =
                     (self.position.saturating_add(1) as f32 / self.release as f32).min(1.0);
@@ -200,19 +272,29 @@ impl Biquad {
         {
             return Self::OFF;
         }
+        let mut result = Self::OFF;
+        result.set(cutoff, resonance_db, sample_rate);
+        result
+    }
+
+    /// New coefficients, the state kept (a moving cutoff). The resonance is
+    /// the format's: dB above the DC gain, 0 a flat (Q 0.707) response; the
+    /// gain drops by 1/sqrt(Q) above that so a resonant peak does not clip.
+    fn set(&mut self, cutoff: f32, resonance_db: f32, sample_rate: f32) {
         let frequency = cutoff.clamp(20.0, sample_rate * 0.45);
         let omega = 2.0 * core::f32::consts::PI * frequency / sample_rate;
         let sine = omega.sin();
         let cosine = omega.cos();
-        let q = 10.0_f32.powf(resonance_db.clamp(-12.0, 26.0) / 20.0).clamp(0.5, 20.0);
+        let q = 10.0_f32.powf((resonance_db.clamp(0.0, 96.0) - 3.01) / 20.0).clamp(0.5, 20.0);
+        let gain = if q > 1.0 { 1.0 / q.sqrt() } else { 1.0 };
         let alpha = sine / (2.0 * q);
         let divisor = 1.0 + alpha;
-        let b0 = (1.0 - cosine) * 0.5 / divisor;
-        let b1 = (1.0 - cosine) / divisor;
-        let b2 = b0;
-        let a1 = -2.0 * cosine / divisor;
-        let a2 = (1.0 - alpha) / divisor;
-        Self { active: true, b0, b1, b2, a1, a2, ..Self::OFF }
+        self.active = true;
+        self.b0 = (1.0 - cosine) * 0.5 / divisor * gain;
+        self.b1 = (1.0 - cosine) / divisor * gain;
+        self.b2 = self.b0;
+        self.a1 = -2.0 * cosine / divisor;
+        self.a2 = (1.0 - alpha) / divisor;
     }
 
     fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
@@ -245,6 +327,31 @@ struct Voice {
     noise: u32,
     envelope: EnvelopeRunner,
     filter: Biquad,
+    /// The SoundFont modulation: its envelope, and what it and the LFOs
+    /// make of pitch (a step factor), cutoff and volume, at control rate.
+    mod_envelope: EnvelopeRunner,
+    pitch_factor: f64,
+    volume_factor: f32,
+    control: u32,
+    /// A DC blocker on the sample (some fonts' synth waveforms sit half
+    /// their RMS off centre): last input and output, left and right.
+    dc: [f32; 4],
+}
+
+/// The DC blocker's pole (a 10 Hz high-pass at 44.1-48 kHz).
+const DC_POLE: f32 = 0.9987;
+
+/// Frames between modulation updates (0.7 ms at 44.1 kHz).
+const CONTROL_FRAMES: u32 = 32;
+
+/// A triangle LFO at `time` seconds: 0 during its delay, then -1..1
+/// starting upward from 0.
+fn lfo(lfo: crate::model::Lfo, time: f32) -> f32 {
+    if time < lfo.delay {
+        return 0.0;
+    }
+    let phase = ((time - lfo.delay) * lfo.hz + 0.25).fract();
+    4.0 * (phase - 0.5).abs() - 1.0
 }
 
 impl Voice {
@@ -275,6 +382,7 @@ impl Voice {
         filter_cutoff_hz: 20_000.0,
         filter_resonance_db: 0.0,
         exclusive_class: 0,
+        modulation: crate::model::Modulation::NONE,
     };
 
     const EMPTY: Self = Self {
@@ -290,19 +398,13 @@ impl Voice {
         oscillator_step: 0.0,
         age: 0,
         noise: 1,
-        envelope: EnvelopeRunner {
-            stage: EnvelopeStage::Finished,
-            level: 0.0,
-            position: 0,
-            delay: 0,
-            attack: 0,
-            hold: 0,
-            decay: 0,
-            release: 0,
-            sustain: 0.0,
-            release_start: 0.0,
-        },
+        envelope: EnvelopeRunner::EMPTY,
         filter: Biquad::OFF,
+        mod_envelope: EnvelopeRunner::EMPTY,
+        pitch_factor: 1.0,
+        volume_factor: 1.0,
+        control: 0,
+        dc: [0.0; 4],
     };
 
     fn start(&mut self, note_id: u32, parameters: VoiceParameters, started: u64, sample_rate: f32) {
@@ -321,12 +423,28 @@ impl Voice {
             oscillator_step: if sample_rate > 0.0 { frequency / sample_rate as f64 } else { 0.0 },
             age: 0,
             noise: note_id ^ (u32::from(parameters.key) << 16) ^ 0x9e37_79b9,
-            envelope: EnvelopeRunner::new(parameters.envelope, sample_rate),
-            filter: Biquad::new(
-                parameters.filter_cutoff_hz,
-                parameters.filter_resonance_db,
-                sample_rate,
-            ),
+            envelope: if parameters.modulation.decibel_release {
+                EnvelopeRunner::decibel(parameters.envelope, sample_rate)
+            } else {
+                EnvelopeRunner::new(parameters.envelope, sample_rate)
+            },
+            filter: if parameters.modulation.env_to_filter != 0.0 || parameters.modulation.mod_lfo_to_filter != 0.0 {
+                // A moving cutoff: always on, set at the first control step.
+                let mut filter = Biquad::OFF;
+                filter.set(parameters.filter_cutoff_hz, parameters.filter_resonance_db, sample_rate);
+                filter
+            } else {
+                Biquad::new(parameters.filter_cutoff_hz, parameters.filter_resonance_db, sample_rate)
+            },
+            mod_envelope: if parameters.modulation.moves() {
+                EnvelopeRunner::new(parameters.modulation.envelope, sample_rate)
+            } else {
+                EnvelopeRunner::EMPTY
+            },
+            pitch_factor: 1.0,
+            volume_factor: 1.0,
+            control: 0,
+            dc: [0.0; 4],
         };
     }
 
@@ -336,13 +454,28 @@ impl Voice {
         }
         self.released = true;
         self.envelope.release();
+        self.mod_envelope.release();
     }
 
     fn render<S: SampleSource>(&mut self, source: &S, sample_rate: f32) -> (f32, f32, bool) {
         if !self.active {
             return (0.0, 0.0, false);
         }
+        if self.parameters.modulation.moves() {
+            let env = self.mod_envelope.next_value();
+            if self.control == 0 {
+                self.modulate(env, sample_rate);
+            }
+            self.control = (self.control + 1) % CONTROL_FRAMES;
+        }
         let (mut left, mut right, missing) = match self.parameters.source {
+            VoiceSource::Sample { .. } if self.parameters.modulation.dc_block => {
+                let (l, r, missing) = self.render_sample(source);
+                let [xl, yl, xr, yr] = self.dc;
+                let (ol, or) = (l - xl + DC_POLE * yl, r - xr + DC_POLE * yr);
+                self.dc = [l, ol, r, or];
+                (ol, or, missing)
+            }
             VoiceSource::Sample { .. } => self.render_sample(source),
             VoiceSource::ProceduralPiano => {
                 let value = self.render_piano(sample_rate);
@@ -357,7 +490,7 @@ impl Voice {
         let pan = self.parameters.pan.clamp(-1.0, 1.0);
         let left_pan = ((1.0 - pan) * 0.5).sqrt();
         let right_pan = ((1.0 + pan) * 0.5).sqrt();
-        let gain = self.parameters.gain * envelope;
+        let gain = self.parameters.gain * envelope * self.volume_factor;
         left *= gain * left_pan;
         right *= gain * right_pan;
         (left, right) = self.filter.process(left, right);
@@ -366,6 +499,22 @@ impl Voice {
             self.active = false;
         }
         (left, right, missing)
+    }
+
+    /// One control step of the modulation envelope (`env`, 0..1) and the
+    /// LFOs: the pitch factor, the cutoff and the volume factor.
+    fn modulate(&mut self, env: f32, sample_rate: f32) {
+        let m = self.parameters.modulation;
+        let time = self.age as f32 / sample_rate;
+        let mod_lfo = if m.mod_lfo_to_pitch != 0.0 || m.mod_lfo_to_filter != 0.0 || m.mod_lfo_to_volume_db != 0.0 { lfo(m.mod_lfo, time) } else { 0.0 };
+        let vib_lfo = if m.vib_lfo_to_pitch != 0.0 { lfo(m.vib_lfo, time) } else { 0.0 };
+        let cents = env * m.env_to_pitch + mod_lfo * m.mod_lfo_to_pitch + vib_lfo * m.vib_lfo_to_pitch;
+        self.pitch_factor = if cents != 0.0 { 2.0_f64.powf(cents as f64 / 1200.0) } else { 1.0 };
+        if m.env_to_filter != 0.0 || m.mod_lfo_to_filter != 0.0 {
+            let cutoff = self.parameters.filter_cutoff_hz * 2.0_f32.powf((env * m.env_to_filter + mod_lfo * m.mod_lfo_to_filter) / 1200.0);
+            self.filter.set(cutoff, self.parameters.filter_resonance_db, sample_rate);
+        }
+        self.volume_factor = if m.mod_lfo_to_volume_db != 0.0 { 10.0_f32.powf(mod_lfo * m.mod_lfo_to_volume_db / 20.0) } else { 1.0 };
     }
 
     fn render_sample<S: SampleSource>(&mut self, source: &S) -> (f32, f32, bool) {
@@ -399,12 +548,12 @@ impl Voice {
                     right[slot] = r;
                 }
                 SampleRead::Missing => {
-                    self.position += self.step;
+                    self.position += self.step * self.pitch_factor;
                     return (0.0, 0.0, true);
                 }
             }
         }
-        self.position += self.step;
+        self.position += self.step * self.pitch_factor;
         (hermite(left, fraction), hermite(right, fraction), false)
     }
 

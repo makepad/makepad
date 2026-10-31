@@ -5,7 +5,10 @@
 //! within 0.1..=4. Invalid fits are rejected, never silently clamped.
 //! Pitch interpolation is linear in MIDI key: gains in dB, decay scales in
 //! log space, with endpoint clamping. Velocity interpolation is linear in
-//! dB between the three knots, also clamped at the endpoints.
+//! dB between the three knots, clamped below the lowest; above the top knot
+//! (112) the mf->ff slope continues up to velocity 127. The reference's
+//! loudest layers keep getting louder there (+3..4 dB from 112 to 127 as
+//! its SFZ plays them) where the model's hammer alone adds +1..2.
 //!
 //! Array index 0 is the fundamental. All current string modes are directly
 //! addressable through `CALIBRATION_PARTIALS`. Beyond that range, the last
@@ -85,7 +88,8 @@ impl CalibrationNote {
         let db = if velocity <= lo {
             self.gain_db[0][m]
         } else if velocity >= hi {
-            self.gain_db[2][m]
+            let over = (velocity.min(127) - hi) as f32 / (hi - mid) as f32;
+            self.gain_db[2][m] + (self.gain_db[2][m] - self.gain_db[1][m]) * over
         } else {
             let v = usize::from(velocity >= mid);
             let t = (velocity - CALIBRATION_VELOCITIES[v]) as f32

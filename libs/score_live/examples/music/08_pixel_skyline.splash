@@ -1,0 +1,212 @@
+// Pixel Skyline: a chiptune game theme at 150 in C major, a loop for a game
+// with an `intensity` param (0..1).
+//
+// Form: intro 4 · theme A 8 (C Am F G | C E7/B Am C7) · theme B 8 (F G Em
+// A7 | Dm7 G7 C) · bridge 8 (the heroic borrowed chords Ab Bb C, then Fm
+// Bb7 Eb G7) · A2 8 and B2 8 a whole step up in D · then back to theme A,
+// forever (`next:`).
+// Channels as on an old sound chip: a 25% pulse lead, a 12.5% pulse counter
+// line, 32nd-note chord arpeggios on a square channel, a triangle bass that
+// walks, noise drums with fills at every fourth and eighth bar.
+// Intensity: below 0.35 only the arpeggios, bass and a light beat play;
+// the lead enters at 0.35; at 0.7 the counter line, sixteenth hats, the
+// busier kick and the lead's octave doubling come in.
+use mod.score.*
+
+let clock = Clock{bpm: 150 sig: [4 4] seed: 1989 params: {intensity: 0.8}}
+
+let kit = Drums{kit: @chip gain: {kick: 1.2 snare: 1.0 hat: 0.8}}
+let pulse1 = Synth{recipe: "pulse width=0.25 freq=440 a=0.001 d=0.12 s=0.7 r=0.04 gain=0.2 vib=6 vib_depth=0.12"}
+let pulse2 = Synth{recipe: "pulse width=0.125 freq=440 a=0.001 d=0.1 s=0.55 r=0.03 gain=0.16"}
+let square = Synth{recipe: "pulse width=0.5 freq=440 a=0.0005 d=0.04 s=0.6 r=0.01 gain=0.13"}
+let tri = Synth{recipe: "tri freq=440 a=0.001 d=0.1 s=0.9 r=0.02 gain=0.55"}
+
+// ---- harmony: chords as a root and the tones above it --------------------------------
+
+let chord_a = [[@c3 @e4 @g4 @c5], [@a2 @e4 @a4 @c5], [@f2 @f4 @a4 @c5], [@g2 @d4 @g4 @b4], [@c3 @e4 @g4 @c5], [@b2 @e4 @gs4 @d5], [@a2 @e4 @a4 @c5], [@c3 @e4 @g4 @bb4]]
+let chord_b = [[@f2 @f4 @a4 @c5], [@g2 @d4 @g4 @b4], [@e2 @e4 @g4 @b4], [@a2 @e4 @g4 @cs5], [@d2 @f4 @a4 @c5], [@g2 @f4 @g4 @b4], [@c3 @e4 @g4 @c5], [@c3 @e4 @g4 @c5]]
+let chord_br = [[@ab2 @eb4 @ab4 @c5], [@bb2 @f4 @bb4 @d5], [@c3 @e4 @g4 @c5], [@c3 @e4 @g4 @c5], [@f2 @f4 @ab4 @c5], [@bb2 @f4 @ab4 @d5], [@eb3 @eb4 @g4 @bb4], [@g2 @f4 @g4 @b4]]
+
+// ---- melodies, a bar each ------------------------------------------------------------
+
+let mel_a = [
+    [[@e5 @g5 @c6 @b5 @g5], [0.5 0.5 1 0.5 1.5]], [[@a5 @g5 @e5 @c5], [1 0.5 0.5 2]],
+    [[@f5 @a5 @c6 @a5 @f5], [0.5 0.5 1 1 1]], [[@g5 @f5 @e5 @d5], [1.5 0.5 1 1]],
+    [[@e5 @g5 @c6 @d6 @e6], [0.5 0.5 1 1 1]], [[@d6 @b5 @gs5 @e5], [1 0.5 0.5 2]],
+    [[@a5 @c6 @b5 @a5 @g5 @bb5], [0.5 0.5 0.5 0.5 1 1]], [[@g5 @e5 @bb4], [2 1 1]]
+]
+let mel_b = [
+    [[@a5 @c6 @a5 @f5], [1 0.5 0.5 2]], [[@b5 @d6 @b5 @g5], [1 0.5 0.5 2]],
+    [[@g5 @b5 @e6 @d6 @b5], [0.5 0.5 1 1 1]], [[@cs6 @a5 @e5 @g5], [1.5 0.5 1 1]],
+    [[@f5 @a5 @d6 @c6 @a5], [0.5 0.5 1 1 1]], [[@b5 @d6 @f6 @d6 @b5 @g5], [0.5 0.5 1 0.5 0.5 1]],
+    [[@c6 @g5 @e5], [2 1 1]], [[@c6 @r], [3 1]]
+]
+let mel_br = [
+    [[@c6 @eb6], [2 2]], [[@d6 @f6], [2 2]], [[@e6], [4]], [[@g6 @e6 @c6], [1 1 2]],
+    [[@ab5 @c6], [2 2]], [[@d6 @f6], [2 2]], [[@g6 @eb6], [2 2]], [[@d6 @b5 @g5 @f5], [1 1 1 1]]
+]
+
+/// Where bar `b` is: its part (0 intro, 1 A, 2 B, 3 bridge), the bar in it
+/// and the key (0 or 2 semitones). After B2 (bar 44) it loops from A.
+let where_of = fn(b) {
+    let x = if b < 44 { b } else { 4 + (b - 44) % 40 }
+    if x < 4 { [0 x 0] }
+    else { if x < 12 { [1 x - 4 0] }
+    else { if x < 20 { [2 x - 12 0] }
+    else { if x < 28 { [3 x - 20 0] }
+    else { if x < 36 { [1 x - 28 2] }
+    else { [2 x - 36 2] } } } } }
+}
+let chord_of = fn(b) {
+    let w = where_of(b)
+    let c = if w[0] == 2 { chord_b[w[1]] } else { if w[0] == 3 { chord_br[w[1]] } else { chord_a[if w[0] == 0 { 0 } else { w[1] }] } }
+    let out = []
+    for n in c { out.push(note(n) + w[2]) }
+    out
+}
+
+let phrase = fn(ns, ds, tr, amp, leg) {
+    let k = 0
+    for d in ds {
+        let n = ns[k]
+        if n != @r { play(note(n) + tr, {dur: d * leg amp: amp * if k == 0 { 1.0 } else { 0.85 }}) }
+        sleep(d)
+        k = k + 1
+    }
+}
+
+// ---- channels -----------------------------------------------------------------------------
+
+/// The chord as 32nd-note arpeggios: every beat when busy, every other
+/// when calm.
+let arps = Loop{play: square beats: 4 amp: 1.3 pan: -0.25 sends: {room: 0.15}
+    code: fn(i) {
+        let c = chord_of(i)
+        let x = param(@intensity)
+        for b in 0..4 {
+            if x > 0.35 || b % 2 == 0 {
+                for s in 0..6 {
+                    play(c[1 + s % 3], {dur: 0.08 amp: if s == 0 { 0.9 } else { 0.7 }})
+                    sleep(1 / 12)
+                }
+                sleep(0.5)
+            } else { sleep(1) }
+        }
+    }
+}
+
+/// The triangle bass walks: root, octave, fifth, and a step into the next.
+let bass = Loop{play: tri beats: 4 amp: 0.45
+    code: fn(i) {
+        let r = chord_of(i)[0] - 12
+        let n = chord_of(i + 1)[0] - 12
+        let walk = [0 12 7 12 0 12 7]
+        for s in 0..7 {
+            play(r + walk[s], {dur: 0.4})
+            sleep(0.5)
+        }
+        play(if n > r { n - 1 } else { if n < r { n + 1 } else { r + 10 } }, {dur: 0.4})
+        sleep(0.5)
+    }
+}
+
+/// The lead: the bar's melody; the octave doubling at high intensity.
+let lead = Loop{play: pulse1 beats: 4 amp: 1.3 pan: 0.05 sends: {echo: 0.18 room: 0.12}
+    code: fn(i) {
+        let w = where_of(i)
+        let x = param(@intensity)
+        let line = if w[0] == 2 { mel_b[w[1]] } else { if w[0] == 3 { mel_br[w[1]] } else { mel_a[w[1]] } }
+        if x > 0.35 && w[0] > 0 { phrase(line[0], line[1], w[2], 1.0, 0.85) }
+        sleep(4 - beat())
+    }
+}
+let lead_oct = Loop{play: pulse2 beats: 4 amp: 0.9 pan: -0.1 sends: {room: 0.15}
+    code: fn(i) {
+        let w = where_of(i)
+        let line = if w[0] == 2 { mel_b[w[1]] } else { if w[0] == 3 { mel_br[w[1]] } else { mel_a[w[1]] } }
+        if param(@intensity) > 0.7 && w[0] > 0 { phrase(line[0], line[1], w[2] - 12, 0.8, 0.7) }
+        sleep(4 - beat())
+    }
+}
+
+/// The counter line: half notes on the chord's third and seventh, moving
+/// against the lead.
+let counter = Loop{play: pulse2 beats: 4 amp: 0.7 pan: 0.3 sends: {room: 0.2}
+    code: fn(i) {
+        let c = chord_of(i)
+        if param(@intensity) > 0.7 && where_of(i)[0] > 0 {
+            phrase([c[3] - 12 c[2] - 12], [2 2], 0, 0.8, 0.9)
+        }
+        sleep(4 - beat())
+    }
+}
+
+/// Noise drums: fills at the end of every fourth and eighth bar.
+let drums = Loop{play: kit beats: 4 amp: 0.7 sends: {room: 0.15}
+    code: fn(i) {
+        let x = param(@intensity)
+        let kicks = if x > 0.7 { "x..x..x.x.x..x.." } else { "x.......x.x....." }
+        let k = steps(kicks)
+        let fill4 = i % 4 == 3
+        let fill8 = i % 8 == 7
+        for s in 0..16 {
+            if fill8 && s >= 8 {
+                if s % 2 == 0 || x > 0.7 { hit(if s < 12 { @tom_hi } else { @tom_mid }, {amp: 0.6 + (s - 8) * 0.05}) }
+                if s == 15 { hit(@snare, {amp: 0.9}) }
+            } else {
+                if k[s] != nil { hit(@kick, {amp: 0.9}) }
+                if s == 4 || s == 12 { hit(@snare, {amp: 0.85}) }
+                if fill4 && s == 14 { hit(@snare, {amp: 0.6}) }
+                if s % 2 == 0 && (x > 0.35 || s % 4 == 2) { hit(@hat, {amp: if s % 4 == 2 { 0.7 } else { 0.4 } pan: 0.3}) }
+                if x > 0.7 && s % 2 == 1 && chance(0.45) { hit(@hat, {amp: 0.3 pan: 0.3}) }
+            }
+            sleep(0.25)
+        }
+    }
+}
+
+let crash = Loop{play: kit beats: 4 amp: 0.45
+    code: fn(i) {
+        let w = where_of(i)
+        if w[1] == 0 && w[0] > 0 { hit(@crash, {amp: 0.8}) }
+        sleep(4)
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: a short room (chip music is mostly dry) and a quarter-note echo.
+let room = Reverb{room: 0.3 mix: 1 damp: 8000}
+let echo = Delay{time: 0.75 feedback: 0.3 mix: 1 spread: 1}
+let returns = Highpass{in: [room echo] cutoff: 300}
+
+// Noise drums glued; the triangle bass mono and steady.
+let drum_bus = Comp{in: [drums crash] threshold: -16 ratio: 3 makeup: 2}
+let bass_comp = Comp{in: [bass] threshold: -18 ratio: 2.5 makeup: 1}
+// The pulse channels: high-passed, a little width on the arpeggio and the
+// counter line, the lead centred.
+let chip_hp = Highpass{in: [arps counter lead_oct] cutoff: 200}
+let chip_wide = Chorus{in: [chip_hp] rate: 0.5 depth: 3 mix: 0.25}
+let lead_hp = Highpass{in: [lead] cutoff: 200}
+let lead_comp = Comp{in: [lead_hp] threshold: -18 ratio: 2.5 makeup: 2}
+
+/// The master: glue and a touch of saturation (the master limiter follows).
+let glue = Comp{in: [returns drum_bus bass_comp chip_wide lead_comp] threshold: -12 ratio: 2 attack: 20 release: 150 knee: 6 makeup: 1}
+let master_drive = Drive{in: [glue] amount: 0.1 mix: 0.25 tone: 12000}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [master_drive] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.20}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let intro = Section{bars: 4 loops: [arps bass drums]}
+let a = Section{bars: 8 loops: [arps bass drums lead lead_oct counter crash]}
+let b = Section{bars: 8 loops: [arps bass drums lead lead_oct counter crash]}
+let bridge = Section{bars: 8 loops: [arps bass drums lead lead_oct counter crash]}
+let a2 = Section{bars: 8 loops: [arps bass drums lead lead_oct counter crash]}
+let b2 = Section{bars: 8 loops: [arps bass drums lead lead_oct counter crash] next: @a}
+
+Score{label: "Pixel Skyline" clock kit pulse1 pulse2 square tri arps bass lead lead_oct counter drums crash room echo returns drum_bus bass_comp chip_hp chip_wide lead_hp lead_comp glue master_drive master_eq master_width master_peak master_limit master_lp intro a b bridge a2 b2 ceiling: -1 master: 1.0 arrange: [intro a b bridge a2 b2]}

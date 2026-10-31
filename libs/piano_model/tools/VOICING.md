@@ -207,7 +207,8 @@ its gain observation is withheld because this compensation cannot be made.
 
 Fit gain observations at all available velocities by weighted least squares
 using exactly the runtime interpolation weights: piecewise linear **in dB** at
-knots `[28, 68, 112]`, clamped outside. The diagonal zero-update prior is
+knots `[28, 68, 112]`, clamped below 28 and continuing the 68→112 slope
+above 112 (to 127), as the runtime does. The diagonal zero-update prior is
 `0.02 + 0.5 * max(0, 1 - weighted knot support)`. Weak evidence thus fades toward
 zero residual correction. There is no cross-knot smoothing. An intermediate
 velocity can algebraically constrain both neighboring knots, so positive updates

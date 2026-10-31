@@ -1,0 +1,33 @@
+# The General MIDI SoundFont's drum kits (bank 128): what each is for.
+# program	name	label	tags
+0	Standard	standard acoustic kit	acoustic drums rock pop ballad funk soul general natural
+1	Standard 1	standard acoustic kit, variation 1	acoustic drums rock pop natural
+2	Standard 2	standard acoustic kit, variation 2	acoustic drums rock pop natural
+3	Standard 3	standard acoustic kit, variation 3	acoustic drums rock pop natural
+4	Standard 4	standard acoustic kit, variation 4	acoustic drums rock pop natural
+5	Standard 5	standard acoustic kit, variation 5	acoustic drums rock pop natural
+6	Standard 6	standard acoustic kit, variation 6	acoustic drums rock pop natural
+7	Standard 7	standard acoustic kit, variation 7	acoustic drums rock pop natural
+8	Room	room kit: the acoustic kit with room ambience	acoustic drums room ambience rock indie live 70s roomy
+9	Room 1	room kit, variation 1	acoustic drums room ambience rock live
+10	Room 2	room kit, variation 2	acoustic drums room ambience rock live
+11	Room 3	room kit, variation 3	acoustic drums room ambience rock live
+12	Room 4	room kit, variation 4	acoustic drums room ambience rock live
+13	Room 5	room kit, variation 5	acoustic drums room ambience rock live
+14	Room 6	room kit, variation 6	acoustic drums room ambience rock live
+15	Room 7	room kit, variation 7	acoustic drums room ambience rock live
+16	Power	power kit: big gated 80s rock drums	acoustic drums power big gated 80s rock arena power_ballad hair_metal punchy
+17	Power 1	power kit, variation 1	acoustic drums power big 80s rock arena punchy
+18	Power 2	power kit, variation 2	acoustic drums power big 80s rock arena punchy
+19	Power 3	power kit, variation 3	acoustic drums power big 80s rock arena punchy
+24	Electronic	electronic kit: early-80s electronic drums with synth toms	electronic drums synth_toms 80s synthpop new_wave electro hexagonal_pads
+25	Analog Drum Machine	analog drum machine kit: early-80s analog box (boomy kick, snappy snare, cowbell)	electronic drums analog drum_machine 80s electro hip_hop trap miami_bass boom_bap synthpop booming
+32	Jazz	jazz kit: light, open-tuned acoustic kit	acoustic drums jazz swing bebop lounge light open soft
+33	Jazz 1	jazz kit, variation 1	acoustic drums jazz swing light
+34	Jazz 2	jazz kit, variation 2	acoustic drums jazz swing light
+35	Jazz 3	jazz kit, variation 3	acoustic drums jazz swing light
+36	Jazz 4	jazz kit, variation 4	acoustic drums jazz swing light
+40	Brush	brush kit: brushes on snare and cymbals	acoustic drums brush jazz ballad lounge bossa soft quiet
+41	Brush 1	brush kit, variation 1	acoustic drums brush jazz soft
+42	Brush 2	brush kit, variation 2	acoustic drums brush jazz soft
+48	Orchestra Kit	orchestra kit: concert bass drum, timpani, orchestral cymbals	orchestral percussion concert timpani film epic classical

@@ -78,20 +78,32 @@ workspace.members = [
     "libs/score",
     "libs/score_layout",
     "libs/score_play",
+    "libs/score_render",
+    "libs/score_view",
+    "libs/score_view/tests/embed_app",
     "libs/score_import",
     "libs/score_pdf",
     "libs/midi_file",
+    "libs/soundfont",
     "libs/drumkit",
     "libs/drumkit_phys",
     "libs/musicxml",
     # === Synth: live-coded scores, their player and the tweak UI kit ===
+    "libs/beat",
     "libs/edit_values",
+    "libs/score_live/tools",
     # === own MP3 / Ogg Vorbis decoders ===
+    "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
+    "libs/audio_encode",
     # === pictures of audio (spectrogram, wave strip, composite) ===
+    "libs/audio_picture",
+    "libs/audio_reactive",
     # === per-application audio tap, mixer input for a host equalizer ===
+    "libs/audio_route",
     # === mkfl motion payload + classical optical flow + all-intra re-encode
     # (shared by the enhance backend and the VJ's flow-warp import) ===
+    "libs/video_flow",
     # === realtime frame tweening: the classical GPU optical-flow pass
     # chain, the RIFE producer behind the same warp, and the mode set
     # (extracted from the VJ, which is still its reference user) ===

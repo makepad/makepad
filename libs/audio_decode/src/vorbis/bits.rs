@@ -2,7 +2,7 @@
 //! three small spec helpers that go with it.
 //!
 //! Adapted from the same author's decoder in the sandbox repo
-//! (`apps/sandbox/libs/audio/src/bitread.rs`); it lives inside the Vorbis
+//! (`apps/commercial/sandbox/libs/audio/src/bitread.rs`); it lives inside the Vorbis
 //! module here because nothing else in this crate reads bits this way (MP3 is
 //! MSB-first).
 //!

@@ -63,6 +63,70 @@ impl Default for Envelope {
     }
 }
 
+/// A low-frequency oscillator of a SoundFont voice: starts after `delay`
+/// seconds, a triangle at `hz`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lfo {
+    pub delay: f32,
+    pub hz: f32,
+}
+
+/// What moves a voice while it plays: the SoundFont's modulation envelope
+/// and its two LFOs, routed to pitch (cents), filter cutoff (cents) and
+/// volume (dB), and how its volume envelope falls.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Modulation {
+    /// The volume envelope's decay and release fall in dB at a constant
+    /// rate (100 dB over the stated time), as the SoundFont format says;
+    /// false: a straight line in amplitude (SFZ regions, the fallbacks).
+    pub decibel_release: bool,
+    /// Block DC on the sample (a font's synth waveforms may sit far off centre).
+    pub dc_block: bool,
+    /// The modulation envelope (its sustain a level 0..1).
+    pub envelope: Envelope,
+    pub env_to_pitch: f32,
+    pub env_to_filter: f32,
+    pub mod_lfo: Lfo,
+    pub mod_lfo_to_pitch: f32,
+    pub mod_lfo_to_filter: f32,
+    pub mod_lfo_to_volume_db: f32,
+    pub vib_lfo: Lfo,
+    pub vib_lfo_to_pitch: f32,
+    /// Effect sends the font asks for, 0..1 (a host's reverb and chorus).
+    pub reverb_send: f32,
+    pub chorus_send: f32,
+}
+
+impl Modulation {
+    pub const NONE: Modulation = Modulation {
+        decibel_release: false,
+        dc_block: false,
+        envelope: Envelope { delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.0, sustain: 0.0, release: 0.0 },
+        env_to_pitch: 0.0,
+        env_to_filter: 0.0,
+        mod_lfo: Lfo { delay: 0.0, hz: 8.176 },
+        mod_lfo_to_pitch: 0.0,
+        mod_lfo_to_filter: 0.0,
+        mod_lfo_to_volume_db: 0.0,
+        vib_lfo: Lfo { delay: 0.0, hz: 8.176 },
+        vib_lfo_to_pitch: 0.0,
+        reverb_send: 0.0,
+        chorus_send: 0.0,
+    };
+
+    /// Whether anything moves the pitch, the filter or the volume.
+    pub fn moves(&self) -> bool {
+        self.env_to_pitch != 0.0 || self.env_to_filter != 0.0 || self.mod_lfo_to_pitch != 0.0 || self.mod_lfo_to_filter != 0.0
+            || self.mod_lfo_to_volume_db != 0.0 || self.vib_lfo_to_pitch != 0.0
+    }
+}
+
+impl Default for Modulation {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// Render-time sound source. All variants are `Copy` and own no heap data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoiceSource {
@@ -99,6 +163,15 @@ pub struct VoiceParameters {
     pub filter_cutoff_hz: f32,
     pub filter_resonance_db: f32,
     pub exclusive_class: u16,
+    pub modulation: Modulation,
+}
+
+/// The gain of a note-on velocity: the SoundFont format's default
+/// velocity-to-attenuation modulator (concave, 960 cB), which is 40 dB per
+/// decade of velocity: (v / 127)^2. Never silent for a legal velocity.
+pub fn velocity_gain(velocity: u8) -> f32 {
+    let v = velocity.clamp(1, 127) as f32 / 127.0;
+    v * v
 }
 
 impl VoiceParameters {
@@ -148,11 +221,7 @@ impl Zone {
         if decay_scale != 0.0 && result.envelope.decay > 0.0 {
             result.envelope.decay *= 2.0_f32.powf(decay_scale / 1200.0);
         }
-        // A smooth velocity curve stands in for the SF2 default velocity-to-
-        // attenuation modulator. It is deterministic and never reaches exact
-        // silence for a legal note-on velocity.
-        let normalized = (result.velocity as f32 / 127.0).sqrt();
-        result.gain *= normalized;
+        result.gain *= velocity_gain(result.velocity);
         result
     }
 }

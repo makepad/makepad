@@ -298,8 +298,9 @@ fn sf2_global_override_and_preset_addition_rules() {
     let font = parse_sf2(&make_sf2(false)).unwrap();
     let zone = &font.zones[0];
     // Preset local 20 replaces preset global 10. Instrument local 30 replaces
-    // instrument global 100. The two resolved levels then add: 20 + 30 = 50 cB.
-    let expected_gain = 10.0_f32.powf(-50.0 / 200.0);
+    // instrument global 100. The two resolved levels then add: 20 + 30 = 50 cB,
+    // applied at the attenuation scale.
+    let expected_gain = 10.0_f32.powf(-50.0 * crate::ATTENUATION_SCALE / 200.0);
     assert!((zone.parameters.gain - expected_gain).abs() < 1e-6);
     assert_eq!(zone.key_range, Range { low: 20, high: 80 });
     assert_eq!(zone.velocity_range, Range { low: 40, high: 90 });
@@ -339,6 +340,18 @@ fn stereo_links_and_rom_samples_have_nonblocking_semantics() {
     assert_eq!(
         font.read_frame(0, 1),
         SampleRead::Resident { left: 1000.0 / 32768.0, right: 5000.0 / 32768.0 }
+    );
+
+    // A left half whose partner does not link back plays as mono.
+    let broken = [
+        TestSample { start: 0, end: 4, loop_start: 1, loop_end: 3, link: 1, sample_type: 4 },
+        TestSample { start: 4, end: 8, loop_start: 5, loop_end: 7, link: 1, sample_type: 1 },
+    ];
+    let font = parse_sf2(&make_sf2_with_samples(false, &broken, 0)).unwrap();
+    assert_eq!(font.samples[0].kind, SampleKind::Mono);
+    assert_eq!(
+        font.read_frame(0, 1),
+        SampleRead::Resident { left: 1000.0 / 32768.0, right: 1000.0 / 32768.0 }
     );
 
     let rom = [TestSample {
@@ -422,6 +435,37 @@ fn envelope_stage_timing_uses_worked_frame_counts() {
 }
 
 #[test]
+fn a_soundfont_volume_envelope_falls_in_decibels() {
+    // Decay 1 s to a sustain 40 dB down, at 1000 frames a second: 100 dB a
+    // second, so -20 dB at 0.2 s and the sustain reached at 0.4 s.
+    let mut envelope = EnvelopeRunner::decibel(
+        Envelope { delay: 0.0, attack: 0.0, hold: 0.0, decay: 1.0, sustain: 0.01, release: 0.5 },
+        1000.0,
+    );
+    let values: Vec<f32> = (0..600).map(|_| envelope.next_value()).collect();
+    let db = |x: f32| 20.0 * x.log10();
+    assert!((db(values[199]) + 20.0).abs() < 0.3, "{}", db(values[199]));
+    assert!((db(values[450]) + 40.0).abs() < 0.01 && envelope.stage == EnvelopeStage::Sustain);
+    // Release: 100 dB in 0.5 s, from wherever it is; ends 100 dB down.
+    envelope.release();
+    let tail: Vec<f32> = (0..400).map(|_| envelope.next_value()).collect();
+    assert!((db(tail[99]) - (-40.0 - 20.0)).abs() < 0.3, "{}", db(tail[99]));
+    assert!(envelope.is_finished() && tail[399] == 0.0);
+    // A decay to silence ends the voice 100 dB down.
+    let mut drum = EnvelopeRunner::decibel(Envelope { delay: 0.0, attack: 0.0, hold: 0.0, decay: 0.1, sustain: 0.0, release: 1.0 }, 1000.0);
+    let n = (0..1000).take_while(|_| { drum.next_value(); !drum.is_finished() }).count();
+    assert!((95..=105).contains(&n), "{n}");
+}
+
+#[test]
+fn velocity_follows_the_formats_default_curve() {
+    let db = |v: u8| 20.0 * crate::velocity_gain(v).log10();
+    assert!(db(127).abs() < 1e-4);
+    assert!((db(64) + 11.9).abs() < 0.1, "{}", db(64));
+    assert!(crate::velocity_gain(1) > 0.0);
+}
+
+#[test]
 fn pitch_ratio_combines_root_tuning_and_rate() {
     let mut parameters = sample_parameters();
     parameters.key = 72;
@@ -464,6 +508,7 @@ fn sample_parameters() -> VoiceParameters {
         filter_cutoff_hz: 20_000.0,
         filter_resonance_db: 0.0,
         exclusive_class: 0,
+        modulation: crate::model::Modulation::NONE,
     }
 }
 

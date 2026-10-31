@@ -21,12 +21,14 @@
 //! [`Mp3Decoder::set_gapless`] turns it off for a caller that wants the raw
 //! filterbank output, and [`Mp3Decoder::gapless`] reports the tag's values.
 
+use makepad_relax::relax;
+
 mod bits;
 mod header;
 mod layer3;
 mod synth;
-mod tables;
-mod tables_lsf;
+pub mod tables;
+pub mod tables_lsf;
 
 pub use header::{ChannelMode, FrameHeader, VbrInfo, Version};
 
@@ -79,6 +81,7 @@ pub struct Mp3Decoder<'a> {
     skip_front: u64,
 }
 
+#[relax(O3, always)]
 impl<'a> Mp3Decoder<'a> {
     /// Sync to the first frame of `bytes`. Fails only when there is no MP3
     /// stream at all; per-frame damage is handled during decoding.
@@ -355,8 +358,14 @@ pub fn decode_all(bytes: &[u8]) -> Result<DecodedAudio, AudioError> {
     decode_all_limited(bytes, Limits::default())
 }
 
+#[relax(O3, always)]
 pub fn decode_all_limited(bytes: &[u8], limits: Limits) -> Result<DecodedAudio, AudioError> {
     let mut decoder = Mp3Decoder::with_limits(bytes, limits)?;
+    // The stream's length from its headers (exact with a Xing/Info header,
+    // else counted from the frame headers): the buffer is allocated once at
+    // its size. Grown frame by frame it doubled up to twice the song while
+    // copying (a 3-minute song: a 74 MB buffer plus the 37 MB it left).
+    let duration = header::probe_duration(bytes).ok();
     let mut pcm: Vec<f32> = Vec::new();
     let (mut rate, mut channels) = (0u32, 0u16);
     while let Some(frame) = decoder.next_frame()? {
@@ -364,6 +373,12 @@ pub fn decode_all_limited(bytes: &[u8], limits: Limits) -> Result<DecodedAudio, 
             // One buffer cannot be both; a caller that wants the tail anyway
             // can drive `next_frame` itself and watch the format.
             return Err(AudioError::Unsupported("format changes mid-stream"));
+        }
+        if channels == 0 {
+            if let Some(seconds) = duration {
+                let frames = ((seconds * frame.rate as f64).ceil() as usize).saturating_add(1152).min(limits.max_frames);
+                pcm.reserve_exact(frames.saturating_mul(frame.channels as usize));
+            }
         }
         rate = frame.rate;
         channels = frame.channels;

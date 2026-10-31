@@ -1,0 +1,58 @@
+// Seeds: a generative piece. Every loop draws from rings with the seeded
+// random: change `seed` for another piece, keep it for the same one.
+use mod.score.*
+
+let clock = Clock{bpm: 96 sig: [4 4] seed: 2024}
+
+let keys = Synth{preset: @epiano}
+let pluck = Synth{preset: @pluck}
+let kit = Drums{kit: @lofi}
+let low = Synth{preset: @fm_bass}
+
+/// A Euclidean kick and a shuffled rim, new each cycle but from the seed.
+let beat = Loop{play: kit beats: 4 amp: 0.7
+    code: fn(i) {
+        let kick = euclid(3, 8, 0)
+        for s in 0..8 {
+            if kick[s] { hit(@kick) }
+            if one_in(3) { hit(@rim, {amp: 0.35 pan: rand(-0.5, 0.5)}) }
+            if s % 2 == 1 { hit(@hat, {amp: rand(0.2, 0.45)}) }
+            sleep(0.5)
+        }
+    }
+}
+
+let pads = Loop{play: keys beats: 8 amp: 0.4
+    code: fn(i) {
+        let scale_notes = scale(@d3, @dorian, 2)
+        for c in 0..2 {
+            let root = choose([0 2 3 4])
+            play([scale_notes[root] scale_notes[root + 2] scale_notes[root + 4] scale_notes[root + 6]], {dur: 3.8})
+            sleep(4)
+        }
+    }
+}
+
+let melody = Loop{play: pluck beats: 4 amp: 0.35 pan: 0.25
+    code: fn(i) {
+        let pent = scale(@d4, @minor_pentatonic, 2)
+        for s in 0..8 {
+            if chance(0.6) { play(choose(pent), {amp: rand(0.5, 0.9)}) }
+            sleep(0.5)
+        }
+    }
+}
+
+let bass = Loop{play: low beats: 8 amp: 0.5
+    code: fn(i) {
+        for note in shuffle([@d2 @f2 @a1 @c2]) {
+            play(note, {dur: 1.6})
+            sleep(2)
+        }
+    }
+}
+
+let echo = Delay{in: [melody] time: 0.75 feedback: 0.5 mix: 0.3 spread: 1}
+let hall = Reverb{in: [pads echo] room: 0.7 mix: 0.3}
+
+Score{label: "Seeds" clock keys pluck kit low beat pads melody bass echo hall}
