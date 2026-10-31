@@ -162,10 +162,12 @@ impl Cache {
         crate::run::yield_section("image encode");
         let mut e = E::default();
         e.u32(tab.crates.len() as u32);
-        for &c in &tab.crates {
-            e.u128(self.crate_ident[c as usize]);
-            e.u128(self.fps[c as usize]);
-        }
+        self.with_full_fps(|full| {
+            for &c in &tab.crates {
+                e.u128(self.crate_ident[c as usize]);
+                e.u128(full[c as usize]);
+            }
+        });
         for t in [&tab.keys, &tab.syms, &tab.files] {
             e.u32(t.list.len() as u32);
             for (i, b) in t.list.iter().enumerate() {
@@ -1754,7 +1756,9 @@ impl Linker {
         let Some((img, store)) = self.cache().image.as_ref().map(|i| (i.bytes(), i._store.clone())) else { return 0 };
         let parsed = {
             let c = self.cache();
-            parse_image(img, store.clone(), |ident, fp| c.crate_by_ident.get(&ident).map_or(false, |&k| c.fps.get(k as usize) == Some(&fp)))
+            c.with_full_fps(|full| {
+                parse_image(img, store.clone(), |ident, fp| c.crate_by_ident.get(&ident).is_some_and(|&k| full.get(k as usize) == Some(&fp)))
+            })
         };
         let Some(mut im) = parsed else {
             self.cache().image_rewrite = true;

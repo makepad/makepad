@@ -265,6 +265,22 @@ pub(crate) fn body_hash(pf: &ParsedFile, d: &FileDigest, item: ItemId) -> Option
     let mut h = Sip128::new();
     h.str("body");
     h.write(&pf.src[lo as usize..hi as usize]);
+    if !pf.exp_map.is_empty() {
+        let mut regions: Vec<(u32, u32, u32)> = pf.exp_map.iter().map(|(a, b, c)| (c, a, b)).collect();
+        regions.sort_unstable();
+        let mut exp = super::deps::region_closure(&regions, &[(lo, hi)]);
+        if !exp.is_empty() {
+            exp.sort_unstable();
+            h.u8(0xfd);
+            for (ea, eb) in exp {
+                if ea < eb && (eb as usize) <= pf.src.len() {
+                    h.u32(eb - ea);
+                    h.write(&pf.src[ea as usize..eb as usize]);
+                    h.u8(0xfc);
+                }
+            }
+        }
+    }
     // items the body defines are identified by their file offset (stable::def_ident: TypeId,
     // folded into this code): the body's place is part of its code then
     if d.nested_in.iter().any(|x| x.1 == item.0) {

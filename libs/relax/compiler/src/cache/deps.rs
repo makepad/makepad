@@ -1501,20 +1501,30 @@ impl Deps {
     }
 }
 
-/// The names of the expansion text produced by macro invocations inside `[lo, hi)` (a fn body),
-/// followed back to their call sites. None when the file's lazily parsed bodies are not parsed
-/// (their expansions are not known).
-pub(crate) fn exp_names(pf: &ParsedFile, lo: u32, hi: u32, lazy: bool) -> Option<Vec<Name>> {
+/// Whether `m` (a `scan` invocation entry) is a quiet built-in that reads an outside late input.
+pub(crate) fn late_builtin(m: Name) -> bool {
+    let raw = m & !QUIET_BIT;
+    raw == name_of(b"include_str") || raw == name_of(b"include_bytes") || raw == name_of(b"env") || raw == name_of(b"option_env")
+}
+
+/// The expansion text digest and the names of the expansion text produced by macro invocations
+/// inside `[lo, hi)` (a fn body), followed back to their call sites. None when the file's lazily
+/// parsed bodies are not parsed (their expansions are not known).
+pub(crate) fn exp_body(pf: &ParsedFile, lo: u32, hi: u32, lazy: bool) -> Option<(u128, Vec<Name>)> {
     if lazy && pf.part.get().is_none() { return None; }
     let mut names = Vec::new();
+    let mut th = Sip128::new();
+    th.str("exp-text");
     let regions = file_regions(pf);
     for (a, b) in region_closure(&regions, &[(lo, hi)]) {
         let text = pf.bytes(a, b);
+        th.u64(text.len() as u64);
+        th.write(text);
         scan(text, &[(0, text.len() as u32)], &[], &mut names, &mut Vec::new());
     }
     names.sort_unstable();
     names.dedup();
-    Some(names)
+    Some((th.finish128(), names))
 }
 
 /// A file's expansion regions (its own text's and its parsed parts'): (direct call site, start,
@@ -1528,7 +1538,7 @@ fn file_regions(pf: &ParsedFile) -> Vec<(u32, u32, u32)> {
 
 /// The regions (start, end) of the expansions called from within `seeds`, and of those called from
 /// within them, transitively.
-fn region_closure(regions: &[(u32, u32, u32)], seeds: &[(u32, u32)]) -> Vec<(u32, u32)> {
+pub(super) fn region_closure(regions: &[(u32, u32, u32)], seeds: &[(u32, u32)]) -> Vec<(u32, u32)> {
     let mut out: Vec<(u32, u32)> = Vec::new();
     let mut todo: Vec<(u32, u32)> = seeds.to_vec();
     let mut seen = std::collections::HashSet::new();
