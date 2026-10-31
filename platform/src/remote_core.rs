@@ -412,6 +412,12 @@ pub enum Cmd {
         value: Option<f32>,
         tx: Sender<Reply>,
     },
+    /// `Cx::gpu_inventory()`: GPU + CPU-retained graphics memory across
+    /// textures (including free pool slots), draw-list instances, and geometries.
+    GpuInventory {
+        n: usize,
+        tx: Sender<Reply>,
+    },
 }
 
 impl Cmd {
@@ -757,6 +763,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "design", args: "<op> ...", answers: "structural edits to the Splash source under design (open state palette insert move delete duplicate wrap up down out rename set bake undo redo reset patch commit verify close)", service: "edit", risk: CmdRisk::Act, params: "\"op\":{\"type\":\"string\",\"enum\":[\"open\",\"state\",\"palette\",\"insert\",\"move\",\"delete\",\"duplicate\",\"wrap\",\"up\",\"down\",\"out\",\"rename\",\"set\",\"bake\",\"undo\",\"redo\",\"reset\",\"patch\",\"commit\",\"verify\",\"close\"]},\"path\":{\"type\":\"string\"}", required: &["op"], positional: &["op"] },
     Command { words: "shader consts", args: "[shader=ID]", answers: "the compiled shaders' hot-patchable constants", service: "edit", risk: CmdRisk::Read, params: "\"shader\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "shader const", args: "shader=ID i=N v=VALUE | reset=1", answers: "patch one constant on the GPU (no recompile)", service: "edit", risk: CmdRisk::Act, params: "\"shader\":{\"type\":\"integer\"},\"i\":{\"type\":\"integer\"},\"v\":{\"type\":\"number\"},\"reset\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
+    Command { words: "gpu_inventory", args: "[n=15]", answers: "Cx GPU and CPU-retained graphics memory (textures, free pool slots, draw-list instances, geometries)", service: "inspect", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "quit", args: "", answers: "shut the app down gracefully (no final grab)", service: "ui", risk: CmdRisk::Destructive, params: "", required: &[], positional: &[] },
 ];
 
@@ -1930,6 +1937,7 @@ mod tests {
             ("tweak op", 2),
             ("shader consts", 2),
             ("shader const", 2),
+            ("gpu_inventory", 1),
             ("quit", 1),
             ("log", 1),
             ("net", 1),

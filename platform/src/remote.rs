@@ -277,6 +277,10 @@ mod imp {
                     4,
                 ))
             }
+            "gpu_inventory" => {
+                let n = p.get(&["n"]).and_then(|v| v.parse::<usize>().ok()).unwrap_or(15);
+                reply_to_answer(ask(move |tx| Cmd::GpuInventory { n, tx }, 4))
+            }
             "quit" => reply_to_answer(ask(|tx| Cmd::Quit(tx), 4)),
             // `cap start`, `cap stop`, `cursor`, `midi`, `log`: commands that
             // need platform state are answered by platform.
@@ -791,8 +795,8 @@ mod imp {
                 }
             }
             _ => {
-                // Relax dispatches GPU queries in its host; program code only serves UI commands.
-                #[cfg(not(relax))]
+                // Under `makepad run`, the host answers GPU/a11y queries before reaching here;
+                // under bare `relax run` or standalone native runs, dispatch them from our HAL.
                 if makepad_hal::a11y::dispatch(req, out) || makepad_hal::inspect::dispatch(req, out) {
                     return;
                 }
@@ -921,6 +925,10 @@ mod imp {
     #[cfg(relax)]
     fn register_with_host() {
         for c in COMMANDS {
+            let first = c.words.split(' ').next().unwrap_or(c.words);
+            super::host_registration::register_with_host(first);
+        }
+        for c in gpu_commands() {
             let first = c.words.split(' ').next().unwrap_or(c.words);
             super::host_registration::register_with_host(first);
         }
@@ -2394,6 +2402,9 @@ mod imp {
             }
             Cmd::ShaderConsts { shader, tx } => {
                 let _ = tx.send(Reply::Text(shader_consts_json(cx, shader)));
+            }
+            Cmd::GpuInventory { n, tx } => {
+                let _ = tx.send(Reply::Text(cx.gpu_inventory().report_json_lines(n)));
             }
             Cmd::ShaderConstPatch {
                 shader,

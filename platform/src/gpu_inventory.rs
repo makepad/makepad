@@ -106,9 +106,126 @@ impl GpuInventory {
     pub fn texture_bytes(&self) -> u64 {
         self.textures.iter().map(|t| t.bytes()).sum()
     }
+    pub fn texture_cpu_bytes(&self) -> u64 {
+        self.textures.iter().map(|t| t.cpu_bytes).sum()
+    }
+    pub fn free_slot_gpu_bytes(&self) -> u64 {
+        self.textures
+            .iter()
+            .filter(|t| t.state == GpuTextureState::FreeSlotHeld)
+            .map(|t| t.bytes())
+            .sum()
+    }
+    pub fn free_slot_cpu_bytes(&self) -> u64 {
+        self.textures
+            .iter()
+            .filter(|t| t.state == GpuTextureState::FreeSlotHeld)
+            .map(|t| t.cpu_bytes)
+            .sum()
+    }
     pub fn instance_gpu_bytes(&self) -> u64 {
         self.draw_lists.iter().filter_map(|d| d.instance_gpu_bytes).sum()
     }
+    pub fn instance_cpu_bytes(&self) -> u64 {
+        self.draw_lists.iter().map(|d| d.instance_cpu_bytes).sum()
+    }
+
+    /// JSON-lines report for remote inspection (`gpu_inventory [n=15]`): a
+    /// totals line followed by the largest textures and draw lists by combined
+    /// CPU + GPU byte footprint.
+    pub fn report_json_lines(&self, limit: usize) -> String {
+        let opt_u64 = |v: Option<u64>| v.map(|b| b.to_string()).unwrap_or_else(|| "null".into());
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "{{\"texture_gpu_bytes\":{},\"texture_cpu_bytes\":{},\"free_slot_gpu_bytes\":{},\"free_slot_cpu_bytes\":{},\"retired_texture_bytes\":{},\"instance_gpu_bytes\":{},\"instance_cpu_bytes\":{},\"retained_allocation_bytes\":{},\"geometry_gpu_bytes\":{},\"geometry_cpu_bytes\":{},\"device_bytes\":{},\"textures\":{},\"draw_lists\":{},\"geometries\":{}}}",
+            self.texture_bytes(),
+            self.texture_cpu_bytes(),
+            self.free_slot_gpu_bytes(),
+            self.free_slot_cpu_bytes(),
+            self.retired_texture_bytes,
+            self.instance_gpu_bytes(),
+            self.instance_cpu_bytes(),
+            self.retained_allocation_bytes,
+            opt_u64(self.geometry_gpu_bytes),
+            self.geometry_cpu_bytes,
+            opt_u64(self.device_allocated_bytes),
+            self.textures.len(),
+            self.draw_lists.len(),
+            self.geometries,
+        ));
+
+        let mut tex_idx: Vec<usize> = (0..self.textures.len()).collect();
+        tex_idx.sort_by(|&a, &b| {
+            let ta = &self.textures[a];
+            let tb = &self.textures[b];
+            (tb.cpu_bytes + tb.bytes())
+                .cmp(&(ta.cpu_bytes + ta.bytes()))
+                .then_with(|| ta.slot.cmp(&tb.slot))
+        });
+        for i in tex_idx.into_iter().take(limit) {
+            let t = &self.textures[i];
+            let state = match t.state {
+                GpuTextureState::Live => "live",
+                GpuTextureState::FreeSlotHeld => "free_slot_held",
+            };
+            lines.push(format!(
+                "{{\"kind\":\"texture\",\"slot\":{},\"gen\":{},\"state\":\"{}\",\"format\":{},\"w\":{},\"h\":{},\"mips\":{},\"gpu_bytes\":{},\"texel_bytes\":{},\"cpu_bytes\":{},\"name\":{}}}",
+                t.slot,
+                t.generation,
+                state,
+                json_escape(t.format),
+                t.width,
+                t.height,
+                t.mip_levels,
+                opt_u64(t.gpu_bytes),
+                t.texel_bytes,
+                t.cpu_bytes,
+                json_escape(&t.name()),
+            ));
+        }
+
+        let mut list_idx: Vec<usize> = (0..self.draw_lists.len()).collect();
+        list_idx.sort_by(|&a, &b| {
+            let da = &self.draw_lists[a];
+            let db = &self.draw_lists[b];
+            (db.instance_cpu_bytes + db.instance_gpu_bytes.unwrap_or(0))
+                .cmp(&(da.instance_cpu_bytes + da.instance_gpu_bytes.unwrap_or(0)))
+                .then_with(|| da.draw_list.cmp(&db.draw_list))
+        });
+        for i in list_idx.into_iter().take(limit) {
+            let d = &self.draw_lists[i];
+            lines.push(format!(
+                "{{\"kind\":\"draw_list\",\"draw_list\":{},\"pass\":{},\"draw_calls\":{},\"gpu_bytes\":{},\"cpu_bytes\":{}}}",
+                d.draw_list,
+                json_escape(&d.pass),
+                d.draw_calls,
+                opt_u64(d.instance_gpu_bytes),
+                d.instance_cpu_bytes,
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn format_name(format: &TextureFormat) -> &'static str {
@@ -322,7 +439,7 @@ impl Cx {
             let gpu_bytes = measured.texture(self, id);
             let (width, height) = texture.alloc.as_ref().map_or((0, 0), |a| (a.width, a.height));
             let cpu_bytes = texture.format.cpu_data_bytes() as u64;
-            if free && gpu_bytes.unwrap_or(0) == 0 && texture.alloc.is_none() {
+            if free && gpu_bytes.unwrap_or(0) == 0 && texture.alloc.is_none() && cpu_bytes == 0 {
                 continue;
             }
             if !free && texture.alloc.is_none() && gpu_bytes.unwrap_or(0) == 0 && cpu_bytes == 0 {

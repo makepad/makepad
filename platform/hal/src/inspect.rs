@@ -109,9 +109,14 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
                 .device_allocated
                 .map(|b| b.to_string())
                 .unwrap_or_else(|| "null".into());
+            let scratch = snap
+                .scratch_allocated
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "null".into());
             out.line(&format!(
-                "{{\"ledger_bytes\":{},\"device_bytes\":{},\"items\":{}}}",
+                "{{\"ledger_bytes\":{},\"scratch_bytes\":{},\"device_bytes\":{},\"items\":{}}}",
                 snap.total_bytes,
+                scratch,
                 device,
                 snap.items.len()
             ));

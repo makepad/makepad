@@ -939,7 +939,8 @@ impl Cx {
             fb.buffer_destroy(rec.id);
         }
         if !fb.ubuf.contains_key(&slot) {
-            let bid = fb.buffer_create(makepad_hal::buffer_kind::UNIFORM, len, Attr::default());
+            let attr = fb.attr(&ub.origin, 0);
+            let bid = fb.buffer_create(makepad_hal::buffer_kind::UNIFORM, len, attr);
             fb.ubuf.insert(slot, UbufRec { slot_gen, gen: 0, id: bid, bytes: len, uploaded: 0 });
         }
         let rec = fb.ubuf.get_mut(&slot).expect("inserted");
@@ -1857,7 +1858,8 @@ impl Cx {
                 if data.is_empty() {
                     return None;
                 }
-                let id = fb.buffer_create(makepad_hal::buffer_kind::INSTANCE, (data.len() * 4) as u64, Attr::default());
+                let attr = fb.attr(block.origin(), 0);
+                let id = fb.buffer_create(makepad_hal::buffer_kind::INSTANCE, (data.len() * 4) as u64, attr);
                 fb.w.buffer_update(id, 0, as_bytes(data));
                 fb.stats.bytes_uploaded += (data.len() * 4) as u64;
                 fb.shared.insert(bid, SharedRec { id });
@@ -1884,7 +1886,8 @@ impl Cx {
             }
             if !fb.inst.contains_key(&key) {
                 let floats = count * slots;
-                let id = fb.buffer_create(makepad_hal::buffer_kind::INSTANCE, (floats * 4) as u64, Attr::default());
+                let attr = fb.attr(publication.origin(), 0);
+                let id = fb.buffer_create(makepad_hal::buffer_kind::INSTANCE, (floats * 4) as u64, attr);
                 for (at, part) in publication.data_slices(0..floats.min(publication.float_len())) {
                     fb.w.buffer_update(id, (at * 4) as u64, as_bytes(part));
                 }

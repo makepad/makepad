@@ -321,6 +321,7 @@ impl Vulkan {
             }
         }
         let allocated = self.dev.allocated.load(Ordering::Relaxed);
+        let scratch = self.dev.scratch_allocated.load(Ordering::Relaxed);
         for ((sid, index), texture) in &self.win {
             let id = Id::new(*index, texture.gen);
             if *sid != HOST && !self.scanout_images.contains_key(&(*sid,id)) { continue; }
@@ -334,7 +335,12 @@ impl Vulkan {
                 owner.ledger.add(row);
             }
         }
-        for sid in world.session_ids() { if let Some(s) = world.session_mut(sid) { s.ledger.device_allocated = Some(allocated); } }
+        for sid in world.session_ids() {
+            if let Some(s) = world.session_mut(sid) {
+                s.ledger.device_allocated = Some(allocated);
+                s.ledger.scratch_allocated = Some(scratch);
+            }
+        }
     }
 
     /// A CPU implementation (lavapipe, SwiftShader): the default selection prefers hardware GL.

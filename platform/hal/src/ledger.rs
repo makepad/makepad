@@ -58,6 +58,9 @@ pub struct Ledger {
     /// What the device says this process holds (set by backends that can ask): the ledger's
     /// total reconciles against it.
     pub device_allocated: Option<u64>,
+    /// Backend scratch allocations (upload arenas and readback staging) included in
+    /// `device_allocated` above.
+    pub scratch_allocated: Option<u64>,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -121,7 +124,16 @@ impl Ledger {
             .values()
             .map(|e| {
                 let site = name(e.attr.site).unwrap_or_default();
-                let owner = name(e.attr.label).or_else(|| name(e.attr.owner)).or_else(|| (!site.is_empty()).then(|| site.clone())).unwrap_or_else(|| "unknown".to_string());
+                let owner = name(e.attr.label)
+                    .or_else(|| name(e.attr.owner))
+                    .or_else(|| (!site.is_empty()).then(|| site.clone()))
+                    .unwrap_or_else(|| {
+                        if e.kind == Kind::Window {
+                            e.detail.to_string()
+                        } else {
+                            "unknown".to_string()
+                        }
+                    });
                 ReportItem {
                     session,
                     kind: e.kind,
@@ -145,6 +157,7 @@ impl Ledger {
             frame,
             total_bytes,
             device_allocated: self.device_allocated,
+            scratch_allocated: self.scratch_allocated,
             by_session: vec![SessionTotal { session, frame, bytes: total_bytes, count: items.len() }],
             by_kind: group(&items, |i| i.detail.to_string()),
             by_owner: group(&items, |i| i.owner.clone()),
@@ -214,6 +227,8 @@ pub struct Report {
     pub total_bytes: u64,
     /// the device's own number, when the backend has one
     pub device_allocated: Option<u64>,
+    /// backend scratch buffers (upload arenas and readback staging) included in `device_allocated`
+    pub scratch_allocated: Option<u64>,
     pub by_session: Vec<SessionTotal>,
     pub by_kind: Vec<Group>,
     pub by_owner: Vec<Group>,
@@ -229,6 +244,7 @@ impl Report {
         self.total_bytes += o.total_bytes;
         // Sessions share the HAL's device: its allocation total must only be counted once.
         self.device_allocated = self.device_allocated.or(o.device_allocated);
+        self.scratch_allocated = self.scratch_allocated.or(o.scratch_allocated);
         self.by_session.extend(o.by_session);
         self.items.extend(o.items);
         self.idle.extend(o.idle);

@@ -346,6 +346,7 @@ pub(crate) struct Buffer {
     pub bytes: u64,
     mapped: usize,
     coherent: bool,
+    scratch: bool,
 }
 
 impl Buffer {
@@ -406,7 +407,7 @@ impl Buffer {
         let (memory, ty) = match result { Ok(v) => v, Err(e) => { unsafe { dev.raw.destroy_buffer(buffer, None); } return Err(e); } };
         dev.charge(req.size);
         let coherent = dev.memory.memory_types[ty as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT);
-        let out = Self { dev, buffer, memory, size: logical_size, bytes: req.size, mapped: 0, coherent };
+        let out = Self { dev, buffer, memory, size: logical_size, bytes: req.size, mapped: 0, coherent, scratch: false };
         unsafe {
             out.dev.raw.bind_buffer_memory(buffer, memory, 0).map_err(error)?;
             let ptr = out.dev.raw.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).map_err(error)? as *mut u8;
@@ -441,9 +442,9 @@ impl Buffer {
             Ok::<_, String>((memory, ty))
         })();
         let (memory, ty) = match result { Ok(v) => v, Err(e) => { unsafe { dev.raw.destroy_buffer(buffer, None); } return Err(e); } };
-        dev.charge(req.size);
+        dev.charge_scratch(req.size);
         let mut out = Self { dev, buffer, memory, size: logical_size, bytes: req.size, mapped: 0,
-            coherent: false };
+            coherent: false, scratch: true };
         out.coherent = out.dev.memory.memory_types[ty as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT);
         unsafe {
             out.dev.raw.bind_buffer_memory(buffer, memory, 0).map_err(error)?;
@@ -535,7 +536,11 @@ impl Drop for Buffer {
             self.dev.raw.destroy_buffer(self.buffer, None);
             self.dev.raw.free_memory(self.memory, None);
         }
-        self.dev.uncharge(self.bytes);
+        if self.scratch {
+            self.dev.uncharge_scratch(self.bytes);
+        } else {
+            self.dev.uncharge(self.bytes);
+        }
     }
 }
 
