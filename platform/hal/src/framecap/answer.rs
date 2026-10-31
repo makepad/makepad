@@ -678,7 +678,7 @@ fn draw_text(c: &Arc<Capture>, req: &Req) -> Result<String, String> {
     t.push_str(&format!("| instances | {inst}{} |\n", if d.inst_ranges.is_empty() { String::new() } else { format!(" in {} ranges", d.inst_ranges.len()) }));
     t.push_str(&format!("| indices | {} from {} |\n", d.index[1], d.index[0]));
     let mut flags = Vec::new();
-    for (bit, name) in [(Draw::BLEND, "blend"), (Draw::DEPTH_WRITE, "depth-write"), (Draw::CULL, "cull back faces (front = counter-clockwise in clip space)"), (Draw::INDEX_U32, "u32 indices")] {
+    for (bit, name) in [(Draw::BLEND, "blend"), (Draw::DEPTH_WRITE, "depth-write"), (Draw::REVERSE_Z, "reverse-z"), (Draw::CULL, "cull back faces (front = counter-clockwise in clip space)"), (Draw::INDEX_U32, "u32 indices")] {
         if d.flags & bit != 0 {
             flags.push(name);
         }

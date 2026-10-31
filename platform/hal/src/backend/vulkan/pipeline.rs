@@ -294,8 +294,8 @@ struct VariantKey { colors: [u32; 4], depth: u32, flags: u32, views: u8, samples
 
 impl VariantKey {
     fn new(pass: PassKey, flags: u32) -> Self {
-        let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE | Draw::WIREFRAME);
-        if pass.depth == ABSENT { flags &= !Draw::DEPTH_WRITE; } // no depth attachment: the bit changes nothing
+        let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE | Draw::WIREFRAME | Draw::REVERSE_Z);
+        if pass.depth == ABSENT { flags &= !(Draw::DEPTH_WRITE | Draw::REVERSE_Z); } // no depth attachment: the bits change nothing
         Self { colors: pass.colors, depth: pass.depth, flags, views: pass.views, samples: pass.samples.max(1) }
     }
 }
@@ -467,8 +467,9 @@ fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Resul
         return Err("device lacks independent blend for this MRT layout".into());
     }
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+    let compare = if flags & Draw::REVERSE_Z != 0 { vk::CompareOp::GREATER_OR_EQUAL } else { vk::CompareOp::LESS_OR_EQUAL };
     let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(pass.key.depth != ABSENT)
-        .depth_write_enable(pass.key.depth != ABSENT && flags & Draw::DEPTH_WRITE != 0).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+        .depth_write_enable(pass.key.depth != ABSENT && flags & Draw::DEPTH_WRITE != 0).depth_compare_op(compare);
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
     let info = vk::GraphicsPipelineCreateInfo::default().stages(&stages).vertex_input_state(&vertex).input_assembly_state(&assembly)

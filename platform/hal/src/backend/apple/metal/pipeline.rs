@@ -238,7 +238,7 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
         variants: Mutex::new(Vec::new()),
         written: desc.outputs as u8,
         blend_max: desc.blend & pipeline_blend::MAX != 0,
-        can_blend: declared == MTLPixelFormat::BGRA8Unorm && !raw,
+        can_blend: matches!(declared, MTLPixelFormat::BGRA8Unorm | MTLPixelFormat::RGBA16Float) && !raw,
         discards: source.contains("discard_fragment"),
         declared: desc.color_formats.iter().copied().take_while(|f| *f != 0).filter_map(mtl_format).collect(),
         settled: AtomicU8::new(0),

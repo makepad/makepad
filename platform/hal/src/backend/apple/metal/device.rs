@@ -124,6 +124,8 @@ pub struct Device {
     pub in_flight: InFlightQueue,
     pub depth_write: RcObjcId,
     pub depth_no_write: RcObjcId,
+    pub depth_write_rev: RcObjcId,
+    pub depth_no_write_rev: RcObjcId,
     pub descriptor: RcObjcId,
     pub clock: Option<Option<Arc<PassClock>>>,
     chunks: Vec<Chunk>,
@@ -175,19 +177,21 @@ impl Device {
             let _: () = msg_send![tex, replaceRegion: region mipmapLevel: 0u64 withBytes: zero.as_ptr() as *const std::ffi::c_void bytesPerRow: 4u64];
             tex
         };
-        let (depth_write, depth_no_write, descriptor) = unsafe {
+        let (depth_write, depth_no_write, depth_write_rev, depth_no_write_rev, descriptor) = unsafe {
             let desc = RcObjcId::from_owned(NonNull::new(msg_send![class!(MTLDepthStencilDescriptor), new])?);
-            let _: () = msg_send![desc.as_id(), setDepthCompareFunction: MTLCompareFunction::LessEqual];
-            let make = |write: bool| {
+            let make = |compare: MTLCompareFunction, write: bool| {
+                let _: () = msg_send![desc.as_id(), setDepthCompareFunction: compare];
                 let _: () = msg_send![desc.as_id(), setDepthWriteEnabled: write];
                 NonNull::new(msg_send![device, newDepthStencilStateWithDescriptor: desc.as_id()]).map(RcObjcId::from_owned)
             };
-            let write = make(true)?;
-            let no_write = make(false)?;
+            let write = make(MTLCompareFunction::LessEqual, true)?;
+            let no_write = make(MTLCompareFunction::LessEqual, false)?;
+            let write_rev = make(MTLCompareFunction::GreaterEqual, true)?;
+            let no_write_rev = make(MTLCompareFunction::GreaterEqual, false)?;
             let pass = RcObjcId::from_owned(NonNull::new(msg_send![class!(MTLRenderPassDescriptor), new])?);
             let stencil: ObjcId = msg_send![pass.as_id(), stencilAttachment];
             let _: () = msg_send![stencil, setTexture: nil];
-            (write, no_write, pass)
+            (write, no_write, write_rev, no_write_rev, pass)
         };
         let completed = Arc::new(AtomicU64::new(0));
         let in_flight: InFlightQueue = Arc::new(Mutex::new(Default::default()));
@@ -221,6 +225,8 @@ impl Device {
             in_flight,
             depth_write,
             depth_no_write,
+            depth_write_rev,
+            depth_no_write_rev,
             descriptor,
             clock: None,
             chunks: Vec::new(),

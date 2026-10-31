@@ -67,6 +67,7 @@ pub(super) struct DrawJob {
     /// Some(max) = blended with MAX instead of ADD
     pub blend: Option<bool>,
     pub depth_write: bool,
+    pub reverse_z: bool,
     pub cull: bool,
     pub scissor: [i32; 4],
     pub draw_buffers: u32,
@@ -412,7 +413,7 @@ impl GlBackend {
             s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
         }
         Ok(Some(DrawJob { program, vb, ib, index_u32, index: d.index, blocks, buffers, textures, twins, pick: pick_words, instances, stride,
-            ranges, blend, depth_write: depth.is_some() && d.flags & Draw::DEPTH_WRITE != 0, cull: d.flags & Draw::CULL != 0, scissor, draw_buffers }))
+            ranges, blend, depth_write: depth.is_some() && d.flags & Draw::DEPTH_WRITE != 0, reverse_z: depth.is_some() && d.flags & Draw::REVERSE_Z != 0, cull: d.flags & Draw::CULL != 0, scissor, draw_buffers }))
     }
 }
 
@@ -423,6 +424,7 @@ struct Bound {
     draw_buffers: Option<u32>,
     blend: Option<Option<bool>>,
     depth_write: Option<bool>,
+    reverse_z: Option<bool>,
     cull: Option<bool>,
 }
 
@@ -504,6 +506,9 @@ impl Renderer {
         for d in &p.draws { self.run_draw(d, &mut bound); }
         let gl = &self.ctx.gl;
         unsafe {
+            if bound.reverse_z == Some(true) {
+                (gl.glDepthFunc)(sys::LEQUAL);
+            }
             (gl.glBindVertexArray)(0);
             (gl.glUseProgram)(0);
             (gl.glBindFramebuffer)(sys::FRAMEBUFFER, 0);
@@ -565,6 +570,10 @@ impl Renderer {
             if bound.depth_write != Some(d.depth_write) {
                 (gl.glDepthMask)(d.depth_write as u8);
                 bound.depth_write = Some(d.depth_write);
+            }
+            if bound.reverse_z != Some(d.reverse_z) {
+                (gl.glDepthFunc)(if d.reverse_z { sys::GEQUAL } else { sys::LEQUAL });
+                bound.reverse_z = Some(d.reverse_z);
             }
             if bound.cull != Some(d.cull) {
                 if d.cull { (gl.glEnable)(sys::CULL_FACE) } else { (gl.glDisable)(sys::CULL_FACE) }

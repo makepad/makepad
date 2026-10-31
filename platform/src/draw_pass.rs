@@ -187,6 +187,8 @@ pub struct ScriptDrawPass {
     pub dont_clear: bool,
     #[live]
     pub keep_camera_matrix: bool,
+    #[live]
+    pub reverse_z: bool,
 }
 
 impl std::ops::Deref for ScriptDrawPass {
@@ -208,6 +210,7 @@ impl ScriptHook for ScriptDrawPass {
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].dont_clear = self.dont_clear;
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].keep_camera_matrix =
             self.keep_camera_matrix;
+        vm.host.cx_mut().passes[self.handle.draw_pass_id()].reverse_z = self.reverse_z;
     }
 }
 
@@ -488,6 +491,12 @@ impl DrawPass {
         cxpass.clear_depth = clear_depth;
     }
 
+    /// Use `GREATER_OR_EQUAL` depth comparison for all draws in this pass
+    /// (for reverse-Z depth buffers where 1.0 is the near plane and 0.0 is far).
+    pub fn set_reverse_z(&self, cx: &mut Cx, reverse_z: bool) {
+        cx.passes[self.draw_pass_id()].reverse_z = reverse_z;
+    }
+
     /// Nothing reads this pass's colour targets: it renders for its depth
     /// (a shadow map whose pipeline still writes a colour). A tile GPU then
     /// neither loads nor stores them (Metal: DontCare), which on a shadow
@@ -681,6 +690,7 @@ pub struct CxDrawPass {
     /// The colour targets are scratch (see `DrawPass::set_color_scratch`).
     pub color_scratch: bool,
     pub keep_camera_matrix: bool,
+    pub reverse_z: bool,
     pub depth_init: f64,
     pub clear_color: Vec4f,
     pub dpi_factor: Option<f64>,
@@ -814,6 +824,7 @@ impl Default for CxDrawPass {
             debug: false,
             dont_clear: false,
             keep_camera_matrix: false,
+            reverse_z: false,
             debug_name: String::new(),
             zbias_step: 0.001,
             sploded: None,
