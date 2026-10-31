@@ -351,6 +351,20 @@ class MakepadSurface
 {
     // IME InputConnection for handling composition text
     private MakepadInputConnection mInputConnection;
+    private final MakepadA11yProvider a11yProvider;
+
+    @Override
+    public android.view.accessibility.AccessibilityNodeProvider getAccessibilityNodeProvider() {
+        if (a11yProvider != null) a11yProvider.updateState();
+        return a11yProvider;
+    }
+
+    @Override
+    public boolean dispatchHoverEvent(MotionEvent event) {
+        return a11yProvider.dispatchHoverEvent(event) || super.dispatchHoverEvent(event);
+    }
+
+    MakepadA11yProvider a11y() { return a11yProvider; }
 
     // Shared Editable buffer for IME - this is the source of truth for Java side
     private SpannableStringBuilder mEditable = new SpannableStringBuilder();
@@ -421,6 +435,7 @@ class MakepadSurface
 
     public MakepadSurface(Context context){
         super(context);
+        a11yProvider = new MakepadA11yProvider(this);
         getHolder().addCallback(this);
 
         setFocusable(true);
@@ -433,15 +448,18 @@ class MakepadSurface
         Selection.setSelection(mEditable, 0, 0);
     }
 
-    // Only while attached, since a recreated activity can keep using this window.
+    // The layout listener only while attached, since a recreated activity can keep using this
+    // window; the accessibility provider likewise.
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
         getViewTreeObserver().addOnGlobalLayoutListener(this);
+        a11yProvider.attach();
     }
 
     @Override
     protected void onDetachedFromWindow() {
+        a11yProvider.detach();
         getViewTreeObserver().removeOnGlobalLayoutListener(this);
         super.onDetachedFromWindow();
     }
@@ -458,6 +476,7 @@ class MakepadSurface
         Context context = getContext();
         if (context instanceof MakepadActivity) {
             MakepadActivity activity = (MakepadActivity) context;
+            activity.nativeLayerSurfaceLost();
             if (activity.hasRecoverySnapshotAvailable()) {
                 activity.setSurfaceCoverVisible(true);
             }
@@ -627,6 +646,7 @@ class MakepadSurface
     // For some reason it only works if placed here and not in the parent layout.
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+        if (!hasFocus()) return null;
         int inputType = InputType.TYPE_CLASS_TEXT;
 
         switch (mInputMode) {
@@ -798,7 +818,7 @@ class MakepadSurface
         mIsSecure = isSecure;
 
         // If config changed and keyboard is already showing, restart input to apply new settings
-        if (changed && mInputConnection != null) {
+        if (changed && mInputConnection != null && hasFocus()) {
             // Finalize any in-progress composition before restart to avoid stale state
             BaseInputConnection.removeComposingSpans(mEditable);
             InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -1056,7 +1076,71 @@ public class MakepadActivity
     private static int sWarmResumeSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
     //% MAIN_ACTIVITY_BODY
 
+    /** False while MakepadNative has no native implementation yet (a host that binds it late). */
+    protected boolean nativesReady() {
+        return true;
+    }
+
+    /** Called instead of starting up when `nativesReady()` was false; the activity then finishes. */
+    protected void onNativesNotReady() {}
+
+    private boolean mNativesDeferred = false;
+
     private MakepadSurface view;
+
+    // JNI notification worker calls this; the provider posts delivery to Android's UI thread.
+    public void a11yEvent(int id, int kind, int change, String text) {
+        runOnUiThread(() -> {
+            if (view != null) view.a11y().postEvent(id, kind, change, text);
+        });
+    }
+
+    public String a11ySelfCheck() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return view == null ? "error: no Android surface" : view.a11y().selfCheck();
+        }
+        CompletableFuture<String> result = new CompletableFuture<>();
+        runOnUiThread(() -> {
+            try { result.complete(view == null ? "error: no Android surface" : view.a11y().selfCheck()); }
+            catch (Throwable error) { result.completeExceptionally(error); }
+        });
+        return result.join();
+    }
+
+    public long a11ySelfCheckAction(int id, int action) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return view == null ? 0 : view.a11y().selfCheckAction(id, action);
+        }
+        CompletableFuture<Long> result = new CompletableFuture<>();
+        runOnUiThread(() -> {
+            try { result.complete(view == null ? 0 : view.a11y().selfCheckAction(id, action)); }
+            catch (Throwable error) { result.completeExceptionally(error); }
+        });
+        return result.join();
+    }
+
+    private NativeLayerContainer mNativeLayers;
+
+    void nativeLayerSurfaceLost() { if (mNativeLayers != null) mNativeLayers.surfaceLost(); }
+
+    public void createNativeWebLayer(int session, long id, byte[] url) {
+        runOnUiThread(() -> { if (mNativeLayers != null) mNativeLayers.create(session, id, url); });
+    }
+
+    public void nativeWebLayerOp(int session, long id, int op, long arg, byte[] data) {
+        runOnUiThread(() -> { if (mNativeLayers != null) mNativeLayers.operation(session, id, op, arg, data); });
+    }
+
+    public void destroyNativeWebLayer(int session, long id) {
+        runOnUiThread(() -> { if (mNativeLayers != null) mNativeLayers.destroy(session, id); });
+    }
+
+    public void applyNativeLayerFrame(long ticket, long serial, int session, long[] ids, float[] geometry, int segmentCount) {
+        runOnUiThread(() -> {
+            if (mNativeLayers != null) mNativeLayers.frame(ticket, serial, session, ids, geometry, segmentCount);
+            else MakepadNative.discardNativeLayerFrame(ticket);
+        });
+    }
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private InputManager mInputManager;
     private InputManager.InputDeviceListener mInputDeviceListener;
@@ -1278,6 +1362,20 @@ public class MakepadActivity
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        if (!nativesReady()) {
+            // a host that binds MakepadNative late (the makepad run host APK) is not booted in this
+            // process, e.g. the system restored this activity after killing the process: nothing
+            // of this activity may touch MakepadNative; the host starts its boot and this ends
+            mNativesDeferred = true;
+            super.onCreate(savedInstanceState);
+            onNativesNotReady();
+            finish();
+            return;
+        }
+        // the app's external files folder exists from the first start (the system makes it with
+        // the app's ownership): what a developer drops in with adb (a fleet credential, a config)
+        // is then readable by the app
+        getExternalFilesDir(null);
         if (mWebSocketsThread == null || !mWebSocketsThread.isAlive()) {
             mWebSocketsThread = new HandlerThread("WebSocketsThread");
             mWebSocketsThread.start();
@@ -1301,11 +1399,9 @@ public class MakepadActivity
                 | LayoutParams.SOFT_INPUT_STATE_UNCHANGED
         );
 
-        // Default state: content below system bars (status bar visible).
-        // Apps that want fullscreen can request CxOsOp::FullscreenWindow which
-        // calls applyFullScreen(true) to hide bars and extend content behind them.
 
         view = new MakepadSurface(this);
+        view.setId(View.generateViewId());
         Object previousView = getLastNonConfigurationInstance();
         if (previousView instanceof MakepadSurface) {
             view.takeImeStateFrom((MakepadSurface) previousView);
@@ -1338,6 +1434,9 @@ public class MakepadActivity
 
         mRootLayout = new FrameLayout(this);
         mRootLayout.addView(layout);
+
+        mNativeLayers = new NativeLayerContainer(this, view);
+        mRootLayout.addView(mNativeLayers);
 
         mSurfaceCoverOverlay = new FrameLayout(this);
         mSurfaceCoverOverlay.setLayoutParams(new FrameLayout.LayoutParams(
@@ -1386,6 +1485,12 @@ public class MakepadActivity
         mSelectionHandleOverlay.addView(mSelectionHandleEnd);
 
         setContentView(mRootLayout);
+
+        // Default state: edge to edge, the bars visible and transparent over the
+        // app's drawing, their size reported as safe-area insets. Apps that want
+        // fullscreen can request CxOsOp::FullscreenWindow which calls
+        // applyFullScreen(true) to hide the bars.
+        applyEdgeToEdge();
         restoreWarmResumeSurfaceSnapshotIfAvailable();
         applyAppBackgroundColor();
         applySystemBarAppearance();
@@ -1476,12 +1581,28 @@ public class MakepadActivity
 
         int sdkVersion = Build.VERSION.SDK_INT;
         sendAndroidParams();
+        sendDisplayRotation();
+        // Landscape to reverse landscape (a half turn) changes no configuration,
+        // so onConfigurationChanged never hears of it: the display listener does.
+        android.hardware.display.DisplayManager displays =
+            (android.hardware.display.DisplayManager) getSystemService(android.content.Context.DISPLAY_SERVICE);
+        if (displays != null) {
+            displays.registerDisplayListener(new android.hardware.display.DisplayManager.DisplayListener() {
+                @Override public void onDisplayAdded(int displayId) {}
+                @Override public void onDisplayRemoved(int displayId) {}
+                @Override public void onDisplayChanged(int displayId) { sendDisplayRotation(); }
+            }, null);
+        }
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
         float refreshRate = getDeviceRefreshRate();
         MakepadNative.initChoreographer(refreshRate, sdkVersion);
+        // A recreated activity was already handed its intent.
+        if (savedInstanceState == null) {
+            deliverAppOpenIntent(getIntent(), true);
+        }
         //% MAIN_ACTIVITY_ON_CREATE
         
     }
@@ -1520,10 +1641,15 @@ public class MakepadActivity
 
     @Override
     protected void onDestroy() {
+        if (mNativesDeferred) {
+            super.onDestroy();
+            return;
+        }
         // Android recreates the activity right away for a config change the manifest doesn't
         // declare, and the running app moves over to the new one, so it must not shut down here.
         boolean isRecreating = isChangingConfigurations();
         unregisterPhysicalKeyboardListener();
+        if (mNativeLayers != null) { mNativeLayers.close(); mNativeLayers = null; }
         if (mBackCallback != null) {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(mBackCallback);
             mBackCallback = null;
@@ -1579,24 +1705,6 @@ public class MakepadActivity
         return view;
     }
 
-    @Override
-    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        int handleSizePx = selectionHandleSizePx();
-        if (handleSizePx != mSelectionHandleSizePx && mSelectionHandleStart != null) {
-            mSelectionHandleSizePx = handleSizePx;
-            for (View handle : new View[] { mSelectionHandleStart, mSelectionHandleEnd }) {
-                ViewGroup.LayoutParams params = handle.getLayoutParams();
-                params.width = handleSizePx;
-                params.height = handleSizePx;
-                handle.setLayoutParams(params);
-            }
-        }
-        // The params carry the new density.
-        sendAndroidParams();
-        reportPhysicalKeyboardIfChanged();
-    }
-
     private int selectionHandleSizePx() {
         return Math.max(24, (int) (getResources().getDisplayMetrics().density * 24.0f));
     }
@@ -1611,7 +1719,8 @@ public class MakepadActivity
 
         // Makepad ignores the kernel version, but the slot stays so the native
         // signature doesn't change.
-        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "");
+        boolean nightMode = isNightMode(getResources().getConfiguration());
+        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "", nightMode);
     }
 
     @Override
@@ -1641,8 +1750,21 @@ public class MakepadActivity
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
         // Navigation is handled asynchronously by the Makepad UI. The superclass
-        // would finish/background this activity before that UI can dismiss an overlay.
+        // would finish/background this activity before that UI can dismiss an overlay;
+        // when the UI does not take the press, it calls onBackUnhandled.
         MakepadNative.onBackPressed();
+    }
+
+    // The Makepad UI did not handle a back press: do what the system does by
+    // default (finish, or move a root task to the background on Android 12+).
+    @SuppressWarnings("deprecation")
+    public void onBackUnhandled() {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    MakepadActivity.super.onBackPressed();
+                }
+            });
     }
 
     @Override
@@ -1662,6 +1784,28 @@ public class MakepadActivity
         super.onNewIntent(intent);
         setIntent(intent);
         restoreSurfaceViewForWarmResumeIfNeeded();
+        deliverAppOpenIntent(intent, false);
+    }
+
+    // What an intent asks the app to open, as Event::AppOpen: an ACTION_VIEW
+    // URI (a file: URI as its path) or ACTION_SEND text (a shared link).
+    private void deliverAppOpenIntent(Intent intent, boolean atLaunch) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        String item = null;
+        boolean isPath = false;
+        if (Intent.ACTION_VIEW.equals(action)) {
+            Uri uri = intent.getData();
+            if (uri != null) {
+                isPath = "file".equals(uri.getScheme());
+                item = isPath ? uri.getPath() : uri.toString();
+            }
+        } else if (Intent.ACTION_SEND.equals(action) && "text/plain".equals(intent.getType())) {
+            item = intent.getStringExtra(Intent.EXTRA_TEXT);
+        }
+        if (item != null && item.length() > 0) {
+            MakepadNative.onAppOpen(item, isPath, atLaunch);
+        }
     }
 
     @Override
@@ -1843,6 +1987,32 @@ public class MakepadActivity
             });
     }
 
+    // Locks the screen orientation (an ActivityInfo.SCREEN_ORIENTATION_*
+    // value; UNSPECIFIED releases the lock).
+    public void setScreenOrientation(final int orientation) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    setRequestedOrientation(orientation);
+                }
+            });
+    }
+
+    // Keeps the display awake while `on`. Window flags only take effect from
+    // the UI thread.
+    public void setKeepScreenOn(final boolean on) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (on) {
+                        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    } else {
+                        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    }
+                }
+            });
+    }
+
     // Tints the system bar (status/navigation bar) icons and text. A "light"
     // system bar has a light background, so it needs dark icons for contrast;
     // we therefore request dark icons when the app's background is light.
@@ -1910,18 +2080,12 @@ public class MakepadActivity
         }
     }
 
-    @SuppressWarnings("deprecation")
     private void applyAppBackgroundColor() {
         Window window = getWindow();
         if (window == null) {
             return;
         }
         window.setBackgroundDrawable(new ColorDrawable(mAppBackgroundColor));
-        // Before Android 15, the app doesn't draw under the system bars, so we color them too.
-        if (Build.VERSION.SDK_INT < 35) {
-            window.setStatusBarColor(mAppBackgroundColor);
-            window.setNavigationBarColor(mAppBackgroundColor);
-        }
         // Keep a stable non-black fallback behind the SurfaceView for task snapshots
         // and system transition frames that cannot capture the separate surface layer.
         View[] backgroundViews = {
@@ -2260,6 +2424,88 @@ public class MakepadActivity
         });
     }
 
+    private static boolean isNightMode(android.content.res.Configuration config) {
+        return (config.uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+            == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    // The system switched between light and dark while the app runs. The
+    // manifest lists uiMode in configChanges, so the activity is not recreated;
+    // Cx is told, and its night_mode follows.
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration config) {
+        super.onConfigurationChanged(config);
+        if (mNativesDeferred) {
+            return;
+        }
+        int handleSizePx = selectionHandleSizePx();
+        if (handleSizePx != mSelectionHandleSizePx && mSelectionHandleStart != null) {
+            mSelectionHandleSizePx = handleSizePx;
+            for (View handle : new View[] { mSelectionHandleStart, mSelectionHandleEnd }) {
+                ViewGroup.LayoutParams params = handle.getLayoutParams();
+                params.width = handleSizePx;
+                params.height = handleSizePx;
+                handle.setLayoutParams(params);
+            }
+        }
+        // A fold, a split screen or a new display size keeps this activity (the manifest
+        // declares those changes too); the params carry the new density.
+        sendAndroidParams();
+        MakepadNative.onNightModeChanged(isNightMode(config));
+        sendDisplayRotation();
+        reportPhysicalKeyboardIfChanged();
+    }
+
+    // The display's rotation (Surface.ROTATION_0..270 = 0..3): camera frames are
+    // turned upright against it.
+    @SuppressWarnings("deprecation")
+    private void sendDisplayRotation() {
+        try {
+            MakepadNative.onDisplayRotation(getWindowManager().getDefaultDisplay().getRotation());
+        } catch (Throwable t) {
+            Log.w("Makepad", "display rotation unavailable: " + t);
+        }
+    }
+
+    // Edge to edge: the surface draws behind the status bar, the navigation /
+    // gesture bar and the display cutout, whatever the Android version (from
+    // Android 15 with targetSdk 35 the system enforces it; below that this
+    // makes older systems behave the same). The bars are transparent and
+    // unscrimmed, so the app's own background shows through them, and the
+    // bar + cutout insets reach Cx as safe-area insets
+    // (MakepadSystemInsets), so layouts keep their content clear of them.
+    @SuppressWarnings("deprecation")
+    private void applyEdgeToEdge() {
+        Window window = getWindow();
+        if (window == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 28) {
+            // ALWAYS (API 30+) lets the content use the cutout area on every
+            // edge, SHORT_EDGES is its API 28-29 form.
+            window.getAttributes().layoutInDisplayCutoutMode =
+                Build.VERSION.SDK_INT >= 30 ? 3 : LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+        } else {
+            View decorView = window.getDecorView();
+            decorView.setSystemUiVisibility(decorView.getSystemUiVisibility()
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        }
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setStatusBarColor(0);
+        window.setNavigationBarColor(0);
+        if (Build.VERSION.SDK_INT >= 29) {
+            // No translucent scrim behind the 3-button navigation bar.
+            window.setNavigationBarContrastEnforced(false);
+            window.setStatusBarContrastEnforced(false);
+        }
+        applySystemBarAppearance();
+    }
+
     private void handleSurfaceSnapshotRefreshRequest() {
         // Rust asks for this right after its first frame, even in versions that don't
         // hide the cover from onCreate themselves, so that's when it can go.
@@ -2304,14 +2550,12 @@ public class MakepadActivity
             }
         }
         else {
+            applyEdgeToEdge();
             if (Build.VERSION.SDK_INT >= 30) {
-                getWindow().setDecorFitsSystemWindows(true);
                 android.view.WindowInsetsController controller = getWindow().getInsetsController();
                 if (controller != null) {
                     controller.show(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
                 }
-            } else {
-                decorView.setSystemUiVisibility(0);
             }
         }
 
@@ -2421,6 +2665,7 @@ public class MakepadActivity
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                if (mNativeLayers != null && mNativeLayers.ownsFocus()) return;
                 if (show) {
                     if (view == null || view.getInputMode() == MakepadSurface.INPUT_MODE_NONE) {
                         return;
@@ -2473,6 +2718,7 @@ public class MakepadActivity
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                if (mNativeLayers != null && mNativeLayers.ownsFocus()) return;
                 if (view != null) {
                     view.updateImeTextState(
                         fullText,
@@ -2492,6 +2738,20 @@ public class MakepadActivity
         String clipLabel = getApplicationName() + " clip";
         ClipData clip = ClipData.newPlainText(clipLabel, content);
         clipboard.setPrimaryClip(clip);
+    }
+
+    // Fire the system share sheet (ACTION_SEND) for social sharing. Called
+    // from Rust via `android_jni::to_java_share_text`.
+    public void shareText(String content) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_SEND);
+            intent.setType("text/plain");
+            intent.putExtra(Intent.EXTRA_TEXT, content);
+            Intent chooser = Intent.createChooser(intent, "Share");
+            startActivity(chooser);
+        } catch (Exception e) {
+            Log.e("Makepad", "shareText failed: " + e.toString());
+        }
     }
 
     public String pasteFromClipboard() {
@@ -2523,7 +2783,6 @@ public class MakepadActivity
     }
 
     // `cx.open_url`: hand the URL to whatever the system opens it with.
-    // Hosted child processes of a window manager ask the WM for this.
     public void openUrl(final String url) {
         runOnUiThread(new Runnable() {
             public void run() {
@@ -2883,12 +3142,21 @@ public class MakepadActivity
         return true;
     }
 
-    public byte[] socketStreamRead(long id, int maxBytes) {
+    /** Into dst (a direct buffer over native memory): bytes moved, 0 on a timeout, -1 ended. */
+    public int socketStreamReadInto(long id, java.nio.ByteBuffer dst) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket == null) {
+            return -1;
+        }
+        return socket.readInto(dst);
+    }
+
+    public byte[] socketStreamPeerCertificate(long id) {
         MakepadSocketStream socket = mActiveSocketStreams.get(id);
         if (socket == null) {
             return null;
         }
-        return socket.read(maxBytes);
+        return socket.peerCertificate();
     }
 
     public int socketStreamWrite(long id, byte[] message) {
@@ -3142,55 +3410,33 @@ public class MakepadActivity
         return speech().ttsLastError();
     }
 
-    public void attachCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom) {
+    public void applyNativeCameraLayer(final long layerId, final int left, final int top,
+            final int right, final int bottom, final int clipLeft, final int clipTop,
+            final int clipRight, final int clipBottom, final boolean visible, final float opacity) {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (mCameraPreviewOverlay == null) {
-                    return;
-                }
-                CameraPreviewSurface preview = mCameraPreviewViews.get(videoId);
+                if (mCameraPreviewOverlay == null) return;
+                CameraPreviewSurface preview = mCameraPreviewViews.get(layerId);
                 if (preview == null) {
-                    preview = new CameraPreviewSurface(MakepadActivity.this, videoId);
-                    mCameraPreviewViews.put(videoId, preview);
+                    if (!visible) return;
+                    preview = new CameraPreviewSurface(MakepadActivity.this, layerId);
+                    mCameraPreviewViews.put(layerId, preview);
                     mCameraPreviewOverlay.addView(preview);
                 }
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    Math.max(1, right - left),
-                    Math.max(1, bottom - top)
-                );
+                    Math.max(1, right - left), Math.max(1, bottom - top));
                 lp.leftMargin = left;
                 lp.topMargin = top;
                 preview.setLayoutParams(lp);
-                preview.setVisibility(View.VISIBLE);
-            }
-        });
-    }
-
-    public void updateCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom, final boolean visible) {
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                CameraPreviewSurface preview = mCameraPreviewViews.get(videoId);
-                if (preview == null) {
-                    if (visible) {
-                        attachCameraNativePreview(videoId, left, top, right, bottom);
-                    }
-                    return;
-                }
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    Math.max(1, right - left),
-                    Math.max(1, bottom - top)
-                );
-                lp.leftMargin = left;
-                lp.topMargin = top;
-                preview.setLayoutParams(lp);
+                preview.setClipBounds(new android.graphics.Rect(clipLeft, clipTop, clipRight, clipBottom));
+                preview.setAlpha(opacity);
                 preview.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
             }
         });
     }
 
-    public void detachCameraNativePreview(final long videoId) {
+    public void detachNativeCameraLayer(final long videoId) {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -3302,6 +3548,59 @@ public class MakepadActivity
         };
     }
 
+    /// The largest frame the HEVC encoder that MediaCodec.createEncoderByType("video/hevc") picks
+    /// (the first one in the regular list) takes: its width (which == 0) or height (which == 1),
+    /// 0 when there is none. The image tile libraries size their pages to fit it.
+    private android.net.wifi.WifiManager.WifiLock lowLatencyWifi;
+
+    /// The low-latency Wi-Fi mode while `on` (WIFI_MODE_FULL_LOW_LATENCY where the system has
+    /// it, else full high-performance): no power save and no background scans.
+    public void networkLowLatency(boolean on) {
+        try {
+            if (on && lowLatencyWifi == null) {
+                android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wifi == null) return;
+                int mode = Build.VERSION.SDK_INT >= 29 ? 4 : 3;
+                lowLatencyWifi = wifi.createWifiLock(mode, "makepad low latency");
+                lowLatencyWifi.setReferenceCounted(false);
+                lowLatencyWifi.acquire();
+                Log.i("Makepad", "low-latency Wi-Fi " + (lowLatencyWifi.isHeld() ? "held" : "not held"));
+            } else if (!on && lowLatencyWifi != null) {
+                lowLatencyWifi.release();
+                lowLatencyWifi = null;
+            }
+        } catch (Exception e) {
+            Log.e("Makepad", "low-latency Wi-Fi: " + e);
+        }
+    }
+
+    public int hevcEncoderMaxSize(int which) {
+        try {
+            MediaCodecList list = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+            for (MediaCodecInfo info : list.getCodecInfos()) {
+                if (!info.isEncoder()) continue;
+                for (String t : info.getSupportedTypes()) {
+                    if (!"video/hevc".equalsIgnoreCase(t)) continue;
+                    MediaCodecInfo.VideoCapabilities vc = info.getCapabilitiesForType(t).getVideoCapabilities();
+                    if (vc == null) return 0;
+                    int w = vc.getSupportedWidths().getUpper().intValue();
+                    int h = vc.getSupportedHeights().getUpper().intValue();
+                    // The widest frame the encoder takes at its tallest height, and the other way:
+                    // the upper bounds alone may not be a supported pair (3840 wide and 3840 tall,
+                    // but not 3840x3840).
+                    int align = Math.max(2, vc.getHeightAlignment());
+                    if (which == 0) {
+                        while (h > align && !vc.isSizeSupported(w, h)) h -= align;
+                        return w;
+                    }
+                    while (h > align && !vc.isSizeSupported(w, h)) h -= align;
+                    return h;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
     public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
         // A destroyed activity has already shut its video thread down.
         if (mVideoPlaybackHandler == null) {
@@ -3381,7 +3680,6 @@ public class MakepadActivity
             runnable.cleanupVideoPlaybackResources();
             runnable = null;
         }
-        detachCameraNativePreview(videoId);
     }
     
                 

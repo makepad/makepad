@@ -3,7 +3,8 @@
 name = "brotli_check"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-brotli = "8.0"
+brotli = { path = "../../libs/brotli/brotli" }
 deflate = "1.0"

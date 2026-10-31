@@ -60,6 +60,8 @@ pub(super) struct Item {
     pub child: bool,
     /// Said on the line under the rule while the row is selected.
     pub info: String,
+    /// An app whose source is here: e sends the person's changes.
+    pub send: bool,
 }
 #[derive(Clone)]
 pub(super) enum Row {
@@ -87,8 +89,8 @@ pub(super) enum Nav {
     /// Something changed in the background (an app exited, disk measured):
     /// rebuild the view and call `menu` again.
     Refresh,
-    /// A letter key on the main menu (c cancel, s start when done) and the
-    /// selected row's id.
+    /// A letter key on the main menu (c cancel, s start when done, e send
+    /// my changes) and the selected row's id.
     Key(char, String),
 }
 

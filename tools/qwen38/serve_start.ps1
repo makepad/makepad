@@ -7,7 +7,7 @@ param(
   [string]$Draft = 'none'
 )
 $ErrorActionPreference = 'Stop'
-$exe = 'C:\Users\me\llama.cpp\build\bin\release\llama-server.exe'
+$exe = '$env:USERPROFILE\llama.cpp\build\bin\release\llama-server.exe'
 $out = 'C:\ai\models\qwen38'
 $keyfile = 'C:\ai\qwen38\api_key.txt'
 if (-not (Test-Path $keyfile)) {

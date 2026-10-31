@@ -44,6 +44,15 @@ pub struct WasmConfig {
     pub split_functions: bool,
     pub split_functions_threshold: usize,
     pub hot_reload: bool,
+    /// Export the indirect function table, growable, so the page can link
+    /// runtime-generated modules into it (platform `wasm_link`).
+    pub link_table: bool,
+    /// Crates built at opt-level 3 (`--opt-speed=a,b`): the size-optimised
+    /// default (z) slows interpreter loops and math several times.
+    pub opt_speed: Option<&'static str>,
+    /// `--pack=<preset>` (and `--strict`): collect, then pack from what
+    /// the run saw (see `super::pack`).
+    pub pack: Option<(makepad_web_pack::pack::PackPreset, bool)>,
 }
 
 #[derive(SerJson, Clone)]
@@ -421,6 +430,9 @@ pub fn generate_html(
                 }}
             }};
             window.makepad_report_browser_issue = reportBrowserIssue;
+            // A development page checks GL errors and framebuffer completeness
+            // (a shipped page never does: each query stalls on the GPU).
+            window.makepad_gl_checks = true;
             
             window.addEventListener('error', (event) => {{
                 let stack = '';
@@ -519,7 +531,7 @@ fn remove_brotli_artifact(dest_path: &PathBuf) {
     let _ = fs::remove_file(dest_path_br);
 }
 
-fn minify_js(input: &str) -> String {
+pub(super) fn minify_js(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     let mut in_string = false;
@@ -660,9 +672,9 @@ pub fn cp_brotli(
 
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
-const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=4294967296 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
+const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=4294967296 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base";
 const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
-    "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C opt-level=z";
+    "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug";
 
 fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
     let target_spec_dir = if threaded {
@@ -741,7 +753,27 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     for arg in args {
         args_out.push(arg.clone());
     }
+    // Size-optimised by default, through the profile (not RUSTFLAGS) so a
+    // crate can be built for speed (`--opt-speed`).
+    args_out.push("--config".to_string());
+    args_out.push(format!("profile.{profile}.opt-level=\"z\""));
+    for name in config.opt_speed.unwrap_or("").split(',').filter(|n| !n.is_empty()) {
+        args_out.push("--config".to_string());
+        args_out.push(format!("profile.{profile}.package.\"{name}\".opt-level=3"));
+    }
     let args_out_refs: Vec<&str> = args_out.iter().map(|arg| arg.as_str()).collect();
+
+    // `--pack`: the app's collect run first; its shader pack is linked in.
+    let mut pack_report = super::pack::PackReport::default();
+    let pack_config = config.pack.map(|(preset, strict)| super::pack::PackConfig::new(preset, strict));
+    let collected = match &pack_config {
+        Some(pack) => {
+            let (dir, manifest) = super::pack::collect(&cwd, build_crate, &build_bin, args, &mut pack_report)?;
+            let (flags, env) = super::pack::link_env(pack, &dir, &manifest, &mut pack_report);
+            Some((dir, manifest, flags, env))
+        }
+        None => None,
+    };
 
     let mut rustflags = if config.threads {
         WASM_RUSTFLAGS_THREADED
@@ -752,7 +784,18 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     if config.no_location_detail {
         rustflags.push_str(" -Zlocation-detail=none");
     }
+    if config.link_table {
+        rustflags.push_str(" -C link-arg=--export-table -C link-arg=--growable-table");
+    }
+    if let Some((_, _, flags, _)) = &collected {
+        rustflags.push_str(flags);
+    }
     let mut env = vec![("RUSTFLAGS", rustflags.as_str())];
+    if let Some((_, _, _, pack_env)) = &collected {
+        for (k, v) in pack_env {
+            env.push((k.as_str(), v.as_str()));
+        }
+    }
     // Let Makepad's explicit strip pass see custom sections so `--keep-names` can retain the
     // analysis module before the shipping module is stripped. The emitted production wasm is
     // still stripped below, and its standard code/data section bytes are unchanged.
@@ -780,31 +823,44 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let local_resources_path = build_crate_dir.join("resources");
 
     if local_resources_path.is_dir() {
-        // The app resolves `self://` through its own module path, which for a bin target is
-        // the BIN name (`files`), not the package name (`makepad-files`): package under that.
+        // The app resolves `self://` through the module path of the code that names the
+        // resource: for a bin target that is the BIN name (`files`), for code in the package's
+        // library the LIBRARY name (`makepad_app_route` for bin `route`). Package under both
+        // when they differ, or a lib+bin app's own icons 404 on the web.
         let underscore_build_bin = build_bin.replace('-', "_");
-        let dst_dir = app_dir.join(&underscore_build_bin).join("resources");
-        font_package.copy_tree_filtered(
-            &local_resources_path,
-            &dst_dir,
-            &format!("{underscore_build_bin}/resources"),
-            no_skip,
-            |dest_path| {
-                let dest_path = dest_path.to_path_buf();
-                if config.brotli {
-                    brotli_compress(&dest_path);
-                } else {
-                    remove_brotli_artifact(&dest_path);
-                }
-                Ok(())
-            },
-        )?;
+        let underscore_lib = build_crate.replace('-', "_");
+        let mut names = vec![underscore_build_bin];
+        if !names.contains(&underscore_lib) {
+            names.push(underscore_lib);
+        }
+        for name in names {
+            let dst_dir = app_dir.join(&name).join("resources");
+            font_package.copy_tree_filtered(
+                &local_resources_path,
+                &dst_dir,
+                &format!("{name}/resources"),
+                no_skip,
+                |dest_path| {
+                    let dest_path = dest_path.to_path_buf();
+                    if config.brotli {
+                        brotli_compress(&dest_path);
+                    } else {
+                        remove_brotli_artifact(&dest_path);
+                    }
+                    Ok(())
+                },
+            )?;
+        }
     }
     let resources = get_crate_dep_dirs(build_crate, &build_dir, "wasm32-unknown-unknown");
+    // The web runtime's sources and where they are packaged (`--pack`
+    // strips their unused sections before minifying).
+    let mut runtime_js: Vec<(PathBuf, PathBuf)> = Vec::new();
     for (name, dep_dir) in resources.iter() {
         // alright we need special handling for makepad-wasm-bridge
         // and makepad-platform
         if name == "makepad-wasm-bridge" {
+            runtime_js.push((dep_dir.join("src/wasm_bridge.js"), app_dir.join("makepad_wasm_bridge/wasm_bridge.js")));
             cp_brotli(
                 &dep_dir.join("src/wasm_bridge.js"),
                 &app_dir.join("makepad_wasm_bridge/wasm_bridge.js"),
@@ -813,6 +869,18 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             )?;
         }
         if name == "makepad-platform" {
+            runtime_js.push((
+                dep_dir.join("src/os/web/a11y.js"),
+                app_dir.join("makepad_platform/a11y.js"),
+            ));
+            cp_brotli(
+                &dep_dir.join("src/os/web/a11y.js"),
+                &app_dir.join("makepad_platform/a11y.js"),
+                false,
+                config.brotli,
+            )?;
+            runtime_js.push((dep_dir.join("src/os/web/web.js"), app_dir.join("makepad_platform/web.js")));
+            runtime_js.push((dep_dir.join("src/os/web/web_gl.js"), app_dir.join("makepad_platform/web_gl.js")));
             cp_brotli(
                 &dep_dir.join("src/os/web/audio_worklet.js"),
                 &app_dir.join("makepad_platform/audio_worklet.js"),
@@ -899,6 +967,20 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         }
     }
     font_package.finish()?.print();
+    if let (Some(pack), Some((dir, manifest, _, _))) = (&pack_config, &collected) {
+        super::pack::subset_fonts(&app_dir, pack, manifest, config.brotli, &mut pack_report)?;
+        let needed = manifest.js.keys().cloned().collect();
+        let stripped = pack.options.js_stripped_for(&needed, pack.strict);
+        super::pack::strip_js(&runtime_js, &stripped, config.brotli, &mut pack_report)?;
+        let profile = super::pack::crate_profile(&fs::read(&linked_wasm).unwrap_or_default());
+        let _ = fs::write(dir.join("linked-profile.txt"), profile);
+    }
+    // The linked wasm's code by crate, beside the package (it is named:
+    // the shipped one is stripped).
+    if config.size_report && config.pack.is_none() {
+        let path = cwd.join(format!("target/makepad-wasm-app/{profile}/{build_crate}.profile.txt"));
+        let _ = fs::write(path, super::pack::crate_profile(&fs::read(&linked_wasm).unwrap_or_default()));
+    }
     let wasm_source = if config.bindgen {
         shell(
             build_dir.as_path(),
@@ -969,8 +1051,15 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
 
     let named_wasm_dest = app_dir.join(format!("{}.names.wasm", build_bin));
-    let data = fs::read(&wasm_source)
+    let mut data = fs::read(&wasm_source)
         .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
+    // `--pack`: the registrations of the script modules the run never used
+    // go, with what only they reached.
+    if let Some((_, manifest, _, _)) = &collected {
+        if let Some(stripped) = super::pack::strip_modules(&data, manifest, &mut pack_report)? {
+            data = stripped;
+        }
+    }
     if config.keep_names {
         fs::write(&named_wasm_dest, &data)
             .map_err(|error| format!("Can't write named wasm {:?}: {error}", named_wasm_dest))?;
@@ -979,6 +1068,9 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         let _ = fs::remove_file(&named_wasm_dest);
         remove_brotli_artifact(&named_wasm_dest);
     }
+    // A threaded build's waits spin on the threads that may not block (the
+    // browser's main thread, an audio worklet): wasm_strip's `waits`.
+    let data = wasm_guard_waits(&data).map_err(|e| format!("Cannot guard the waits of {:?}: {e}", wasm_source))?;
     let mut output = if config.optimize_size || config.strip {
         if config.optimize_size {
             let report = wasm_size_report(&data)
@@ -2250,6 +2342,9 @@ mod tests {
             split_functions: false,
             split_functions_threshold: 200,
             hot_reload: false,
+            link_table: false,
+            opt_speed: None,
+            pack: None,
         }
     }
 
