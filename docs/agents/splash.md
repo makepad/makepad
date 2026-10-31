@@ -154,6 +154,15 @@ colors such as `#x2ecc71` and `#x1e1e2e` where a digit followed by `e` or
 For Rust action enums, use `#[derive(Default)]` and `#[default]` on the
 default variant, not the old `DefaultNone` derive.
 
+In script functions, `a.b ?? d` reads an optional field: a missing field
+(or a field of nil) is `d`, where `a.b |? d` only replaces a nil value.
+`mod(a, b)` is the floored modulo of shading languages (the result takes
+b's sign); `mod` alone is still the module root, and `modf(a, b)` is the
+truncating remainder. `int(x)`, `i32`, `u32` and `f32` values index arrays
+and do arithmetic as the number they hold. `log(x)` from `mod.math` is the
+natural log, and `ln(x)` is the same function (script, shaders, kernels);
+`mod.std.log(v)` prints.
+
 ## Templates and lists
 
 Script objects distinguish ordinary `key: value` properties in their map
@@ -189,6 +198,28 @@ component must be reused outside that Dock. For custom widgets, turtle
 drawing, FileTree traversal, and full animation state definitions, follow
 the linked implementations instead of maintaining duplicate tutorials.
 
+### `scan:` on widgets that create children from data
+
+A web build ships only what a collect run saw the app use (see
+[web-pack.md](web-pack.md)). A widget that creates children from data or
+strings (PortalList, FlatList, page and tab switchers, anything that picks a
+template at run time) gets a `scan:` list of every template it can create,
+written together with the templates, by default:
+
+```rust
+list := PortalList{
+    scan: [@Item, @Header]
+    Item := View{ title := Label{text: "Default"} }
+    Header := View{ caption := Label{text: "Section"} }
+}
+```
+
+Entries name the widget's own templates (`@Item`) or are template objects
+themselves (`RowView{}`). Without a `scan:` list the collect run spawns every
+template the widget holds. When a web build misses something, its log names
+the widget path and file:line: add the missing template to that widget's
+`scan:` list.
+
 ## Shaders and animation
 
 - Per-draw shader values use `instance(value)`; shared values use
@@ -221,3 +252,62 @@ pub struct MyDrawShader {
 Putting non-instance state in that region corrupts the GPU instance buffer,
 including when another draw shader extends yours. Follow the base shader's
 current layout and registration.
+
+### Materials
+
+`mod.sdf.Material` (`draw/src/shader/surface.rs`) lights a shape from the
+signed distance a pixel function already holds: `face(...)` shades a face
+from its distance, outward gradient, elevation and the packed `light`,
+`relief`, `finish` and `tune` vec4s; `cast(...)` returns what a raised face
+throws on its ground, to lay under it with `sdf.clear`; `box_cov` is the
+blurred box coverage an inner shadow is cut from. Its helpers are `fn`
+declarations in the object's own scope, so a member calls another member by
+its bare `m_*` name, never through `Material.`.
+
+The base shaders of `RoundedView`, `PanelView`, `Button`, `CheckBox`,
+`Toggle`, `Slider` and `RotaryKnob` read it behind a `material` uniform
+defaulting to `theme.material_level`, packed exactly as `ReliefView` packs
+its own (`material_light`, `material_relief`, `material_finish`,
+`material_tune`, `material_shadow`, `material_inner`, the three inks). Keep
+that packing when a widget joins: a stylesheet's tokens must mean the same
+thing on every surface. Gate the whole branch on the uniform, so a stock
+theme pays one compare per draw call and draws exactly what it always did,
+and put the room a shadow needs inside the control's own rect
+(`material_margin`), since makepad clips by default.
+
+## Per-frame script cost
+
+- Script runs interpreted, about 1-2 µs a function call. Per-frame code (a
+  property `fn(t)`, a Draw2D `draw`) should call native helpers on whole
+  arrays, such as `c.segs(flat_array, {m alpha})` and `c.curve(...)`, not a
+  script loop per element.
+- Work over roughly 1k elements a frame belongs in a `Kernel` (native code,
+  every core; `active_count: fn(t)` runs only the live elements).
+- In Motion documents, `memo(f, t)` runs a shared per-frame helper (a
+  camera, a beat) once per frame however many properties read it. Wrap a
+  vector result in an array: `[v]`.
+- Measure a Motion document with `makepad-motion bench doc --realtime`. The
+  Stage guide `stage-motion/performance.md` has the rules and budgets.
+
+### Accessibility overrides
+
+Any widget can override its semantic description through its source object:
+
+```rust
+save := Button{
+    text: "Save"
+    a11y: {role: Button label: "Save document" description: "Writes the current document"}
+}
+caption := Label{text: "Name" a11y: {label_for: @name}}
+name := TextInput{}
+status := Label{text: "Saved" a11y: {live: @Polite}}
+decoration := Icon{a11y: {hidden: true}}
+```
+
+Roles also accept their semantic name as a string (for example `"heading"`).
+`live` accepts `@Off`, `@Polite` or `@Assertive`. `hidden: true` removes the
+whole subtree. `label_for` accepts an id or a dotted path string and makes the
+target's `labelled_by` relation point to this label. Widgets supply their normal
+role, value, states, actions and text geometry through `Widget::semantics`;
+overrides are applied afterwards. Semantic actions use `Widget::handle_action`
+and emit the same widget actions as input.

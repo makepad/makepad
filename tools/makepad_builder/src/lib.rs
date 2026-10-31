@@ -2,6 +2,7 @@
 pub mod app_icon;
 pub mod cab;
 pub mod catalog;
+pub mod changes;
 pub mod command;
 #[cfg(target_os = "macos")]
 pub mod desktop;
@@ -368,11 +369,10 @@ fn dwell(stage: &str, detail: &str, frac: f32) {
 }
 
 const APP_CATALOG: &[(&str, &str)] = &[
-    ("makepad-director", "Director"),
-    ("makepad-wm", "Desktop"),
-    ("makepad-files", "Files"),
-    ("makepad-browser", "Browser"),
-    ("makepad-terminal", "Terminal"),
+    ("makepad-app-wm", "Desktop"),
+    ("makepad-app-files", "Files"),
+    ("makepad-app-browser", "Browser"),
+    ("makepad-app-terminal", "Terminal"),
     ("makepad-example-counter", "Counter"),
     ("makepad-example-splash", "Splash"),
     ("makepad-example-todo", "Todo"),
@@ -655,6 +655,12 @@ pub fn cli_main() -> Result<(), String> {
     if std::env::args().nth(1).as_deref() == Some("build") {
         let app = std::env::args().nth(2).ok_or("Usage: makepad-builder build APP")?;
         return runtime::build_local(&app);
+    }
+    if std::env::args().nth(1).as_deref() == Some("changes") {
+        return changes::cli_changes();
+    }
+    if std::env::args().nth(1).as_deref() == Some("send-changes") {
+        return changes::cli_send();
     }
     if std::env::args().nth(1).as_deref() == Some("rebuild") {
         return runtime::rebuild_local();

@@ -23,9 +23,9 @@ add_tree() {
 # Use each web app's shipped feature set; the union below preserves the
 # feature-resolved wasm graph for every demo while linting shared crates once.
 add_tree makepad-app-route --no-default-features --features demo
-add_tree makepad-files --no-default-features --features demo
-add_tree makepad-sheets
-add_tree makepad-finance --no-default-features --features demo
+add_tree makepad-app-files --no-default-features --features demo
+add_tree makepad-app-sheets
+add_tree makepad-app-finance --no-default-features --features demo
 
 # The VJ web build was this gate's fifth graph. The app, the asset system and
 # their private closure live in the Stage repository now, with their half of
@@ -72,7 +72,7 @@ while IFS='|' read -r package features; do
     # the root workspace's complete library union for the web-demo wasm graphs.
     [[ "$workspace" == *"\"manifest_path\":\"$manifest\""* ]] || continue
     case "$name" in
-        makepad-app-route|makepad-files|makepad-sheets|makepad-finance)
+        makepad-app-route|makepad-app-files|makepad-app-sheets|makepad-app-finance)
             continue
             ;;
     esac
@@ -148,6 +148,6 @@ check_app() {
 }
 
 check_app makepad-app-route --no-default-features --features demo
-check_app makepad-files --no-default-features --features demo
-check_app makepad-sheets
-check_app makepad-finance --no-default-features --features demo
+check_app makepad-app-files --no-default-features --features demo
+check_app makepad-app-sheets
+check_app makepad-app-finance --no-default-features --features demo

@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +21,8 @@ pub struct Limits {
     pub max_trailer_bytes: usize,
     pub max_body_bytes: u64,
     pub max_chunk_line_bytes: usize,
-    pub total_timeout: Duration,
+    pub connect_timeout: Duration,
+    pub idle_timeout: Duration,
 }
 
 impl Default for Limits {
@@ -34,7 +35,8 @@ impl Default for Limits {
             max_trailer_bytes: 8 * 1024,
             max_body_bytes: 64 * 1024 * 1024,
             max_chunk_line_bytes: 4096,
-            total_timeout: Duration::from_secs(300),
+            connect_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(120),
         }
     }
 }
@@ -159,9 +161,11 @@ pub fn request_no_redirect(req: Request) -> Result<Response, Error> {
     let mut command = Command::new(curl);
     command
         .args(["--silent", "--show-error", "--globoff", "--proto", "=https,http,file"])
-        .args(["--connect-timeout", "30"])
-        .arg("--max-time")
-        .arg(req.limits.total_timeout.as_secs().max(1).to_string())
+        .arg("--connect-timeout")
+        .arg(req.limits.connect_timeout.as_secs_f64().to_string())
+        // Drain the byte trace privately below, including incomplete headers.
+        // No minimum transfer speed: any bytes renew the idle wait.
+        .args(["--trace", "-", "--no-buffer"])
         .arg("--max-filesize")
         .arg(req.limits.max_body_bytes.to_string())
         .arg("--dump-header")
@@ -171,7 +175,7 @@ pub fn request_no_redirect(req: Request) -> Result<Response, Error> {
         .arg("--config")
         .arg(&config_file)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     match req.method {
         "HEAD" => {
@@ -191,7 +195,28 @@ pub fn request_no_redirect(req: Request) -> Result<Response, Error> {
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let mut child = command.spawn().map_err(|e| Error::Other(format!("curl: {e}")))?;
-    let start = Instant::now();
+    let activity = Arc::new(AtomicU64::new(0));
+    let observed = activity.clone();
+    let mut trace = child.stdout.take().expect("piped trace");
+    // Trace bytes can contain credentials. They are counted and discarded,
+    // never decoded, logged, or persisted.
+    if let Err(error) = std::thread::Builder::new().name("http-activity".into()).spawn(move || {
+        let mut bytes = [0u8; 8192];
+        loop {
+            match trace.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(n) => { observed.fetch_add(n as u64, Ordering::Relaxed); }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    }) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(Error::Other(error.to_string()));
+    }
+    let mut last_activity = Instant::now();
+    let mut seen = 0;
     let mut total = None;
     let mut reported = u64::MAX;
     let status = loop {
@@ -215,7 +240,11 @@ pub fn request_no_redirect(req: Request) -> Result<Response, Error> {
             let _ = child.wait();
             return Err(Error::Other(crate::CANCELLED.into()));
         }
-        if start.elapsed() > req.limits.total_timeout + Duration::from_secs(5) {
+        let count = activity.load(Ordering::Relaxed);
+        if count != seen {
+            seen = count;
+            last_activity = Instant::now();
+        } else if last_activity.elapsed() >= req.limits.idle_timeout {
             let _ = child.kill();
             let _ = child.wait();
             return Err(Error::Timeout);

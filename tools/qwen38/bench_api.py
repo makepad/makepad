@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmarks against the Qwen3.8-27B endpoint: TTFT (streamed), decode tok/s, ~30K prefill sustained.
 
-Usage: QWEN38_KEY=... python3 tools/qwen38/bench_api.py [--host 10.0.0.217] [--port 8090] [--runs 3]
+Usage: QWEN38_KEY=... python3 tools/qwen38/bench_api.py [--host 192.0.2.217] [--port 8090] [--runs 3]
 """
 import argparse, json, os, sys, time, urllib.request
 
@@ -53,7 +53,7 @@ def stream_ttft(base, key, body, timeout=600):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="10.0.0.217")
+    ap.add_argument("--host", required=True)
     ap.add_argument("--port", default="8090")
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--skip-long", action="store_true")

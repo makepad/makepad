@@ -1,0 +1,29 @@
+{
+  "format": "makepad-change-report",
+  "version": 1,
+  "app": {"id": "calculator", "release": "2026-09-20"},
+  "base": [{"repository": "makepad", "commit": "7a533b61ee0c4e1f9d2b3a4c5d6e7f8091a2b3c4"}],
+  "summary": "Two small changes so the calculator suits a keyboard-first workflow.",
+  "changes": [
+    {
+      "title": "Enter repeats the last operation",
+      "kind": "feature",
+      "what": "Pressing Enter again after a result applies the same operation and operand once more, like a desk calculator (2 + 3 = = gives 8).",
+      "why": "Adding the same amount several times took retyping the operand each time.",
+      "areas": ["calculator keypad", "apps/calculator/src/app.rs"]
+    },
+    {
+      "title": "Larger result text",
+      "kind": "ui",
+      "what": "The result line uses a larger font and stays right-aligned when the window is narrow.",
+      "why": "The result was hard to read from a distance on a laptop screen.",
+      "areas": ["result display"],
+      "snippet": {"language": "splash", "text": "draw_text +: {text_style: theme.font_regular{font_size: 28}}"}
+    }
+  ],
+  "redactions": [
+    {"what": "home folder path", "count": 2},
+    {"what": "personal name in a comment", "count": 1}
+  ],
+  "diff": false
+}

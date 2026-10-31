@@ -32,7 +32,7 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// Per-read stall guard on a streamed download. A storage node that goes
 /// silent this long is not coming back on this connection.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// Wall-clock cap for one small request (blocking_http's total_timeout).
+/// Maximum silence between bytes for one small request.
 const SMALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const USER_AGENT: &str = "makepad-archive-org/0.1";
 pub(crate) const RANGE_READ_TIMEOUT: Duration = READ_TIMEOUT;
@@ -103,7 +103,7 @@ pub fn fetch_bytes(url: &str, max_bytes: usize, cancel: &CancelToken) -> Result<
         }
         let limits = Limits {
             max_body_bytes: max_bytes,
-            total_timeout: SMALL_TIMEOUT,
+            idle_timeout: SMALL_TIMEOUT,
             ..Limits::default()
         };
         let req = Request::get(current.to_string())

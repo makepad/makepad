@@ -1,0 +1,13 @@
+[package]
+name = "makepad-private-check"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Fails when a tracked file names a private address, a personal path or a private host"
+publish = false
+
+[[bin]]
+name = "makepad-private-check"
+path = "src/main.rs"
+test = false
+bench = false

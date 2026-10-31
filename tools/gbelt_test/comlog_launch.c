@@ -91,7 +91,7 @@ static void tail_log(HANDLE proc) {
     DWORD pos = 0;
     char buf[4096];
     DWORD n;
-    log = CreateFileW(L"C:\\Users\\playe\\com3sniff\\com.log", GENERIC_READ,
+    log = CreateFileW(L"C:\\Users\\Public\\com3sniff\\com.log", GENERIC_READ,
                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                       NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (log == INVALID_HANDLE_VALUE) {
@@ -122,14 +122,14 @@ int main(void) {
     PROCESS_INFORMATION pi;
     wchar_t exe[] = L"C:\\Program Files (x86)\\SimXperience\\Sim Commander 4.5\\Commander4.exe";
     wchar_t dir[] = L"C:\\Program Files (x86)\\SimXperience\\Sim Commander 4.5";
-    wchar_t dll[] = L"C:\\Users\\playe\\com3sniff\\comlog64.dll";
+    wchar_t dll[] = L"C:\\Users\\Public\\com3sniff\\comlog64.dll";
     wchar_t cmd[512];
     DWORD existing;
     HANDLE log;
 
     printf("G-Belt COM logger\n");
     printf("Starts Sim Commander with an IAT WriteFile hook (no INT3).\n");
-    printf("Log: C:\\Users\\playe\\com3sniff\\com.log\n\n");
+    printf("Log: C:\\Users\\Public\\com3sniff\\com.log\n\n");
 
     if (!is_elevated()) {
         if (!self_elevate()) return 1;
@@ -144,8 +144,8 @@ int main(void) {
         return 2;
     }
 
-    CreateDirectoryW(L"C:\\Users\\playe\\com3sniff", NULL);
-    log = CreateFileW(L"C:\\Users\\playe\\com3sniff\\com.log", GENERIC_WRITE,
+    CreateDirectoryW(L"C:\\Users\\Public\\com3sniff", NULL);
+    log = CreateFileW(L"C:\\Users\\Public\\com3sniff\\com.log", GENERIC_WRITE,
                       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS,
                       FILE_ATTRIBUTE_NORMAL, NULL);
     if (log != INVALID_HANDLE_VALUE) CloseHandle(log);

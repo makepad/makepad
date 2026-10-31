@@ -1,6 +1,6 @@
 # Reclaim disk: purge the hf xet chunk cache (safe when no download in flight; it's a re-download cache)
 $ErrorActionPreference = 'Continue'
-$xet = 'C:\Users\playe\.cache\huggingface\xet'
+$xet = '$env:USERPROFILE\.cache\huggingface\xet'
 Write-Output ("free_before_GB " + [math]::Round((Get-PSDrive C).Free/1GB,1))
 if (Test-Path $xet) {
   $m = Get-ChildItem $xet -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Functional + auth tests for the Qwen3.8-27B llama-server endpoint on .217.
 
-Usage: QWEN38_KEY=... python3 tools/qwen38/test_api.py [--host 10.0.0.217] [--port 8090]
+Usage: QWEN38_KEY=... python3 tools/qwen38/test_api.py [--host 192.0.2.217] [--port 8090]
 Prints PASS/FAIL lines; exit 1 if any FAIL.
 """
 import argparse, base64, json, os, struct, sys, time, urllib.request, urllib.error, zlib
@@ -59,7 +59,7 @@ def check(name, ok, detail=""):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="10.0.0.217")
+    ap.add_argument("--host", required=True)
     ap.add_argument("--port", default="8090")
     args = ap.parse_args()
     key = os.environ.get("QWEN38_KEY")

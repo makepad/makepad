@@ -1,63 +1,5 @@
 workspace.members = [
-    "apps/ai-hub",
-    "apps/aichat",
-    "apps/aihub",
-    "apps/amp",
-    "apps/browser",
-    "apps/browser_host",
-    "apps/calculator",
-    "apps/calendar",
-    "apps/camera",
-    "apps/clock",
-    "apps/code",
-    "apps/deskhost",
-    "apps/desklink",
-    "apps/devhub",
-    "apps/fabric",
-    "apps/files",
-    "apps/finance",
-    "apps/flow",
-    "apps/image",
-    "apps/mail",
-    "apps/mixer",
-    "apps/notes",
-    "apps/pdf",
-    "apps/photos",
-    "apps/reminders",
-    "apps/route",
-    "apps/score",
-    "apps/sheets",
-    "apps/storybook",
-    "apps/synth",
-    "apps/task",
-    "apps/terminal",
-    "apps/translator",
-    "apps/video",
-    "apps/weather",
-    "apps/wm",
-    "apps/wm-all",
-    "apps/wm-phone",
-    "apps/xr_bridge",
-    "apps/xr_remote",
-    "libs/ai/models/beats",
-    "libs/ai/models/body",
-    "libs/ai/models/common",
-    "libs/ai/models/flux",
-    "libs/ai/models/h3",
-    "libs/ai/models/motion",
-    "libs/ai/models/music",
-    "libs/ai/models/notes",
-    "libs/ai/models/paint",
-    "libs/ai/models/rife",
-    "libs/ai/models/rig",
-    "libs/ai/models/sfx",
-    "libs/ai/models/sing",
-    "libs/ai/models/speech",
-    "libs/ai/models/splat",
-    "libs/ai/models/stems",
-    "libs/ai/models/textdet",
-    "libs/ai/models/trellis",
-    "libs/ai/models/vision",
+    "tools/private_check",
     # === app ===
     "apps/browser",
     "apps/browser_host",
@@ -153,6 +95,7 @@ workspace.members = [
     "libs/ai/vulkan",
     "libs/ai/job",
     "libs/ai/llm",
+    "libs/ai/models/*",
     "libs/ai/hub",
     "libs/ai/livepipe",
     # Constructive solid geometry.
@@ -318,6 +261,7 @@ workspace.members = [
     # (extracted from the VJ, which is still its reference user) ===
     "libs/frametween",
     # === archive.org search + download content input (VJ / asset-ui) ===
+    "libs/archive_org",
     # === image tile wall: HEVC tape atlases + baker CLI + TileGrid widget
     # (the engine extracted from the Source Library picture wall) ===
     "libs/image_tiles",
@@ -326,7 +270,9 @@ workspace.members = [
     "libs/mp4_index",
     # === necessary tools ===
     "platform/video",
+    "tools/cargo_makepad",
     "tools/cef_fetch",
+    "tools/makepad_builder",
     "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
@@ -411,6 +357,7 @@ workspace.members = [
     # not exist and on a glob that matches nothing; this glob always matches
     # the public apps, so a tree without the private repositories loads as
     # before. Directories without a `src/` (local data) are not matched.
+    "apps/*/src/..",
 ]
 
 workspace.exclude = [

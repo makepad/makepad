@@ -319,8 +319,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID res) {
     (void)res;
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(inst);
-    CreateDirectoryW(L"C:\\Users\\playe\\com3sniff", NULL);
-    g_log = CreateFileW(L"C:\\Users\\playe\\com3sniff\\com.log",
+    CreateDirectoryW(L"C:\\Users\\Public\\com3sniff", NULL);
+    g_log = CreateFileW(L"C:\\Users\\Public\\com3sniff\\com.log",
                         FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     slog("=== comlog IAT attach pid=%u ===\n", (unsigned)GetCurrentProcessId());

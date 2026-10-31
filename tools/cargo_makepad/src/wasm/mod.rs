@@ -1,4 +1,5 @@
 mod compile;
+mod pack;
 mod sdk;
 mod size_report;
 use compile::WasmConfig;
@@ -70,6 +71,26 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
         true
     } else if v == "--bindgen" {
         config.bindgen = true;
+        true
+    } else if let Some(list) = v.strip_prefix("--opt-speed=") {
+        config.opt_speed = Some(Box::leak(list.to_string().into_boxed_str()));
+        true
+    } else if v == "--link-table" {
+        config.link_table = true;
+        true
+    } else if let Some(preset) = v.strip_prefix("--pack=") {
+        let strict = config.pack.is_some_and(|(_, strict)| strict);
+        match makepad_web_pack::pack::PackPreset::parse(preset) {
+            Some(preset) => config.pack = Some((preset, strict)),
+            None => {
+                eprintln!("error: --pack={preset}: film, app or full");
+                std::process::exit(1);
+            }
+        }
+        true
+    } else if v == "--strict" {
+        let preset = config.pack.map_or(makepad_web_pack::pack::PackPreset::App, |(preset, _)| preset);
+        config.pack = Some((preset, true));
         true
     } else if v == "--no-threads" {
         config.threads = false;
@@ -144,6 +165,9 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         split_functions: false,
         split_functions_threshold: 200,
         hot_reload: false,
+        link_table: false,
+        opt_speed: None,
+        pack: None,
     };
 
     // pull out options
@@ -202,6 +226,9 @@ mod tests {
             split_functions: false,
             split_functions_threshold: 200,
             hot_reload: false,
+            link_table: false,
+        opt_speed: None,
+            pack: None,
         }
     }
 

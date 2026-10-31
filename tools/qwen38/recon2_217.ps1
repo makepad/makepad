@@ -33,10 +33,10 @@ Write-Output "=== C:\ai\models CONTENT ==="
 Get-ChildItem C:\ai\models -ErrorAction SilentlyContinue | Format-Table Name,Length,LastWriteTime -AutoSize | Out-String
 Write-Output "=== EXISTING llama-server ON DISK ==="
 where.exe llama-server 2>&1
-foreach ($pth in @('C:\ai\llama','C:\Users\playe\llama.cpp','C:\Users\playe\llama','C:\ai\llamacpp')) { if (Test-Path $pth) { Write-Output "EXISTS: $pth" } }
+foreach ($pth in @('C:\ai\llama','$env:USERPROFILE\llama.cpp','$env:USERPROFILE\llama','C:\ai\llamacpp')) { if (Test-Path $pth) { Write-Output "EXISTS: $pth" } }
 Write-Output "=== CURL CANDIDATES ==="
 foreach ($cc in @('C:\Windows\System32\curl.exe','C:\Program Files\Git\mingw64\bin\curl.exe')) { if (Test-Path $cc) { & $cc --version | Select-Object -First 1 | ForEach-Object { Write-Output ("$cc -> " + $_) } } else { Write-Output "$cc MISSING" } }
 Write-Output "=== HF CACHE ==="
-foreach ($hc in @('C:\Users\playe\.cache\huggingface')) { if (Test-Path $hc) { Get-ChildItem $hc -ErrorAction SilentlyContinue | Format-Table Name,LastWriteTime -AutoSize | Out-String } else { Write-Output "$hc MISSING" } }
+foreach ($hc in @('$env:USERPROFILE\.cache\huggingface')) { if (Test-Path $hc) { Get-ChildItem $hc -ErrorAction SilentlyContinue | Format-Table Name,LastWriteTime -AutoSize | Out-String } else { Write-Output "$hc MISSING" } }
 Write-Output "=== GPU IDLE BASELINE NOW ==="
 nvidia-smi --query-gpu=memory.used,memory.free --format=csv

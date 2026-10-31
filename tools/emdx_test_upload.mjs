@@ -16,7 +16,7 @@ function arg(name, fallback = undefined) {
   return fallback;
 }
 
-const host = arg('host', '10.0.0.182');
+const host = arg('host', '192.0.2.182');
 const mac = arg('mac', '04-E4-B6-F4-5A-8E');
 const pin = arg('pin', '123456');
 const displayId = Number(arg('display', '0'));

@@ -2,6 +2,7 @@
 name = "makepad-loader"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 publish = false
 description = "Makepad Builder: compile and customize commercial Makepad apps from source"
 
@@ -11,7 +12,7 @@ path = "src/lib.rs"
 
 # The Builder: a console program with its TUI. On Windows it ships as source
 # (windows/makepad-builder.bat compiles it with Rust's GNU toolchain); on
-# macOS and Linux the same Builder is the shell script makepad.sh.
+# macOS and Linux the same Builder is the shell script makepad-builder.sh.
 [[bin]]
 name = "makepad-builder"
 path = "src/bin/makepad-loader-cli.rs"
@@ -22,6 +23,8 @@ makepad-zip-file = { path = "../../libs/zip_file" }
 makepad-git = { path = "../../libs/git" }
 makepad-fast-inflate = { path = "../../libs/fast_inflate" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-change-report = { path = "../../libs/change_report" }
+makepad-source-slice = { path = "../../libs/source_slice" }
 
 [target.'cfg(windows)'.dependencies]
 makepad-win-resource = { path = "../../libs/win_resource" }
