@@ -3246,7 +3246,7 @@ impl Widget for PortalList {
                 Event::TouchUpdate(e) => e
                     .touches
                     .iter()
-                    .any(|touch| matches!(touch.state, TouchState::Stop | TouchState::Stable)),
+                    .any(|touch| matches!(touch.state, TouchState::Stop | TouchState::Cancel | TouchState::Stable)),
                 Event::Scroll(_) => cx.fingers.first_mouse_button.is_none(),
                 _ => false,
             };
@@ -3373,7 +3373,7 @@ impl Widget for PortalList {
                     let has_release = e
                         .touches
                         .iter()
-                        .any(|t| matches!(t.state, TouchState::Stop));
+                        .any(|t| matches!(t.state, TouchState::Stop | TouchState::Cancel));
                     if !has_release {
                         pass_through_to_children = false;
                     }
@@ -3407,7 +3407,7 @@ impl Widget for PortalList {
                 }
                 Event::TouchUpdate(e) => {
                     let releases_a_child = e.touches.iter().any(|t| {
-                        t.state == TouchState::Stop
+                        matches!(t.state, TouchState::Stop | TouchState::Cancel)
                             && cx.fingers.is_digit_captured_elsewhere(
                                 live_id_num!(touch, t.uid).into(),
                                 self.area,
@@ -3462,7 +3462,7 @@ impl Widget for PortalList {
                 self.pressed_rows.retain(|(_, d)| *d != mouse);
             }
             Event::TouchUpdate(e) => {
-                for t in e.touches.iter().filter(|t| t.state == TouchState::Stop) {
+                for t in e.touches.iter().filter(|t| matches!(t.state, TouchState::Stop | TouchState::Cancel)) {
                     let digit: DigitId = live_id_num!(touch, t.uid).into();
                     self.pressed_rows.retain(|(_, d)| *d != digit);
                 }
@@ -4203,6 +4203,18 @@ impl Widget for PortalList {
                     }
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                    if fe.cancelled && cx.fingers.press_taken_away(fe.digit_id) {
+                        self.stop_all_scroll_motion();
+                        self.is_selecting = false;
+                        self.select_scroll_state = None;
+                        self.suppress_child_events = false;
+                        self.drag_claimed = false;
+                        if self.first_id == self.range_start {
+                            self.first_scroll = self.first_scroll.min(0.0);
+                        }
+                        self.area.redraw(cx);
+                        return;
+                    }
                     // The press's release settles the fate of any fling it caught:
                     // only a qualifying same-direction flick below adds it back.
                     // A tap or a slow lift discards it — a catch stays a stop.

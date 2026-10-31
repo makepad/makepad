@@ -70,7 +70,8 @@ impl PhoneSurface {
             Event::MouseMove(e) => Some((e.abs, false, false)),
             Event::MouseUp(e) => Some((e.abs, false, true)),
             Event::FingerCancel(_) => owned_cancel(event, self.search_pointer),
-            Event::TouchUpdate(e) => e.touches.first().map(|t| {
+            // A touch the OS took away ends on its `FingerCancel`, just above.
+            Event::TouchUpdate(e) => e.touches.iter().find(|t| t.state != makepad_platform::event::TouchState::Cancel).map(|t| {
                 (
                     t.abs,
                     t.state == makepad_platform::event::TouchState::Start,

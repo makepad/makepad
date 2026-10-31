@@ -2957,6 +2957,11 @@ impl Widget for TextInput {
                                     self.pending_outside_focus_loss_touch = Some(touch.uid);
                                 }
                             }
+                            TouchState::Cancel => {
+                                if self.pending_outside_focus_loss_touch == Some(touch.uid) {
+                                    self.pending_outside_focus_loss_touch = None;
+                                }
+                            }
                             TouchState::Stop => {
                                 if self.pending_outside_focus_loss_touch == Some(touch.uid) {
                                     should_lose_focus = !rect.contains(touch.abs);

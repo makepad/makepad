@@ -815,7 +815,6 @@ impl Cx {
     }
 
     /// A remote touch at a layout point, delivered the way a touch screen's are.
-    /// `is_cancel` is a `Stop` the system took away, which goes out as `Event::FingerCancel`.
     #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
     pub(crate) fn dispatch_remote_touch(
         &mut self,
@@ -823,7 +822,6 @@ impl Cx {
         abs: crate::makepad_math::DVec2,
         uid: u64,
         state: crate::event::TouchState,
-        is_cancel: bool,
         modifiers: crate::event::KeyModifiers,
         time: f64,
     ) {
@@ -838,8 +836,39 @@ impl Cx {
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
         }];
-        if is_cancel {
-            // Like a platform's touch cancel: every capture ends without a release, then it retires.
+        let e = crate::event::TouchUpdateEvent {
+            time,
+            window_id,
+            modifiers,
+            touches,
+        };
+        if state == crate::event::TouchState::Cancel {
+            self.dispatch_touch_cancel(e, false);
+            return;
+        }
+        self.fingers.process_touch_update_start(time, &e.touches);
+        let event = Event::TouchUpdate(e);
+        self.call_event_handler(&event);
+        if let Event::TouchUpdate(e) = event {
+            self.fingers.process_touch_update_end(&e.touches);
+        }
+    }
+
+    /// Dispatches `e` as is, then a `FingerCancel` for each of its `Cancel` touches to end the presses
+    /// `e` didn't reach. Pass `ends_internal_drag` when the backend just dropped a live internal drag.
+    pub(crate) fn dispatch_touch_cancel(&mut self, e: crate::event::TouchUpdateEvent, ends_internal_drag: bool) {
+        let cancelled: Vec<_> = e.touches.iter()
+            .filter(|t| t.state == crate::event::TouchState::Cancel)
+            .map(|t| (t.uid, t.abs))
+            .collect();
+        for (uid, _) in &cancelled {
+            self.fingers.take_away_digit(crate::makepad_live_id::live_id_num!(touch, *uid).into());
+        }
+        self.fingers.process_touch_update_start(e.time, &e.touches);
+        let (window_id, time, modifiers) = (e.window_id, e.time, e.modifiers);
+        let event = Event::TouchUpdate(e);
+        self.call_event_handler(&event);
+        for (uid, abs) in cancelled {
             let digit_id: crate::event::DigitId = crate::makepad_live_id::live_id_num!(touch, uid).into();
             self.fingers.cancel_digit(digit_id);
             self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
@@ -850,17 +879,11 @@ impl Cx {
                 time,
                 modifiers,
             }));
-            self.fingers.process_touch_update_end(&touches);
-            return;
         }
-        self.fingers.process_touch_update_start(time, &touches);
-        let event = Event::TouchUpdate(crate::event::TouchUpdateEvent {
-            time,
-            window_id,
-            modifiers,
-            touches,
-        });
-        self.call_event_handler(&event);
+        if ends_internal_drag {
+            self.call_event_handler(&Event::DragEnd);
+            self.drag_drop.cycle_drag();
+        }
         if let Event::TouchUpdate(e) = event {
             self.fingers.process_touch_update_end(&e.touches);
         }
@@ -961,17 +984,12 @@ impl Cx {
             sweep_lock: Cell::new(Area::Empty),
         };
         let Some(state) = state else {
-            let digit_id: crate::event::DigitId = crate::makepad_live_id::live_id_num!(touch, 0).into();
-            self.fingers.cancel_digit(digit_id);
-            self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
-                window_id,
-                digit_id,
-                device: crate::event::DigitDevice::Touch { uid: 0 },
-                abs,
+            self.dispatch_touch_cancel(crate::event::TouchUpdateEvent {
                 time,
+                window_id,
+                touches: vec![touch(TouchState::Cancel)],
                 modifiers: Default::default(),
-            }));
-            self.fingers.process_touch_update_end(&[touch(TouchState::Stop)]);
+            }, false);
             self.update_pointer_capture_pacing();
             self.send_studio_key_focus_rect_response();
             return;

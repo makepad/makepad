@@ -457,8 +457,6 @@ mod imp {
             y: f64,
             uid: u64,
             state: crate::event::TouchState,
-            /// A `Stop` the system took away (`phase=cancel`), not a lift.
-            is_cancel: bool,
             mods: RemoteKeyModifiers,
             time: Option<f64>,
         },
@@ -1482,7 +1480,6 @@ mod imp {
                             y,
                             uid,
                             state,
-                            is_cancel,
                             mods,
                             time: at,
                         } => {
@@ -1495,7 +1492,6 @@ mod imp {
                                 abs,
                                 uid,
                                 state,
-                                is_cancel,
                                 mods.into_key_modifiers(),
                                 at.unwrap_or(time),
                             );
@@ -2437,11 +2433,11 @@ mod imp {
             ],
             "scroll" | "wheel" => vec![mouse(MouseKind::Scroll)],
             "touch" => {
-                let phase = p.get(&["phase"]).unwrap_or("move");
-                let state = match phase {
+                let state = match p.get(&["phase"]).unwrap_or("move") {
                     "start" => crate::event::TouchState::Start,
                     "move" => crate::event::TouchState::Move,
-                    "stop" | "cancel" => crate::event::TouchState::Stop,
+                    "stop" => crate::event::TouchState::Stop,
+                    "cancel" => crate::event::TouchState::Cancel,
                     other => return err(&format!("bad touch phase {other}")),
                 };
                 vec![Input::Touch {
@@ -2449,7 +2445,6 @@ mod imp {
                     y,
                     uid: p.f64(&["id"], 1.0).max(0.0) as u64,
                     state,
-                    is_cancel: phase == "cancel",
                     mods,
                     time,
                 }]
