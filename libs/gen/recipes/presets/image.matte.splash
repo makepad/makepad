@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** The picture to cut out. */
+let source = Input{ type: @image }
+let matte = Matte{ image: source.image() }
+let published = Publish{ value: matte.out(@image) tags: ["image"] }
+
+Flow{
+    label: "Cut out"
+    brief: "Removes a picture's background: the subject on transparency."
+    source, matte, published
+}

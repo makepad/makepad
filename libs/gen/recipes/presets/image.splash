@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** What to paint. */
+let prompt = Input{ type: @text default: "a small brass robot on a workbench" }
+let image = Image{ prompt: prompt.text() width: 1024 height: 1024 }
+let published = Publish{ value: image.out(@image) tags: ["image"] }
+
+Flow{
+    label: "Image"
+    brief: "A picture from a prompt: concept art, a poster, a sign, an infographic, a menu screen."
+    prompt, image, published
+}

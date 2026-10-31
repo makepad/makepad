@@ -57,10 +57,16 @@ pub enum LanguageId {
     Zig = 28,
     /// Haskell source; compiled frontend registered.
     Haskell = 29,
+    /// Unreal Engine project files: package headers (`.uasset`, `.umap`),
+    /// shown as a summary the preparation derives from the binary header,
+    /// and the JSON project/plugin descriptors (`.uproject`, `.uplugin`).
+    Unreal = 30,
+    /// INI configuration (Unreal `Config/*.ini`). Tokens and line summaries only.
+    Ini = 31,
 }
 
 impl LanguageId {
-    pub const ALL: [LanguageId; 30] = [
+    pub const ALL: [LanguageId; 32] = [
         LanguageId::Unknown,
         LanguageId::Rust,
         LanguageId::Toml,
@@ -91,6 +97,8 @@ impl LanguageId {
         LanguageId::FSharp,
         LanguageId::Zig,
         LanguageId::Haskell,
+        LanguageId::Unreal,
+        LanguageId::Ini,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -125,6 +133,8 @@ impl LanguageId {
             LanguageId::FSharp => "fsharp",
             LanguageId::Zig => "zig",
             LanguageId::Haskell => "haskell",
+            LanguageId::Unreal => "unreal",
+            LanguageId::Ini => "ini",
         }
     }
 

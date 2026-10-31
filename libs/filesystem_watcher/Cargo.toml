@@ -7,3 +7,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-git = { path = "../git" }
+
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = {path = "../windows/sys", version = "0.1.0"}

@@ -8,3 +8,12 @@
 
 pub mod bc1;
 pub mod ktx2;
+pub mod uastc;
+pub mod basis;
+pub mod astc;
+pub mod bc7;
+pub mod bc7_tables;
+pub mod etc;
+pub mod rgtc;
+pub mod transcode;
+pub mod uastc_tables;

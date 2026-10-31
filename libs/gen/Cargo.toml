@@ -1,0 +1,24 @@
+# Generation for every app that offers it: the preset catalog (recipe
+# documents), the recipe checks as Flow nodes, the recipe digest that is the
+# one generation cache, the headless host a shell without a studio runs
+# presets on, and the gen.* tools (`tools`).
+
+[package]
+name = "makepad-gen"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Generation presets, recipe checks, recipe-digest reuse and the headless generation host over Flow"
+
+[dependencies]
+makepad-micro-serde = { path = "../micro_serde" }
+makepad-strict-json = { path = "../strict_json" }
+makepad-ai-hub = { path = "../ai/hub", default-features = false }
+# The gen.* tools' shared text and shapes.
+makepad-gen-tools = { path = "tools" }
+makepad-flow = { path = "../flow", default-features = false, features = ["client", "host", "hub-chat"] }
+# The character checks read a GLB with the runtime's own skin parser and
+# decode its atlas with the UI's decoder.
+makepad-gltf = { path = "../gltf" }
+makepad-render = { path = "../render" }
+makepad-draw = { path = "../../draw" }

@@ -1,36 +1,47 @@
-use proc_macro::TokenStream;
+use makepad_micro_proc_macro::proc_macro::TokenStream;
 
-use makepad_micro_proc_macro::{error, TokenBuilder, TokenParser};
+use makepad_micro_proc_macro::{error, StructField, TokenBuilder, TokenParser};
 
+/// `#[derive(Widget)]`: WidgetNode, WidgetRegister and the `XxxRef` wrapper,
+/// from one parse of the input into one builder. The `XxxSet` wrapper (a typed
+/// WidgetSet with `xxx_set(cx, paths)`) is opt-in: `#[derive(WidgetSet)]`.
 pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
-    let mut out = TokenStream::new();
-    out.extend(derive_widget_node_impl(input.clone()));
-    out.extend(derive_widget_register_impl(input.clone()));
-    out.extend(derive_widget_ref_impl(input.clone()));
-    out.extend(derive_widget_set_impl(input.clone()));
-    out
-}
-
-pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let main_attribs = parser.eat_attributes();
-    let designable = main_attribs.iter().any(|v| v.name == "designable");
-
     parser.eat_ident("pub");
-    if parser.eat_ident("struct") {
-        let struct_name = parser.expect_any_ident().unwrap();
-        let generic = parser.eat_generic();
-        let types = parser.eat_all_types();
-        let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
+    if !parser.eat_ident("struct") {
+        return parser.unexpected();
+    }
+    let struct_name = parser.expect_any_ident().unwrap();
+    let generic = parser.eat_generic();
+    let types = parser.eat_all_types();
+    let where_clause = parser.eat_where_clause(None);
+    let fields = if types.is_some() {
+        return error("Unexpected type form");
+    } else if let Some(fields) = parser.eat_all_struct_fields() {
+        fields
+    } else {
+        return error("Unexpected field form");
+    };
+    let designable = main_attribs.iter().any(|v| v.name == "designable");
+    let mut tb = TokenBuilder::new();
+    if let Err(err) = widget_node_impl(&mut tb, designable, &struct_name, &generic, &where_clause, fields) {
+        return err;
+    }
+    widget_register_impl(&mut tb, &struct_name, &generic, &where_clause);
+    widget_ref_impl(&mut tb, &struct_name);
+    tb.end()
+}
 
-        let mut fields = if let Some(_types) = types {
-            return error("Unexpected type form");
-        } else if let Some(fields) = parser.eat_all_struct_fields() {
-            fields
-        } else {
-            return error("Unexpected field form");
-        };
+fn widget_node_impl(
+    tb: &mut TokenBuilder,
+    designable: bool,
+    struct_name: &str,
+    generic: &Option<TokenStream>,
+    where_clause: &Option<TokenStream>,
+    mut fields: Vec<StructField>,
+) -> Result<(), TokenStream> {
+    {
 
         // alright now. we have a field
         let mut walk_field = None;
@@ -94,21 +105,21 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             }
         }
         if uid_field.is_some() && deref_field.is_some() {
-            return error(
+            return Err(error(
                 "Widget derive does not allow #[uid] together with #[deref]; widget_uid() must come from the deref field",
-            );
+            ));
         }
         if uid_field.is_none() && wrap_field.is_none() && deref_field.is_none() {
-            return error(
+            return Err(error(
                 "Widget derive requires either an explicit #[uid] WidgetUid field or a #[deref]/#[wrap] field",
-            );
+            ));
         }
 
         tb.add("impl").stream(generic.clone());
         tb.add("WidgetNode for")
             .ident(&struct_name)
-            .stream(generic)
-            .stream(where_clause)
+            .stream(generic.clone())
+            .stream(where_clause.clone())
             .add("{");
         if let Some(deref_field) = &deref_field {
             tb.add("    fn widget_uid(&self) -> WidgetUid { self.")
@@ -188,10 +199,10 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 .ident(wrap_field)
                 .add(".visit_cancel(visit)");
             tb.add("   }");
-            tb.add("   fn skip_widget_tree_search(&self)->bool{");
+            tb.add("   fn search_scope(&self)->bool{");
             tb.add("       self.")
                 .ident(wrap_field)
-                .add(".skip_widget_tree_search()");
+                .add(".search_scope()");
             tb.add("   }");
             tb.add("   fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
             tb.add("       self.")
@@ -271,9 +282,9 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                     .ident(deref_field)
                     .add(".redraw(cx)}");
             } else {
-                return error(
+                return Err(error(
                     "Need either a field marked redraw or deref or wrap to find redraw method",
-                );
+                ));
             }
             if !layer_fields.is_empty() {
                 tb.add("    fn layer_areas(&self) -> Vec<(&'static str, Area)> { vec![");
@@ -375,10 +386,10 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 tb.add("       self.visible() && self.")
                     .ident(deref_field).add(".visit_cancel(visit)");
                 tb.add("   }");
-                tb.add("   fn skip_widget_tree_search(&self)->bool{");
+                tb.add("   fn search_scope(&self)->bool{");
                 tb.add("       self.")
                     .ident(deref_field)
-                    .add(".skip_widget_tree_search()");
+                    .add(".search_scope()");
                 tb.add("   }");
                 tb.add("   fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
                 tb.add("       self.")
@@ -406,13 +417,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             }
         }
         tb.add("}");
-        return tb.end();
     }
-    parser.unexpected()
+    Ok(())
 }
 
 pub fn derive_widget_register_impl(input: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
@@ -420,24 +429,36 @@ pub fn derive_widget_register_impl(input: TokenStream) -> TokenStream {
         if let Some(struct_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let _types = parser.eat_all_types();
-            let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
-            tb.add("impl").stream(generic.clone());
-            tb.add("WidgetRegister for")
-                .ident(&struct_name)
-                .stream(generic.clone())
-                .stream(where_clause.clone())
-                .add("{");
-            tb.add("    fn register_widget(vm: &mut ScriptVm)->ScriptValue{");
-            tb.add("        register_widget!(vm.cx_mut(), ")
-                .ident(&struct_name)
-                .add(");");
-            tb.add("        Self::script_component(vm)");
-            tb.add("    }");
-            tb.add("}");
+            let where_clause = parser.eat_where_clause(None);
+            let mut tb = TokenBuilder::new();
+            widget_register_impl(&mut tb, &struct_name, &generic, &where_clause);
             return tb.end();
         }
     }
     parser.unexpected()
+}
+
+fn widget_register_impl(
+    tb: &mut TokenBuilder,
+    struct_name: &str,
+    generic: &Option<TokenStream>,
+    where_clause: &Option<TokenStream>,
+) {
+    tb.add("impl").stream(generic.clone());
+    tb.add("WidgetRegister for")
+        .ident(struct_name)
+        .stream(generic.clone())
+        .stream(where_clause.clone())
+        .add("{");
+    tb.add("    fn register_widget(vm: &mut ScriptVm)->ScriptValue{");
+    tb.add("        register_widget!(vm.cx_mut(), ").ident(struct_name).add(");");
+    tb.add("        let value = Self::script_proto(vm);");
+    tb.add("        ScriptValue::script_proto(vm);");
+    tb.add("        vm.heap_mut().define_type_property(value.into(), live_id!(a11y), ScriptValue::script_type_id_static());");
+    tb.add("        vm.heap_mut().freeze_component(value.into());");
+    tb.add("        value");
+    tb.add("    }");
+    tb.add("}");
 }
 
 /*
@@ -496,168 +517,173 @@ pub fn camel_case_to_snake_case(inp: &str) -> String {
 }
 
 pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
         if let Some(clean_name) = parser.eat_any_ident() {
-            let ref_name = format!("{}Ref", clean_name);
-            let snake_name = camel_case_to_snake_case(&clean_name);
-
-            tb.add("#[derive(Clone, Debug)]");
-            tb.add("pub struct ").ident(&ref_name).add("(WidgetRef);");
-            tb.add("impl std::ops::Deref for ")
-                .ident(&ref_name)
-                .add("{");
-            tb.add("    type Target = WidgetRef;");
-            tb.add("    fn deref(&self)->&Self::Target{");
-            tb.add("        &self.0");
-            tb.add("    }");
-            tb.add("}");
-            tb.add("impl std::ops::DerefMut for ")
-                .ident(&ref_name)
-                .add("{");
-            tb.add("    fn deref_mut(&mut self)->&mut Self::Target{");
-            tb.add("        &mut self.0");
-            tb.add("    }");
-            tb.add("}");
-            tb.add("impl").ident(&ref_name).add("{");
-
-            tb.add("    pub fn has_widget(&self, widget:&WidgetRef)->")
-                .ident(&ref_name)
-                .add("{");
-            tb.add("        if self.0 == *widget{");
-            tb.add("             ")
-                .add(&ref_name)
-                .add("(widget.clone())");
-            tb.add("        } else {");
-            tb.add("             ")
-                .add(&ref_name)
-                .add("(WidgetRef::default())");
-            tb.add("        }");
-            tb.add("    }");
-
-            tb.add("   pub fn borrow(&self) -> Option<std::cell::Ref<'_, ")
-                .ident(&clean_name)
-                .add(" >> {");
-            tb.add("       self.0.borrow()");
-            tb.add("   }");
-
-            tb.add("   pub fn borrow_mut(&self) -> Option<std::cell::RefMut<'_, ")
-                .ident(&clean_name)
-                .add(" >> {");
-            tb.add("       self.0.borrow_mut()");
-            tb.add("   }");
-
-            tb.add(
-                "   pub fn borrow_if_eq(&self, widget:&WidgetRef) -> Option<std::cell::Ref<'_, ",
-            )
-            .ident(&clean_name)
-            .add(" >> {");
-            tb.add("        if self.0 == *widget{");
-            tb.add("             self.0.borrow()");
-            tb.add("        } else {");
-            tb.add("             None");
-            tb.add("        }");
-            tb.add("   }");
-
-            tb.add("   pub fn borrow_mut_if_eq(&self, widget:&WidgetRef) -> Option<std::cell::RefMut<'_, ").ident(&clean_name).add(" >> {");
-            tb.add("        if self.0 == *widget{");
-            tb.add("             self.0.borrow_mut()");
-            tb.add("        } else {");
-            tb.add("             None");
-            tb.add("        }");
-            tb.add("   }");
-            tb.add("}");
-
-            //let frame_ext = format!("{}ViewRefExt", clean_name);
-            let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
-            let widget_ext = format!("{}WidgetExt", clean_name);
-            let get_fn = snake_name.to_string();
-            let as_fn = format!("as_{}", snake_name);
-
-            tb.add("pub trait").ident(&widget_ref_ext).add("{");
-            tb.add("    fn ")
-                .ident(&get_fn)
-                .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
-                .ident(&ref_name)
-                .add(";");
-            tb.add("    fn ")
-                .ident(&as_fn)
-                .add("(&self) -> ")
-                .ident(&ref_name)
-                .add(";");
-            tb.add("}");
-
-            tb.add("impl ")
-                .ident(&widget_ref_ext)
-                .add(" for WidgetRef{");
-            tb.add("    fn ")
-                .ident(&get_fn)
-                .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
-                .ident(&ref_name)
-                .add("{");
-            tb.add("        ")
-                .ident(&ref_name)
-                .add("(self.widget(cx, path))");
-            tb.add("    }");
-            tb.add("    fn ")
-                .ident(&as_fn)
-                .add("(&self) -> ")
-                .ident(&ref_name)
-                .add("{");
-            tb.add("        ").ident(&ref_name).add("(self.clone())");
-            tb.add("    }");
-            tb.add("}");
-
-            tb.add("impl Default for ").ident(&ref_name).add("{");
-            tb.add("    fn default()->Self{Self(Default::default())}");
-            tb.add("}");
-            /*
-            tb.add("impl ").ident(&widget_ref_ext).add(" for Option<WidgetRef>{");
-            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
-            tb.add("        if let Some(s) = &self{").ident(&ref_name).add("(s.widget(path))}else{").ident(&ref_name).add("(WidgetRef::empty())}");
-            tb.add("    }");
-            tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add("{");
-            tb.add("        if let Some(s) = &self{").ident(&ref_name).add("(s.clone())}else{").ident(&ref_name).add("(WidgetRef::empty())}");
-            tb.add("    }");
-            tb.add("}"); */
-
-            tb.add("pub trait").ident(&widget_ext).add("{");
-            tb.add("    fn ")
-                .ident(&get_fn)
-                .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
-                .ident(&ref_name)
-                .add(";");
-            tb.add("}");
-
-            tb.add("impl<T> ")
-                .ident(&widget_ext)
-                .add(" for T where T: Widget{");
-            tb.add("    fn ")
-                .ident(&get_fn)
-                .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
-                .ident(&ref_name)
-                .add("{");
-            tb.add("        ")
-                .ident(&ref_name)
-                .add("(self.widget(cx, path))");
-            tb.add("    }");
-            tb.add("}");
-
-            /*
-            tb.add("impl std::ops::Deref for ").ident(&ref_name).add("{");
-            tb.add("    type Target = WidgetRef;");
-            tb.add("    fn deref(&self)->&WidgetRef{&self.0}");
-            tb.add("}");
-            */
-
+            let mut tb = TokenBuilder::new();
+            widget_ref_impl(&mut tb, &clean_name);
             return tb.end();
         }
     }
-
     parser.unexpected()
+}
+
+fn widget_ref_impl(tb: &mut TokenBuilder, clean_name: &str) {
+    let ref_name = format!("{}Ref", clean_name);
+    let snake_name = camel_case_to_snake_case(&clean_name);
+
+    tb.add("pub struct ").ident(&ref_name).add("(WidgetRef);");
+    tb.add("impl std::clone::Clone for ").ident(&ref_name).add("{ fn clone(&self)->Self{ Self(self.0.clone()) } }");
+    tb.add("impl std::fmt::Debug for ").ident(&ref_name).add("{");
+    tb.add("    fn fmt(&self, f: &mut std::fmt::Formatter)->std::fmt::Result{ f.debug_tuple(").string(&ref_name).add(").field(&self.0).finish() }");
+    tb.add("}");
+    tb.add("impl std::ops::Deref for ")
+        .ident(&ref_name)
+        .add("{");
+    tb.add("    type Target = WidgetRef;");
+    tb.add("    fn deref(&self)->&Self::Target{");
+    tb.add("        &self.0");
+    tb.add("    }");
+    tb.add("}");
+    tb.add("impl std::ops::DerefMut for ")
+        .ident(&ref_name)
+        .add("{");
+    tb.add("    fn deref_mut(&mut self)->&mut Self::Target{");
+    tb.add("        &mut self.0");
+    tb.add("    }");
+    tb.add("}");
+    tb.add("impl").ident(&ref_name).add("{");
+
+    tb.add("    pub fn has_widget(&self, widget:&WidgetRef)->")
+        .ident(&ref_name)
+        .add("{");
+    tb.add("        if self.0 == *widget{");
+    tb.add("             ")
+        .add(&ref_name)
+        .add("(widget.clone())");
+    tb.add("        } else {");
+    tb.add("             ")
+        .add(&ref_name)
+        .add("(WidgetRef::default())");
+    tb.add("        }");
+    tb.add("    }");
+
+    tb.add("   pub fn borrow(&self) -> Option<std::cell::Ref<'_, ")
+        .ident(&clean_name)
+        .add(" >> {");
+    tb.add("       self.0.borrow()");
+    tb.add("   }");
+
+    tb.add("   pub fn borrow_mut(&self) -> Option<std::cell::RefMut<'_, ")
+        .ident(&clean_name)
+        .add(" >> {");
+    tb.add("       self.0.borrow_mut()");
+    tb.add("   }");
+
+    tb.add(
+        "   pub fn borrow_if_eq(&self, widget:&WidgetRef) -> Option<std::cell::Ref<'_, ",
+    )
+    .ident(&clean_name)
+    .add(" >> {");
+    tb.add("        if self.0 == *widget{");
+    tb.add("             self.0.borrow()");
+    tb.add("        } else {");
+    tb.add("             None");
+    tb.add("        }");
+    tb.add("   }");
+
+    tb.add("   pub fn borrow_mut_if_eq(&self, widget:&WidgetRef) -> Option<std::cell::RefMut<'_, ").ident(&clean_name).add(" >> {");
+    tb.add("        if self.0 == *widget{");
+    tb.add("             self.0.borrow_mut()");
+    tb.add("        } else {");
+    tb.add("             None");
+    tb.add("        }");
+    tb.add("   }");
+    tb.add("}");
+
+    //let frame_ext = format!("{}ViewRefExt", clean_name);
+    let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
+    let widget_ext = format!("{}WidgetExt", clean_name);
+    let get_fn = snake_name.to_string();
+    let as_fn = format!("as_{}", snake_name);
+
+    tb.add("pub trait").ident(&widget_ref_ext).add("{");
+    tb.add("    fn ")
+        .ident(&get_fn)
+        .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
+        .ident(&ref_name)
+        .add(";");
+    tb.add("    fn ")
+        .ident(&as_fn)
+        .add("(&self) -> ")
+        .ident(&ref_name)
+        .add(";");
+    tb.add("}");
+
+    tb.add("impl ")
+        .ident(&widget_ref_ext)
+        .add(" for WidgetRef{");
+    tb.add("    fn ")
+        .ident(&get_fn)
+        .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
+        .ident(&ref_name)
+        .add("{");
+    tb.add("        ")
+        .ident(&ref_name)
+        .add("(self.widget(cx, path))");
+    tb.add("    }");
+    tb.add("    fn ")
+        .ident(&as_fn)
+        .add("(&self) -> ")
+        .ident(&ref_name)
+        .add("{");
+    tb.add("        ").ident(&ref_name).add("(self.clone())");
+    tb.add("    }");
+    tb.add("}");
+
+    tb.add("impl Default for ").ident(&ref_name).add("{");
+    tb.add("    fn default()->Self{Self(Default::default())}");
+    tb.add("}");
+    /*
+    tb.add("impl ").ident(&widget_ref_ext).add(" for Option<WidgetRef>{");
+    tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
+    tb.add("        if let Some(s) = &self{").ident(&ref_name).add("(s.widget(path))}else{").ident(&ref_name).add("(WidgetRef::empty())}");
+    tb.add("    }");
+    tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add("{");
+    tb.add("        if let Some(s) = &self{").ident(&ref_name).add("(s.clone())}else{").ident(&ref_name).add("(WidgetRef::empty())}");
+    tb.add("    }");
+    tb.add("}"); */
+
+    tb.add("pub trait").ident(&widget_ext).add("{");
+    tb.add("    fn ")
+        .ident(&get_fn)
+        .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
+        .ident(&ref_name)
+        .add(";");
+    tb.add("}");
+
+    tb.add("impl<T> ")
+        .ident(&widget_ext)
+        .add(" for T where T: Widget{");
+    tb.add("    fn ")
+        .ident(&get_fn)
+        .add("(&self, cx: &Cx, path: &[LiveId]) -> ")
+        .ident(&ref_name)
+        .add("{");
+    tb.add("        ")
+        .ident(&ref_name)
+        .add("(self.widget(cx, path))");
+    tb.add("    }");
+    tb.add("}");
+
+    /*
+    tb.add("impl std::ops::Deref for ").ident(&ref_name).add("{");
+    tb.add("    type Target = WidgetRef;");
+    tb.add("    fn deref(&self)->&WidgetRef{&self.0}");
+    tb.add("}");
+    */
 }
 
 pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {

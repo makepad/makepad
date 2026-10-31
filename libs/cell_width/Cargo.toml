@@ -1,0 +1,11 @@
+[package]
+name = "makepad-cell-width"
+version = "0.1.0"
+edition = "2021"
+# The range tables are generated from the Unicode Character Database.
+license = "MIT AND Unicode-3.0"
+publish = false
+description = "Cell width (0, 1 or 2) of a codepoint and grapheme-cluster breaks for monospace grids: the terminal and the code editor"
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** The picture to read depth from. */
+let source = Input{ type: @image }
+let depth = Depth{ image: source.image() }
+let published = Publish{ value: depth.out(@image) tags: ["image"] }
+
+Flow{
+    label: "Depth map"
+    brief: "A metric depth map of a picture."
+    source, depth, published
+}

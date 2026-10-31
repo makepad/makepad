@@ -11,7 +11,7 @@ use makepad_code_editor::{
     text::{Change, Drift, Edit, Position},
     CodeDocument, CodeEditor, CodeSession,
 };
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::{
     cell::RefCell,
     collections::HashMap,

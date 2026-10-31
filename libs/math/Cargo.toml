@@ -12,3 +12,4 @@ metadata.makepad-auto-version = "C4VIsC4byWBjPFWeuGD2ZHHSRRs="
 [features] 
 [dependencies]
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+bytemuck = { path = "../bytemuck", version = "1.25.0", features = ["min_const_generics"] }

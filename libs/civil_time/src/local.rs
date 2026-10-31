@@ -4,7 +4,7 @@
 //! Windows asks `SystemTimeToTzSpecificLocalTime`. Elsewhere there is no
 //! local zone and [`local`] returns `None`.
 
-use crate::{from_ymd, to_ymd, weekday, Day};
+use crate::{from_ymd, to_ymd, weekday, Day, MONTH_ABBR, MONTH_NAMES, WEEKDAY_ABBR, WEEKDAY_NAMES};
 
 /// An instant as a wall clock shows it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -32,6 +32,32 @@ impl LocalDateTime {
     /// 0 = Monday, matching [`weekday`].
     pub fn weekday(&self) -> u32 {
         weekday(self.day_number())
+    }
+
+    /// `12:34:56`.
+    pub fn hms(&self) -> String {
+        format!("{:02}:{:02}:{:02}", self.hour, self.minute, self.second)
+    }
+
+    /// `12:34`.
+    pub fn hm(&self) -> String {
+        format!("{:02}:{:02}", self.hour, self.minute)
+    }
+
+    /// `Sat 26 Sep 2026`, marked ` (UTC)` when no local zone was applied,
+    /// so a clock that looks wrong is never a mystery.
+    pub fn date_text(&self) -> String {
+        self.date(WEEKDAY_ABBR[self.weekday() as usize], MONTH_ABBR[(self.month.clamp(1, 12) - 1) as usize])
+    }
+
+    /// `Saturday 26 September 2026`, marked like [`date_text`](Self::date_text).
+    pub fn date_text_long(&self) -> String {
+        self.date(WEEKDAY_NAMES[self.weekday() as usize], MONTH_NAMES[(self.month.clamp(1, 12) - 1) as usize])
+    }
+
+    fn date(&self, weekday: &str, month: &str) -> String {
+        let zone = if self.zoned { "" } else { " (UTC)" };
+        format!("{weekday} {} {month} {}{zone}", self.day, self.year)
     }
 }
 
@@ -207,6 +233,20 @@ mod tests {
         assert_eq!((t.year, t.month, t.day, t.hour, t.minute, t.second), (2026, 9, 6, 12, 34, 56));
         assert_eq!(t.weekday(), 6);
         assert!(!t.zoned);
+    }
+
+    #[test]
+    fn wall_clock_text() {
+        let mut t = utc(1_790_416_800); // 2026-09-26T10:00:00Z, a Saturday
+        assert_eq!((t.hms(), t.hm()), ("10:00:00".to_string(), "10:00".to_string()));
+        assert_eq!(t.date_text(), "Sat 26 Sep 2026 (UTC)");
+        assert_eq!(t.date_text_long(), "Saturday 26 September 2026 (UTC)");
+        t.zoned = true;
+        assert_eq!(t.date_text(), "Sat 26 Sep 2026");
+        assert_eq!(t.date_text_long(), "Saturday 26 September 2026");
+        let t = utc(1_767_225_600); // 2026-01-01T00:00:00Z, a Thursday
+        assert_eq!(t.date_text(), "Thu 1 Jan 2026 (UTC)");
+        assert_eq!(utc(-1).hms(), "23:59:59");
     }
 
     #[cfg(any(unix, windows))]

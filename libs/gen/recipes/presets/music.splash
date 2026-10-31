@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** The track: genre, mood, instruments, tempo. */
+let prompt = Input{ type: @text default: "tense synthwave chase, driving bass, 120 bpm" }
+let music = Music{ prompt: prompt.text() lyrics: "[Instrumental]" model: "minimax-music3-q4" seconds: 120 }
+let published = Publish{ value: music.out(@audio) tags: ["music"] }
+
+Flow{
+    label: "Music"
+    brief: "An instrumental track to length (5 to 300 seconds)."
+    prompt, music, published
+}

@@ -49,19 +49,11 @@ pub fn get_activity_setter_fn() -> Option<unsafe fn(jni_sys::jobject)> {
     SET_ACTIVITY_FN.lock().unwrap().take()
 }
 
+/// Sets the JavaVM: a standalone app's JNI_OnLoad (makepad-platform's `app_main!`), or the
+/// makepad run host for a packed app (it calls this symbol).
 #[no_mangle]
 #[doc(hidden)]
-pub unsafe extern "C" fn JNI_OnLoad(
-    vm: *mut jni_sys::JavaVM,
-    _: std::ffi::c_void,
-) -> jni_sys::jint {
-    VM = vm as *mut _ as _;
-
-    jni_sys::JNI_VERSION_1_6 as _
-}
-
-#[no_mangle]
-extern "C" fn jni_on_load(vm: *mut std::ffi::c_void) {
+pub extern "C" fn jni_on_load(vm: *mut std::ffi::c_void) {
     unsafe {
         VM = vm as _;
     }

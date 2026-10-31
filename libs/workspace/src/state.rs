@@ -7,10 +7,10 @@
 //! - `settings.ron` — appearance and renderer choice (`Settings`)
 //! - `dock.ron`     — the dock layout (`HashMap<LiveId, DockItem>`)
 
-use makepad_widgets::dock::DockItem;
-use makepad_widgets::makepad_micro_serde::*;
-use makepad_widgets::makepad_platform::home::makepad_home;
-use makepad_widgets::*;
+use makepad_widgets_data::dock::DockItem;
+use makepad_widgets_core::makepad_micro_serde::*;
+use makepad_widgets_core::makepad_platform::home::makepad_home;
+use makepad_widgets_core::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -143,9 +143,9 @@ impl RendererChoice {
 /// Every optional field may be absent from an older `settings.ron`.
 #[derive(Clone, Debug, Default, PartialEq, SerRon, DeRon)]
 pub struct Settings {
-    /// Style family id (`"macos"`, `"windows-2000"`, ...); `None` follows the
+    /// UI theme id (`"macos"`, `"windows-2000"`, ...); `None` follows the
     /// host OS family and native appearance where available.
-    pub style: Option<String>,
+    pub theme: Option<String>,
     /// Manual dark preference for an explicit family, or for a platform that
     /// cannot report its native appearance.
     pub dark: bool,
@@ -163,9 +163,12 @@ pub struct Settings {
     /// fitting a step's changed files into view (`None` = off, the fitting
     /// default).
     pub history_keep_zoom: Option<bool>,
-    /// The map colour theme identifier (`None` = `"default"`). The widget
-    /// style and dark preference above are the OS chrome; this is the map.
-    pub map_theme: Option<String>,
+    /// The 3D map look the user chose, by id (`None` or unknown = the look
+    /// linked to the widget theme above). The widget theme and dark
+    /// preference above are the OS chrome; this is the map.
+    pub look: Option<String>,
+    /// The Look tab's Adjust overrides (`key=value;...`, empty = none).
+    pub look_adjust: Option<String>,
     /// Experimental infinite zoom: a prepared map inside the glyph
     /// (`None` = off). Older settings files without the field stay off.
     pub infinite_zoom: Option<bool>,
@@ -175,7 +178,39 @@ pub struct Settings {
     /// Directories hidden from the code map, per prepared project
     /// (`None` = nothing hidden anywhere). See [`MapHidden`].
     pub map_hidden: Option<Vec<MapHidden>>,
+    /// Folders opened, most recent first (`None` = none yet). See
+    /// [`RecentFolder`].
+    pub recent_folders: Option<Vec<RecentFolder>>,
 }
+
+/// A folder the app opened, with the platform bookmark that lets it open the
+/// folder again after a restart (a sandboxed macOS app has no access to a
+/// folder the user did not pick in this process otherwise).
+#[derive(Clone, Debug, Default, PartialEq, SerRon, DeRon)]
+pub struct RecentFolder {
+    pub path: String,
+    /// `makepad_platform::folder_access` bookmark bytes as lowercase hex.
+    pub bookmark: Option<String>,
+    /// When it was last opened, in seconds since the Unix epoch (`None`:
+    /// an entry written before the time was kept).
+    pub opened: Option<u64>,
+}
+
+impl RecentFolder {
+    pub fn bookmark_bytes(&self) -> Option<Vec<u8>> {
+        let hex = self.bookmark.as_deref()?.as_bytes();
+        if hex.len() % 2 != 0 {
+            return None;
+        }
+        hex.chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+            .collect()
+    }
+}
+
+/// How many folders the recent list keeps: what a recent-folders menu shows,
+/// the oldest drops off.
+const RECENT_FOLDERS: usize = 12;
 
 /// The directories one prepared project hides from its code map: the
 /// project is the prepared map's identity (the namespace directory name),
@@ -211,9 +246,9 @@ impl Settings {
     pub fn history_keep_zoom(&self) -> bool {
         self.history_keep_zoom.unwrap_or(false)
     }
-    /// The saved map theme identifier, `"default"` when unset.
-    pub fn map_theme(&self) -> &str {
-        self.map_theme.as_deref().unwrap_or("default")
+    /// The saved map look id, empty when unset (the look follows the theme).
+    pub fn look(&self) -> &str {
+        self.look.as_deref().unwrap_or("")
     }
     pub fn infinite_zoom(&self) -> bool {
         self.infinite_zoom.unwrap_or(true)
@@ -246,6 +281,37 @@ impl Settings {
     /// within 1..=16.
     pub fn tab_width(&self) -> u32 {
         self.tab_width.unwrap_or(8).clamp(1, 16)
+    }
+    /// Opened folders, most recent first.
+    pub fn recent_folders(&self) -> &[RecentFolder] {
+        self.recent_folders.as_deref().unwrap_or(&[])
+    }
+    /// Put `path` first in the recent list, with its bookmark (`None` keeps
+    /// the bookmark it already had, if any).
+    pub fn remember_folder(&mut self, path: &Path, bookmark: Option<&[u8]>) {
+        let path = path.to_string_lossy().into_owned();
+        let mut entries = self.recent_folders.take().unwrap_or_default();
+        let previous = entries
+            .iter()
+            .position(|entry| entry.path == path)
+            .map(|index| entries.remove(index));
+        let bookmark = match bookmark {
+            Some(bytes) => Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
+            None => previous.and_then(|entry| entry.bookmark),
+        };
+        let opened = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs());
+        entries.insert(0, RecentFolder { path, bookmark, opened });
+        entries.truncate(RECENT_FOLDERS);
+        self.recent_folders = Some(entries);
+    }
+    /// Take `path` off the recent list (a folder that is gone).
+    pub fn forget_folder(&mut self, path: &str) {
+        let mut entries = self.recent_folders.take().unwrap_or_default();
+        entries.retain(|entry| entry.path != path);
+        self.recent_folders = (!entries.is_empty()).then_some(entries);
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))
@@ -334,7 +400,7 @@ pub fn dock_state_is_usable(items: &HashMap<LiveId, DockItem>, kinds: &[LiveId])
         }
         match item {
             DockItem::Splitter { a, b, align, .. } => {
-                use makepad_widgets::splitter::SplitterAlign;
+                use makepad_widgets_core::splitter::SplitterAlign;
                 let valid = match align {
                     SplitterAlign::Weighted(v) => v.is_finite() && (0.0..=1.0).contains(v),
                     SplitterAlign::FromA(v) | SplitterAlign::FromB(v) => v.is_finite() && *v >= 0.0,
@@ -397,7 +463,7 @@ pub fn recover_rooted_dock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_widgets::splitter::{SplitterAlign, SplitterAxis};
+    use makepad_widgets_core::splitter::{SplitterAlign, SplitterAxis};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -432,12 +498,12 @@ mod tests {
     fn settings_without_renderer_still_load() {
         // a settings.ron written before the Renderer row existed
         let old = Settings::deserialize_ron(
-            "(style: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: false)",
+            "(theme: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: false)",
         )
         .unwrap();
         assert_eq!(old.renderer, None);
         assert_eq!(old.renderer(), None);
-        assert_eq!(old.style.as_deref(), Some("macos"));
+        assert_eq!(old.theme.as_deref(), Some("macos"));
         assert_eq!(old.code_indent_cells(), 3);
         assert!(!old.map_tiles());
         assert!(old.infinite_zoom());
@@ -489,7 +555,7 @@ mod tests {
     #[test]
     fn settings_without_export_width_load_with_the_default() {
         // a settings file written before the print export existed
-        let old = "(style: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: true)";
+        let old = "(theme: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: true)";
         let s = Settings::deserialize_ron(old).unwrap();
         assert_eq!(s.export_width, None);
         assert_eq!(s.export_width(), 4096);
@@ -506,17 +572,19 @@ mod tests {
         assert_eq!(Settings::load(&dir), Settings::default());
         assert_eq!(Settings::deserialize_ron("(dark: false)").unwrap().code_indent_cells(), 2);
         let s = Settings {
-            style: Some("windows-2000".into()),
+            theme: Some("windows-2000".into()),
             dark: true,
             architecture_indent_cells: Some(2),
             map_tiles: Some(false),
             renderer: None,
             export_width: Some(8192),
             history_keep_zoom: None,
-            map_theme: None,
+            look: None,
+            look_adjust: None,
             infinite_zoom: None,
             tab_width: None,
             map_hidden: None,
+            recent_folders: None,
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);

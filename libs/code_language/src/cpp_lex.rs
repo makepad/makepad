@@ -72,13 +72,16 @@ impl CppKind {
     }
 }
 
+/// Sorted (byte order): `is_keyword` binary-searches it.
 const KEYWORDS: &[&str] = &[
     "alignas",
     "alignof",
     "and",
     "and_eq",
     "asm",
+    "audit",
     "auto",
+    "axiom",
     "bitand",
     "bitor",
     "bool",
@@ -86,21 +89,21 @@ const KEYWORDS: &[&str] = &[
     "case",
     "catch",
     "char",
-    "char8_t",
     "char16_t",
     "char32_t",
+    "char8_t",
     "class",
-    "compl",
-    "concept",
-    "const",
-    "consteval",
-    "constexpr",
-    "constinit",
-    "const_cast",
-    "continue",
     "co_await",
     "co_return",
     "co_yield",
+    "compl",
+    "concept",
+    "const",
+    "const_cast",
+    "consteval",
+    "constexpr",
+    "constinit",
+    "continue",
     "decltype",
     "default",
     "delete",
@@ -113,14 +116,17 @@ const KEYWORDS: &[&str] = &[
     "export",
     "extern",
     "false",
+    "final",
     "float",
     "for",
     "friend",
     "goto",
     "if",
+    "import",
     "inline",
     "int",
     "long",
+    "module",
     "mutable",
     "namespace",
     "new",
@@ -131,6 +137,7 @@ const KEYWORDS: &[&str] = &[
     "operator",
     "or",
     "or_eq",
+    "override",
     "private",
     "protected",
     "public",
@@ -165,16 +172,12 @@ const KEYWORDS: &[&str] = &[
     "while",
     "xor",
     "xor_eq",
-    "override",
-    "final",
-    "audit",
-    "axiom",
-    "import",
-    "module",
 ];
 
 pub fn is_keyword(ident: &str) -> bool {
-    KEYWORDS.binary_search(&ident).is_ok() || KEYWORDS.contains(&ident)
+    // Every keyword starts with a lowercase ASCII letter; most identifiers
+    // (macros, types) are rejected by their first byte alone.
+    ident.as_bytes().first().is_some_and(u8::is_ascii_lowercase) && KEYWORDS.binary_search(&ident).is_ok()
 }
 
 pub fn keyword_role(ident: &str) -> TokenRole {
@@ -953,4 +956,13 @@ pub fn line_summaries(bytes: &[u8], spans: &[TokenSpan]) -> Vec<LineSummary> {
     }
     let _ = LineMix::from_counts;
     out
+}
+
+#[cfg(test)]
+mod keyword_table_tests {
+    #[test]
+    fn keywords_are_sorted_and_lowercase_initial() {
+        assert!(super::KEYWORDS.windows(2).all(|w| w[0] < w[1]));
+        assert!(super::KEYWORDS.iter().all(|k| k.as_bytes()[0].is_ascii_lowercase()));
+    }
 }

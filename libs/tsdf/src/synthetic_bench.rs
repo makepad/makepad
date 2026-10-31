@@ -5,6 +5,7 @@ use crate::{
     DEPTH_VOXEL_MIN_DISTANCE_METERS,
 };
 use makepad_math::{vec3f, vec4f, CameraFov, Mat4f, Vec3f};
+use crate::synthetic::{synthetic_scene_boxes, SyntheticBox};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
@@ -22,17 +23,7 @@ struct SyntheticTsdfBenchStats {
     heap_mib: f64,
 }
 
-#[derive(Clone, Copy)]
-struct SyntheticBox {
-    min: Vec3f,
-    max: Vec3f,
-}
-
 impl SyntheticBox {
-    const fn new(min: Vec3f, max: Vec3f) -> Self {
-        Self { min, max }
-    }
-
     fn hit_distance(self, origin: Vec3f, direction: Vec3f) -> Option<f32> {
         let mut t_min = f32::NEG_INFINITY;
         let mut t_max = f32::INFINITY;
@@ -62,19 +53,7 @@ impl SyntheticBox {
         let entry = t_min.max(0.0);
         (entry.is_finite() && entry <= t_max).then_some(entry)
     }
-}
 
-fn synthetic_scene_boxes() -> Vec<SyntheticBox> {
-    vec![
-        SyntheticBox::new(vec3f(-2.60, -0.10, -5.20), vec3f(2.60, 0.0, 0.70)),
-        SyntheticBox::new(vec3f(-2.60, 2.45, -5.20), vec3f(2.60, 2.55, 0.70)),
-        SyntheticBox::new(vec3f(-2.60, 0.0, -5.20), vec3f(-2.50, 2.55, 0.70)),
-        SyntheticBox::new(vec3f(2.50, 0.0, -5.20), vec3f(2.60, 2.55, 0.70)),
-        SyntheticBox::new(vec3f(-2.60, 0.0, -5.20), vec3f(2.60, 2.55, -5.10)),
-        SyntheticBox::new(vec3f(-0.45, 0.0, -2.65), vec3f(0.45, 1.15, -1.85)),
-        SyntheticBox::new(vec3f(1.15, 0.0, -3.55), vec3f(1.85, 1.65, -2.95)),
-        SyntheticBox::new(vec3f(-1.85, 0.0, -4.20), vec3f(-1.25, 0.95, -3.55)),
-    ]
 }
 
 fn synthetic_camera_world(frame_index: usize, frame_count: usize) -> Vec3f {

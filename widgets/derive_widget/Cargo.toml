@@ -13,11 +13,10 @@ metadata.makepad-auto-version = "dFoAj28MCO5aU_25X_xxuF1WYxA="
 proc-macro = true
 
 [dependencies]
+makepad-derive-widget-impl = { path = "../derive_widget_impl", version = "1.0.0" }
 makepad-micro-proc-macro = { path = "../../libs/micro_proc_macro", version = "1.0.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }
 
 [features]
 default = ["nightly"]
 nightly = []
-## Enables deriving serde (de)serialization traits for the LiveId type.
-serde = ["makepad-live-id/serde"]

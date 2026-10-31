@@ -174,3 +174,29 @@ fn kinds_sequence_and_epochs_on_the_host_backend() {
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(second);
 }
+
+/// A watcher whose roots see no change is stopped and dropped: its root threads are waiting in
+/// their directory reads and must end (Windows: a synchronous ReadDirectoryChangesW never
+/// returned, so the drop's join hung -- every `makepad run` hung at its quit).
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[test]
+fn a_watcher_with_quiet_roots_stops() {
+    let dir = scratch("quiet");
+    let watcher = FileSystemWatcher::start(
+        vec![WatchRoot {
+            mount: "quiet".into(),
+            path: dir.clone(),
+        }],
+        |_| {},
+    )
+    .unwrap();
+    // the root threads are in their reads by now
+    std::thread::sleep(Duration::from_millis(300));
+    let (done, ended) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(watcher);
+        let _ = done.send(());
+    });
+    assert!(ended.recv_timeout(Duration::from_secs(10)).is_ok(), "dropping the watcher did not return");
+    let _ = std::fs::remove_dir_all(dir);
+}

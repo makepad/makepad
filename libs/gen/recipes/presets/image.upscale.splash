@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** The picture to enlarge. */
+let source = Input{ type: @image }
+let upscale = Upscale{ image: source.image() factor: 2 }
+let published = Publish{ value: upscale.out(@image) tags: ["image"] }
+
+Flow{
+    label: "Upscale image"
+    brief: "Enlarges a picture two or four times with detail restored."
+    source, upscale, published
+}

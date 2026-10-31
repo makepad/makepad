@@ -1,0 +1,25 @@
+use mod.flow.*
+
+/** The object: one thing, whole. */
+let prompt = Input{ type: @text default: "a wooden barrel with iron bands" }
+let image = Gen{
+    domain: "image"
+    label: "image"
+    ports: { in: { prompt: @text } out: { image: @image } }
+    prompt: prompt.text()
+}
+let mesh = Gen{
+    domain: "mesh"
+    label: "mesh"
+    ports: { in: { prompt: @text image: @image } out: { mesh: @mesh } }
+    prompt: prompt.text()
+    image: image.out(@image)
+}
+let published_image = Publish{ value: image.out(@image) tags: ["prop"] }
+let published = Publish{ value: mesh.out(@mesh) tags: ["prop"] }
+
+Flow{
+    label: "Prop"
+    brief: "A 3D prop from a prompt: its picture, then a textured mesh."
+    prompt, image, mesh, published_image, published
+}

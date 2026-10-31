@@ -4,7 +4,7 @@
 //! view over them, the camera-scaled canvas ground and card, the camera and
 //! presentation seam zoomable presentations project through, and the input
 //! remap through such a camera.
-pub use makepad_widgets;
+pub use makepad_widgets_core;
 pub mod appearance;
 pub mod camera;
 pub use camera as workspace;

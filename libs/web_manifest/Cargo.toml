@@ -1,0 +1,11 @@
+[package]
+name = "makepad-web-manifest"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "The collect manifest: what a collect run learned an app needs on the web (shaders, glyphs, font coverage, kernels, widgets, JS sections, assets, diagnostics), as files in one directory; written by the platform's collect-web run mode and Stage's film analysis, read by the packers"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

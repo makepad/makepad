@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** What happens in the clip. */
+let prompt = Input{ type: @text default: "slow push-in over a neon city street at night, rain" }
+let video = Video{ prompt: prompt.text() }
+let published = Publish{ value: video.out(@video) tags: ["video"] }
+
+Flow{
+    label: "Video"
+    brief: "A short video clip from a prompt: a cutscene, a menu plate, a title backdrop."
+    prompt, video, published
+}

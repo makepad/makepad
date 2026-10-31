@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** One dry, isolated sound: what makes it, how close, the room. */
+let prompt = Input{ type: @text default: "a wooden door slams shut, close perspective, dry, isolated sound effect" }
+let sound = Sfx{ prompt: prompt.text() model: "sa3-sfx" seconds: 2 }
+let published = Publish{ value: sound.out(@audio) tags: ["sound"] }
+
+Flow{
+    label: "Sound effect"
+    brief: "A sound effect to length: whole seconds, 1-2 for one-shots, 10-20 for beds."
+    prompt, sound, published
+}

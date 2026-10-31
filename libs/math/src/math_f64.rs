@@ -143,10 +143,16 @@ impl Rect {
         }
     }
 
-    pub fn dpi_snap(&self, f: f64) -> Rect {
+    /// On whole device pixels at `dpi`: origin and size each rounded to the nearest pixel, the one
+    /// rounding rule for what a hosted app is told and where its frame is drawn. The integer is
+    /// decided once; px / dpi * dpi rounds back to it exactly, so a size handed through points
+    /// and back never drifts a pixel (a floor did: 1000.8 pt at 1.25 = 1250.9999999 px became
+    /// 1250 while the app drew 1251, and the WM squeezed every frame).
+    pub fn device_round(&self, dpi: f64) -> Rect {
+        let px = |v: f64| (v * dpi).round() / dpi;
         Rect {
-            pos: dvec2((self.pos.x / f).floor() * f, (self.pos.y / f).floor() * f),
-            size: dvec2((self.size.x / f).floor() * f, (self.size.y / f).floor() * f),
+            pos: dvec2(px(self.pos.x), px(self.pos.y)),
+            size: dvec2(px(self.size.x), px(self.size.y)),
         }
     }
 
@@ -579,5 +585,28 @@ impl ops::Neg for Vec2d {
             x: -self.x,
             y: -self.y,
         }
+    }
+}
+
+#[cfg(test)]
+mod device_round_tests {
+    use super::*;
+
+    /// A whole number of device pixels handed through points comes back as that number at every
+    /// scale, origin and size (WMSYNC: 1000.8 pt at 1.25 is 1251 px, not 1250).
+    #[test]
+    fn device_round_returns_the_whole_pixels_it_was_given() {
+        for step in 100..=300 {
+            let dpi = step as f64 / 100.0;
+            for px in [1u32, 45, 1251, 1301, 1752, 2110, 3840] {
+                let pt = px as f64 / dpi;
+                let r = Rect { pos: dvec2(pt, pt), size: dvec2(pt, pt) }.device_round(dpi);
+                for v in [r.pos.x, r.size.y] {
+                    assert!((v * dpi - px as f64).abs() < 1e-6, "{px} px at {dpi}: {v}");
+                }
+            }
+        }
+        let r = Rect { pos: dvec2(1035.2, 492.0), size: dvec2(1000.8, 699.2) }.device_round(1.25);
+        assert_eq!(((r.size.x * 1.25).round(), (r.size.y * 1.25).round()), (1251.0, 874.0));
     }
 }

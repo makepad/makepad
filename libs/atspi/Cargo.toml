@@ -1,0 +1,9 @@
+[package]
+name = "makepad-atspi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Typed AT-SPI2 server dispatch, client calls and signals"
+
+[dependencies]
+makepad-dbus-wire = { path = "../dbus_wire", version = "0.1.0" }

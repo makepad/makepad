@@ -118,10 +118,12 @@ impl Commit {
     }
 }
 
-/// Parse the text content of a commit object.
+/// Parse the text content of a commit object. Bytes that are not UTF-8
+/// (Latin-1 names and messages of old histories, such as the Linux
+/// kernel's) are decoded lossily: history is read, not rewritten.
 pub fn parse_commit(data: &[u8]) -> Result<Commit, GitError> {
-    let text = std::str::from_utf8(data)
-        .map_err(|_| GitError::InvalidObject("commit: invalid UTF-8".into()))?;
+    let text = String::from_utf8_lossy(data);
+    let text: &str = &text;
 
     // Split at the blank line separating headers from message
     let (headers, message) = match text.find("\n\n") {

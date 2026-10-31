@@ -1,0 +1,12 @@
+use mod.flow.*
+
+/** The object's picture: one object, whole, on a plain background. */
+let source = Input{ type: @image }
+let mesh = Mesh{ image: source.image() }
+let published = Publish{ value: mesh.out(@mesh) tags: ["mesh"] }
+
+Flow{
+    label: "Mesh from image"
+    brief: "A textured 3D mesh reconstructed from a picture of one object."
+    source, mesh, published
+}

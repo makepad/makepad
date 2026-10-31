@@ -1,0 +1,14 @@
+use mod.flow.*
+
+/** The first frame. */
+let source = Input{ type: @image }
+/** How it moves. */
+let prompt = Input{ type: @text default: "the camera slowly orbits, gentle wind" }
+let video = Video{ prompt: prompt.text() image: source.image() }
+let published = Publish{ value: video.out(@video) tags: ["video"] }
+
+Flow{
+    label: "Video from image"
+    brief: "Animates a picture into a short clip."
+    source, prompt, video, published
+}
