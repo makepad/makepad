@@ -826,25 +826,47 @@ impl Cx {
 
                 // lets check if our vao is still valid
                 if draw_item.os.vao.is_none() {
-                    draw_item.os.vao = Some(CxOsDrawCallVao {
-                        vao: None,
-                        shader_id: None,
-                        inst_vb: None,
-                        geom_vb: None,
-                        geom_ib: None,
-                    });
+                    draw_item.os.vao = Some(CxOsDrawCallVao::default());
                 }
 
                 let vao = draw_item.os.vao.as_mut().unwrap();
+                let shader_id = Some(draw_call.draw_shader_id.index);
+                let (geom_vb, geom_ib) = (geometry.os.vb.gl_buffer, geometry.os.ib.gl_buffer);
                 if vao.inst_vb != draw_item.os.inst_vb.gl_buffer
-                    || vao.geom_vb != geometry.os.vb.gl_buffer
-                    || vao.geom_ib != geometry.os.ib.gl_buffer
-                    || vao.shader_id != Some(draw_call.draw_shader_id.index)
+                    || vao.geom_vb != geom_vb
+                    || vao.geom_ib != geom_ib
+                    || vao.shader_id != shader_id
                 {
-                    if let Some(vao) = vao.vao.take() {
-                        unsafe { (gl.glDeleteVertexArrays)(1, &vao) };
+                    // Every VAO we kept points at this item's instance buffer, so they're only reusable while it stays the same.
+                    let inst_vb_changed = vao.inst_vb != draw_item.os.inst_vb.gl_buffer;
+                    if let Some(current) = vao.vao.take() {
+                        if inst_vb_changed {
+                            unsafe { (gl.glDeleteVertexArrays)(1, &current) };
+                        } else {
+                            vao.spares.push(SpareVao { shader_id: vao.shader_id, geom_vb: vao.geom_vb, geom_ib: vao.geom_ib, vao: current });
+                        }
                     }
-
+                    if inst_vb_changed {
+                        for spare in vao.spares.drain(..) {
+                            unsafe { (gl.glDeleteVertexArrays)(1, &spare.vao) };
+                        }
+                    }
+                    let reusable = vao.spares.iter().position(|spare| {
+                        spare.shader_id == shader_id && spare.geom_vb == geom_vb && spare.geom_ib == geom_ib
+                    });
+                    if let Some(index) = reusable {
+                        vao.vao = Some(vao.spares.remove(index).vao);
+                        vao.shader_id = shader_id;
+                        vao.inst_vb = draw_item.os.inst_vb.gl_buffer;
+                        vao.geom_vb = geom_vb;
+                        vao.geom_ib = geom_ib;
+                    }
+                    while vao.spares.len() > MAX_SPARE_VAOS {
+                        let oldest = vao.spares.remove(0);
+                        unsafe { (gl.glDeleteVertexArrays)(1, &oldest.vao) };
+                    }
+                }
+                if vao.vao.is_none() {
                     vao.vao = Some(unsafe {
                         let mut vao = 0u32;
                         (gl.glGenVertexArrays)(1, &mut vao);
@@ -1088,28 +1110,8 @@ impl Cx {
                         } else {
                             (gl.glBindTexture)(expected_target, 0);
                         }
-
-                        if let Some(loc) = shgl.textures[i].loc {
-                            (gl.glUniform1i)(loc, i as i32);
-                        }
-                        if let Some(gl_bind_sampler) = gl.glBindSampler {
-                            // Do not bind sampler objects for OES external textures;
-                            // per GL ES spec, using sampler objects with external textures
-                            // is undefined behavior.
-                            let is_oes = matches!(
-                                sh.mapping.textures[i].tex_type,
-                                TextureType::TextureVideo
-                            );
-                            let sampler = if is_oes {
-                                0
-                            } else {
-                                shgl.samplers
-                                    .get(i)
-                                    .and_then(|sampler| sampler.sampler)
-                                    .unwrap_or(0)
-                            };
-                            gl_bind_sampler(i as u32, sampler);
-                        }
+                        // Each sampler uniform's unit is set once at link, and since we never create
+                        // sampler objects (see `opengl_create_samplers`), every unit stays on sampler 0.
                     }
                     if trace_draw {
                         crate::trace!(
@@ -2053,6 +2055,14 @@ impl GlShader {
                 GlShader::set_uniform_array(gl, &uniforms.const_table_uniform, &zeros);
             }
 
+            // Each sampler always reads the texture unit matching its slot, so we set that once here.
+            let textures = Self::opengl_get_texture_slots(gl, program, &mapping.textures);
+            for (unit, texture) in textures.iter().enumerate() {
+                if let Some(loc) = texture.loc {
+                    (gl.glUniform1i)(loc, unit as i32);
+                }
+            }
+
             (gl.glUseProgram)(0);
 
             Self {
@@ -2071,7 +2081,7 @@ impl GlShader {
                     mapping.instances.total_slots,
                     &mapping.instances.inputs,
                 ),
-                textures: Self::opengl_get_texture_slots(gl, program, &mapping.textures),
+                textures,
                 samplers: Self::opengl_create_samplers(gl, mapping),
                 xr_depth_texture: Self::opengl_get_uniform(gl, program, "xr_depth_texture"),
                 uniforms,
@@ -2767,12 +2777,29 @@ pub struct CxOsDrawCallVao {
     pub inst_vb: Option<u32>,
     pub geom_vb: Option<u32>,
     pub geom_ib: Option<u32>,
+    /// VAOs this draw item built for other shaders. List rows scrolling in and out shift which shader
+    /// each draw item gets, so it often switches back and can reuse one instead of rebuilding it.
+    pub spares: Vec<SpareVao>,
 }
+
+#[derive(Clone)]
+pub struct SpareVao {
+    shader_id: Option<usize>,
+    geom_vb: Option<u32>,
+    geom_ib: Option<u32>,
+    vao: u32,
+}
+
+/// How many spare VAOs a draw item keeps, which bounds the GL objects a long list can hold onto.
+const MAX_SPARE_VAOS: usize = 3;
 
 impl CxOsDrawCallVao {
     pub fn free(self, gl: &LibGl) {
         if let Some(vao) = self.vao {
             unsafe { (gl.glDeleteVertexArrays)(1, &vao) };
+        }
+        for spare in self.spares {
+            unsafe { (gl.glDeleteVertexArrays)(1, &spare.vao) };
         }
     }
 }
@@ -3756,6 +3783,8 @@ pub struct OpenglBuffer {
     pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
     pub retained_count: usize,
     pub charge: Option<crate::retained_instances::RetainedAllocation>,
+    /// What the uniform buffer holds now, so an upload that wouldn't change it can be skipped.
+    uniform_bytes: Vec<u8>,
 }
 
 impl OpenglBuffer {
@@ -3932,6 +3961,10 @@ impl OpenglBuffer {
         }
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
+        } else if self.uniform_bytes == data {
+            // Every draw list uploads each frame, and glBufferData reallocates the buffer
+            // even when nothing changed, which costs the GL driver a lot of CPU.
+            return;
         }
         unsafe {
             (gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, self.gl_buffer.unwrap());
@@ -3945,6 +3978,8 @@ impl OpenglBuffer {
             #[cfg(debug_assertions)]
             crate::gl_log_error!(gl);
         }
+        self.uniform_bytes.clear();
+        self.uniform_bytes.extend_from_slice(data);
     }
 
     pub fn update_index_buffer(&mut self, gl: &LibGl, data: &[u32]) {
