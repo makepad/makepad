@@ -1,0 +1,26 @@
+# makepad-browser-view -- web pages in a makepad app, without Chromium in it.
+#
+# Chromium (CEF) runs only in the browser host (apps/browser_host,
+# makepad-app-browser-host): a native makepad app this crate starts as a
+# hosted child through libs/app_host when the first view opens and stops
+# when the last one closes. Every view is a window of that one process; its
+# frames arrive as a shared GPU texture, its input goes the hosted-app way.
+# No browser host binary: no views, quietly.
+
+[package]
+name = "makepad-browser-view"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "makepad_browser_view"
+path = "src/lib.rs"
+
+[dependencies]
+makepad-platform = { path = "../../platform" }
+makepad-studio-protocol = { path = "../../platform/studio" }
+makepad-app-host = { path = "../app_host" }
+makepad-app-registry = { path = "../app_registry" }
+makepad-error-log = { path = "../error_log" }
