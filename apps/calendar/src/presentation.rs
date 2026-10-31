@@ -75,13 +75,10 @@ fn unpack(c: u32) -> Vec4f {
 impl CalendarColors {
     pub fn resolve(vm: &mut ScriptVm) -> Self {
         // Resolve in the current isolate, including theme refreshes made by the host.
-        let _palette = makepad_wm_theme::current_for_vm(vm);
         let theme = vm.module(id!(theme));
         let role = |name: &str| {
             unpack(
-                vm.bx
-                    .heap
-                    .value(theme, LiveId::from_str(name).into(), NoTrap)
+                vm.value(theme, LiveId::from_str(name))
                     .as_color()
                     .unwrap_or(0),
             )
@@ -389,13 +386,10 @@ pub fn retint_widget(
     let source = widget.script_source();
     let colors = cx.with_vm(|vm| {
         [live_id!(draw_bg), live_id!(draw_text), live_id!(draw_icon)].map(|field| {
-            let draw = vm.bx.heap.value(source, field.into(), NoTrap);
-            let mut value = vm
-                .bx
-                .heap
-                .value(draw.as_object()?, live_id!(color).into(), NoTrap);
+            let draw = vm.value(source, field);
+            let mut value = vm.value(draw.as_object()?, live_id!(color));
             if let Some(object) = value.as_object() {
-                value = vm.bx.heap.value(object, live_id!(value).into(), NoTrap);
+                value = vm.value(object, live_id!(value));
             }
             if value.as_color().is_some() || value.as_pod().is_some() {
                 Some(Vec4f::script_from_value(vm, value))
@@ -419,7 +413,7 @@ pub fn retint_widget(
         .into_iter()
         .find_map(|(old, new)| if old == value { Some(new) } else { None })
     };
-    let paints = cx.with_vm(|vm| vm.bx.heap.value(source, live_id!(show_bg).into(), NoTrap).as_bool().unwrap_or(false));
+    let paints = cx.with_vm(|vm| vm.value(source, live_id!(show_bg)).as_bool().unwrap_or(false));
     let surface = if paints {
         colors[0].and_then(mapped).map(|c| composite(c, surface)).unwrap_or(surface)
     } else { surface };

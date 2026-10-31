@@ -1,0 +1,22 @@
+use mod.flow.*
+
+/** What to render while preserving the supplied image's edges. */
+let prompt = Input{ type: @text default: "a stained-glass city map" }
+/** The source image whose edges should control the result. */
+let image = Input{ type: @image }
+let control = Control{
+    prompt: prompt.text()
+    control: image.image()
+    steps: 30
+    canny_low: 50
+    canny_high: 200
+    model: "flux1-canny-dev"
+}
+/** Publish the edge-guided picture into the flow asset library. */
+let published = Publish{ value: control.image() namespace: "flows" tags: ["flow", "control", "canny"] }
+
+Flow{
+    label: "Edge-guided image"
+    brief: "Uses Canny edges from a supplied image to constrain a new render."
+    prompt, image, control, published
+}

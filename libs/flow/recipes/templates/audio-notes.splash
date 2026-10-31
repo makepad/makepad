@@ -1,0 +1,15 @@
+use mod.flow.*
+
+/** The music recording to transcribe. */
+let audio = Input{ type: @audio }
+let transcribe = Notes{ audio: audio.audio() model: "basic-pitch" }
+/** Publish the timed note analysis into the flow asset library. */
+let notes = Publish{ value: transcribe.json() namespace: "flows" tags: ["flow", "notes"] }
+/** The companion MIDI file. */
+let midi = Output{ type: @bytes value: transcribe.midi() }
+
+Flow{
+    label: "Transcribe notes"
+    brief: "Transcribes polyphonic music into timed note JSON and a companion MIDI file."
+    audio, transcribe, notes, midi
+}

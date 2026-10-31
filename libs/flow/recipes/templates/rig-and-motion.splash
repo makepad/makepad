@@ -1,0 +1,31 @@
+use mod.flow.*
+
+/** Character identity and optional motion trace text. */
+let prompt = Input{ type: @text  default: "a nimble forest ranger"  at: vec2(40, 80) }
+
+/** The unrigged character GLB. */
+let mesh = Input{ type: @mesh  at: vec2(40, 240) }
+
+let rig = Rig{
+    prompt: prompt.text()
+    mesh: mesh.mesh()
+    model: "skintokens"
+    at: vec2(360, 160)
+}
+
+let motion = Motion{
+    prompt: prompt.text()
+    mesh: rig.out(@mesh)
+    motion_mode: "playable"
+    model: "hy-motion"
+    at: vec2(680, 160)
+}
+
+/** The rigged GLB with playable motion clips. */
+let character = Output{ type: @mesh  value: motion.out(@mesh)  at: vec2(1000, 160) }
+
+Flow{
+    label: "Rig and motion"
+    brief: "Rigs a supplied character mesh and adds the backend's playable motion set."
+    prompt, mesh, rig, motion, character
+}

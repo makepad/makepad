@@ -1,0 +1,26 @@
+use mod.flow.*
+use mod.components.*
+
+let first = Input{ value: "red\ngreen"  at: vec2(40, 80) }
+let second = Input{ value: "blue"  at: vec2(40, 340) }
+let a = SplitLines{ in: {text: first.text()}  at: vec2(340, 80) }
+let b = SplitLines{ in: {text: second.text()}  at: vec2(340, 340) }
+let group = GroupLines{
+    in: {lines: [conn(1, a.out(@lines)), conn(2, b.out(@lines)), conn(3, a.out(@lines))]}
+    at: vec2(660, 80)
+}
+let empty = GroupLines{ in: {lines: []}  at: vec2(660, 380) }
+let collections = Output{
+    type: "flow.text.lines"
+    many: 4
+    value: [conn(1, group.out(@collections))]
+    at: vec2(1000, 80)
+}
+let count = Output{ value: group.out(@total)  at: vec2(1000, 320) }
+let empty_count = Output{ value: empty.out(@total)  at: vec2(1000, 520) }
+
+Flow{
+    label: "Text collections"
+    brief: "Split text with a Flow component, then group typed collections through reusable subflows."
+    first, second, a, b, group, empty, collections, count, empty_count
+}

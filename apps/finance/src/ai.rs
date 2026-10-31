@@ -50,6 +50,7 @@ mod tests {
             call_id: "c1".to_string(),
             tool: "delete_everything".to_string(),
             args: "{}".to_string(),
+            caller: None,
         };
         let result = answer(&call, || "unreachable".to_string());
         assert!(!result.outcome.is_ok());

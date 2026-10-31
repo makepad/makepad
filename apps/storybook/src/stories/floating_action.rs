@@ -661,7 +661,7 @@ mod tests {
     fn build(cx: &mut Cx, dsl: &str) -> WidgetRef {
         cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            let value = vm.bx.heap.value(stories, LiveId::from_str(dsl).into(), NoTrap);
+            let value = vm.value(stories, LiveId::from_str(dsl));
             WidgetRef::script_from_value(vm, value)
         })
     }
@@ -684,7 +684,7 @@ mod tests {
         for (story, extra) in STORIES.iter().zip(extra) {
             let page = cx.with_vm(|vm| {
                 let stories = vm.module(id!(stories));
-                let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+                let value = vm.value(stories, LiveId::from_str(story.dsl));
                 assert!(value.as_object().is_some(), "no template {}", story.dsl);
                 WidgetRef::script_from_value(vm, value)
             });

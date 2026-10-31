@@ -1,0 +1,61 @@
+use mod.flow.*
+
+// Controls and results for the reusable text collection flows.
+
+// The themed title and hint of the face prelude: their colours follow
+// the theme; the sizes are the prelude's, the same this surface had.
+let Title = mod.flow.ui.Title
+
+let Hint = mod.flow.ui.Hint
+
+View{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: theme.space_3
+    padding: Inset{left: 18 right: 18 top: 16 bottom: 16}
+
+    Title{text: "Text collections"}
+    Hint{text: "Split two texts into collections; the first collection is grouped twice."}
+
+    first := TextInput{
+        width: Fill
+        height: 34
+        empty_text: "First text"
+        bind := "first.text"
+    }
+
+    second := TextInput{
+        width: Fill
+        height: 34
+        empty_text: "Second text"
+        bind := "second.text"
+    }
+
+    run_button := Button{
+        width: Fit
+        height: 32
+        text: "Split and group"
+    }
+
+    Hint{text: "Collections"}
+    result := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := "collections.value"
+    }
+
+    Hint{text: "Collection count"}
+    count := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := "count.value"
+    }
+
+    Hint{text: "Empty group count"}
+    empty_count := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := "empty_count.value"
+    }
+}

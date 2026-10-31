@@ -1,0 +1,18 @@
+use mod.flow.*
+
+/** Appends an exclamation mark. */
+let text = Input{ type: @text  at: vec2(40, 80) }
+
+let bang = Fn{
+    in: { text: text.text() }
+    out: [@text]
+    run: |i| { {text: i.text + "!"} }
+    at: vec2(320, 80)
+}
+
+let loud = Output{ type: @text  value: bang.text()  at: vec2(600, 80) }
+
+Component{
+    label: "Exclaim"
+    text, bang, loud
+}

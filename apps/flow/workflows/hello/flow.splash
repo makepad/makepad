@@ -1,0 +1,20 @@
+use mod.flow.*
+
+/** Who to greet. */
+let name = Input{ type: @text  value: "world"  at: vec2(40, 80) }
+
+let greet = Fn{
+    in: { name: name.text() }
+    out: [@text]
+    run: |i| { {text: "Hello, " + i.name + "!"} }
+    at: vec2(360, 80)
+}
+
+/** The greeting. */
+let greeting = Output{ type: @text  value: greet.text()  at: vec2(680, 80) }
+
+Flow{
+    label: "Hello"
+    brief: "Greets whoever the name input says."
+    name, greet, greeting
+}

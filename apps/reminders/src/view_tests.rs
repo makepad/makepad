@@ -410,6 +410,7 @@ fn first_run_seed_waits_for_ack_and_reloads_absolute_dates() {
         call_id: "seed".into(),
         tool: "due".into(),
         args: r#"{"days":7}"#.into(),
+        caller: None,
     };
     let result = view.ai_answer(&call);
     assert_eq!(
@@ -720,7 +721,7 @@ fn theme_roles_come_from_each_roots_owning_vm() {
     let mut roots = Vec::new();
     for colour in [vec4(0.1, 0.2, 0.3, 1.0), vec4(0.8, 0.7, 0.6, 1.0)] {
         let vm_id = cx.alloc_splash_vm_with_network(false);
-        let root = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        let root = cx.with_script_vm_id(vm_id, |vm| {
             makepad_widgets::script_mod(vm);
             script_eval!(vm,{
                 mod.theme.color_text = #(colour)

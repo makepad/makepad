@@ -1,0 +1,30 @@
+use mod.flow.*
+
+/** The isolated object to cut out, reconstruct, and paint. */
+let prompt = Input{ type: @text default: "a hand-painted ceramic fox" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+let matte = Matte{ image: image.image() model: "birefnet-hr" }
+let mesh = Mesh{
+    prompt: prompt.text()
+    image: matte.out(@image)
+    remesh_resolution: 512
+    texture: false
+    decimation_target: 12000
+    texture_size: 1024
+    model: "trellis-2"
+}
+let paint = Paint{
+    prompt: prompt.text()
+    mesh: mesh.mesh()
+    reference_image: matte.out(@image)
+    texture_size: 1024
+    model: "hunyuan3d-paint-2.1"
+}
+/** Publish the PBR-painted GLB into the flow asset library. */
+let published = Publish{ value: paint.out(@mesh) namespace: "flows" tags: ["flow", "mesh", "pbr"] }
+
+Flow{
+    label: "Prompt to cutout PBR mesh"
+    brief: "Paints and mattes an object before reconstruction and PBR material baking."
+    prompt, image, matte, mesh, paint, published
+}

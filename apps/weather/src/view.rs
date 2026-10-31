@@ -3,20 +3,22 @@
 //! `HostedViewMode` over `Event::Custom` (the same message a standalone
 //! window and a module's isolate both receive; the `HostedView` child
 //! below reads it and swaps faces on its own — nothing here parses it) —
-//! and the fetch, the tick timer and the last good forecast.
+//! the clock tick and the sample forecast.
 //!
 //! The full face is the sky with the city and temperature leading, then
 //! the hourly strip, the ten-day list, the detail cards and the footer,
 //! all in one scroller; a glass button opens the locations sheet. The city
 //! is chosen from a short, named list (never inferred from the machine's
 //! location) and persisted to whatever storage a host gives this instance.
-//! [`WeatherView::ensure_started`] seeds the first fetch on the first
-//! event or draw, whichever the host gives it first: a window has a
-//! `Startup` event, a module instance does not.
+//! The forecast is sample data generated on the device (`sample.rs`):
+//! nothing is fetched, so the first frame already shows a full forecast.
 
 use crate::daily::ForecastDays;
 use crate::hourly::{GlyphIcon, HourlyStrip};
-use crate::model::{compass, describe, hhmm_of, temp, uv_text, Day, Forecast, SkyInputs, WeatherState, ATTRIBUTION, CITIES, MAX_BODY_BYTES};
+use crate::model::{
+    compass, describe, hhmm_of, local_hhmm, parse_cities, search_cities, serialize_cities, temp, uv_text, City, Day, Forecast, SkyInputs, TempUnit,
+    WeatherState, MAX_CITIES, SAMPLE_NOTE,
+};
 use crate::parts::{PageDots, SolarArc};
 use crate::sky::SkyView;
 use makepad_widgets::makepad_platform::storage::{StorageHandle, StorageRequestId, StorageResponse, StorageResult};
@@ -69,18 +71,33 @@ script_mod! {
         value := SkyText{margin: Inset{top: 8} draw_text.text_style: theme.font_regular{font_size: 24}}
         note := SkyText{width: Fill max_lines: 3 margin: Inset{top: 6} draw_text.text_style: theme.font_regular{font_size: 11.25}}
     }
-    let Sheet = RoundedView{
-        width: Fill height: Fit flow: Down
-        draw_bg +: {color: theme.color_inset border_radius: 14.0}
+    // The sheet's own glass, not a flat theme panel: the same frosted
+    // profile as the forecast panels over the sky, so the city names stay
+    // readable no matter what the current city's sky art looks like behind
+    // them.
+    let Sheet = ForecastPanel{
+        height: Fit padding: 0
+        draw_bg +: {corner_radius: 14.0}
     }
     let SheetRow = View{
         width: Fill height: 64 flow: Right align: Align{y: 0.5} padding: Inset{left: 20 right: 20}
         cursor: MouseCursor.Hand
+        // A View grabs key focus on press by default (view.rs's
+        // `grab_key_focus`); left off here so picking a city does not
+        // steal it from WeatherView's own arrow-key city switching.
+        grab_key_focus: false
         View{width: Fill height: Fit flow: Down spacing: 2
-            city := Surface{draw_text.text_style: theme.font_bold{font_size: 12.75}}
-            country := SurfaceDim{}
+            city := SkyText{draw_text.text_style: theme.font_bold{font_size: 12.75}}
+            country := SkyDim{draw_text.text_style.font_size: 9.75}
         }
-        check := Surface{text: "✓" visible: false draw_text.color: theme.color_focus draw_text.text_style: theme.font_bold{font_size: 15}}
+        check := SkyText{text: "✓" visible: false draw_text.color: theme.color_focus draw_text.text_style: theme.font_bold{font_size: 15}}
+        // Hidden while `search` has text (those rows are results, not the
+        // person's own list); a plain View, not SkyDim, since it needs its
+        // own tap target.
+        remove := View{width: 32 height: 32 margin: Inset{left: 4} align: Align{x: 0.5 y: 0.5}
+            cursor: MouseCursor.Hand grab_key_focus: false
+            SkyDim{text: "×" draw_text.text_style: theme.font_bold{font_size: 17}}
+        }
     }
 
     mod.widgets.WeatherViewBase = #(WeatherView::register_widget(vm))
@@ -194,12 +211,17 @@ script_mod! {
                             }
                         }
                         View{width: 48 height: 48}
-                        View{width: Fill height: Fit align: Align{x: 0.5}
-                            dots := PageDots{width: 44 height: 16}
+                        // Fill, not Fit: the dots stay small and centred
+                        // (PageDots centres in whatever turtle rect it
+                        // gets), but the swipe-to-change-city gesture
+                        // (WeatherView::handle_event) gets this whole
+                        // column as its hit area, not just the 6 pt dots.
+                        View{width: Fill height: Fill align: Align{x: 0.5}
+                            dots := PageDots{width: Fill height: Fill}
                         }
                         View{width: Fit height: Fit
                             locations := View{width: 48 height: 48 align: Align{x: 0.5 y: 0.5}
-                                cursor: MouseCursor.Hand show_bg: true
+                                cursor: MouseCursor.Hand show_bg: true grab_key_focus: false
                                 draw_bg +: {
                                     pixel: fn(){
                                         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -215,20 +237,79 @@ script_mod! {
                         }
                     }
                 }
+                // Declared after `header`/`chrome`, so its own glass registers
+                // its overlay later than theirs (draw_list_2d.rs's
+                // `overlay_seq`) and always paints above the pinned header,
+                // scrolled or not.
+                View{width: Fill height: Fill flow: Right align: Align{x: 0.0 y: 0.0}
+                    padding: Inset{top: 14 left: 14}
+                    glass.LensChip{
+                        local_time_label := SkyText{text: "--:--" draw_text.text_style: theme.font_bold{font_size: 12.75}}
+                    }
+                }
+                View{width: Fill height: Fill flow: Right align: Align{x: 1.0 y: 0.0}
+                    padding: Inset{top: 14 right: 14}
+                    unit_toggle := View{width: Fit height: Fit cursor: MouseCursor.Hand grab_key_focus: false
+                        glass.LensChip{
+                            unit_label := SkyText{text: "°C" draw_text.text_style: theme.font_bold{font_size: 12.75}}
+                        }
+                    }
+                }
+                // A plain View draws in the pass's normal body, always
+                // beneath `header` and `chrome` above: both are glass.Layer,
+                // which lifts its content into the pass's overlay z-order
+                // (draw_list_2d.rs, begin_overlay_reuse) regardless of DSL
+                // order. Without this inner glass.Layer the sheet painted
+                // behind the chrome bar instead of over it.
                 sheet_layer := View{visible: false width: Fill height: Fill flow: Overlay
-                    scrim_sheet := View{width: Fill height: Fill show_bg: true draw_bg.color: #00000066 cursor: MouseCursor.Default}
-                    View{width: Fill height: Fill align: Align{y: 1.0}
-                        sheet := Sheet{
-                            View{width: Fill height: 56 align: Align{x: 0.5 y: 0.5}
-                                Surface{text: "Locations" draw_text.text_style: theme.font_bold{font_size: 16.5}}
+                    glass.Layer{width: Fill height: Fill
+                        scrim_sheet := View{width: Fill height: Fill show_bg: true draw_bg.color: #00000066 cursor: MouseCursor.Default grab_key_focus: false}
+                        View{width: Fill height: Fill align: Align{y: 1.0}
+                            sheet := Sheet{
+                                View{width: Fill height: 56 flow: Overlay
+                                    View{width: Fill height: Fill align: Align{x: 0.5 y: 0.5}
+                                        SkyText{text: "Locations" draw_text.text_style: theme.font_bold{font_size: 16.5}}
+                                    }
+                                    // Tapping the scrim behind the sheet
+                                    // also closes it, but that has no
+                                    // visible affordance of its own — this
+                                    // does.
+                                    View{width: Fill height: Fill flow: Right align: Align{x: 1.0 y: 0.5} padding: Inset{right: 12}
+                                        close_sheet := View{width: 40 height: 40 align: Align{x: 0.5 y: 0.5}
+                                            cursor: MouseCursor.Hand grab_key_focus: false
+                                            SkyDim{text: "×" draw_text.text_style: theme.font_bold{font_size: 22}}
+                                        }
+                                    }
+                                }
+                                View{width: Fill height: Fit padding: Inset{left: 16 right: 16 bottom: 4}
+                                    search := glass.SearchField{width: Fill empty_text: "Search for a city"}
+                                }
+                                search_status := SkyDim{
+                                    width: Fill height: Fit visible: false
+                                    margin: Inset{left: 20 right: 20 top: 4 bottom: 4}
+                                }
+                                // The same row slots show either the
+                                // person's own list or, while `search` has
+                                // text, that search's results — never both
+                                // (WeatherView::populate_rows). Capped at
+                                // MAX_CITIES (model.rs); a slot past however
+                                // many rows are live just stays invisible.
+                                rows_scroll := ScrollYView{width: Fill height: 300 flow: Down
+                                    city_0 := SheetRow{}
+                                    city_1 := SheetRow{}
+                                    city_2 := SheetRow{}
+                                    city_3 := SheetRow{}
+                                    city_4 := SheetRow{}
+                                    city_5 := SheetRow{}
+                                    city_6 := SheetRow{}
+                                    city_7 := SheetRow{}
+                                    city_8 := SheetRow{}
+                                    city_9 := SheetRow{}
+                                    city_10 := SheetRow{}
+                                    city_11 := SheetRow{}
+                                }
+                                View{width: Fill height: 20}
                             }
-                            city_0 := SheetRow{}
-                            city_1 := SheetRow{}
-                            city_2 := SheetRow{}
-                            city_3 := SheetRow{}
-                            View{width: Fill height: 0.5 show_bg: true draw_bg.color: theme.color_text_disabled margin: Inset{left: 20 right: 20}}
-                            refresh := SheetRow{height: 44}
-                            View{width: Fill height: 20}
                         }
                     }
                 }
@@ -264,8 +345,7 @@ pub struct WeatherView {
     started: bool,
     #[rust]
     state: WeatherState,
-    /// A slow tick that re-checks the 15 minute refresh budget and ages
-    /// the "updated N min ago" line.
+    /// A slow tick that keeps the city's clock and the "Now" hour current.
     #[rust]
     tick: Option<Timer>,
     #[rust]
@@ -280,10 +360,22 @@ pub struct WeatherView {
     city_load: Option<StorageRequestId>,
     #[rust]
     city_write: Option<StorageRequestId>,
+    #[rust]
+    unit_load: Option<StorageRequestId>,
+    #[rust]
+    unit_write: Option<StorageRequestId>,
+    #[rust]
+    cities_load: Option<StorageRequestId>,
+    #[rust]
+    cities_write: Option<StorageRequestId>,
     /// True once the person picks a city: a load response landing later
     /// (a slow jail on a cold start) must never clobber a fresh pick.
     #[rust]
     city_changed: bool,
+    /// True once the person adds a city this session: guards `cities_load`
+    /// the same way `city_changed` guards `city_load`.
+    #[rust]
+    cities_changed: bool,
     /// The sky's drift clock and the NextFrame chain that advances it —
     /// only for a short tail after an interaction or a data change.
     #[rust]
@@ -307,6 +399,13 @@ pub struct WeatherView {
     /// so every condition can be looked at without waiting for weather.
     #[rust]
     sky_override: Option<SkyInputs>,
+    /// A drag in flight over the page dots: where it started, so release
+    /// can measure how far the finger travelled.
+    #[rust]
+    swipe_start: Option<f64>,
+    /// The Locations sheet's search results over the city catalogue.
+    #[rust]
+    search_results: Vec<City>,
 }
 
 impl WeatherView {
@@ -402,80 +501,46 @@ impl WeatherView {
         self.view.widget(cx, ids!(app_view)).borrow::<HostedView>().map(|h| h.mode()).unwrap_or_default()
     }
 
-    /// One line for the assistant: the selected city, its status, and the
-    /// current conditions and ten-day outlook when there is good data.
+    /// One line for the assistant: the selected city, the current
+    /// conditions and the ten-day outlook, marked as sample data.
     pub fn ai_summary(&self) -> String {
         let city = self.state.city();
-        let mut out = format!("{}, {} — {}", city.name, city.country, self.state.status_text());
-        if let Some((forecast, _)) = self.state.current() {
-            let cur = &forecast.current;
-            out.push_str(&format!("; now {} {}", temp(cur.temperature_2m), describe(forecast.code())));
-            let (hi, lo) = forecast.today_high_low();
-            out.push_str(&format!(" (H {} L {})", temp(hi), temp(lo)));
-            let days: Vec<String> = forecast
-                .days()
-                .iter()
-                .map(|d| {
-                    let name = if d.weekday.is_empty() { d.date.clone() } else { d.weekday.to_string() };
-                    format!("{} {}/{}", name, temp(d.high), temp(d.low))
-                })
-                .collect();
-            if !days.is_empty() {
-                out.push_str(&format!("; forecast: {}", days.join(", ")));
-            }
+        let mut out = format!("{}, {} — sample forecast (generated, not real weather)", city.name, city.country);
+        let forecast = self.state.forecast();
+        let cur = &forecast.current;
+        out.push_str(&format!("; now {} {}", temp(cur.temperature_2m, self.state.unit), describe(forecast.code())));
+        let (hi, lo) = forecast.today_high_low();
+        out.push_str(&format!(" (H {} L {})", temp(hi, self.state.unit), temp(lo, self.state.unit)));
+        let days: Vec<String> = forecast
+            .days()
+            .iter()
+            .map(|d| {
+                let name = if d.weekday.is_empty() { d.date.clone() } else { d.weekday.to_string() };
+                format!("{} {}/{}", name, temp(d.high, self.state.unit), temp(d.low, self.state.unit))
+            })
+            .collect();
+        if !days.is_empty() {
+            out.push_str(&format!("; forecast: {}", days.join(", ")));
         }
         out
     }
 
-    /// The timer stops and any fetch in flight is cancelled; nothing else
-    /// this widget owns outlives its isolate.
+    /// The timer stops; nothing this widget owns outlives its isolate.
     pub fn shutdown(&mut self, cx: &mut Cx) {
         if let Some(t) = self.tick.take() {
             cx.stop_timer(t);
         }
-        if let Some((id, _)) = self.state.pending.take() {
-            cx.cancel_http_request(id);
-        }
     }
 
-    fn fetch(&mut self, cx: &mut Cx) {
-        let (id, url) = self.state.begin_fetch();
-        let mut request = HttpRequest::new(url, HttpMethod::GET);
-        request.set_header("Accept".into(), "application/json".into());
-        cx.http_request(id, request);
-        self.render(cx);
-    }
-
-    fn handle_response(&mut self, cx: &mut Cx, id: LiveId, result: Result<HttpResponse, String>) {
-        if !self.state.owns(id) {
-            // A reply for a request we already superseded (city switch or
-            // manual refresh): drop it without touching the model.
-            return;
-        }
-        let parsed = result.and_then(|response| {
-            if response.status_code != 200 {
-                return Err(format!("HTTP {}", response.status_code));
-            }
-            let body = response.body.as_ref().ok_or_else(|| "empty response".to_string())?;
-            if body.len() > MAX_BODY_BYTES {
-                return Err(format!("response too large ({} bytes)", body.len()));
-            }
-            let text = std::str::from_utf8(body).map_err(|_| "response is not UTF-8".to_string())?;
-            Forecast::parse(text)
-        });
-        self.state.complete(id, parsed);
-        self.render(cx);
-        self.wake_sky(cx);
-    }
-
-    /// Select a city, persist the choice, and start fetching it.
+    /// Select a city, persist the choice and show its forecast.
     fn select_city(&mut self, cx: &mut Cx, index: usize) {
         if !self.state.select_city(index) {
             return;
         }
         self.city_changed = true;
         self.persist_city(cx);
-        self.fetch(cx);
+        self.render(cx);
+        self.wake_sky(cx);
     }
 
     fn persist_city(&mut self, cx: &mut Cx) {
@@ -484,26 +549,186 @@ impl WeatherView {
         }
     }
 
+    fn persist_cities(&mut self, cx: &mut Cx) {
+        if let Some(storage) = self.storage.as_ref() {
+            self.cities_write = Some(storage.set(cx, "cities", serialize_cities(&self.state.cities)));
+        }
+    }
+
+    /// Select a city by index and refresh the dots to match.
+    fn pick_city(&mut self, cx: &mut Cx, index: usize) {
+        self.select_city(cx, index);
+        if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
+            dots.set(cx, self.state.cities.len(), self.state.city);
+        }
+    }
+
+    /// Step to the next/previous city, wrapping at the ends: the arrow keys
+    /// and a swipe across the page dots both land here.
+    fn step_city(&mut self, cx: &mut Cx, delta: i32) {
+        let n = self.state.cities.len() as i32;
+        let next = (self.state.city as i32 + delta).rem_euclid(n) as usize;
+        self.pick_city(cx, next);
+    }
+
+    /// Add a search result to the person's own list — or find the match
+    /// already on it — and switch to it. A no-op past `MAX_CITIES` for a
+    /// city not already there: nothing to switch to.
+    fn add_city(&mut self, cx: &mut Cx, city: City) {
+        let before = self.state.cities.len();
+        let Some(index) = self.state.add_city(city) else { return };
+        if self.state.cities.len() != before {
+            self.cities_changed = true;
+            self.persist_cities(cx);
+        }
+        self.pick_city(cx, index);
+    }
+
+    /// Remove a city from the list (never the last one). Removing the
+    /// selected city lands on whatever now sits at its old position — the
+    /// next city, or the new last one if it was the last — and shows it;
+    /// removing any other just shifts the selected index down if the
+    /// removed one sat before it, since the actual city does not move.
+    fn remove_city(&mut self, cx: &mut Cx, index: usize) {
+        if self.state.cities.len() <= 1 || index >= self.state.cities.len() {
+            return;
+        }
+        let was_current = index == self.state.city;
+        self.state.cities.remove(index);
+        self.cities_changed = true;
+        self.persist_cities(cx);
+        if was_current {
+            self.state.city = index.min(self.state.cities.len() - 1);
+            self.persist_city(cx);
+            self.render(cx);
+        } else if index < self.state.city {
+            self.state.city -= 1;
+            self.persist_city(cx);
+        }
+        if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
+            dots.set(cx, self.state.cities.len(), self.state.city);
+        }
+        self.populate_rows(cx);
+    }
+
+    /// The dozen `city_N` slots the Locations sheet declares (MAX_CITIES):
+    /// shared between the person's own list and, while `search` has text,
+    /// that search's results — never both at once (`populate_rows`).
+    fn row_ids() -> [&'static [LiveId]; MAX_CITIES] {
+        [
+            ids!(city_0), ids!(city_1), ids!(city_2), ids!(city_3), ids!(city_4), ids!(city_5),
+            ids!(city_6), ids!(city_7), ids!(city_8), ids!(city_9), ids!(city_10), ids!(city_11),
+        ]
+    }
+
+    /// Fill the row slots from the search results while `search` has text,
+    /// from the person's own city list otherwise; a slot past however many
+    /// rows are live stays invisible.
+    fn populate_rows(&mut self, cx: &mut Cx) {
+        let searching = !self.view.text_input(cx, ids!(search)).text().trim().is_empty();
+        for (i, row_id) in Self::row_ids().iter().enumerate() {
+            let row = self.view.widget(cx, *row_id);
+            let entry = if searching { self.search_results.get(i) } else { self.state.cities.get(i) };
+            let Some(city) = entry else {
+                row.set_visible(cx, false);
+                continue;
+            };
+            row.set_visible(cx, true);
+            row.label(cx, ids!(city)).set_text(cx, city.name);
+            row.label(cx, ids!(country)).set_text(cx, city.country);
+            row.widget(cx, ids!(check)).set_visible(cx, !searching && i == self.state.city);
+            row.widget(cx, ids!(remove)).set_visible(cx, !searching && self.state.cities.len() > 1);
+        }
+        self.view.redraw(cx);
+    }
+
+    fn update_search_status(&mut self, cx: &mut Cx, text: &str) {
+        self.view.widget(cx, ids!(search_status)).set_visible(cx, !text.is_empty());
+        if !text.is_empty() {
+            self.view.label(cx, ids!(search_status)).set_text(cx, text);
+        }
+    }
+
+    /// The search runs over the built-in city catalogue on every keystroke:
+    /// no request, no wait.
+    fn on_search_changed(&mut self, cx: &mut Cx, text: String) {
+        self.search_results = search_cities(&text);
+        let status = if !text.trim().is_empty() && self.search_results.is_empty() { "No matching city" } else { "" };
+        self.update_search_status(cx, status);
+        self.populate_rows(cx);
+    }
+
+    /// Flip the display unit, persist it, and re-render: the forecast
+    /// stays Celsius; only the text converts.
+    fn toggle_unit(&mut self, cx: &mut Cx) {
+        self.state.unit = self.state.unit.toggle();
+        if let Some(storage) = self.storage.as_ref() {
+            self.unit_write = Some(storage.set(cx, "unit", vec![self.state.unit.storage_byte()]));
+        }
+        self.render(cx);
+    }
+
     fn on_storage(&mut self, cx: &mut Cx, responses: &[StorageResponse]) {
-        for response in responses {
-            if self.city_load == Some(response.request_id) {
-                self.city_load = None;
-                if !self.city_changed {
-                    if let Ok(StorageResult::Value(Some(bytes))) = &response.result {
-                        if let Some(index) = std::str::from_utf8(bytes).ok().and_then(|s| s.trim().parse::<usize>().ok()) {
-                            if self.state.select_city(index) {
-                                self.fetch(cx);
-                            }
-                        }
+        // The list first: `city_load`'s index is only meaningful once the
+        // list it indexes is the persisted one, not still the 4 defaults —
+        // and both loads can land in the same batch, in either order.
+        if let Some(response) = responses.iter().find(|r| self.cities_load == Some(r.request_id)) {
+            self.cities_load = None;
+            if !self.cities_changed {
+                if let Ok(StorageResult::Value(Some(bytes))) = &response.result {
+                    let cities = parse_cities(bytes);
+                    if !cities.is_empty() {
+                        self.state.cities = cities;
                     }
                 }
             }
-            if self.city_write == Some(response.request_id) {
-                self.city_write = None;
-                if let Err(e) = &response.result {
-                    log!("weather: could not save the selected city: {}", e);
+        }
+        if let Some(response) = responses.iter().find(|r| self.cities_write == Some(r.request_id)) {
+            self.cities_write = None;
+            if let Err(e) = &response.result {
+                log!("weather: could not save the city list: {}", e);
+            }
+        }
+        if let Some(response) = responses.iter().find(|r| self.city_load == Some(r.request_id)) {
+            self.city_load = None;
+            if !self.city_changed {
+                if let Ok(StorageResult::Value(Some(bytes))) = &response.result {
+                    if let Some(index) = std::str::from_utf8(bytes).ok().and_then(|s| s.trim().parse::<usize>().ok()) {
+                        self.state.select_city(index);
+                    }
                 }
             }
+        }
+        if let Some(response) = responses.iter().find(|r| self.city_write == Some(r.request_id)) {
+            self.city_write = None;
+            if let Err(e) = &response.result {
+                log!("weather: could not save the selected city: {}", e);
+            }
+        }
+        if let Some(response) = responses.iter().find(|r| self.unit_load == Some(r.request_id)) {
+            self.unit_load = None;
+            if let Ok(StorageResult::Value(Some(bytes))) = &response.result {
+                if let Some(unit) = TempUnit::from_storage(bytes) {
+                    self.state.unit = unit;
+                    self.render(cx);
+                }
+            }
+        }
+        if let Some(response) = responses.iter().find(|r| self.unit_write == Some(r.request_id)) {
+            self.unit_write = None;
+            if let Err(e) = &response.result {
+                log!("weather: could not save the selected unit: {}", e);
+            }
+        }
+        // Either load above can change the list or the selected index:
+        // the forecast, the dots and, if it's open, the sheet's rows must
+        // catch up.
+        self.render(cx);
+        if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
+            dots.set(cx, self.state.cities.len(), self.state.city);
+        }
+        if self.sheet_open {
+            self.populate_rows(cx);
         }
     }
 
@@ -511,17 +736,16 @@ impl WeatherView {
         self.sheet_open = open;
         self.view.widget(cx, ids!(sheet_layer)).set_visible(cx, open);
         if open {
-            let rows = [ids!(city_0), ids!(city_1), ids!(city_2), ids!(city_3)];
-            for (i, row) in rows.iter().enumerate() {
-                let row = self.view.widget(cx, *row);
-                let city = &CITIES[i];
-                row.label(cx, ids!(city)).set_text(cx, city.name);
-                row.label(cx, ids!(country)).set_text(cx, city.country);
-                row.widget(cx, ids!(check)).set_visible(cx, i == self.state.city);
+            self.view.text_input(cx, ids!(search)).set_text(cx, "");
+            self.search_results.clear();
+            self.update_search_status(cx, "");
+            self.populate_rows(cx);
+        } else {
+            // The search field may have taken key focus while the sheet was
+            // up; hand it back so the arrow keys keep switching cities.
+            if self.face(cx) == HostedViewMode::Full {
+                cx.set_key_focus(self.view.area());
             }
-            let refresh = self.view.widget(cx, ids!(refresh));
-            refresh.label(cx, ids!(city)).set_text(cx, "Refresh");
-            refresh.widget(cx, ids!(country)).set_visible(cx, false);
         }
         self.view.redraw(cx);
     }
@@ -561,59 +785,26 @@ impl WeatherView {
 
     /// Push the model into every label of both faces.
     fn render(&mut self, cx: &mut Cx) {
-        let city = self.state.city();
-        let status = self.state.status_text();
+        let city = *self.state.city();
         self.view.label(cx, ids!(hero_city)).set_text(cx, city.name);
         self.view.label(cx, ids!(tile_city)).set_text(cx, city.name);
         self.view.label(cx, ids!(header_city)).set_text(cx, city.name);
-        let freshness = self.state.tile_freshness();
-
-        let Some((forecast, _)) = self.state.current().map(|(f, t)| (f.clone(), t)) else {
-            for id in [ids!(hero_temp), ids!(tile_temp)] {
-                self.view.label(cx, id).set_text(cx, "—°");
-            }
-            let placeholder = if self.state.loading() { "Loading" } else { "Unavailable" };
-            for id in [ids!(hero_cond), ids!(tile_cond), ids!(header_line)] {
-                self.view.label(cx, id).set_text(cx, placeholder);
-            }
-            for id in [ids!(hero_hilo), ids!(tile_hilo), ids!(summary)] {
-                self.view.label(cx, id).set_text(cx, "");
-            }
-            self.view.widget(cx, ids!(condition_icon)).set_visible(cx, false);
-            for card in [ids!(uv_card), ids!(sun_card), ids!(wind_card), ids!(humidity_card), ids!(precip_card), ids!(feels_card)] {
-                self.set_card(cx, card, "—", "Unavailable");
-            }
-            self.view.label(cx, ids!(footer)).set_text(cx, &format!("{status} · {ATTRIBUTION}"));
-            if let Some(mut hours) = self.view.widget(cx, ids!(hours)).borrow_mut::<HourlyStrip>() {
-                hours.set_cells(cx, Vec::new());
-            }
-            if let Some(mut days) = self.view.widget(cx, ids!(days)).borrow_mut::<ForecastDays>() {
-                days.set_days(cx, Vec::new(), None);
-            }
-            for id in [ids!(sky_full), ids!(sky_tile)] {
-                if let Some(mut sky) = self.view.widget(cx, id).borrow_mut::<SkyView>() {
-                    match self.sky_override {
-                        Some(inputs) => sky.set_conditions(cx, inputs),
-                        None => sky.set_unknown(cx),
-                    }
-                }
-            }
-            self.view.redraw(cx);
-            return;
-        };
+        self.view.label(cx, ids!(unit_label)).set_text(cx, self.state.unit.label());
+        let forecast = self.state.forecast();
 
         let cur = &forecast.current;
         let code = forecast.code();
         let (hi, lo) = forecast.today_high_low();
-        let temp_text = temp(cur.temperature_2m);
+        self.view.label(cx, ids!(local_time_label)).set_text(cx, &local_hhmm(forecast.utc_offset_seconds));
+        let temp_text = temp(cur.temperature_2m, self.state.unit);
         let cond = describe(code);
-        let hilo = format!("H:{}  L:{}", temp(hi), temp(lo));
+        let hilo = format!("H:{}  L:{}", temp(hi, self.state.unit), temp(lo, self.state.unit));
         self.view.label(cx, ids!(hero_temp)).set_text(cx, &temp_text);
         self.view.label(cx, ids!(tile_temp)).set_text(cx, &temp_text);
         self.view.label(cx, ids!(hero_cond)).set_text(cx, cond);
         self.view.label(cx, ids!(tile_cond)).set_text(cx, cond);
         self.view.label(cx, ids!(hero_hilo)).set_text(cx, &hilo);
-        self.view.label(cx, ids!(tile_hilo)).set_text(cx, freshness.as_deref().unwrap_or(&hilo));
+        self.view.label(cx, ids!(tile_hilo)).set_text(cx, &hilo);
         self.view.label(cx, ids!(header_line)).set_text(cx, &format!("{} · {}", temp_text, cond));
         self.view.label(cx, ids!(summary)).set_text(cx, &Self::summary_text(&forecast));
         self.view.widget(cx, ids!(condition_icon)).set_visible(cx, true);
@@ -622,11 +813,11 @@ impl WeatherView {
         }
 
         if let Some(mut hours) = self.view.widget(cx, ids!(hours)).borrow_mut::<HourlyStrip>() {
-            hours.set_cells(cx, forecast.hour_cells());
+            hours.set_cells(cx, forecast.hour_cells(), self.state.unit);
         }
         let days: Vec<Day> = forecast.days();
         if let Some(mut list) = self.view.widget(cx, ids!(days)).borrow_mut::<ForecastDays>() {
-            list.set_days(cx, days.clone(), cur.temperature_2m);
+            list.set_days(cx, days.clone(), cur.temperature_2m, self.state.unit);
         }
 
         // The detail cards.
@@ -691,12 +882,11 @@ impl WeatherView {
                     Some(t) if a > t + 1.5 => "Humidity makes it feel warmer.",
                     _ => "Similar to the actual temperature.",
                 };
-                self.set_card(cx, ids!(feels_card), &temp(Some(a)), note);
+                self.set_card(cx, ids!(feels_card), &temp(Some(a), self.state.unit), note);
             }
             None => self.set_card(cx, ids!(feels_card), "—", "Unavailable"),
         }
-        let updated = cur.time.as_deref().map(hhmm_of).unwrap_or_else(|| "—".into());
-        self.view.label(cx, ids!(footer)).set_text(cx, &format!("Updated {updated} · {ATTRIBUTION}"));
+        self.view.label(cx, ids!(footer)).set_text(cx, SAMPLE_NOTE);
 
         let inputs = self.sky_override.unwrap_or_else(|| forecast.sky_inputs());
         for id in [ids!(sky_full), ids!(sky_tile)] {
@@ -815,13 +1005,15 @@ impl WeatherView {
         }
         self.started = true;
         if let Some(storage) = self.storage.as_ref() {
+            self.cities_load = Some(storage.get(cx, "cities"));
             self.city_load = Some(storage.get(cx, "city"));
+            self.unit_load = Some(storage.get(cx, "unit"));
         }
         self.tick = Some(cx.start_interval(30.0));
         if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
-            dots.set(cx, CITIES.len(), self.state.city);
+            dots.set(cx, self.state.cities.len(), self.state.city);
         }
-        self.fetch(cx);
+        self.render(cx);
     }
 }
 
@@ -845,25 +1037,8 @@ impl Widget for WeatherView {
         if let Event::Storage(responses) = event {
             self.on_storage(cx, responses);
         }
-        if let Event::NetworkResponses(responses) = event {
-            for response in responses {
-                match response {
-                    NetworkResponse::HttpResponse { request_id, response } => {
-                        self.handle_response(cx, *request_id, Ok(response.clone()));
-                    }
-                    NetworkResponse::HttpError { request_id, error } => {
-                        self.handle_response(cx, *request_id, Err(error.message.clone()));
-                    }
-                    _ => {}
-                }
-            }
-        }
         if self.tick.as_ref().is_some_and(|t| t.is_event(event).is_some()) {
-            if self.state.due_for_refresh() {
-                self.fetch(cx);
-            } else {
-                self.render(cx);
-            }
+            self.render(cx);
         }
         if let Some(frame) = self.sky_frame.is_event(event) {
             if self.sky_last > 0.0 {
@@ -886,26 +1061,72 @@ impl Widget for WeatherView {
                 return;
             }
         }
+        if let Event::KeyDown(ke) = event {
+            if cx.key_focus() == self.view.area() {
+                match ke.key_code {
+                    KeyCode::ArrowLeft => self.step_city(cx, -1),
+                    KeyCode::ArrowRight => self.step_city(cx, 1),
+                    _ => {}
+                }
+            }
+        }
+        // A swipe across the page dots: the same city change a tap in the
+        // Locations sheet makes, just gestured from the dots' own small
+        // area instead — raw finger tracking, since a plain tap-action
+        // query (as the buttons below use) only ever sees the release, not
+        // how far it travelled from the press.
+        let dots_area = self.view.widget(cx, ids!(dots)).area();
+        match event.hits(cx, dots_area) {
+            Hit::FingerDown(e) if e.is_primary_hit() => {
+                self.swipe_start = Some(e.abs.x);
+            }
+            Hit::FingerUp(e) => {
+                if let Some(start) = self.swipe_start.take() {
+                    let dx = e.abs.x - start;
+                    if !e.cancelled && dx.abs() > 24.0 {
+                        self.step_city(cx, if dx < 0.0 { 1 } else { -1 });
+                    }
+                }
+            }
+            _ => {}
+        }
         if let Event::Actions(actions) = event {
             if self.view.view(cx, ids!(locations)).finger_up(actions).is_some_and(|fe| fe.is_over) {
                 self.set_sheet(cx, true);
             }
+            if self.view.view(cx, ids!(unit_toggle)).finger_up(actions).is_some_and(|fe| fe.is_over) {
+                self.toggle_unit(cx);
+            }
             if self.view.widget(cx, ids!(scrim_sheet)).view(cx, &[]).finger_down(actions).is_some() {
                 self.set_sheet(cx, false);
             }
-            for (i, row) in [ids!(city_0), ids!(city_1), ids!(city_2), ids!(city_3)].iter().enumerate() {
-                // A press taken away (a list or the host took the finger) is no tap.
-                if self.view.view(cx, *row).finger_up(actions).is_some_and(|fe| !fe.cancelled) {
-                    self.select_city(cx, i);
-                    if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
-                        dots.set(cx, CITIES.len(), self.state.city);
-                    }
-                    self.set_sheet(cx, false);
-                }
-            }
-            if self.view.view(cx, ids!(refresh)).finger_up(actions).is_some_and(|fe| !fe.cancelled) {
-                self.fetch(cx);
+            if self.view.view(cx, ids!(close_sheet)).finger_up(actions).is_some_and(|fe| fe.is_over) {
                 self.set_sheet(cx, false);
+            }
+            if let Some(text) = self.view.text_input(cx, ids!(search)).changed(actions) {
+                self.on_search_changed(cx, text);
+            }
+            let searching = !self.view.text_input(cx, ids!(search)).text().trim().is_empty();
+            for (i, row_id) in Self::row_ids().iter().enumerate() {
+                let row = self.view.widget(cx, *row_id);
+                // The row's own capture yields to this nested button's when
+                // a press lands on it, so this never also fires a select.
+                if !searching && row.view(cx, ids!(remove)).finger_up(actions).is_some_and(|fe| fe.is_over) {
+                    self.remove_city(cx, i);
+                    continue;
+                }
+                // A press taken away (a list or the host took the finger) is no tap.
+                if row.view(cx, &[]).finger_up(actions).is_some_and(|fe| !fe.cancelled) {
+                    if searching {
+                        if let Some(city) = self.search_results.get(i).cloned() {
+                            self.add_city(cx, city);
+                            self.set_sheet(cx, false);
+                        }
+                    } else {
+                        self.pick_city(cx, i);
+                        self.set_sheet(cx, false);
+                    }
+                }
             }
         }
         self.view.handle_event(cx, event, scope);
@@ -924,6 +1145,13 @@ impl Widget for WeatherView {
         let step = self.view.draw_walk(cx, scope, walk);
         if step.is_done() {
             self.sync_zones(cx);
+            // Claim the keyboard once, so the arrow keys work without a
+            // click first — only when this instance owns the whole window,
+            // never inside a shared WM tile where that would steal focus
+            // from whatever else is hosted there.
+            if cx.key_focus().is_empty() && self.face(cx) == HostedViewMode::Full {
+                cx.set_key_focus(self.view.area());
+            }
         }
         step
     }

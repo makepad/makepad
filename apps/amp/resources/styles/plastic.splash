@@ -1,0 +1,214 @@
+// Moulded Plastic — an 80s tape deck / boombox: a warm grey moulded ABS
+// front with a fine spark-eroded texture, cream piano-key transport caps
+// with bold dark glyphs, a charcoal moulded screen surround with a thin
+// chrome trim, smoky display windows, red and green LEDs.
+//
+// Assignments only, over the base templates in `src/hw.rs`
+// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+use mod.prelude.widgets_internal.*
+
+// ---- palette: the lists, the spectrum, the bars ----
+mod.widgets.hw_palette.screen_bg = #x171816
+mod.widgets.hw_palette.screen_text = #xe9e6dc
+mod.widgets.hw_palette.screen_muted = #x9a968a
+mod.widgets.hw_palette.accent = #x46e07a
+
+// ---- the front: warm grey ABS, spark-eroded texture ----
+mod.widgets.HwChassis.draw_bg.ground = #xa7a193
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 0.98, 0.94, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.22, 0.21, 0.19, 1.0)
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    // Spark-eroded stipple plus fine moulded grip ribs.
+    let w = self.world.xy
+    let stip = self.hw_noise(w * 0.9) * 0.6 + self.hw_hash(floor(w * 2.0)) * 0.4
+    var col = base * (1.0 + (stip - 0.5) * 0.08)
+    let rib = 0.5 + 0.5 * sin(w.y * 2.0944)
+    col = col * (1.0 + (rib - 0.5) * 0.09)
+    // The era's printed stripe decal along the foot of the front.
+    let y = self.rect_size.y - p.y
+    let s1 = smoothstep(4.0, 4.6, y) * (1.0 - smoothstep(6.4, 7.0, y))
+    let s2 = smoothstep(7.6, 8.2, y) * (1.0 - smoothstep(10.0, 10.6, y))
+    let s3 = smoothstep(11.2, 11.8, y) * (1.0 - smoothstep(13.6, 14.2, y))
+    col = mix(col, vec3(0.80, 0.18, 0.11), s1)
+    col = mix(col, vec3(0.93, 0.50, 0.12), s2)
+    col = mix(col, vec3(0.95, 0.76, 0.22), s3)
+    return col
+}
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(0.30, 0.95, 0.50, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(2.0, 0.6)
+mod.widgets.Window.pass.clear_color = #xa7a193
+
+// Raised plates: cream moulded mouldings, soft round edges.
+mod.widgets.HwPlate.draw_bg.ground = #xe2d9c2
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 0.99, 0.95, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.25, 0.23, 0.20, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern = vec4(4.0, 0.30, 0.08, 0.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(5.0, 1.0, 2.5, 0.25)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.6, 0.3, 0.25, 0.8)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.55, 10.0, 1.0, 0.5)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(0.30, 0.95, 0.50, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(2.4, 0.55)
+mod.widgets.HwPlate.radius = 16
+
+// Recessed panels: a darker grey moulding stepped into the front.
+mod.widgets.HwPanel.draw_bg.ground = #x5b5852
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.95, 0.93, 0.88, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.10, 0.10, 0.09, 1.0)
+mod.widgets.HwPanel.draw_bg.pattern = vec4(4.0, 0.30, 0.10, 0.0)
+mod.widgets.HwPanel.draw_bg.relief = vec4(4.0, 1.0, 2.0, 0.2)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.75, 10.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(0.30, 0.95, 0.50, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.6, 0.5)
+mod.widgets.HwPanel.radius = 14
+
+// The screen's surround: charcoal plastic, a chrome trim on the lip.
+mod.widgets.HwBezel.draw_bg.ground = #x2a2927
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.92, 0.93, 0.95, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    // Charcoal stipple, a bright chrome trim band round the lip.
+    let w = self.world.xy
+    let stip = self.hw_noise(w * 0.9) * 0.6 + self.hw_hash(floor(w * 2.0)) * 0.4
+    var col = base * (1.0 + (stip - 0.5) * 0.12)
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    let band = smoothstep(0.0, 0.8, e) * (1.0 - smoothstep(4.2, 5.2, e))
+    let v = p.y / max(self.rect_size.y, 1.0)
+    let chrome = mix(vec3(0.93, 0.94, 0.95), vec3(0.52, 0.53, 0.55), v) + vec3(0.25, 0.25, 0.25) * (1.0 - smoothstep(0.0, 1.8, abs(e - 1.6)))
+    col = mix(col, chrome, band)
+    return col
+}
+mod.widgets.HwBezel.draw_bg.relief = vec4(3.0, 1.0, 2.0, 0.9)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.95, 12.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.3, 0.4)
+
+// The glass: smoked acrylic, a broad soft reflection.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.10, 0.35, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(1.0, 0.97, 0.92, 0.0)
+
+// ---- keys: chunky cream piano keys, bold dark glyphs ----
+mod.widgets.HwKey.draw_bg.ground = #xefe9da
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 1.0, 0.97, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.28, 0.25, 0.21, 1.0)
+mod.widgets.HwKey.draw_bg.pattern = vec4(5.0, 0.6, 0.05, 0.0)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.06, 0.45, 0.25, 0.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(4.5, 1.0, 3.0, 0.35)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.65, 7.0, 1.0, 0.65)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.8, 0.5)
+mod.widgets.HwKey.radius = 5
+mod.widgets.HwKey.depth = 4.5
+mod.widgets.HwKey.press = -4.5
+mod.widgets.HwKeyButton.draw_text.color = #x2b2824
+mod.widgets.HwKeyButton.draw_text.color_hover = #x000000
+mod.widgets.HwKeyButton.draw_text.color_down = #x000000
+mod.widgets.HwKeyText.draw_text.color = #x2b2824
+mod.widgets.HwKeyText.draw_text.color_hover = #x000000
+mod.widgets.HwKeyText.draw_text.color_down = #x000000
+
+// ---- lights: red LEDs under the keys ----
+mod.widgets.HwDash.emissive = vec4(1.0, 0.16, 0.10, 8.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.18, 0.12, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x4a1c17
+mod.widgets.HwLed.emissive = vec4(1.0, 0.16, 0.10, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.18, 0.12, 1.0)
+
+// ---- knob: a black ribbed plastic skirt, a chrome cap ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x2a2927
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(0.95, 0.95, 0.95, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.05, 0.05, 0.05, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(1.0, 0.62, 28.0, 0.55)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.80, 0.81, 0.83, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(1.0, 0.25, 0.15, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(11.0, 1.30, 2.6, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.22, 0.20, 0.17, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.30, 1.0, 0.45, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.7, 9.0, 1.0, 0.65)
+mod.widgets.HwKnobFace.emissive = vec4(0.30, 1.0, 0.45, 0.6)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(0.35, 0.5)
+
+// ---- meter: green LEDs going red at the top ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x141513
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 14.0, 1.0, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.30, 1.0, 0.42, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.18, 0.10, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.10, 0.12, 0.09, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(0.30, 1.0, 0.42, 0.5)
+
+// ---- type printed on the front: bold, dark ----
+mod.widgets.HwCaption.draw_text.color = #x2e2b26
+mod.widgets.HwTitle.draw_text.color = #x1e1c19
+mod.widgets.HwText.draw_text.color = #x3a3731
+mod.widgets.HwPanelTitle.draw_text.color = #xf1ece0
+mod.widgets.HwPanelText.draw_text.color = #xd0cabb
+mod.widgets.HwNavButton.draw_text.color = #xefeadf
+mod.widgets.HwDisplayText.draw_text.color = #x7cf29e
+mod.widgets.HwDisplay.draw_bg.ground = #x161715
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.85, 0.85, 0.85, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.95, 9.0, 0.0, 0.55)
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.35)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 0.98, 0.92, 0.25)
+// Bold printed type.
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold{font_size: 8.5}
+mod.widgets.HwKeyButton.draw_text.text_style = theme.font_icons{font_size: 16.0}
+mod.widgets.HwKeyText.draw_text.text_style = theme.font_bold{font_size: 9.5}
+
+// Plates: stipple and the era's printed stripe decal along the foot.
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let stip = self.hw_noise(w * 0.9) * 0.6 + self.hw_hash(floor(w * 2.0)) * 0.4
+    var col = base * (1.0 + (stip - 0.5) * 0.06)
+    // A thin chrome pinstripe moulded in just inside the rounded edge.
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    let pin = smoothstep(6.2, 6.8, e) * (1.0 - smoothstep(8.0, 8.6, e))
+    let v = p.y / max(self.rect_size.y, 1.0)
+    col = mix(col, mix(vec3(0.95, 0.96, 0.97), vec3(0.55, 0.56, 0.58), v), pin * 0.9)
+    return col
+}
+// Choosers and search: smoked acrylic wells with a warm rim.
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.10, 0.095, 0.085, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(1.0, 0.95, 0.85, 0.22)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(0.49, 0.95, 0.62, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xefeadf
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.10, 0.095, 0.085, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(1.0, 0.95, 0.85, 0.22)
+mod.widgets.HwTextInput.draw_text.color_empty = #xa8a293
+
+// The picture lights the mouldings round it.
+mod.widgets.HwSpectrum.light = 3.6
+mod.widgets.HwMilk.light = 1.6
+mod.widgets.HwMilk.light_knee = 1.0
+// White flashes ease under a ceiling instead of washing the chrome lips.
+mod.widgets.hw_palette.spill_knee = 1.1
+// ---- transport: chunky 80s deck piano keys that drop and latch ----
+mod.widgets.HwTransportKey.latch = 1.0
+mod.widgets.HwTransportKey.press_secs = 0.07
+mod.widgets.HwTransportKey.draw_bg.spill = vec2(0.9, 0.45)
+mod.widgets.HwTransportKey.travel = 5.0
+mod.widgets.HwTransportKey.inset = 3.0
+mod.widgets.HwTransportKey.draw_bg.mech = vec4(1.0, 0.64, 0.0, 0.0)
+mod.widgets.HwTransportKey.draw_bg.dimple = vec4(0.0, 3.0, 0.3, 0.1)
+mod.widgets.HwTransportKey.draw_bg.housing_ink = vec4(0.10, 0.09, 0.08, 1.0)
+mod.widgets.HwTransportKey.draw_bg.front_ink = vec4(0.80, 0.76, 0.67, 1.0)
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x1a1714
+mod.widgets.hw_palette.map1 = #x7a6e60
+mod.widgets.hw_palette.map2 = #xd9c9a8
+mod.widgets.hw_palette.map3 = #xfff8e8
+mod.widgets.hw_palette.map_strength = 0.55
+mod.widgets.hw_palette.map_default = 1.0
+// The screen filter with the THEME COLOURS key: CRT: a bulging tube, scanlines, an RGB mask, bloom.
+mod.widgets.hw_palette.screen_filter = 1.0
+mod.widgets.hw_palette.screen_filter_strength = 0.8
+mod.widgets.hw_palette.screen_cell = 3.0
+mod.widgets.hw_palette.screen_curve = 0.08
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(2.0, 0.56, 15.0, 5.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.58, 0.59, 0.56, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.02, 0.02, 0.02, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(0.0, 2.0, 7.0, 0.10)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(0.0, 0.08, 0.28, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.20, 0.0, 0.3, 0.0)
+true

@@ -1,0 +1,15 @@
+use mod.flow.*
+
+let images = []
+for i in 0..3 {
+    images.push(Image{ prompt: "variation" width: 512 + i * 64 height: 512 })
+}
+let first = images[0]
+let second = images[1]
+let third = images[2]
+
+Flow{
+    label: "Built in a loop"
+    brief: "The writer flattens build-time logic."
+    first, second, third
+}

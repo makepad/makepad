@@ -1,0 +1,9 @@
+[package]
+name = "makepad-example-frame-probe"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A hosted-window test pattern: a 1-device-pixel checkerboard, a 1-px edge frame and the frame number stamped at two corners, for checking a compositor's sampling, alignment and frame completeness (makepad-app-wm frame checks)"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }

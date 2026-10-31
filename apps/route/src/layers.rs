@@ -36,6 +36,8 @@ pub struct LayerState {
     pub dirty: bool,
     pub wind_worker_started: bool,
     pub wind_cache: Option<WindUpdate>,
+    /// Cache-only (network.rs): tools that need a server say so.
+    pub offline: bool,
 }
 
 impl Default for LayerState {
@@ -52,6 +54,7 @@ impl Default for LayerState {
             dirty: false,
             wind_worker_started: false,
             wind_cache: None,
+            offline: false,
         }
     }
 }
@@ -139,9 +142,14 @@ impl LayerState {
 
 /// GFS wind worker: 30 min disk-gated NOMADS polls, cached GRIB2 under
 /// `cache_dir`. Ends when the instance that started it is gone (its
-/// receiver dropped).
+/// receiver dropped). Offline (`network` false) it only reads the cache.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>, cache_dir: PathBuf) {
+pub fn start_wind_worker(
+    spawner: ThreadSpawner,
+    sender: ToUISender<WindUpdate>,
+    cache_dir: PathBuf,
+    network: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let spawned = spawner.spawn_worker(
         ThreadOptions {
             name: Some("route-wind".into()),
@@ -152,7 +160,9 @@ pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>,
         let sync = WindSync::new(cache_dir);
         let pacing = CancellationToken::new();
         loop {
-            let field = sync.sync().ok().flatten().or_else(|| sync.cached());
+            let online = network.load(std::sync::atomic::Ordering::Relaxed);
+            let fetched = if online { sync.sync().ok().flatten() } else { None };
+            let field = fetched.or_else(|| sync.cached());
             if let Some(field) = field {
                 let sent = sender.send(WindUpdate {
                     nx: field.nx,

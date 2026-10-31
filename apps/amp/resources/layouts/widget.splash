@@ -1,0 +1,38 @@
+// title: Widget
+// class: tiny
+// order: 40
+// min: 320x140
+// pref: 340x150
+//
+// The smallest player, in two rows on the style's own chassis: the time in
+// big segments beside the title (scrolling while it plays); then previous,
+// play and next, and the volume with its level. Everything else is in the
+// ≡ menu (or a right-click), Space plays, Cmd+arrows skip.
+use mod.prelude.widgets_internal.*
+use mod.widgets.*
+
+mod.widgets.HwLayout = View{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: 6
+    View{
+        width: Fill
+        height: Fill
+        flow: Right
+        spacing: 6
+        mod.widgets.HwSlot{component: "clock" width: 118 height: Fill}
+        mod.widgets.HwSlot{component: "marquee" width: Fill height: Fill}
+    }
+    // 44: the volume slider's slot is a finger's target.
+    View{
+        width: Fill
+        height: 44
+        flow: Right
+        spacing: 8
+        align: Align{y: 0.5}
+        mod.widgets.HwSlot{component: "transport" width: 172 height: Fill}
+        mod.widgets.HwSlot{component: "volume" width: Fill height: Fill}
+    }
+}
+true

@@ -1,0 +1,9 @@
+use mod.app.*
+
+App{
+    id: "flow.hello"
+    name: "Hello"
+    entry: "flow.splash"
+    surface: "ui.splash"
+    defaults: {name: "Flow"}
+}

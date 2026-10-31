@@ -1,0 +1,29 @@
+use mod.flow.*
+
+/** The isolated object to reconstruct and paint. */
+let prompt = Input{ type: @text default: "a carved wooden toy submarine" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+let mesh = Mesh{
+    prompt: prompt.text()
+    image: image.image()
+    remesh_resolution: 512
+    texture: false
+    decimation_target: 12000
+    texture_size: 1024
+    model: "trellis-2"
+}
+let paint = Paint{
+    prompt: prompt.text()
+    mesh: mesh.mesh()
+    reference_image: image.image()
+    texture_size: 1024
+    model: "hunyuan3d-paint-2.1"
+}
+/** Publish the PBR-painted GLB into the flow asset library. */
+let published = Publish{ value: paint.out(@mesh) namespace: "flows" tags: ["flow", "mesh", "pbr"] }
+
+Flow{
+    label: "Prompt to PBR mesh"
+    brief: "Paints an object, reconstructs its geometry, and bakes Hunyuan PBR materials."
+    prompt, image, mesh, paint, published
+}

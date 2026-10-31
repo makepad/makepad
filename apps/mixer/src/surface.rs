@@ -5,12 +5,12 @@
 //! gesture-to-command translation. A layout that omits a child simply
 //! doesn't show that control; a layout cannot name an OSC address at all.
 
-use makepad_mixer::model::{meters1_slots, scribble_rgb, MixerModel, StripId};
-use makepad_mixer::safety::{BusN, Ch};
-use makepad_mixer::safety::{
+use makepad_app_mixer::model::{meters1_slots, scribble_rgb, MixerModel, StripId};
+use makepad_app_mixer::safety::{BusN, Ch};
+use makepad_app_mixer::safety::{
     DynLeaf, EqBand, EqBand6, EqLeaf, GateLeaf, PVal, Param,
 };
-use makepad_mixer::units::{
+use makepad_app_mixer::units::{
     format_level_db, format_pan, format_signed_db, lin_to_unit, DYN_RATIOS, EQ_GAIN_MAX,
     EQ_GAIN_MIN,
 };
@@ -248,7 +248,7 @@ impl SurfaceBinder {
         slot.name_lbl.set_text(cx, &model.strip_name(strip));
         let idx = model.strip_color(strip);
         let filled = match idx {
-            Some(i) if makepad_mixer::model::scribble_inverted(i) => 0.0,
+            Some(i) if makepad_app_mixer::model::scribble_inverted(i) => 0.0,
             Some(_) => 1.0,
             None => 0.0,
         };
@@ -448,7 +448,7 @@ fn pan_param(s: StripId) -> Param {
 /// The even-half equivalent of an odd-half parameter, for VIRTUAL pairs
 /// (console link off, stereo by naming convention): gestures drive both.
 fn twin(p: Param) -> Option<Param> {
-    use makepad_mixer::safety::{BusN, Ch};
+    use makepad_app_mixer::safety::{BusN, Ch};
     let ch = |c: Ch| Ch::new(c.get() + 1);
     let bus = |b: BusN| BusN::new(b.get() + 1);
     match p {
@@ -470,7 +470,7 @@ fn twin(p: Param) -> Option<Param> {
 
 /// The even half's pan parameter, for pairs the console is not mirroring.
 fn pan_twin(s: StripId) -> Option<Param> {
-    use makepad_mixer::safety::{BusN, Ch};
+    use makepad_app_mixer::safety::{BusN, Ch};
     match s {
         StripId::Ch { base, .. } => Ch::new(base.get() + 1).map(Param::ChMixPan),
         StripId::Bus { base, .. } => BusN::new(base.get() + 1).map(Param::BusMixPan),
@@ -909,7 +909,7 @@ impl SurfaceBinder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_mixer::safety::{BusN, Ch};
+    use makepad_app_mixer::safety::{BusN, Ch};
 
     #[test]
     fn twin_maps_odd_params_to_even_halves() {
@@ -937,12 +937,12 @@ mod tests {
     fn eq_moves_on_both_halves_of_an_unlinked_pair() {
         // The EQ slider is a strip control: on a pair the console is not
         // mirroring, both halves have to get it or the pair goes lopsided.
-        let b2 = makepad_mixer::safety::EqBand::new(2).unwrap();
+        let b2 = makepad_app_mixer::safety::EqBand::new(2).unwrap();
         assert_eq!(
             twin(Param::ChEq(Ch::new(3).unwrap(), b2, EqLeaf::G)),
             Some(Param::ChEq(Ch::new(4).unwrap(), b2, EqLeaf::G))
         );
-        let b5 = makepad_mixer::safety::EqBand6::new(5).unwrap();
+        let b5 = makepad_app_mixer::safety::EqBand6::new(5).unwrap();
         assert_eq!(
             twin(Param::BusEq(BusN::new(1).unwrap(), b5, EqLeaf::G)),
             Some(Param::BusEq(BusN::new(2).unwrap(), b5, EqLeaf::G))

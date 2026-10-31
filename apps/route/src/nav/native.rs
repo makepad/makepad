@@ -21,13 +21,10 @@ use makepad_map_nav::search_service::merge_search_results;
 use makepad_widgets::*;
 use std::path::{Path, PathBuf};
 
-/// The production nav pair (see `examples/map`). When it is absent the app
-/// falls back to whatever test map was baked on this machine — same
-/// formats, one city instead of a province.
-const NAV_DATA_BASENAME: &str = "noord-holland";
 /// The test map's nav basename under the maps root: the layout
 /// `makepad_map_build::testmap::TestMapPaths::in_dir(root, "amsterdam")`
-/// bakes, spelled out here so reading it needs no baker.
+/// bakes, spelled out here so reading it needs no baker. It is one more
+/// city, loaded after every regional nav pair.
 const TEST_MAP_BASENAME: &str = "amsterdam";
 #[cfg(not(target_arch = "wasm32"))]
 const EUROPE_PLACES_PATH: &str = "europe-places.search";
@@ -35,9 +32,18 @@ const EUROPE_PLACES_PATH: &str = "europe-places.search";
 const EUROPE_SEARCHDB_PATH: &str = "europe.searchdb";
 const EUROPE_MAJOR_GRAPH_PATH: &str = "europe-major.graph";
 
+/// One loaded nav region: a place index and a routing graph baked together
+/// (`<basename>.search` + `<basename>.graph`).
+pub struct NavRegion {
+    pub search: SearchIndex,
+    pub graph: RouteGraph,
+}
+
 pub struct NavData {
-    pub nh_search: SearchIndex,
-    pub nh_graph: RouteGraph,
+    /// Every regional nav pair found under the maps root. Searches merge
+    /// across them; a route is answered by the first region whose graph
+    /// holds both endpoints.
+    pub regions: Vec<NavRegion>,
     pub searchdb: Option<SearchDb>,
     /// In-RAM Europe settlements, used only when the searchdb is absent.
     pub places: Option<SearchIndex>,
@@ -55,20 +61,51 @@ pub enum NavLoad {
     Failed { error: String },
 }
 
-/// The nav artifacts to load, production first, test map second. `None`
-/// means this machine has neither and the caller should offer to bake one.
-pub fn nav_basename(maps_root: &Path) -> Option<String> {
-    for basename in [
-        maps_root.join(NAV_DATA_BASENAME).to_string_lossy().into_owned(),
-        maps_root.join(TEST_MAP_BASENAME).to_string_lossy().into_owned(),
-    ] {
-        if Path::new(&format!("{basename}.search")).is_file()
+/// Read every region's `.search` and `.graph`.
+pub fn load_regions(basenames: &[String]) -> Result<Vec<NavRegion>, String> {
+    basenames
+        .iter()
+        .map(|basename| {
+            let search = std::fs::read(format!("{basename}.search"))
+                .map_err(|e| e.to_string())
+                .and_then(|d| SearchIndex::deserialize(&d).map_err(|e| format!("{e:?}")))
+                .map_err(|e| format!("search index {basename}: {e}"))?;
+            let graph = std::fs::read(format!("{basename}.graph"))
+                .map_err(|e| e.to_string())
+                .and_then(|d| RouteGraph::deserialize(&d).map_err(|e| format!("{e:?}")))
+                .map_err(|e| format!("route graph {basename}: {e}"))?;
+            Ok(NavRegion { search, graph })
+        })
+        .collect()
+}
+
+/// The nav artifacts to load: every `<name>.search` that has a
+/// `<name>.graph` beside it in the maps root, regional pairs sorted by
+/// name and the baked test map last (a regional graph that also covers
+/// Amsterdam answers first; searches merge and dedupe across all). Empty
+/// means this machine has none and the caller should offer to bake one.
+pub fn nav_basenames(maps_root: &Path) -> Vec<String> {
+    let has_pair = |basename: &str| {
+        Path::new(&format!("{basename}.search")).is_file()
             && Path::new(&format!("{basename}.graph")).is_file()
-        {
-            return Some(basename);
-        }
+    };
+    let test_map = maps_root.join(TEST_MAP_BASENAME).to_string_lossy().into_owned();
+    let mut found = std::fs::read_dir(maps_root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stem = name.strip_suffix(".search")?;
+            let basename = maps_root.join(stem).to_string_lossy().into_owned();
+            (basename != test_map && has_pair(&basename)).then_some(basename)
+        })
+        .collect::<Vec<_>>();
+    found.sort();
+    if has_pair(&test_map) {
+        found.push(test_map);
     }
-    None
+    found
 }
 
 /// Load the nav artifacts at `basename` (and the charger layer at
@@ -77,37 +114,21 @@ pub fn nav_basename(maps_root: &Path) -> Option<String> {
 pub fn start_nav_load(
     pool: TaskPool,
     sender: ToUISender<NavLoad>,
-    basename: String,
+    basenames: Vec<String>,
     chargers: PathBuf,
 ) {
     let rejected_sender = sender.clone();
     match pool.submit(Lane::Heavy, move || {
-        let maps_root = Path::new(&basename)
-            .parent()
+        let maps_root = basenames
+            .first()
+            .and_then(|basename| Path::new(basename).parent())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let t0 = Cx::monotonic_now();
-        let nh_search = match std::fs::read(format!("{basename}.search"))
-            .map_err(|e| e.to_string())
-            .and_then(|d| SearchIndex::deserialize(&d).map_err(|e| format!("{e:?}")))
-        {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = sender.send(NavLoad::Failed {
-                    error: format!("search index: {e} (run from repo root; see examples/map)"),
-                });
-                return;
-            }
-        };
-        let nh_graph = match std::fs::read(format!("{basename}.graph"))
-            .map_err(|e| e.to_string())
-            .and_then(|d| RouteGraph::deserialize(&d).map_err(|e| format!("{e:?}")))
-        {
-            Ok(g) => g,
-            Err(e) => {
-                let _ = sender.send(NavLoad::Failed {
-                    error: format!("route graph: {e}"),
-                });
+        let regions = match load_regions(&basenames) {
+            Ok(regions) => regions,
+            Err(error) => {
+                let _ = sender.send(NavLoad::Failed { error });
                 return;
             }
         };
@@ -122,18 +143,18 @@ pub fn start_nav_load(
         let chargers = LayerDb::open(&chargers).ok();
 
         let stats = format!(
-            "nav ready in {:.1}s: {} docs, {} edges{}{}{}",
+            "nav ready in {:.1}s: {} regions, {} docs, {} edges{}{}{}",
             Cx::monotonic_now() - t0,
-            nh_search.doc_count(),
-            nh_graph.edges.len(),
+            regions.len(),
+            regions.iter().map(|r| r.search.doc_count()).sum::<usize>(),
+            regions.iter().map(|r| r.graph.edges.len()).sum::<usize>(),
             if searchdb.is_some() { ", europe searchdb" } else { "" },
             ", major graph on demand",
             if chargers.is_some() { ", chargers" } else { "" },
         );
         let _ = sender.send(NavLoad::Ready {
             data: Box::new(NavData {
-                nh_search,
-                nh_graph,
+                regions,
                 searchdb,
                 places,
                 major_graph: None,
@@ -157,7 +178,7 @@ pub fn start_nav_load(
 pub fn start_nav_load(
     _pool: TaskPool,
     sender: ToUISender<NavLoad>,
-    _basename: String,
+    _basenames: Vec<String>,
     _chargers: PathBuf,
 ) {
     let _ = sender.send(NavLoad::Failed {
@@ -166,10 +187,13 @@ pub fn start_nav_load(
 }
 
 impl NavData {
-    /// Merged search over the NH detail index + Europe-wide index, same
+    /// Merged search over the regional detail indexes + Europe-wide index, same
     /// policy as examples/map: score-sorted, name+2km deduped, truncated.
     pub fn search(&self, text: &str, near: Option<LonLat>, limit: usize) -> Vec<SearchResult> {
-        let mut results = self.nh_search.query(text, near, limit);
+        let mut results = Vec::new();
+        for region in &self.regions {
+            results.extend(region.search.query(text, near, limit));
+        }
         if let Some(db) = &self.searchdb {
             if let Ok(more) = db.query(text, near, limit) {
                 results.extend(more);
@@ -184,8 +208,10 @@ impl NavData {
     /// graph when an endpoint is outside NH coverage (no cross-graph
     /// stitching — same policy as examples/map).
     pub fn route_pair(&mut self, from: LonLat, to: LonLat, mode: TravelMode) -> Option<Route> {
-        if let Some(route) = self.nh_graph.route(from, to, mode) {
-            return Some(route);
+        for region in &self.regions {
+            if let Some(route) = region.graph.route(from, to, mode) {
+                return Some(route);
+            }
         }
         if self.major_graph.is_none() && !self.major_graph_attempted {
             self.major_graph_attempted = true;
@@ -293,13 +319,16 @@ fn build_hires_now(
 /// (numeric weather_now sampling) and reprojected display frames to the UI.
 /// Also syncs the raw volumes of both radars and composites them into the
 /// hi-res "now" image. Files land under `cache_dir`. The worker ends when
-/// the instance that started it is gone (its receiver dropped).
+/// the instance that started it is gone (its receiver dropped). While
+/// `network` is false (offline) it fetches nothing and shows what the cache
+/// already holds.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start_radar_worker(
     spawner: ThreadSpawner,
     pool: TaskPool,
     sender: ToUISender<RadarData>,
     cache_dir: PathBuf,
+    network: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let spawned = spawner.spawn_worker(
         ThreadOptions {
@@ -324,9 +353,10 @@ pub fn start_radar_worker(
         let mut current: Option<RadarData> = None;
         let pacing = CancellationToken::new();
         loop {
-            let state = match sync.sync() {
-                Ok(state) => state,
-                Err(_) => sync.state(),
+            let online = network.load(std::sync::atomic::Ordering::Relaxed);
+            let state = match online.then(|| sync.sync()) {
+                Some(Ok(state)) => state,
+                _ => sync.state(),
             };
             let mut changed = false;
             if let Some(frame) = state.frames.last() {
@@ -366,8 +396,10 @@ pub fn start_radar_worker(
             }
             // Volumes: sync both radars, composite when a new common
             // timestamp appears.
-            let _ = volume_syncs.0.sync();
-            let _ = volume_syncs.1.sync();
+            if online {
+                let _ = volume_syncs.0.sync();
+                let _ = volume_syncs.1.sync();
+            }
             if let Some((stamp, herwijnen_path, den_helder_path)) =
                 newest_volume_pair(&volume_syncs.0, &volume_syncs.1)
             {
@@ -471,5 +503,53 @@ impl RadarGrid {
         }
         let dbz = 0.5 * v as f64 - 32.0;
         Some((10.0_f64.powf(dbz / 10.0) / 200.0).powf(1.0 / 1.6))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    /// Offline check against a real maps root: `ROUTE_MAPS_ROOT=<dir> cargo
+    /// test --release -p makepad-app-route nav_regions -- --ignored --nocapture`.
+    /// Searches and routes in every region, with whatever network the
+    /// process has (none of it is used).
+    #[test]
+    #[ignore]
+    fn nav_regions_search_and_route_offline() {
+        let root = PathBuf::from(std::env::var("ROUTE_MAPS_ROOT").expect("ROUTE_MAPS_ROOT"));
+        let basenames = nav_basenames(&root);
+        println!("regions: {basenames:?}");
+        let regions = load_regions(&basenames).unwrap();
+        let mut data = NavData {
+            regions,
+            searchdb: None,
+            places: None,
+            major_graph: None,
+            major_graph_attempted: true,
+            chargers: None,
+            maps_root: root,
+        };
+        let top = |data: &NavData, q: &str| {
+            let r = data.search(q, None, 3);
+            println!("search {q:?}: {:?}", r.first().map(|r| (&r.name, r.pos)));
+            r.into_iter().next().unwrap_or_else(|| panic!("no result for {q}")).pos
+        };
+        let dam = top(&data, "Amsterdam Centraal");
+        let schiphol = top(&data, "Schiphol");
+        let szn = top(&data, "深圳北站");
+        let szn_en = top(&data, "Shenzhen North Railway Station");
+        let futian = top(&data, "Futian");
+        let peak = top(&data, "Victoria Peak");
+        let tst = top(&data, "尖沙咀");
+        for (name, a, b, mode) in [
+            ("amsterdam", dam, schiphol, TravelMode::Car),
+            ("shenzhen", szn, futian, TravelMode::Car),
+            ("hong kong", peak, tst, TravelMode::Car),
+            ("shenzhen-hong kong (foot)", szn_en, tst, TravelMode::Foot),
+        ] {
+            let route = data.route_pair(a, b, mode).unwrap_or_else(|| panic!("no route {name}"));
+            println!("route {name}: {:.1} km, {:.0} min", route.length_m / 1000.0, route.duration_s / 60.0);
+        }
     }
 }

@@ -1,0 +1,15 @@
+use mod.flow.*
+
+/** Body options: combine `hands`, `detect`, and `persons=N` as needed. */
+let prompt = Input{ type: @text default: "hands detect persons=1" }
+/** The person image to analyse. */
+let image = Input{ type: @image }
+let body = Body{ prompt: prompt.text() image: image.image() model: "sam3dbody" }
+/** Publish the structured body-pose packet into the flow asset library. */
+let published = Publish{ value: body.json() namespace: "flows" tags: ["flow", "body", "pose"] }
+
+Flow{
+    label: "Body pose"
+    brief: "Recovers a structured SAM 3D Body pose packet from a supplied person image."
+    prompt, image, body, published
+}

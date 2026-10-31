@@ -1,0 +1,23 @@
+// title: Tile
+// class: pocket
+// order: 51
+// min: 200x200
+// pref: 220x220
+//
+// The square compact form (compact form "tile", 220x220; see Amp's
+// `compact_forms`), asked for by a window manager that parks Amp small. Never
+// picked by window size: the picture of the sound over what plays (the record,
+// the title and the artist), the mini spectrum, then previous, play and next.
+use mod.prelude.widgets_internal.*
+use mod.widgets.*
+
+mod.widgets.HwLayout = View{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: 4
+    mod.widgets.HwSlot{component: "screen" width: Fill height: Fill}
+    mod.widgets.HwSlot{component: "now" width: Fill height: 58}
+    mod.widgets.HwSlot{component: "spectrum" width: Fill height: 30}
+    mod.widgets.HwSlot{component: "transport" width: Fill height: 36}
+}

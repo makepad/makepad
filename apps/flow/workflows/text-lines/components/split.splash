@@ -1,0 +1,13 @@
+use mod.flow.*
+
+let text = Input{ type: @text  at: vec2(40, 80) }
+let split = TextLines{ text: text.text()  at: vec2(330, 80) }
+let pass = Fn{
+    in: {value: split.out(@lines)}
+    out: ["flow.text.lines"]
+    run: |i| { {"flow.text.lines": i.value} }
+    at: vec2(640, 80)
+}
+let lines = Output{ type: "flow.text.lines"  value: pass.port("flow.text.lines")  at: vec2(940, 80) }
+
+Component{ label: "Split lines"  text, split, pass, lines }

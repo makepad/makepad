@@ -1,0 +1,12 @@
+use mod.app.*
+
+App{
+    id: "flow.text_lines"
+    name: "Text collections"
+    entry: "flow.splash"
+    surface: "ui.splash"
+    modules: [
+        {path: "components/split.splash" as: "SplitLines" hash: "2ff0566b763d3bb5af4fd013412e8356fa7549cf0ef6a2a1fae9859fb571643b"}
+        {path: "components/group.splash" as: "GroupLines" hash: "2e7a68378a742c631358fd6a8d4bf0af576f7ae20c529fa4d71297f8eadb65bd"}
+    ]
+}

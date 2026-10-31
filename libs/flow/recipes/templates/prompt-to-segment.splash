@@ -1,0 +1,14 @@
+use mod.flow.*
+
+/** The isolated subject to paint and segment. */
+let prompt = Input{ type: @text default: "a red canvas backpack" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+let segment = Segment{ prompt: "object:1" image: image.image() model: "sam3-1-multiplex" }
+/** Publish the predicted subject mask into the flow asset library. */
+let published = Publish{ value: segment.mask() namespace: "flows" tags: ["flow", "segment"] }
+
+Flow{
+    label: "Prompt to segment"
+    brief: "Paints one subject and extracts its SAM 3.1 mask."
+    prompt, image, segment, published
+}

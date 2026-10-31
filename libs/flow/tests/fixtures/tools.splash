@@ -1,0 +1,16 @@
+use mod.flow.*
+
+let prompt = Text{ default: "paint" }
+let unused = Text{ default: "unused" }
+let image = Image{ prompt: prompt.text() }
+let picture = Output{ type: @image value: image.image() }
+let echo = Output{ type: @text value: unused.text() }
+
+Flow{
+    label: "Tools"
+    brief: "Two independent branches."
+    tools: {
+        paint: { in: [prompt] out: [picture] }
+    }
+    prompt, unused, image, picture, echo
+}

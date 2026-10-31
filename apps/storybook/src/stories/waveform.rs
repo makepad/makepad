@@ -410,7 +410,6 @@ fn waveform_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::makepad_widgets::makepad_script::trap::NoTrap;
 
     /// Build the page the way the canvas does: register the widgets, the
     /// shell the page is made of and this file's own templates, then look
@@ -421,10 +420,7 @@ mod tests {
             crate::shell::script_mod(vm);
             super::script_mod(vm);
             let stories = vm.module(id!(stories));
-            let value = vm
-                .bx
-                .heap
-                .value(stories, LiveId::from_str("WaveformOverview").into(), NoTrap);
+            let value = vm.value(stories, LiveId::from_str("WaveformOverview"));
             WidgetRef::script_from_value(vm, value)
         })
     }

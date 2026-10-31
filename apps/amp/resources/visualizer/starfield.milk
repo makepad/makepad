@@ -1,0 +1,49 @@
+MILKDROP_PRESET_VERSION=201
+PSVERSION=0
+[preset00]
+fVideoEchoAlpha=0
+bTexWrap=0
+bBrighten=0
+bDarken=0
+bSolarize=0
+bInvert=0
+bRedBlueStereo=0
+bMaximizeWaveColor=0
+fWarpAnimSpeed=1
+fWarpScale=1
+cx=0.5
+cy=0.5
+dx=0
+dy=0
+sx=1
+sy=1
+nMotionVectorsX=0
+nMotionVectorsY=0
+mv_a=0
+ib_size=0
+fGammaAdj=1.1
+fDecay=0.9
+zoom=1.06
+rot=0
+warp=0
+nWaveMode=0
+bAdditiveWaves=0
+bWaveDots=1
+bWaveThick=1
+bModWaveAlphaByVolume=0
+fWaveAlpha=1
+fWaveScale=1
+fWaveSmoothing=0.2
+wave_r=1
+wave_g=1
+wave_b=1
+wave_x=0.5
+wave_y=0.5
+bDarkenCenter=0
+ob_size=0
+per_frame_1=zoom = 1.04 + 0.05*bass_att;
+per_frame_2=rot = 0.015*sin(time*0.17);
+per_frame_3=wave_r = 0.6 + 0.4*sin(time*0.7);
+per_frame_4=wave_g = 0.6 + 0.4*sin(time*0.53 + 2);
+per_frame_5=wave_b = 0.6 + 0.4*sin(time*0.61 + 4);
+per_pixel_1=zoom = zoom + 0.02*rad;

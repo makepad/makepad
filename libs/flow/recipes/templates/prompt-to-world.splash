@@ -1,0 +1,14 @@
+use mod.flow.*
+
+/** The walkable scene to paint and reconstruct. */
+let prompt = Input{ type: @text default: "a mossy observatory above a cloud sea" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+let world = World{ prompt: prompt.text() image: image.image() model: "flashworld" }
+/** Publish the world splat into the flow asset library. */
+let published = Publish{ value: world.mesh() namespace: "flows" tags: ["flow", "world"] }
+
+Flow{
+    label: "Prompt to world"
+    brief: "Paints a scene reference and reconstructs it as a walkable world splat."
+    prompt, image, world, published
+}

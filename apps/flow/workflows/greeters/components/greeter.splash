@@ -1,0 +1,26 @@
+use mod.flow.*
+use mod.components.Exclaim
+
+/** Who to greet. */
+let name = Input{ type: @text  value: "world"  at: vec2(40, 80) }
+
+let calls = 0
+
+let greet = Fn{
+    in: { name: name.text() }
+    out: [@text]
+    run: |i| { calls += 1; {text: "Hello, " + i.name + " #" + calls} }
+    at: vec2(320, 80)
+}
+
+let shout = Exclaim{
+    in: { text: greet.text() }
+    at: vec2(600, 80)
+}
+
+let greeting = Output{ type: @text  value: shout.out(@loud)  at: vec2(880, 80) }
+
+Component{
+    label: "Greeter"
+    name, greet, shout, greeting
+}

@@ -86,7 +86,7 @@ script_mod! {
             width: Fill
             height: Fit
             draw_text +: {
-                color: mod.mpf.fg
+                color: mod.theme.color_text
                 text_style: theme.font_regular{font_size: 9.5}
             }
         }
@@ -99,13 +99,13 @@ script_mod! {
         align: Align{x: 0.5 y: 0.5}
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: mod.mpf.bg_light
-            border_color: mod.mpf.muted
+            color: mod.theme.color_fg_app
+            border_color: mod.theme.color_bevel_outset_2
             border_size: 1.0
         }
         chat_button_label := Label{
             draw_text +: {
-                color: mod.mpf.fg_bright
+                color: mod.theme.color_text_hover
                 text_style: theme.font_regular{font_size: 9.0}
             }
         }
@@ -116,7 +116,7 @@ script_mod! {
         width: 340
         height: Fill
         flow: Down
-        draw_bg +: {color: mod.mpf.bg_dark}
+        draw_bg +: {color: mod.theme.color_bg_container}
 
         chat_header := SolidView{
             width: Fill
@@ -124,12 +124,12 @@ script_mod! {
             flow: Right
             padding: Inset{left: 16 right: 10}
             align: Align{y: 0.5}
-            draw_bg +: {color: mod.mpf.bg_light}
+            draw_bg +: {color: mod.theme.color_fg_app}
             Label{
                 width: Fill
                 text: "Ask about these files"
                 draw_text +: {
-                    color: mod.mpf.fg_bright
+                    color: mod.theme.color_text_hover
                     text_style: theme.font_bold{font_size: 10.0}
                 }
             }
@@ -142,7 +142,7 @@ script_mod! {
                     icon_walk: Walk{width: 10 height: 10}
                     draw_icon +: {
                         svg: crate_resource("self://resources/icons/close.svg")
-                        color: mod.mpf.fg_dim
+                        color: mod.theme.color_text_disabled
                     }
                 }
             }
@@ -155,7 +155,7 @@ script_mod! {
             max_lines: 3
             text: "The model loads the first time you open this."
             draw_text +: {
-                color: mod.mpf.fg_dim
+                color: mod.theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 8.5}
             }
         }
@@ -170,7 +170,7 @@ script_mod! {
                     padding: Inset{left: 14 right: 12 top: 9 bottom: 3}
                     line_label +: {
                         draw_text +: {
-                            color: mod.mpf.fg_bright
+                            color: mod.theme.color_text_hover
                             text_style: theme.font_bold{font_size: 9.5}
                         }
                     }
@@ -180,7 +180,7 @@ script_mod! {
                     padding: Inset{left: 22 right: 12 top: 2 bottom: 2}
                     line_label +: {
                         draw_text +: {
-                            color: mod.mpf.fg_dim
+                            color: mod.theme.color_text_disabled
                             text_style: theme.font_regular{font_size: 8.5}
                         }
                     }
@@ -189,7 +189,7 @@ script_mod! {
                     padding: Inset{left: 14 right: 12 top: 2 bottom: 2}
                     line_label +: {
                         draw_text +: {
-                            color: mod.mpf.accent
+                            color: mod.theme.color_focus
                             text_style: theme.font_regular{font_size: 8.5}
                         }
                     }
@@ -201,14 +201,14 @@ script_mod! {
             width: Fill
             height: Fit
             padding: Inset{left: 14 right: 12 top: 5 bottom: 5}
-            draw_bg +: {color: mod.mpf.bg}
+            draw_bg +: {color: mod.theme.color_bg_app}
             chat_about_label := Label{
                 width: Fill
                 height: Fit
                 max_lines: 2
                 text: "about: this folder"
                 draw_text +: {
-                    color: mod.mpf.fg
+                    color: mod.theme.color_text
                     text_style: theme.font_regular{font_size: 8.5}
                 }
             }
@@ -235,7 +235,7 @@ script_mod! {
                 visible: false
                 chat_button_label +: {
                     text: "Stop"
-                    draw_text +: {color: mod.mpf.accent}
+                    draw_text +: {color: mod.theme.color_focus}
                 }
             }
         }
@@ -247,7 +247,7 @@ script_mod! {
             max_lines: 2
             text: "Reads only — it can look at your files and never change them."
             draw_text +: {
-                color: mod.mpf.fg_dim
+                color: mod.theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 8.0}
             }
         }

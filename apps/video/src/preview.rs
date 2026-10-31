@@ -11,8 +11,8 @@
 //!
 //! * `PreviewFile { path }` — show that file IN PLACE. No respawn, no new
 //!   window, and the view reset to its fit default.
-//! * `PreviewUnload` — drop what is loaded (here: stop playback, tear the
-//!   decoder and the audio queue down, blank the picture) and idle as a
+//! * `PreviewUnload` — drop what is loaded (here: stop playback and let
+//!   the platform player go, blank the picture) and idle as a
 //!   blank themed panel at near-zero cost until the next `PreviewFile`.
 //!   **An unload is not a quit**: only `CloseRequested` / `Kill` from the
 //!   WM, or the viewer's own Escape/Q, end the process.

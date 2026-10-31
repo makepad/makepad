@@ -244,7 +244,7 @@ mod tests {
         let story = &STORIES[0];
         let page = cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+            let value = vm.value(stories, LiveId::from_str(story.dsl));
             assert!(value.as_object().is_some(), "no template {}", story.dsl);
             WidgetRef::script_from_value(vm, value)
         });
@@ -287,11 +287,11 @@ mod tests {
         // leave every box on this page empty with nothing failing.
         let has_face = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let declared = vm.bx.heap.value(widgets, live_id!(ItemGrid).into(), NoTrap);
+            let declared = vm.value(widgets, live_id!(ItemGrid));
             let Some(declared) = declared.as_object() else {
                 return false;
             };
-            let layout = vm.bx.heap.value(declared, live_id!(grid).into(), NoTrap);
+            let layout = vm.value(declared, live_id!(grid));
             let Some(layout) = layout.as_object() else {
                 return false;
             };

@@ -123,6 +123,8 @@ pub struct AssistantService {
     ai_llm_ready: bool,
     ai_gate_ready: bool,
     ddg: DdgState,
+    /// Cache-only (network.rs): no image search, no cloud escalation.
+    offline: bool,
     /// What happened since the view last asked.
     events: Vec<AssistantEvent>,
 }
@@ -212,21 +214,24 @@ impl AssistantService {
         }
     }
 
-    /// Aggregate boot status: the whole AI pipeline loads at startup
-    /// (9B dispatcher, 4B voice gate, whisper via the voice worker).
+    /// Boot status: the dispatcher loads at startup; speech (the 4B voice
+    /// gate and whisper) on the first mic use.
     pub fn status_text(&self) -> String {
-        if self.local_timing.is_none() {
-            return "AI loading — cloud dispatcher · voice gate…".to_string();
-        }
-        if self.ai_llm_ready && self.ai_gate_ready {
-            "AI ready — dispatcher 9B ✓ · voice gate 4B ✓ · whisper warm".to_string()
+        let speech = if self.ai_gate_ready {
+            "speech ✓"
+        } else if self.whisper_warmed {
+            "loading speech…"
         } else {
-            format!(
-                "AI loading — dispatcher 9B {} · voice gate 4B {} · whisper…",
-                if self.ai_llm_ready { "✓" } else { "…" },
-                if self.ai_gate_ready { "✓" } else { "…" },
-            )
+            "speech on first mic use"
+        };
+        if self.local_timing.is_none() {
+            return format!("AI loading — cloud dispatcher · {speech}");
         }
+        format!(
+            "AI {} — dispatcher 9B {} · {speech}",
+            if self.ai_llm_ready { "ready" } else { "loading" },
+            if self.ai_llm_ready { "✓" } else { "…" },
+        )
     }
 
     pub fn is_busy(&self) -> bool {
@@ -325,7 +330,11 @@ impl AssistantService {
         }
         // cloud_ask escalates asynchronously through the Claude side-agent;
         // the tool result is sent when that turn completes.
-        if name == "cloud_ask" && self.cloud_agent.is_some() && self.pending_cloud.is_none() {
+        if name == "cloud_ask"
+            && !self.offline
+            && self.cloud_agent.is_some()
+            && self.pending_cloud.is_none()
+        {
             let question = broker::parse_question(input);
             self.info("☁ asking cloud…");
             let (cloud, cloud_session) = (
@@ -347,7 +356,15 @@ impl AssistantService {
         query: &str,
         tool_use_id: Option<String>,
     ) -> Result<(), String> {
+        if self.offline {
+            return Err("offline: image search needs the network".to_string());
+        }
         self.ddg.start(cx, query, tool_use_id)
+    }
+
+    /// Cache-only on or off (network.rs).
+    pub fn set_offline(&mut self, offline: bool) {
+        self.offline = offline;
     }
 
     // --- speech ---------------------------------------------------------
@@ -386,12 +403,6 @@ impl AssistantService {
                     color: #(vec4(0.86, 0.20, 0.20, 1.0))
                 }
             });
-            self.info(if self.whisper_warmed {
-                "🎤 listening — say 'computer, …' or address me directly"
-            } else {
-                "🎤 arming — loading whisper (first time takes a few seconds), then say 'computer, …'"
-            });
-            self.whisper_warmed = true;
         } else {
             button.set_text(cx, "🎤");
             self.info("🎤 mic off");
@@ -399,10 +410,22 @@ impl AssistantService {
         self.sync_voice_state(cx, ui);
     }
 
-    /// Start/stop the VoiceWave capture and lazily spawn the gate worker.
+    /// Start/stop the VoiceWave capture. The speech models load on the
+    /// first mic use (the mic button, a click on the wave, F1), never at
+    /// launch: whisper (~4 GB, ~4 s) and the 4B gate each load on their
+    /// own worker thread while the mic arms, so the UI does not wait.
     fn sync_voice_state(&mut self, cx: &mut Cx, ui: &WidgetRef) {
-        if self.mic_on && self.voice_gate.is_none() {
-            self.voice_gate = Some(VoiceGate::new(cx.thread_spawner()));
+        if self.mic_on {
+            if self.voice_gate.is_none() {
+                self.voice_gate = Some(VoiceGate::new(cx.thread_spawner()));
+            }
+            self.info(if self.whisper_warmed {
+                "🎤 listening — say 'computer, …' or address me directly"
+            } else {
+                "🎤 loading speech… (first time takes a few seconds), then say 'computer, …'"
+            });
+            self.whisper_warmed = true;
+            self.status();
         }
         let wave = ui.voice_wave(cx, ids!(mic_wave));
         wave.set_enabled(cx, self.mic_on);
@@ -458,18 +481,13 @@ impl AssistantService {
 
     // --- the agents' events -----------------------------------------
 
-    fn on_agent_event(&mut self, cx: &mut Cx, ui: &WidgetRef, event: AgentEvent) {
+    fn on_agent_event(&mut self, cx: &mut Cx, event: AgentEvent) {
         match event {
             AgentEvent::SessionReady { .. } => {
                 self.ai_llm_ready = true;
-                // Eager but SERIALIZED: the gate's 4B loads after the 9B is
-                // resident so startup peaks don't stack (iPad jetsam kills
-                // on peak footprint, not steady state).
-                if self.voice_gate.is_none() {
-                    self.voice_gate = Some(VoiceGate::new(cx.thread_spawner()));
-                }
-                // Chain whisper after the LLMs (eager but serialized).
-                ui.voice_wave(cx, ids!(mic_wave)).prewarm(cx);
+                // The voice gate and whisper are NOT loaded here: they
+                // serve only the mic and load on its first use
+                // (sync_voice_state).
                 self.status();
             }
             AgentEvent::SessionError { error, .. } => {
@@ -573,8 +591,7 @@ impl AssistantService {
     }
 
     /// Everything the workers and agents reported since the last call.
-    /// `ui` is the panel, for the mic the dispatcher warms once it is up.
-    pub fn handle_event(&mut self, cx: &mut Cx, ui: &WidgetRef, event: &Event) -> Vec<AssistantEvent> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<AssistantEvent> {
         match event {
             Event::AudioDevices(devices) => {
                 // TTS playback device; mic input selection lives inside the
@@ -606,7 +623,7 @@ impl AssistantService {
             let events = agent.handle_event(cx, event);
             self.agent = Some(agent);
             for agent_event in events {
-                self.on_agent_event(cx, ui, agent_event);
+                self.on_agent_event(cx, agent_event);
             }
         }
         if let Some(mut cloud) = self.cloud_agent.take() {

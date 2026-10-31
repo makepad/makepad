@@ -278,7 +278,7 @@ mod tests {
     use makepad_ai_services::wire::ToolOutcome;
 
     fn call(id: &str, tool: &str, args: &str) -> ServiceCall {
-        ServiceCall { call_id: id.into(), tool: tool.into(), args: args.into() }
+        ServiceCall { call_id: id.into(), tool: tool.into(), args: args.into(), caller: None }
     }
 
     fn answer_call(call: &ServiceCall, workbook: &mut Workbook) -> ToolResult {

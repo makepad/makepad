@@ -7,9 +7,9 @@
 //! `WeatherView{}` root there, gives it the host's storage jail for the
 //! chosen city, and hands the host its one tool: the same tool the
 //! standalone binary answers over its port, answered on the root at call
-//! time. The module never opens a socket or spawns a thread itself — the
-//! forecast fetch rides the platform's own HTTP request API, the same
-//! one a standalone window uses, so it works identically hosted.
+//! time. The module never opens a socket or spawns a thread: the forecast
+//! is sample data generated in-process (src/sample.rs), so it works
+//! identically hosted, with no network at all.
 
 use crate::view::WeatherView;
 use makepad_ai_services::wire::{ServiceCall, ServiceManifest};
@@ -20,9 +20,6 @@ pub struct WeatherModule;
 
 /// The one linked instance of the module description: immutable, no state.
 pub static WEATHER_MODULE: WeatherModule = WeatherModule;
-
-#[cfg(feature = "dynamic-module")]
-makepad_app_module::export_app_module!(WEATHER_MODULE);
 
 impl AppModule for WeatherModule {
     fn id(&self) -> &'static str {
@@ -70,7 +67,7 @@ impl AppModule for WeatherModule {
     }
 
     fn capabilities(&self) -> &'static [&'static str] {
-        &["storage", "net"]
+        &["storage"]
     }
 }
 
@@ -105,7 +102,7 @@ mod tests {
         assert_eq!(m.id(), "weather");
         assert_eq!(m.label(), "Weather");
         assert!(m.capabilities().contains(&"storage"));
-        assert!(m.capabilities().contains(&"net"));
+        assert!(!m.capabilities().contains(&"net"), "offline: sample data only");
         let schema = m.open_schema();
         assert_eq!(schema.version, 1);
         assert!(schema.empty_open().is_ok(), "no argument is required");
@@ -130,7 +127,7 @@ mod tests {
             replies,
         };
         let open = WEATHER_MODULE.open_schema().empty_open().unwrap();
-        let InstanceParts { root, executor, shutdown } = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        let InstanceParts { root, executor, shutdown } = cx.with_script_vm_id(vm_id, |vm| {
             WEATHER_MODULE.register(vm);
             let parts = WEATHER_MODULE.create(vm, open, handles);
             assert!(vm.take_errors().is_empty(), "the isolate evaluated the view without errors");
@@ -140,10 +137,8 @@ mod tests {
 
         // Full is the default face; the host asks for the tile the same
         // way it asks a standalone window, over `Event::Custom`. The
-        // isolate has no network (`alloc_splash_vm_with_network(false)`,
-        // matching how the WM allocates every module today), so the
-        // fetch itself never completes here — only the face switch and
-        // the labelled-city summary are asserted.
+        // isolate has no network (`alloc_splash_vm_with_network(false)`)
+        // and needs none: the forecast is generated in-process.
         let entry = enter_isolate(&mut cx, vm_id);
         root.handle_event(&mut cx, &Event::Custom(HostedViewMode::Tile.to_json()), &mut Scope::empty());
         leave_isolate(&mut cx, entry);
@@ -152,10 +147,11 @@ mod tests {
             assert_eq!(view.face(&cx), HostedViewMode::Tile, "the module root switched faces from the host's message");
             let summary = view.ai_summary();
             assert!(summary.contains("Amsterdam"), "the default city is labelled, not inferred: {summary}");
+            assert!(summary.contains("; now ") && summary.contains("; forecast: "), "a forecast with no network: {summary}");
         }
 
         // The host's order: shutdown in the isolate, the refs, the isolate.
-        cx.with_script_vm_id_trusted(vm_id, |vm| shutdown(vm));
+        cx.with_script_vm_id(vm_id, |vm| shutdown(vm));
         drop(root);
         drop(executor);
         cx.free_splash_vm(vm_id);

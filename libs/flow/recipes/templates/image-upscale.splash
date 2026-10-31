@@ -1,0 +1,20 @@
+use mod.flow.*
+
+/** The image to enlarge. */
+let image = Input{ type: @image  at: vec2(40, 120) }
+
+let upscale = Upscale{
+    image: image.image()
+    factor: 4
+    model: "realesrgan-x4plus"
+    at: vec2(360, 120)
+}
+
+/** The four-times larger image. */
+let picture = Output{ type: @image  value: upscale.out(@image)  at: vec2(680, 120) }
+
+Flow{
+    label: "Image upscale"
+    brief: "Enlarges a supplied image with the creator's RealESRGAN x4 recipe."
+    image, upscale, picture
+}

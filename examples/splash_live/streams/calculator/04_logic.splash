@@ -1,0 +1,70 @@
+// A calculator, written in Splash
+let acc = 0.0
+let stored = 0.0
+let op = ""
+let fresh = true
+fn apply(a, b, o) {
+    if o == "+" { return a + b }
+    if o == "−" { return a - b }
+    if o == "×" { return a * b }
+    if o == "÷" { return a / b }
+    return b
+}
+let Key = ButtonFlat{
+    width: Fill height: 88
+    draw_bg.color: #x23262e draw_bg.color_hover: #x2c3039 draw_bg.color_down: #x363b46
+    draw_bg.border_radius: 20.0
+    draw_text.color: #xf0ede6 draw_text.text_style.font_size: 28
+}
+let FnKey = Key{
+    draw_bg.color: #x3d4048 draw_bg.color_hover: #x474b54 draw_bg.color_down: #x52565f
+}
+let OpKey = Key{
+    draw_bg.color: #xf0a27a draw_bg.color_hover: #xf4b08c draw_bg.color_down: #xd98c66
+    draw_text.color: #x14161b
+}
+let EqKey = Key{
+    draw_bg.color: #x74d4f2 draw_bg.color_hover: #x8adcf4 draw_bg.color_down: #x5cbfe0
+    draw_text.color: #x0b1a22
+}
+View{width: Fill height: Fit align: Align{x: 0.5}
+    calc := RoundedView{width: 560 height: Fit flow: Down spacing: 16 padding: 28
+        show_bg: true new_batch: true
+        draw_bg.color: #x14161b draw_bg.border_radius: 32.0
+        display := View{width: Fill height: 190 flow: Down spacing: 6 align: Align{x: 1.0 y: 1.0}
+            expr := Label{text: "" draw_text.color: #x8d919a draw_text.text_style.font_size: 26}
+            value := Label{text: "0" draw_text.color: #xf0ede6 draw_text.text_style.font_size: 80}
+        }
+        keys := View{width: Fill height: Fit flow: Down spacing: 14
+            View{width: Fill height: Fit flow: Right spacing: 14
+                FnKey{text: "C" on_click: || { acc = 0.0; stored = 0.0; op = ""; fresh = true; ui.expr.set_text(""); ui.value.set_text("0") }}
+                FnKey{text: "±" on_click: || { acc = 0.0 - acc; ui.value.set_text("" + acc) }}
+                FnKey{text: "%" on_click: || { acc = acc / 100.0; ui.value.set_text("" + acc) }}
+                OpKey{text: "÷" on_click: || { stored = apply(stored, acc, op); op = "÷"; fresh = true; ui.expr.set_text("" + stored + " ÷"); ui.value.set_text("" + stored) }}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "7" on_click: || { if fresh { acc = 7.0 } else { acc = acc * 10.0 + 7.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                Key{text: "8" on_click: || { if fresh { acc = 8.0 } else { acc = acc * 10.0 + 8.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                Key{text: "9" on_click: || { if fresh { acc = 9.0 } else { acc = acc * 10.0 + 9.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                OpKey{text: "×" on_click: || { stored = apply(stored, acc, op); op = "×"; fresh = true; ui.expr.set_text("" + stored + " ×"); ui.value.set_text("" + stored) }}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "4" on_click: || { if fresh { acc = 4.0 } else { acc = acc * 10.0 + 4.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                Key{text: "5" on_click: || { if fresh { acc = 5.0 } else { acc = acc * 10.0 + 5.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                Key{text: "6" on_click: || { if fresh { acc = 6.0 } else { acc = acc * 10.0 + 6.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                OpKey{text: "−" on_click: || { stored = apply(stored, acc, op); op = "−"; fresh = true; ui.expr.set_text("" + stored + " −"); ui.value.set_text("" + stored) }}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "1" on_click: || { if fresh { acc = 1.0 } else { acc = acc * 10.0 + 1.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                Key{text: "2" on_click: || { if fresh { acc = 2.0 } else { acc = acc * 10.0 + 2.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                Key{text: "3" on_click: || { if fresh { acc = 3.0 } else { acc = acc * 10.0 + 3.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                OpKey{text: "+" on_click: || { stored = apply(stored, acc, op); op = "+"; fresh = true; ui.expr.set_text("" + stored + " +"); ui.value.set_text("" + stored) }}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "0" on_click: || { if fresh { acc = 0.0 } else { acc = acc * 10.0 }; fresh = false; ui.value.set_text("" + acc) }}
+                Key{text: "00" on_click: || { acc = acc * 100.0; fresh = false; ui.value.set_text("" + acc) }}
+                EqKey{text: "=" on_click: || { acc = apply(stored, acc, op); stored = 0.0; op = ""; fresh = true; ui.expr.set_text(""); ui.value.set_text("" + acc) }}
+            }
+        }
+    }
+}

@@ -1,0 +1,234 @@
+// Dark Rack — a black anodised studio rack: matte black front with rack
+// ears and screws, black caps each carrying a status LED, a full LED ring
+// round the volume encoder, a long VU ladder, cyan status light with amber
+// warnings, stencilled white labels.
+//
+// Assignments only, over the base templates in `src/hw.rs`
+// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+use mod.prelude.widgets_internal.*
+
+// ---- palette: the lists, the spectrum, the bars ----
+mod.widgets.hw_palette.screen_bg = #x06080a
+mod.widgets.hw_palette.screen_text = #xe2eef2
+mod.widgets.hw_palette.screen_muted = #x7f9098
+mod.widgets.hw_palette.accent = #x27d9ff
+// The device's floor is dark: display type sits on it bare.
+mod.widgets.hw_palette.dark_floor = 1.0
+
+// ---- the front: black anodised, rack ears with slotted screws ----
+mod.widgets.HwChassis.draw_bg.ground = #x121316
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(0.62, 0.66, 0.70, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwChassis.draw_bg.pattern = vec4(5.0, 0.6, 0.10, 0.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(0.15, 0.85, 1.0, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(1.5, 0.6)
+mod.widgets.HwChassis.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    var col = self.surface(p, self.ground.xyz)
+    let v = length((self.pos - vec2(0.5, 0.30)) * vec2(0.9, 1.3))
+    col = col * (1.10 - 0.30 * v * v)
+    // Rack units: a faint seam every 1U (44 pt).
+    let fu = fract(p.y / 44.0)
+    let useam = (1.0 - smoothstep(0.0, 0.9, min(fu, 1.0 - fu) * 44.0)) * 0.35
+    col = col * (1.0 - useam)
+    // Rack ears: a brighter brushed strip 12 pt in from each side, a
+    // chamfer where it meets the front, slotted screw holes every 3U.
+    let ew = 12.0
+    let ex = min(p.x, sz.x - p.x)
+    let ear = 1.0 - smoothstep(ew - 0.6, ew + 0.6, ex)
+    let brush = 1.0 + (self.hw_noise(vec2(p.x * 0.8, p.y * 0.02)) - 0.5) * 0.25
+    let earcol = vec3(0.150, 0.156, 0.168) * brush * (1.05 - 0.25 * self.pos.y)
+    col = mix(col, earcol, ear)
+    let lip = 1.0 - smoothstep(0.0, 1.0, abs(ex - ew))
+    col = mix(col, vec3(0.0, 0.0, 0.0), lip * 0.8)
+    let hi = 1.0 - smoothstep(0.0, 0.8, abs(ex - 0.8))
+    col = col + vec3(0.12, 0.13, 0.14) * hi
+    let cy = (floor(p.y / 132.0) + 0.5) * 132.0
+    let q = vec2(ex - ew * 0.5, p.y - cy)
+    let hole = length(vec2(q.x, max(abs(q.y) - 3.5, 0.0)))
+    let hm = 1.0 - smoothstep(2.3, 3.0, hole)
+    let rim = (1.0 - smoothstep(0.0, 0.8, abs(hole - 3.3))) * clamp(q.y * 0.25 + 0.5, 0.0, 1.0)
+    col = mix(col, vec3(0.0, 0.0, 0.0), hm * ear) + vec3(0.22, 0.23, 0.25) * rim * ear
+    col = col * (1.0 - self.env_ao(0.0)) + self.env_spill(vec3(0.0, 0.0, 1.0))
+    return vec4(col + self.dither(), 1.0)
+}
+mod.widgets.Window.pass.clear_color = #x121316
+
+// Raised plates: rack modules, a crisp chamfer, a screw in each corner.
+mod.widgets.HwPlate.draw_bg.ground = #x1a1b1f
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(0.70, 0.74, 0.78, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern = vec4(5.0, 0.6, 0.08, 0.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(1.4, 0.95, 2.0, 0.55)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.75, 9.0, 1.0, 0.6)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(0.15, 0.85, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(1.9, 0.55)
+mod.widgets.HwPlate.radius = 4
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    var col = base * (1.0 + (self.hw_hash(floor(w * 3.0)) - 0.5) * 0.06)
+    // A screw near each corner: a cross-head with a rim.
+    let a = vec2(self.inset + 9.0, self.inset + 9.0)
+    let b = self.rect_size - a
+    let cx = mix(a.x, b.x, step(self.rect_size.x * 0.5, p.x))
+    let cy = mix(a.y, b.y, step(self.rect_size.y * 0.5, p.y))
+    let q = p - vec2(cx, cy)
+    let r = length(q)
+    let head = 1.0 - smoothstep(3.0, 3.8, r)
+    let dome = clamp(0.55 - (q.x + q.y) * 0.08, 0.0, 1.0)
+    col = mix(col, vec3(0.30, 0.31, 0.33) * (0.6 + dome), head)
+    let cross = min(abs(q.x - q.y), abs(q.x + q.y))
+    let slot = (1.0 - smoothstep(0.35, 0.9, cross)) * (1.0 - smoothstep(2.0, 2.8, r))
+    col = mix(col, vec3(0.02, 0.02, 0.02), slot)
+    col = col * (1.0 - (1.0 - smoothstep(3.6, 5.0, r)) * (1.0 - head) * 0.5)
+    // Module status LEDs beside the top-right screw: power (cyan), signal
+    // (amber), each in a black bezel.
+    let l1 = vec2(self.rect_size.x - self.inset - 24.0, self.inset + 9.0)
+    let l2 = l1 - vec2(12.0, 0.0)
+    let d1 = length(p - l1)
+    let d2 = length(p - l2)
+    let bez = (1.0 - smoothstep(3.3, 4.0, d1)) + (1.0 - smoothstep(3.3, 4.0, d2))
+    col = mix(col, vec3(0.01, 0.01, 0.012), clamp(bez, 0.0, 1.0))
+    let c1 = 1.0 - smoothstep(1.9, 2.5, d1)
+    let c2 = 1.0 - smoothstep(1.9, 2.5, d2)
+    col = mix(col, vec3(0.55, 0.95, 1.0), c1) + vec3(0.15, 0.85, 1.0) * exp(-d1 / 3.0) * 0.5 * (1.0 - c1)
+    col = mix(col, vec3(1.0, 0.80, 0.40), c2) + vec3(1.0, 0.62, 0.10) * exp(-d2 / 3.0) * 0.5 * (1.0 - c2)
+    return col
+}
+
+// Recessed panels: black wells, deep inner shadow.
+mod.widgets.HwPanel.draw_bg.ground = #x0e0f11
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.55, 0.60, 0.64, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwPanel.draw_bg.pattern = vec4(5.0, 0.6, 0.06, 0.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.95, 9.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(0.15, 0.85, 1.0, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.4, 0.5)
+mod.widgets.HwPanel.radius = 4
+
+// The screen's surround: deep, near black.
+mod.widgets.HwBezel.draw_bg.ground = #x08090a
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.50, 0.54, 0.58, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(1.0, 12.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.0, 0.4)
+mod.widgets.HwBezel.radius = 6
+
+// No dark rim or bulge over the picture: it reads clean and bright.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.05, 0.0, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(0.7, 0.9, 1.0, 0.0)
+mod.widgets.HwGlass.draw_bg.radius = 4.0
+
+// ---- keys: black rubber-topped caps, each with a status LED ----
+mod.widgets.HwKey.radius = 3
+mod.widgets.HwKey.draw_bg.ground = #x202226
+mod.widgets.HwKey.draw_bg.light_ink = vec4(0.75, 0.80, 0.85, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKey.draw_bg.pattern = vec4(5.0, 0.5, 0.06, 0.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(2.0, 0.9, 2.5, 0.45)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.85, 6.0, 1.0, 0.7)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.66, 0.16, 1.0)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.4, 0.45)
+mod.widgets.HwKey.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.key_face(p, self.ground.xyz))
+    if self.mech.x > 0.5 {
+        o = self.mech_key()
+    }
+    // The status LED: top-left of the face, amber.
+    let lp = vec2(self.inset + 6.0, self.inset + 5.5)
+    let d = length(p - lp) - 1.7
+    let core = 1.0 - smoothstep(-px, px, d)
+    // Lit while its switch is on (the key's `lit`), a dim amber dot when off.
+    let on = clamp(self.lit, 0.0, 1.0)
+    let col = mix(self.led_off.xyz, mix(self.glow_ink.xyz, vec3(1.0, 0.95, 0.8), 0.35), on)
+    o = vec4(mix(o.xyz, col, core), o.w)
+    let halo = exp(-max(d, 0.0) / 2.2) * 0.5 * (1.0 - core) * on
+    o = vec4(o.xyz + self.glow_ink.xyz * halo * o.w, o.w)
+    return o
+}
+mod.widgets.HwKeyButton.draw_text.color = #xe8eef2
+mod.widgets.HwKeyButton.draw_text.color_hover = #xffffff
+mod.widgets.HwKeyButton.draw_text.color_down = #x6fe6ff
+mod.widgets.HwKeyText.draw_text.color = #xe8eef2
+mod.widgets.HwKeyText.draw_text.color_hover = #xffffff
+mod.widgets.HwKeyText.draw_text.color_down = #x6fe6ff
+
+// ---- lights: cyan ----
+mod.widgets.HwDash.emissive = vec4(0.15, 0.85, 1.0, 9.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(0.15, 0.85, 1.0, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x0a1418
+mod.widgets.HwLed.emissive = vec4(0.15, 0.85, 1.0, 4.0)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(0.15, 0.85, 1.0, 1.0)
+
+// ---- knob: a black knurled encoder in a full LED ring ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x1c1e21
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(0.80, 0.85, 0.90, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(1.0, 0.66, 40.0, 0.45)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.10, 0.11, 0.12, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.30, 0.90, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(31.0, 1.36, 2.2, 2.6)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.06, 0.10, 0.12, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.15, 0.85, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.9, 9.0, 1.0, 0.8)
+mod.widgets.HwKnobFace.emissive = vec4(0.15, 0.85, 1.0, 0.9)
+
+// ---- meter: a long VU ladder, cyan into amber ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x050607
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 32.0, 1.0, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.15, 0.85, 1.0, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.62, 0.10, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.05, 0.08, 0.09, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(0.15, 0.85, 1.0, 0.7)
+mod.widgets.HwMeterFace.radius = 3
+
+// ---- screen light ----
+mod.widgets.HwSpectrum.light = 3.2
+mod.widgets.HwMilk.light = 2.3
+mod.widgets.HwMilk.light_knee = 1.0
+
+// ---- stencilled type ----
+mod.widgets.HwCaption.draw_text.color = #xc4ccd2
+mod.widgets.HwTitle.draw_text.color = #xf2f6f8
+mod.widgets.HwText.draw_text.color = #xaab4ba
+mod.widgets.HwPanelTitle.draw_text.color = #xf0f4f6
+mod.widgets.HwPanelText.draw_text.color = #x8e9aa2
+mod.widgets.HwNavButton.draw_text.color = #xd4dde2
+mod.widgets.HwDisplayText.draw_text.color = #x6fe6ff
+mod.widgets.HwDisplay.draw_bg.ground = #x050607
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.50, 0.54, 0.58, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(1.0, 9.0, 0.0, 0.55)
+mod.widgets.HwDisplay.radius = 3
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.02, 0.03, 0.035, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.15, 0.85, 1.0, 0.30)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(0.15, 0.85, 1.0, 1.0)
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.02, 0.03, 0.035, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.15, 0.85, 1.0, 0.30)
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.6)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(0.6, 0.7, 0.75, 0.18)
+mod.widgets.HwKey.draw_bg.led_off = vec4(0.20, 0.13, 0.05, 1.0)
+// ---- transport: short-throw anodised keys that drop and latch ----
+mod.widgets.HwTransportKey.latch = 1.0
+mod.widgets.HwTransportKey.press_secs = 0.07
+mod.widgets.HwTransportKey.draw_bg.spill = vec2(0.9, 0.45)
+mod.widgets.HwTransportKey.travel = 3.0
+mod.widgets.HwTransportKey.inset = 4.0
+mod.widgets.HwTransportKey.draw_bg.mech = vec4(1.0, 0.7, 0.0, 0.0)
+mod.widgets.HwTransportKey.draw_bg.dimple = vec4(0.0, 3.0, 0.3, 0.1)
+mod.widgets.HwTransportKey.draw_bg.housing_ink = vec4(0.01, 0.01, 0.012, 1.0)
+mod.widgets.HwTransportKey.draw_bg.front_ink = vec4(0.16, 0.17, 0.19, 1.0)
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(1.0, 0.46, 6.0, 3.0)
+mod.widgets.HwEqGraph.draw_fader.segments = vec4(4.0, 1.4, 0.0, 0.0)
+mod.widgets.HwEqGraph.draw_fader.led_off = vec4(0.06, 0.08, 0.09, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(0.0, 1.4, 7.0, 0.06)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(1.0, 0.22, 0.30, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.16, 0.0, 0.2, 0.0)
+mod.widgets.HwEqGraph.light = 1.2
+true

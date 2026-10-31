@@ -17,6 +17,8 @@ fn settled(app: &TestApp) -> String {
             .locator(Selector::id("status"))
             .snapshot()
             .text
+            .as_ref()
+            .map(|text| text.content.clone())
             .unwrap_or_default();
         if text == last || Instant::now() > deadline {
             return text;
@@ -57,8 +59,8 @@ fn wait_for(app: &TestApp, key: &str, value: f64) {
 fn center(app: &TestApp, selector: Selector) -> (f64, f64) {
     let widget = app.locator(selector).snapshot();
     (
-        widget.x as f64 + widget.width as f64 / 2.0,
-        widget.y as f64 + widget.height as f64 / 2.0,
+        widget.x() as f64 + widget.width() as f64 / 2.0,
+        widget.y() as f64 + widget.height() as f64 / 2.0,
     )
 }
 
@@ -260,7 +262,7 @@ fn far_strip_near_bottom(app: &TestApp) -> (f64, f64) {
     wheel(app, center(app, Selector::all().text_exact("Outer 10")), 0.0, 400.0);
     thread::sleep(NEW_SCROLL);
     let strip = app.locator(Selector::id("far_strip")).snapshot();
-    assert!(strip.y + strip.height < list.y + list.height, "the far strip is in view");
+    assert!(strip.y() + strip.height() < list.y() + list.height(), "the far strip is in view");
     center(app, Selector::id("far_strip"))
 }
 
@@ -370,7 +372,7 @@ fn an_open_dropdown_keeps_scrolls_from_what_is_under_it(app: TestApp) {
     // Over the open list where it covers the view after it, beside the list, and on the page.
     let under_popup = app.locator(Selector::id("under_popup")).snapshot();
     let (x, y) = center(&app, Selector::id("under_popup"));
-    wheel(&app, (under_popup.x as f64 + 20.0, y), 0.0, 60.0);
+    wheel(&app, (under_popup.x() as f64 + 20.0, y), 0.0, 60.0);
     thread::sleep(NEW_SCROLL);
     wheel(&app, (x, y), 0.0, 60.0);
     thread::sleep(NEW_SCROLL);
@@ -421,7 +423,7 @@ fn a_list_partly_scrolled_out_of_a_modal_still_takes_its_scrolls(app: TestApp) {
     // Over the visible rest of the list.
     thread::sleep(NEW_SCROLL);
     let visible_list = 350.0 - modal;
-    let over_list = (modal_page.x as f64 + 40.0, modal_page.y as f64 + visible_list / 2.0);
+    let over_list = (modal_page.x() as f64 + 40.0, modal_page.y() as f64 + visible_list / 2.0);
     wheel(&app, over_list, 0.0, 30.0);
     assert_eq!(offsets(&app, ["modal", "modal_list"]), [modal, list + 30.0]);
 }

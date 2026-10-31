@@ -1,0 +1,19 @@
+use mod.flow.*
+
+/** The clip to upscale, tween, and equip with motion vectors. */
+let video = Input{ type: @video }
+let enhance = VideoEnhance{
+    video: video.video()
+    upscale: 2
+    interpolate: 2
+    flow_map: true
+    model: "video-enhance"
+}
+/** Publish the enhanced clip into the flow asset library. */
+let published = Publish{ value: enhance.out(@video) namespace: "flows" tags: ["flow", "video", "enhanced"] }
+
+Flow{
+    label: "Video enhance"
+    brief: "Upscales a clip twofold, doubles its frame cadence, and appends a motion-vector map."
+    video, enhance, published
+}

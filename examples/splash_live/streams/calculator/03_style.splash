@@ -1,0 +1,59 @@
+// A calculator, written in Splash
+let Key = ButtonFlat{
+    width: Fill height: 88
+    draw_bg.color: #x23262e draw_bg.color_hover: #x2c3039 draw_bg.color_down: #x363b46
+    draw_bg.border_radius: 20.0
+    draw_text.color: #xf0ede6 draw_text.text_style.font_size: 28
+}
+let FnKey = Key{
+    draw_bg.color: #x3d4048 draw_bg.color_hover: #x474b54 draw_bg.color_down: #x52565f
+}
+let OpKey = Key{
+    draw_bg.color: #xf0a27a draw_bg.color_hover: #xf4b08c draw_bg.color_down: #xd98c66
+    draw_text.color: #x14161b
+}
+let EqKey = Key{
+    draw_bg.color: #x74d4f2 draw_bg.color_hover: #x8adcf4 draw_bg.color_down: #x5cbfe0
+    draw_text.color: #x0b1a22
+}
+View{width: Fill height: Fit align: Align{x: 0.5}
+    calc := RoundedView{width: 560 height: Fit flow: Down spacing: 16 padding: 28
+        show_bg: true new_batch: true
+        draw_bg.color: #x14161b draw_bg.border_radius: 32.0
+        display := View{width: Fill height: 190 flow: Down spacing: 6 align: Align{x: 1.0 y: 1.0}
+            expr := Label{text: "" draw_text.color: #x8d919a draw_text.text_style.font_size: 26}
+            value := Label{text: "0" draw_text.color: #xf0ede6 draw_text.text_style.font_size: 80}
+        }
+        keys := View{width: Fill height: Fit flow: Down spacing: 14
+            View{width: Fill height: Fit flow: Right spacing: 14
+                FnKey{text: "C"}
+                FnKey{text: "±"}
+                FnKey{text: "%"}
+                OpKey{text: "÷"}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "7"}
+                Key{text: "8"}
+                Key{text: "9"}
+                OpKey{text: "×"}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "4"}
+                Key{text: "5"}
+                Key{text: "6"}
+                OpKey{text: "−"}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "1"}
+                Key{text: "2"}
+                Key{text: "3"}
+                OpKey{text: "+"}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "0"}
+                Key{text: "00"}
+                EqKey{text: "="}
+            }
+        }
+    }
+}

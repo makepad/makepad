@@ -7,14 +7,14 @@
 //! CSV — lives in this crate, and none of it depends on Makepad, so
 //! `cargo test -p sheets` covers it without a window.
 //!
-//! sheets runs standalone, and unmodified inside makepad-wm / Studio tiles
+//! sheets runs standalone, and unmodified inside makepad-app-wm / Studio tiles
 //! via the shared --stdin-loop client runtime every Makepad app has. Either
 //! way it exposes bounded read and write tools to the assistant (src/ai.rs): under the WM
 //! over the bus, standalone to the F10 overlay in its own window.
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_sheets::{ai, theme, view};
+use makepad_app_sheets::{ai, theme, view};
 use makepad_widgets::*;
 
 app_main!(
@@ -31,10 +31,8 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(1320, 840)
                 window.title: "sheets"
-                // The stock window clears to `theme.color_bg_app` as captured
-                // when the widgets module was evaluated — before this app
-                // retinted it — so state the sheet's own ground explicitly.
-                pass +: { clear_color: mod.sheets.bg }
+                // The pass and the sheet share the system theme ground.
+                pass +: { clear_color: mod.theme.color_bg_app }
                 body +: {
                     padding: 0.
                     margin: 0.
@@ -129,13 +127,12 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        // Retint the stock widgets from the WM palette, then publish the same
-        // palette as `mod.sheets` for this app's own splash.
-        makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
-        makepad_aichat::script_mod(vm);
+        makepad_app_aichat::script_mod(vm);
         theme::install(vm);
         view::script_mod(vm);
         self::script_mod(vm)

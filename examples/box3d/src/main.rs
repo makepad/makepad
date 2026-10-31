@@ -329,7 +329,7 @@ impl PhysicsSim {
                 for j in 0..n {
                     let mut body_def = default_body_def();
                     body_def.body_type = BodyType::Dynamic;
-                    body_def.position = makepad_box3d::math_functions::vec3(
+                    body_def.position = makepad_box3d::math_functions::pos(
                         i as f32 * spacing - offset,
                         y,
                         j as f32 * spacing - offset,
@@ -358,7 +358,7 @@ impl PhysicsSim {
             let angle = k as f32 * (2.0 * std::f32::consts::PI / SPHERE_COUNT as f32);
             let mut body_def = default_body_def();
             body_def.body_type = BodyType::Dynamic;
-            body_def.position = makepad_box3d::math_functions::vec3(
+            body_def.position = makepad_box3d::math_functions::pos(
                 2.6 * angle.cos(),
                 12.0 + 1.7 * k as f32,
                 2.6 * angle.sin(),
@@ -489,7 +489,7 @@ impl Box3dViewport {
         );
         self.pass
             .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
+        self.pass.set_keep_camera_matrix(cx, true);
 
         self.sim = Some(PhysicsSim::new());
         self.next_frame = cx.new_next_frame();
@@ -623,6 +623,8 @@ impl MatchEvent for App {}
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         crate::makepad_xr::script_mod(vm);
         self::script_mod(vm)

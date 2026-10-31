@@ -1,0 +1,100 @@
+// title: Classic
+// class: large
+// order: 0
+// min: 820x560
+// pref: 1360x900
+//
+// The layout the device started with: the volume wing, the screen over the
+// transport keys and the display wing across the top; what plays and where
+// it is under them; the playlists, the open list and Up Next below. Every
+// boundary that should move is a splitter (its position is kept per layout).
+//
+// A layout places SLOTS, never looks: `mod.widgets.HwSlot{component: "…"}`
+// marks where a component goes (see STYLE_GUIDE.md for the names), and any
+// View, splitter or spacing arranges the slots. A component with no slot is
+// hidden.
+use mod.prelude.widgets_internal.*
+use mod.widgets.*
+
+mod.widgets.HwLayout = View{
+    width: Fill
+    height: Fill
+    flow: Down
+    // The AI theme chat on the right: folded away until the AI key (or
+    // Cmd+I) opens it; its groove then sets how wide it is.
+    chat_split := mod.widgets.HwSplitter{
+        width: Fill
+        height: Fill
+        axis: SplitterAxis.Horizontal
+        align: SplitterAlign.FromB(420.0)
+        collapse: SplitterCollapse.B
+        min_vertical: 600.0
+        max_vertical: 320.0
+        a: View{
+            width: Fill
+            height: Fill
+            flow: Down
+            // The device over the lists: dragging the groove makes the screen
+            // taller or shorter.
+            device_split := mod.widgets.HwDeckSplitter{
+                width: Fill
+                height: Fill
+                axis: SplitterAxis.Vertical
+                align: SplitterAlign.Weighted(0.58)
+                min_horizontal: 300.0
+                max_horizontal: 150.0
+                a: View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 14
+                    View{
+                        width: Fill
+                        height: Fill
+                        flow: Right
+                        spacing: 14
+                        mod.widgets.HwSlot{component: "volume" width: Fill{weight: 0.0 basis: 196.0 shrink: 1.0 min: 150.0} height: Fill}
+                        View{
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 12
+                            mod.widgets.HwSlot{component: "screen" width: Fill height: Fill}
+                            mod.widgets.HwSlot{component: "transport" width: Fill height: 84}
+                        }
+                        mod.widgets.HwSlot{component: "display" width: Fill{weight: 0.0 basis: 236.0 shrink: 1.0 min: 200.0} height: Fill}
+                    }
+                    View{
+                        width: Fill
+                        height: 64
+                        flow: Right
+                        spacing: 14
+                        mod.widgets.HwSlot{component: "now" width: Fill{weight: 0.0 basis: 196.0 shrink: 1.0 min: 150.0} height: Fill}
+                        mod.widgets.HwSlot{component: "progress" width: Fill height: Fill margin: Inset{left: 20 right: 20}}
+                        mod.widgets.HwSlot{component: "queue" width: Fill{weight: 0.0 basis: 236.0 shrink: 1.0 min: 56.0} height: Fill}
+                    }
+                }
+                b: View{
+                    width: Fill
+                    height: Fill
+                    flow: Right
+                    spacing: 14
+                    mod.widgets.HwSlot{component: "library" width: Fill{weight: 0.0 basis: 270.0 shrink: 1.0 min: 180.0} height: Fill}
+                    // The open list and Up Next; Up Next folds away from its key.
+                    split := mod.widgets.HwSplitter{
+                        width: Fill
+                        height: Fill
+                        axis: SplitterAxis.Horizontal
+                        align: SplitterAlign.FromB(340.0)
+                        min_vertical: 280.0
+                        max_vertical: 200.0
+                        a: mod.widgets.HwSlot{component: "tracks" width: Fill height: Fill}
+                        b: mod.widgets.HwSlot{component: "upnext" width: Fill height: Fill}
+                    }
+                }
+            }
+        }
+        b: mod.widgets.HwSlot{component: "chat" width: Fill height: Fill}
+    }
+}
+true

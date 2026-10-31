@@ -21,6 +21,9 @@ pub fn now(ctx: &mut ToolCtx, args: &JsonValue) -> Result<String, String> {
     let (center_lon, center_lat) = ctx.map_center();
     let lon = arg_f64(args, "lon").unwrap_or(center_lon);
     let lat = arg_f64(args, "lat").unwrap_or(center_lat);
+    if ctx.layers.offline && ctx.radar.is_none() {
+        return Err("offline: the rain nowcast needs the network (KNMI radar)".into());
+    }
     let radar = ctx
         .radar
         .ok_or("radar nowcast not available yet (still syncing from KNMI)")?;

@@ -6,9 +6,9 @@
 //! Everything that makes it a clock — the tick and fast timers, the
 //! stopwatch and countdown state, the alarm book and its persistence —
 //! lives in `ClockView` (`src/view.rs`), and none of it depends on this
-//! binary, so `cargo test -p makepad-clock` covers it without a window.
+//! binary, so `cargo test -p makepad-app-clock` covers it without a window.
 //!
-//! clock runs standalone, and unmodified inside makepad-wm / Studio tiles
+//! clock runs standalone, and unmodified inside makepad-app-wm / Studio tiles
 //! via the shared --stdin-loop client runtime every Makepad app has.
 //! Either way it exposes its one bounded read tool to the assistant
 //! (src/ai.rs): under the WM over the bus, standalone to the F10 overlay
@@ -16,8 +16,9 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_clock::{ai, view::ClockView};
-use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
+use makepad_widgets::makepad_platform::ime::pick_compact_form;
+use makepad_app_clock::{ai, view::{compact_forms, ClockView}};
+use makepad_widgets::desktop_style::{self, StyleSheet};
 use makepad_widgets::*;
 
 app_main!(App, font_assets: [INTER_FONT_ASSET, ROBOTO_FLEX_FONT_ASSET]);
@@ -113,6 +114,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        cx.declare_compact_forms(&compact_forms());
         // Dev flags for looking at the faces in a plain window: `--phone`
         // sizes the window like the phone viewport, `--tile` like the home
         // tile and asks the view for its compact face, the way a host does.
@@ -146,19 +148,20 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
-        makepad_aichat::script_mod(vm);
-        makepad_clock::face::script_mod(vm);
-        makepad_clock::wheel::script_mod(vm);
-        makepad_clock::alarm_list::script_mod(vm);
-        makepad_clock::digits::script_mod(vm);
-        makepad_clock::tabs::script_mod(vm);
-        makepad_clock::ring::script_mod(vm);
-        makepad_clock::laps::script_mod(vm);
-        makepad_clock::view::script_mod(vm);
+        makepad_app_aichat::script_mod(vm);
+        makepad_app_clock::face::script_mod(vm);
+        makepad_app_clock::wheel::script_mod(vm);
+        makepad_app_clock::alarm_list::script_mod(vm);
+        makepad_app_clock::digits::script_mod(vm);
+        makepad_app_clock::tabs::script_mod(vm);
+        makepad_app_clock::ring::script_mod(vm);
+        makepad_app_clock::laps::script_mod(vm);
+        makepad_app_clock::view::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -170,11 +173,28 @@ impl AppMain for App {
                 return;
             }
         }
+        // Parked beside the work (the compact-forms contract, platform/src/ime.rs):
+        // the host says how much room the slot has; the row is picked when it
+        // fits and the answer says so, then the host gives the window that
+        // size. Unparked: the full face again (the host resizes the window).
+        if let Event::Custom(json) = event {
+            if let Some(parked) = makepad_widgets::makepad_platform::ime::HostedParked::parse(json) {
+                let form = parked.scale.and_then(|_| pick_compact_form(&compact_forms(), parked.max));
+                let on = form.is_some();
+                let mode = if on { HostedViewMode::Tile } else { HostedViewMode::Full };
+                let clock = self.ui.widget(cx, ids!(clock));
+                clock.handle_event(cx, &Event::Custom(mode.to_json()), &mut Scope::empty());
+                if let Some(mut view) = clock.borrow_mut::<ClockView>() {
+                    view.set_compact(cx, on);
+                }
+                cx.answer_compact(form);
+                return;
+            }
+        }
         if let Some((timer, name)) = &self.switch {
             if timer.is_event(event).is_some() {
                 // The same receive path a host's appearance change takes.
-                if let Some(style) = DesktopStyle::parse(name) {
-                    let sheet = StyleSheet::load_with_appearance(style, name.ends_with("-dark"));
+                if let Some(sheet) = StyleSheet::named(name) {
                     desktop_style::handle_event(cx, &Event::Custom(sheet.to_json()));
                 }
                 self.switch = None;

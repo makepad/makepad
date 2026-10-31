@@ -3,32 +3,32 @@
 # local/agent_state/wm-all/apps/reminders-spec.md; contract: .../CONTRACT.md.
 
 [package]
-name = "makepad-reminders"
+name = "makepad-app-reminders"
 version = "0.1.0"
 edition = "2021"
-default-run = "reminders"
+license = "MIT OR Apache-2.0"
+default-run = "makepad-app-reminders"
 
 [lib]
-name = "makepad_reminders"
+name = "makepad_app_reminders"
 path = "src/lib.rs"
 
 [[bin]]
-name = "reminders"
+name = "makepad-app-reminders"
 path = "src/main.rs"
 required-features = ["standalone"]
 
 [features]
-dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 # The standalone window (src/main.rs); a host that links the module leaves it off.
 standalone = []
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["glass"] }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-app-module = { path = "../../libs/app_module" }
 makepad-strict-json = { path = "../../libs/strict_json" }
