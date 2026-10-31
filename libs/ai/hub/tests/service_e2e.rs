@@ -845,7 +845,7 @@ fn realtime_h264_round_trip_input_and_output() {
         fps: 30,
         bitrate_kbps: 2_000,
         keyint: 30,
-        low_latency: true,
+        low_latency: true, full_chroma: false,
     })
     .expect("client encoder creation");
     let mut client_decoder = VideoStreamDecoder::new(StreamVideoCodec::H264).expect("client decoder creation");

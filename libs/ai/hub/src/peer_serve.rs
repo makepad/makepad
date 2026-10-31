@@ -3,8 +3,10 @@
 //! listener).
 //!
 //! `GET /v1/model_blob/<sha256>` with headers:
-//! - `Authorization: Bearer <ticket>` — a [`crate::peer::PeerTicket`] scoped
+//! - `X-Peer-Ticket: <ticket>` — a [`crate::peer::PeerTicket`] scoped
 //!   to (this source node, the claimed receiver node, this exact digest).
+//!   (`Authorization` carries the receiver's fleet credential, role `node`,
+//!   checked by the TLS front first.)
 //! - `X-Peer-Receiver: <receiver node_key>` — must equal the ticket scope.
 //! - `Range: bytes=<from>-[<to>]` — optional resume offset.
 //!
@@ -163,6 +165,10 @@ impl Throttle {
         }
     }
 
+    pub fn mb_per_sec_value(&self) -> f64 {
+        self.bytes_per_sec / (1024.0 * 1024.0)
+    }
+
     /// Reserves transmission time for `len` bytes and sleeps until this
     /// worker's reservation starts. First chunk goes immediately; sustained
     /// load converges to the configured rate.
@@ -286,6 +292,7 @@ impl Drop for ServeSlot {
 pub fn route_blob(
     shared: &Arc<ServiceShared>,
     headers: &HttpServerHeaders,
+    caller: &makepad_network::fleet::front::Caller,
     response_sender: mpsc::Sender<HttpServerResponse>,
 ) {
     let respond = |response: HttpServerResponse| {
@@ -314,49 +321,60 @@ pub fn route_blob(
         ));
     }
 
-    // -- fail closed without a secret / with serving off --
+    // -- a paired phone (fleet credential checked by the front) fetches
+    // the on-device model files: no node-to-node ticket, the same
+    // allow-list, range and concurrency rules below --
     let peer = &shared.peer;
-    let Some(secret) = peer.secret.as_ref().filter(|_| peer.serve) else {
+    if !peer.serve {
         return respond(error_response(
             403,
             "Forbidden",
             "peer-cache serving is disabled on this node".to_string(),
         ));
-    };
+    }
+    if caller.role != makepad_network::fleet::id::Role::Paired {
+        // -- fail closed without a secret --
+        let Some(secret) = peer.secret.as_ref().filter(|_| peer.serve) else {
+            return respond(error_response(
+                403,
+                "Forbidden",
+                "peer-cache serving is disabled on this node".to_string(),
+            ));
+        };
 
-    // -- authentication before any existence disclosure --
-    let Some(bearer) = header_value(headers, "authorization")
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-    else {
-        return respond(error_response(
-            401,
-            "Unauthorized",
-            "missing Authorization: Bearer <transfer ticket>".to_string(),
-        ));
-    };
-    let Some(receiver) = header_value(headers, "x-peer-receiver") else {
-        return respond(error_response(
-            401,
-            "Unauthorized",
-            "missing X-Peer-Receiver header".to_string(),
-        ));
-    };
-    let Some(ticket) = crate::peer::PeerTicket::parse(bearer) else {
-        return respond(error_response(
-            401,
-            "Unauthorized",
-            "malformed transfer ticket".to_string(),
-        ));
-    };
-    if let Err(denied) = ticket.verify(
-        secret,
-        &shared.node_key,
-        receiver,
-        &digest,
-        crate::peer::now_unix(),
-    ) {
-        return respond(error_response(403, "Forbidden", denied.to_string()));
+        // -- authentication before any existence disclosure --
+        // The ticket rides its own header: Authorization carries the node's
+        // fleet credential, checked by the TLS front before this runs.
+        let Some(bearer) = header_value(headers, "x-peer-ticket").map(str::trim) else {
+            return respond(error_response(
+                401,
+                "Unauthorized",
+                "missing X-Peer-Ticket: <transfer ticket>".to_string(),
+            ));
+        };
+        let Some(receiver) = header_value(headers, "x-peer-receiver") else {
+            return respond(error_response(
+                401,
+                "Unauthorized",
+                "missing X-Peer-Receiver header".to_string(),
+            ));
+        };
+        let Some(ticket) = crate::peer::PeerTicket::parse(bearer) else {
+            return respond(error_response(
+                401,
+                "Unauthorized",
+                "malformed transfer ticket".to_string(),
+            ));
+        };
+        if let Err(denied) = ticket.verify(
+            secret,
+            &shared.node_key,
+            receiver,
+            &digest,
+            crate::peer::now_unix(),
+        ) {
+            return respond(error_response(403, "Forbidden", denied.to_string()));
+        }
     }
 
     // -- allow-list: known digest with a valid receipt right now --

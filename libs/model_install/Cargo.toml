@@ -1,0 +1,20 @@
+[package]
+name = "makepad-model-install"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "First-use install of the files a host needs in-process (model weights, SoundFonts, fonts, opt-in datasets): a pinned URL, size and SHA-256, resumable, a provenance record beside each file saying what was fetched, under which licence and when the operator acknowledged it. Nothing downloads until the host asks."
+
+[lib]
+name = "makepad_model_install"
+
+[features]
+default = ["download"]
+# The downloader (resumable .part files, hash check, atomic commit): the
+# install worker, verify and uninstall. Without it only the portable
+# description of a file remains (what the web build of the score engine
+# links to name the General MIDI SoundFont).
+download = ["dep:makepad-ai-hub"]
+
+[dependencies]
+makepad-ai-hub = { path = "../ai/hub", default-features = false, features = ["local"], optional = true }

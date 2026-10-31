@@ -7,7 +7,7 @@
 use super::adain::AdainResBlk1d;
 use super::ops::{concat_cols, conv1d, layer_norm_plain, linear, sigmoid_slice, BiLstm, Mat};
 use super::text_encoder::load_bilstm;
-use super::weights::Weights;
+use super::weights::{WeightData, Weights};
 use crate::TtsError;
 
 const CHANNELS: usize = 512;
@@ -21,8 +21,8 @@ const BLOCKS: usize = 3;
 
 /// `(1 + gamma) * layer_norm(x) + beta`, where gamma and beta come from style.
 struct AdaLayerNorm {
-    fc_weight: Vec<f32>,
-    fc_bias: Vec<f32>,
+    fc_weight: WeightData,
+    fc_bias: WeightData,
 }
 
 impl AdaLayerNorm {
@@ -44,16 +44,18 @@ impl AdaLayerNorm {
 }
 
 pub struct Predictor {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) vulkan_id: std::sync::Arc<()>,
     lstms: Vec<BiLstm>,
     norms: Vec<AdaLayerNorm>,
     lstm: BiLstm,
-    duration_proj: (Vec<f32>, Vec<f32>),
+    duration_proj: (WeightData, WeightData),
     /// Shared BiLSTM feeding both the pitch and noise branches.
     shared: BiLstm,
-    f0_blocks: Vec<AdainResBlk1d>,
-    noise_blocks: Vec<AdainResBlk1d>,
-    f0_proj: (Vec<f32>, Vec<f32>),
-    noise_proj: (Vec<f32>, Vec<f32>),
+    pub(super) f0_blocks: Vec<AdainResBlk1d>,
+    pub(super) noise_blocks: Vec<AdainResBlk1d>,
+    pub(super) f0_proj: (WeightData, WeightData),
+    pub(super) noise_proj: (WeightData, WeightData),
 }
 
 /// The two curves, each `[1, 2 * frames]` — block 1 of each branch upsamples,
@@ -82,14 +84,23 @@ pub struct DurationTrace {
     pub durations: Vec<f32>,
 }
 
-fn need(weights: &Weights, name: &str) -> Result<Vec<f32>, TtsError> {
+fn need(weights: &Weights, name: &str) -> Result<WeightData, TtsError> {
     weights
-        .get(name)
-        .map(<[f32]>::to_vec)
+        .take(name)
         .ok_or_else(|| TtsError::Backend(format!("missing tensor {name}")))
 }
 
 impl Predictor {
+    #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+    pub(crate) fn drop_host_copies(&mut self) {
+        for block in self.f0_blocks.iter_mut().chain(self.noise_blocks.iter_mut()) { block.drop_host_copies(); }
+    }
+
+    fn run_lstm(&self, model: &BiLstm, x: &Mat) -> Mat {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(out) = super::vulkan::bilstm(&self.vulkan_id, model, x) { return out; }
+        model.run(x)
+    }
     pub fn load(weights: &Weights) -> Result<Self, TtsError> {
         let root = "predictor.module";
 
@@ -136,6 +147,8 @@ impl Predictor {
         };
 
         Ok(Self {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            vulkan_id: std::sync::Arc::new(()),
             lstms,
             norms,
             lstm: load_bilstm(weights, &format!("{root}.lstm"), WIDE, CHANNELS / 2)?,
@@ -161,10 +174,15 @@ impl Predictor {
     /// DurationEncoder output; `style` is the same second half of the voice vector.
     pub fn prosody(&self, en: &Mat, style: &[f32]) -> ProsodyTrace {
         // The shared LSTM wants [frames, 640] and gives [frames, 512].
-        let shared = self.shared.run(&en.transpose());
+        let shared = self.run_lstm(&self.shared, &en.transpose());
         let start = shared.transpose();
 
-        let run = |blocks: &Vec<AdainResBlk1d>, proj: &(Vec<f32>, Vec<f32>)| {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some((f0_blocks, noise_blocks, f0, noise)) = super::vulkan::prosody(self, &start, style) {
+            return ProsodyTrace { shared, f0_blocks, noise_blocks, f0, noise };
+        }
+
+        let run = |blocks: &Vec<AdainResBlk1d>, proj: &(WeightData, WeightData)| {
             let mut traces = Vec::with_capacity(blocks.len());
             let mut x = start.clone();
             for block in blocks {
@@ -196,7 +214,7 @@ impl Predictor {
         let mut lstm_out = Vec::with_capacity(BLOCKS);
         let mut norm_out = Vec::with_capacity(BLOCKS);
         for block in 0..BLOCKS {
-            let hidden = self.lstms[block].run(&x);
+            let hidden = self.run_lstm(&self.lstms[block], &x);
             lstm_out.push(hidden.clone());
 
             let normed = self.norms[block].forward(&hidden, style);
@@ -206,7 +224,7 @@ impl Predictor {
         }
         let encoded = x;
 
-        let hidden = self.lstm.run(&encoded);
+        let hidden = self.run_lstm(&self.lstm, &encoded);
         let duration_logits = linear(
             &hidden,
             &self.duration_proj.0,

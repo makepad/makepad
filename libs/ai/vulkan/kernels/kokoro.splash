@@ -1,0 +1,372 @@
+// Channel-major activations, with each row padded to four floats. The
+// convolution GEMM consumes patches [input * taps, time] and resident
+// weights [output, input * taps]. A 32x32x32 tile uses 8 KiB shared memory.
+// Vulkan guarantees at least 65535 groups per dimension. Split large flat
+// dispatches over two dimensions instead of imposing an activation limit.
+let flat = {
+    workgroup_size: 128
+    index: fn() { return (group_id().y * 65535 + group_id().x) * 128 + local_id().x }
+}
+
+{
+    kokoro_gemm: {
+        workgroup_size: 128
+        a: shader.buffer(vec4f)
+        b: shader.buffer(vec4f)
+        bias: shader.buffer(f32)
+        dst: shader.buffer_rw(vec4f)
+        m: shader.uniform(u32)
+        n: shader.uniform(u32)
+        k: shader.uniform(u32)
+        astride: shader.uniform(u32)
+        bstride: shader.uniform(u32)
+        has_bias: shader.uniform(u32)
+        aa: shader.workgroup(f32, 1024)
+        bb: shader.workgroup(vec4f, 256)
+        main: fn() {
+            let t = local_id().x
+            let row = t / 8
+            let col = t % 8
+            let mr = group_id().y * 32
+            let nc = group_id().x * 8
+            var acc0 = vec4f(0.0)
+            var acc1 = vec4f(0.0)
+            var base = u32(0)
+            while base < self.k {
+                for half in 0..2 {
+                    let r = row + half * 16
+                    var av = vec4f(0.0)
+                    var bv = vec4f(0.0)
+                    if mr + r < self.m && base + col * 4 < self.k {
+                        av = self.a[(mr + r) * self.astride / 4 + base / 4 + col]
+                    }
+                    if base + r < self.k && (nc + col) * 4 < self.n {
+                        bv = self.b[(base + r) * self.bstride / 4 + nc + col]
+                    }
+                    for j in 0..4 { self.aa[r * 32 + col * 4 + j] = av[j] }
+                    self.bb[r * 8 + col] = bv
+                }
+                barrier()
+                for j in 0..32 {
+                    let bv = self.bb[j * 8 + col]
+                    acc0 += self.aa[row * 32 + j] * bv
+                    acc1 += self.aa[(row + 16) * 32 + j] * bv
+                }
+                barrier()
+                base += 32
+            }
+            if (nc + col) * 4 < self.n {
+                if mr + row < self.m {
+                    var bv = 0.0
+                    if self.has_bias != 0 { bv = self.bias[mr + row] }
+                    self.dst[(mr + row) * self.bstride / 4 + nc + col] = acc0 + bv
+                }
+                if mr + row + 16 < self.m {
+                    var bv = 0.0
+                    if self.has_bias != 0 { bv = self.bias[mr + row + 16] }
+                    self.dst[(mr + row + 16) * self.bstride / 4 + nc + col] = acc1 + bv
+                }
+            }
+        }
+    }
+
+    // Four adjacent time positions per invocation. Stride-one interiors use
+    // one aligned vector load when possible, including dilated convolutions.
+    kokoro_im2col: flat{
+        x: shader.buffer(f32)
+        x4: shader.buffer(vec4f)
+        dst: shader.buffer_rw(vec4f)
+        ic: shader.uniform(u32)
+        iw: shader.uniform(u32)
+        xs: shader.uniform(u32)
+        ow: shader.uniform(u32)
+        os: shader.uniform(u32)
+        kw: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        pad: shader.uniform(u32)
+        dilation: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let time = (i % (self.os / 4)) * 4
+            let taprow = i / (self.os / 4)
+            if taprow < self.ic * self.kw {
+                let channel = taprow / self.kw
+                let tap = taprow % self.kw
+                var v = vec4f(0.0)
+                let start = i32(time * self.stride + tap * self.dilation) - i32(self.pad)
+                if self.stride == 1 && start >= 0 && start + 3 < i32(self.iw) && start % 4 == 0 && time + 3 < self.ow {
+                    v = self.x4[(channel * self.xs + u32(start)) / 4]
+                } else {
+                    for j in 0..4 {
+                        let pos = start + i32(j * self.stride)
+                        if time + j < self.ow && pos >= 0 && pos < i32(self.iw) {
+                            v[j] = self.x[channel * self.xs + u32(pos)]
+                        }
+                    }
+                }
+                self.dst[i] = v
+            }
+        }
+    }
+
+    // Fold GEMM's [output * tap, input_time] into the upsampled sequence.
+    // Each output has one writer and visits only contributing taps.
+    kokoro_overlap: flat{
+        x: shader.buffer(f32)
+        bias: shader.buffer(f32)
+        dst: shader.buffer_rw(vec4f)
+        channels: shader.uniform(u32)
+        iw: shader.uniform(u32)
+        xs: shader.uniform(u32)
+        ow: shader.uniform(u32)
+        os: shader.uniform(u32)
+        kw: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        pad: shader.uniform(u32)
+        has_bias: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let channel = i / (self.os / 4)
+            let time = (i % (self.os / 4)) * 4
+            if channel < self.channels {
+                var value = vec4f(0.0)
+                if self.has_bias != 0 { value = vec4f(self.bias[channel]) }
+                for j in 0..4 {
+                    let pos = time + j + self.pad
+                    var tap = pos % self.stride
+                    while tap < self.kw {
+                        if time + j < self.ow && pos >= tap && (pos - tap) / self.stride < self.iw {
+                            value[j] += self.x[(channel * self.kw + tap) * self.xs + (pos - tap) / self.stride]
+                        }
+                        tap += self.stride
+                    }
+                }
+                self.dst[i] = value
+            }
+        }
+    }
+
+    // op: copy/scale, scaled add, leaky rectifier, Snake, or GELU.
+    kokoro_element: flat{
+        x: shader.buffer(vec4f)
+        b: shader.buffer(vec4f)
+        alpha: shader.buffer(f32)
+        dst: shader.buffer_rw(vec4f)
+        count: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        op: shader.uniform(u32)
+        scale: shader.uniform(f32)
+        main: fn() {
+            let i = self.index()
+            if i < self.count / 4 {
+                let v = self.x[i]
+                var out = v * self.scale
+                if self.op == 1 { out = (v + self.b[i]) * self.scale }
+                if self.op == 2 { out = max(v, vec4f(0.0)) + min(v, vec4f(0.0)) * self.scale }
+                if self.op == 3 {
+                    let a = self.alpha[i * 4 / self.stride]
+                    let s = sin(v * a)
+                    out = v + (1.0 / a) * s * s
+                }
+                if self.op == 4 {
+                    out = 0.5 * v * (1.0 + tanh(0.7978845608 * (v + 0.044715 * v * v * v)))
+                }
+                self.dst[i] = out
+            }
+        }
+    }
+
+    // Two-pass variance over the logical row, excluding its padding. Affine
+    // mode 1 is per column; mode 2 is AdaIN's [gamma | beta] per channel.
+    // Fuse the following activation so each conditioned norm writes once.
+    kokoro_norm: {
+        workgroup_size: 128
+        x: shader.buffer(vec4f)
+        affine: shader.buffer(f32)
+        beta: shader.buffer(f32)
+        alpha: shader.buffer(f32)
+        dst: shader.buffer_rw(vec4f)
+        cols: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        rows: shader.uniform(u32)
+        mode: shader.uniform(u32)
+        activation: shader.uniform(u32)
+        eps: shader.uniform(f32)
+        slope: shader.uniform(f32)
+        partial: shader.workgroup(f32, 128)
+        total: fn(v) {
+            let sum = subgroup_add(v)
+            if subgroup_lane() == 0 { self.partial[subgroup_id()] = sum }
+            barrier()
+            var result = 0.0
+            for j in 0..(self.workgroup_size + subgroup_size() - 1) / subgroup_size() {
+                result += self.partial[j]
+            }
+            barrier()
+            return result
+        }
+        main: fn() {
+            let row = group_id().x
+            let lane = local_id().x
+            let offset = row * self.stride / 4
+            var col = lane * 4
+            var sum = 0.0
+            while col < self.cols {
+                let v = self.x[offset + col / 4]
+                for j in 0..4 { if col + j < self.cols { sum += v[j] } }
+                col += self.workgroup_size * 4
+            }
+            let mean = self.total(sum) / float(self.cols)
+            col = lane * 4
+            var variance = 0.0
+            while col < self.cols {
+                let delta = self.x[offset + col / 4] - mean
+                for j in 0..4 { if col + j < self.cols { variance += delta[j] * delta[j] } }
+                col += self.workgroup_size * 4
+            }
+            let inv = 1.0 / sqrt(self.total(variance) / float(self.cols) + self.eps)
+            col = lane * 4
+            while col < self.cols {
+                var value = (self.x[offset + col / 4] - mean) * inv
+                if self.mode == 1 {
+                    for j in 0..4 {
+                        if col + j < self.cols { value[j] = value[j] * self.affine[col + j] + self.beta[col + j] }
+                    }
+                }
+                if self.mode == 2 { value = value * (1.0 + self.affine[row]) + self.affine[self.rows + row] }
+                if self.activation == 1 { value = max(value, vec4f(0.0)) + min(value, vec4f(0.0)) * self.slope }
+                if self.activation == 2 {
+                    let a = self.alpha[row]
+                    let s = sin(value * a)
+                    value += (1.0 / a) * s * s
+                }
+                for j in 0..4 { if col + j >= self.cols { value[j] = 0.0 } }
+                self.dst[offset + col / 4] = value
+                col += self.workgroup_size * 4
+            }
+        }
+    }
+
+    // op 0 transpose, 1 nearest repeat, 2 left reflection padding.
+    kokoro_layout: flat{
+        x: shader.buffer(f32)
+        dst: shader.buffer_rw(vec4f)
+        rows: shader.uniform(u32)
+        cols: shader.uniform(u32)
+        xs: shader.uniform(u32)
+        os: shader.uniform(u32)
+        ow: shader.uniform(u32)
+        op: shader.uniform(u32)
+        factor: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let row = i / (self.os / 4)
+            let col = (i % (self.os / 4)) * 4
+            if row < self.rows {
+                var value = vec4f(0.0)
+                for j in 0..4 {
+                    if col + j < self.ow {
+                        if self.op == 0 { value[j] = self.x[(col + j) * self.xs + row] }
+                        if self.op == 1 { value[j] = self.x[row * self.xs + (col + j) / self.factor] }
+                        if self.op == 2 {
+                            var src = i32(col + j) - i32(self.factor)
+                            if src < 0 { src = -src }
+                            value[j] = self.x[row * self.xs + u32(src)]
+                        }
+                    }
+                }
+                self.dst[i] = value
+            }
+        }
+    }
+
+    kokoro_depthwise: flat{
+        x: shader.buffer(f32)
+        w: shader.buffer(f32)
+        bias: shader.buffer(f32)
+        dst: shader.buffer_rw(vec4f)
+        channels: shader.uniform(u32)
+        iw: shader.uniform(u32)
+        xs: shader.uniform(u32)
+        ow: shader.uniform(u32)
+        os: shader.uniform(u32)
+        kw: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        pad: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let channel = i / (self.os / 4)
+            let time = (i % (self.os / 4)) * 4
+            if channel < self.channels {
+                var value = vec4f(0.0)
+                for tap in 0..self.kw {
+                    for j in 0..4 {
+                        let src = i32(time + j + self.pad) - i32(tap)
+                        if time + j < self.ow && src >= 0 && src % i32(self.stride) == 0 && src / i32(self.stride) < i32(self.iw) {
+                            value[j] += self.x[channel * self.xs + u32(src) / self.stride] * self.w[channel * self.kw + tap]
+                        }
+                    }
+                }
+                self.dst[i] = value + self.bias[channel]
+            }
+        }
+    }
+
+    // One workgroup owns one recurrent direction for the entire sequence.
+    // Input projections are a preceding GEMM. Hidden state stays in shared
+    // memory and cell state in registers; there is no dispatch per frame.
+    // Kokoro's recurrent directions have 256 hidden units.
+    kokoro_lstm: {
+        workgroup_size: 256
+        projected: shader.buffer(f32)
+        w: shader.buffer(vec4f)
+        bias: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        hidden: shader.uniform(u32)
+        time: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        ws: shader.uniform(u32)
+        reverse: shader.uniform(u32)
+        state: shader.workgroup(f32, 256)
+        main: fn() {
+            let lane = local_id().x
+            self.state[lane] = 0.0
+            var cell = 0.0
+            barrier()
+            for step in 0..self.time {
+                var time = step
+                if self.reverse != 0 { time = self.time - 1 - step }
+                var gates = vec4f(0.0)
+                if lane < self.hidden {
+                    for gate in 0..4 {
+                        let row = gate * self.hidden + lane
+                        gates[gate] = self.projected[row * self.stride + time] + self.bias[row]
+                    }
+                    var c = u32(0)
+                    while c < self.hidden {
+                        let h = vec4f(self.state[c], self.state[c + 1], self.state[c + 2], self.state[c + 3])
+                        for gate in 0..4 {
+                            let row = gate * self.hidden + lane
+                            gates[gate] += dot(self.w[(row * self.ws + c) / 4], h)
+                        }
+                        c += 4
+                    }
+                }
+                // No lane may overwrite the previous state until every
+                // lane has completed the recurrent matrix product.
+                barrier()
+                if lane < self.hidden {
+                    let input = 1.0 / (1.0 + exp(-gates.x))
+                    let forget = 1.0 / (1.0 + exp(-gates.y))
+                    let update = tanh(gates.z)
+                    let output = 1.0 / (1.0 + exp(-gates.w))
+                    cell = forget * cell + input * update
+                    let h = output * tanh(cell)
+                    self.state[lane] = h
+                    self.dst[lane * self.stride + time] = h
+                }
+                barrier()
+            }
+        }
+    }
+}

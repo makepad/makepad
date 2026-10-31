@@ -486,7 +486,10 @@ impl LazyFluxVae {
                     return Err(DiffusionError::Cancelled);
                 }
                 Err(err) => {
-                    eprintln!("flux vae device path failed ({err}); falling back to host math");
+                    // no silent CPU fallback: the job fails with the GPU's error
+                    gpu_pool_clear();
+                    gpu_pool_cap_override(None);
+                    return Err(DiffusionError::model(format!("flux vae decode on the GPU failed: {err} (no CPU fallback)")));
                 }
             }
         }

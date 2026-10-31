@@ -1033,8 +1033,21 @@ pub fn prepare_graph(
     graph: &Graph,
     features: MetalDeviceFeatures,
 ) -> Result<MetalPreparedGraph, String> {
+    prepare_graph_with_reuse_cooldown(ctx, graph, features, reuse_cooldown())
+}
+
+/// Choose the activation reuse delay for this graph without changing the
+/// process-wide default. Zero reuses dead ranges at the next operation;
+/// execution's buffer-range barriers order readers before a reused write.
+pub fn prepare_graph_with_reuse_cooldown(
+    ctx: &Context,
+    graph: &Graph,
+    features: MetalDeviceFeatures,
+    reuse_delay: usize,
+) -> Result<MetalPreparedGraph, String> {
     let graph_plan = build_graph_plan(ctx, graph, features)?;
-    let (bindings, main_buffer_size, reclaimed) = collect_tensor_bindings(ctx, graph, &graph_plan)?;
+    let (bindings, main_buffer_size, reclaimed) =
+        collect_tensor_bindings(ctx, graph, &graph_plan, reuse_delay)?;
     let mut tail_cursor = 0usize;
     let mut nodes = Vec::with_capacity(graph_plan.nodes.len());
     for plan in &graph_plan.nodes {
@@ -1409,6 +1422,53 @@ impl MetalGraphSession {
     ) -> Result<MetalGraphExecution, String> {
         execute_compiled_graph(&self.runtime, ctx, &self.compiled, inputs, outputs)
     }
+
+    /// Profile consecutive portions of the SAME compiled graph and buffer
+    /// plan. Endpoints must be compiled output ids in execution order, ending
+    /// at the final node. Each callback receives completed wall/GPU seconds.
+    /// This diagnostic waits at every endpoint; use execute for throughput.
+    pub fn execute_profiled(
+        &self,
+        ctx: &Context,
+        inputs: &[MetalGraphTensorWrite<'_>],
+        outputs: &[TensorId],
+        stage_ends: &[TensorId],
+        on_stage: &mut dyn FnMut(TensorId, f64, f64),
+    ) -> Result<MetalGraphExecution, String> {
+        let mut ranges = Vec::with_capacity(stage_ends.len());
+        let mut start = 0;
+        for &end in stage_ends {
+            let count = self.compiled.nodes[start..].iter()
+                .position(|node| node.output_id == end)
+                .ok_or_else(|| format!("profile endpoint {end} is not a compiled output in order"))? + 1;
+            ranges.push((end, start..start + count));
+            start += count;
+        }
+        if start != self.compiled.nodes.len() {
+            return Err("profile endpoints must cover the entire compiled graph".to_string());
+        }
+        self.runtime.wait_idle()?;
+        write_compiled_graph_inputs(&self.runtime, ctx, &self.compiled, inputs)?;
+        // Input writes may submit blits. Retire those before the first
+        // timing baseline so they are not charged to its compute nodes.
+        self.runtime.wait_idle()?;
+        for (end, range) in ranges {
+            let before = self.runtime.counters().gpu_elapsed_ns;
+            let began = std::time::Instant::now();
+            self.runtime.begin_command_batch()?;
+            if let Err(err) = execute_compiled_nodes(
+                &self.runtime, ctx, &self.compiled, &self.compiled.nodes[range],
+            ) {
+                let _ = self.runtime.discard_command_batch();
+                return Err(err);
+            }
+            self.runtime.end_command_batch()?;
+            self.runtime.wait_idle()?;
+            let gpu = self.runtime.counters().gpu_elapsed_ns.saturating_sub(before);
+            on_stage(end, began.elapsed().as_secs_f64(), gpu as f64 * 1e-9);
+        }
+        read_compiled_graph_outputs(&self.runtime, ctx, &self.compiled, outputs)
+    }
 }
 
 pub fn execute_compiled_graph(
@@ -1433,6 +1493,25 @@ pub fn execute_compiled_graph_with_buffer_inputs(
     // execute's readback wait). A Shared memcpy inside an active batch
     // was invisible to later compute: Flux kept the step-0 packed
     // latents and only the timestep write appeared to change.
+    write_compiled_graph_inputs(runtime, ctx, compiled, inputs)?;
+    runtime.begin_command_batch()?;
+    let execute_result =
+        execute_compiled_graph_in_active_batch(runtime, ctx, compiled, &[], buffer_inputs);
+
+    if let Err(err) = execute_result {
+        let _ = runtime.discard_command_batch();
+        return Err(err);
+    }
+    runtime.end_command_batch()?;
+    read_compiled_graph_outputs(runtime, ctx, compiled, outputs)
+}
+
+fn write_compiled_graph_inputs(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    inputs: &[MetalGraphTensorWrite<'_>],
+) -> Result<(), String> {
     for input in inputs {
         let binding = binding(compiled, input.tensor_id)?;
         let tensor = ctx
@@ -1449,15 +1528,15 @@ pub fn execute_compiled_graph_with_buffer_inputs(
         let offset_bytes = resolve_main_write_offset(compiled, binding.offset_bytes)?;
         runtime.write_buffer(&compiled.main_buffer, offset_bytes, input.bytes)?;
     }
-    runtime.begin_command_batch()?;
-    let execute_result =
-        execute_compiled_graph_in_active_batch(runtime, ctx, compiled, &[], buffer_inputs);
+    Ok(())
+}
 
-    if let Err(err) = execute_result {
-        let _ = runtime.discard_command_batch();
-        return Err(err);
-    }
-    runtime.end_command_batch()?;
+fn read_compiled_graph_outputs(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    outputs: &[TensorId],
+) -> Result<MetalGraphExecution, String> {
     let mut execution = MetalGraphExecution::default();
     for &tensor_id in outputs {
         // Offsets were frozen at compile time; if the reuse planner recycled
@@ -1526,14 +1605,23 @@ pub fn execute_compiled_graph_in_active_batch(
         )?;
     }
 
+    execute_compiled_nodes(runtime, ctx, compiled, &compiled.nodes)
+}
+
+fn execute_compiled_nodes(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    nodes: &[MetalCompiledNode],
+) -> Result<(), String> {
     // Official ggml_metal_op_concurrency / ggml_mem_ranges: barrier only when
     // this node's src/dst *buffer ranges* overlap a prior dst (or a prior src
     // if we write). Tensor-id RAW barriers serialize independent Flux streams.
     let mut live_ranges: Vec<MetalMemRange> = Vec::with_capacity(256);
     // Official n_cb=1: encode+submit the first max(64, 10%) nodes so the GPU
     // starts while the remaining ops are encoded.
-    let n_main = compiled.nodes.len().div_ceil(10).max(64);
-    for (op_i, node) in compiled.nodes.iter().enumerate() {
+    let n_main = nodes.len().div_ceil(10).max(64);
+    for (op_i, node) in nodes.iter().enumerate() {
         let tensor = ctx
             .tensor(node.node_id)
             .ok_or_else(|| format!("compiled graph references invalid tensor {}", node.node_id))?;
@@ -1550,7 +1638,7 @@ pub fn execute_compiled_graph_in_active_batch(
         }
         execute_node(runtime, ctx, compiled, tensor, node)?;
         push_node_ranges(compiled, tensor, node, &mut live_ranges);
-        if op_i + 1 == n_main && compiled.nodes.len() > n_main {
+        if op_i + 1 == n_main && nodes.len() > n_main {
             runtime.submit_partial_command_batch()?;
             live_ranges.clear();
         }
@@ -1720,6 +1808,7 @@ fn collect_tensor_bindings(
     ctx: &Context,
     graph: &Graph,
     plan: &crate::metal_selector::MetalGraphPlan,
+    reuse_delay: usize,
 ) -> Result<(BTreeMap<TensorId, MetalTensorBinding>, usize, BTreeSet<TensorId>), String> {
     let tensors = ctx.tensors();
     // Only tensors the fused execute list (plus host-read leafs) need a
@@ -1745,7 +1834,7 @@ fn collect_tensor_bindings(
     // norm+mul+add kernel runs later and still reads them — Flux then
     // ignored packed latents and decoded to gray mush.
     let last_use = tensor_last_use_plan(ctx, graph, plan);
-    let mut planner = GraphBindingPlanner::new(ctx.used_mem(), reuse_cooldown());
+    let mut planner = GraphBindingPlanner::new(ctx.used_mem(), reuse_delay);
 
     // Tensors that no node writes carry bytes that arrive BEFORE the graph
     // runs: host inputs are copied straight into the buffer at their planned
@@ -3748,6 +3837,24 @@ fn dispatch_im2col(
             .checked_mul(kw)
             .ok_or_else(|| "im2col khw overflow".to_string())?,
     };
+
+    if !is_2d {
+        // Pack adjacent column elements with full threadgroups instead of
+        // issuing one tiny (kernel-width) group for every channel/sample.
+        let elements = (n as u64) * (ow as u64) * (chw as u64);
+        let threads = stage.pipeline.max_threads_per_threadgroup.clamp(1, 256);
+        return runtime.dispatch_compute(
+            &stage.pipeline,
+            bytes_of(&args),
+            &[
+                buffer_ref(compiled, 1, src1_id),
+                buffer_ref(compiled, 2, tensor.id),
+            ],
+            &[],
+            MetalSize { width: elements.div_ceil(threads), height: 1, depth: 1 },
+            MetalSize { width: threads, height: 1, depth: 1 },
+        );
+    }
 
     let kh_kw = u64::try_from(
         i64::from(kh)

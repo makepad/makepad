@@ -1,0 +1,192 @@
+// The escape-time fractals of fractal.splash and multibrot.splash (same
+// texel format, de and trap included) for iteration counts past one call's
+// bound: a tile runs in passes of at most 2048 iterations per texel, its
+// orbit state handed from pass to pass (the node's feedback: sfo -> sfi,
+// sio -> sii; zeros before the first pass). `pass` is the pass index (set
+// by the node), `passes` how many there are; the last pass writes `out`.
+//
+// kind: 0 Mandelbrot, 1 Julia, 2 Burning Ship, 3 Tricorn, 4 Multibrot.
+// view (f64): x0, y0, step, julia re, julia im.
+let view = input(f64)
+let out = output(u32)
+// state in: z re, z im, |dz|, trap (f64); steps taken, flag (i32: 0 running,
+// 1 escaped, 2 inside)
+let zr_in = input(f64, 8, 0, sfi)
+let zi_in = input(f64, 8, 2, sfi)
+let dz_in = input(f64, 8, 4, sfi)
+let tr_in = input(f64, 8, 6, sfi)
+let n_in = input(i32, 2, 0, sii)
+let fl_in = input(i32, 2, 1, sii)
+// state out
+let zr_out = output(f64, 8, 0, sfo)
+let zi_out = output(f64, 8, 2, sfo)
+let dz_out = output(f64, 8, 4, sfo)
+let tr_out = output(f64, 8, 6, sfo)
+let n_out = output(i32, 2, 0, sio)
+let fl_out = output(i32, 2, 1, sio)
+let res = param(256, 1, 4096)
+let max_iter = param(500, 1, 131072)
+let kind = param(0, 0, 4)
+let power = param(3, 2, 8)
+let de = param(0, 0, 1)
+let trap = param(0, 0, 1)
+let pass = param(0, 0, 63)
+let passes = param(1, 1, 64)
+
+fn low24(v) {
+    let w = v * 64.0
+    if w < 0.0 {
+        w = f64(0.0)
+    }
+    if w > 16777215.0 {
+        w = f64(16777215.0)
+    }
+    int(float(floor(w)))
+}
+
+fn element(i) {
+    let r = int(res)
+    let col = i % r
+    let row = i / r
+    let step = view[2]
+    let cr = view[0] + (f64(col) + 0.5) * step
+    let ci = view[1] + (f64(row) + 0.5) * step
+    let k = int(kind)
+    let p = if k == 4 { int(power) } else { 2 }
+    let pf = f64(p)
+    let mi = int(max_iter)
+    let d_on = int(de)
+    let t_on = int(trap)
+    let ar = cr
+    let ai = ci
+    let dz_add = f64(1.0)
+    if k == 1 {
+        ar = view[3]
+        ai = view[4]
+        dz_add = f64(0.0)
+    }
+    let zr = zr_in[i]
+    let zi = zi_in[i]
+    let dz = dz_in[i]
+    let tr = tr_in[i]
+    let n = n_in[i]
+    let flag = fl_in[i]
+    if int(pass) == 0 {
+        zr = f64(0.0)
+        zi = f64(0.0)
+        dz = f64(0.0)
+        tr = f64(1000000000.0)
+        n = 0
+        flag = 0
+        if k == 1 {
+            zr = cr
+            zi = ci
+            dz = f64(1.0)
+        }
+        if k == 0 && t_on == 0 {
+            let x = cr - 0.25
+            let q = x * x + ci * ci
+            if q * (q + x) < 0.25 * ci * ci {
+                flag = 2
+            }
+            let x1 = cr + 1.0
+            if x1 * x1 + ci * ci < 0.0625 {
+                flag = 2
+            }
+        }
+    }
+    let mag = zr * zr + zi * zi
+    if flag == 0 {
+        for it in 0..2048 {
+            if n >= mi {
+                break
+            }
+            if d_on == 1 {
+                let za = sqrt(mag)
+                let zp = za
+                for j in 0..6 {
+                    if j >= p - 2 {
+                        break
+                    }
+                    zp = zp * za
+                }
+                dz = pf * zp * dz + dz_add
+            }
+            let fr = zr * zr - zi * zi
+            let fi = (zr + zr) * zi
+            if k == 2 {
+                let a = abs(zr)
+                let b = abs(zi)
+                fr = a * a - b * b
+                fi = (a + a) * b
+            }
+            if k == 3 {
+                fi = -2.0 * zr * zi
+            }
+            if k == 4 {
+                let wr = zr
+                let wi = zi
+                for j in 0..7 {
+                    if j >= p - 1 {
+                        break
+                    }
+                    let t = wr * zr - wi * zi
+                    wi = wr * zi + wi * zr
+                    wr = t
+                }
+                fr = wr
+                fi = wi
+            }
+            zr = fr + ar
+            zi = fi + ai
+            mag = zr * zr + zi * zi
+            n = n + 1
+            if mag < 256.0 {
+                if t_on == 1 {
+                    let ax = abs(zr)
+                    let ay = abs(zi)
+                    let d = if ax < ay { ax } else { ay }
+                    if d < tr {
+                        tr = d
+                    }
+                }
+            } else {
+                flag = 1
+                break
+            }
+        }
+    }
+    zr_out[i] = zr
+    zi_out[i] = zi
+    dz_out[i] = dz
+    tr_out[i] = tr
+    n_out[i] = n
+    fl_out[i] = flag
+    if int(pass) == int(passes) - 1 {
+        let tv = (1.0 - log2(max(tr, 1e-30))) * 8.0
+        if flag != 1 {
+            out[i] = if t_on == 1 { -16777216 + low24(tv) } else { -16777216 }
+        } else {
+            let nu = f64(n)
+            if mag > 1.0 {
+                nu = f64(n) + 1.0 - ln(0.5 * ln(mag)) / ln(pf)
+            }
+            let value = if t_on == 1 { low24(tv) } else { low24(nu) }
+            if d_on == 1 && dz > 0.0 && mag > 1.0 {
+                let za = sqrt(mag)
+                let dist = za * ln(za) / dz / step
+                let code = int(float(round(log2(max(dist, 1e-9)) * 20.0 + 100.0)))
+                if code < 1 {
+                    code = 1
+                }
+                if code > 254 {
+                    code = 254
+                }
+                let top = if code >= 128 { (code - 256) * 16777216 } else { code * 16777216 }
+                out[i] = top + value
+            } else {
+                out[i] = value
+            }
+        }
+    }
+}

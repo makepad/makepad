@@ -11,6 +11,7 @@
 //! | build / box                                   | accelerator |
 //! |-----------------------------------------------|-------------|
 //! | macOS / iOS                                   | Metal (`src/metal/backend.rs`, gated by `settings::USE_METAL_BACKEND`) |
+//! | Android (default), Linux with `MAKEPAD_WHISPER_BACKEND=vulkan` | Vulkan, CPU on failure |
 //! | Linux/Windows, CUDA kernels compiled, GPU present | CUDA (`src/cuda/backend.rs`) |
 //! | Linux/Windows, no CUDA toolkit at build time  | CPU |
 //! | Linux/Windows, kernels built but no device    | CPU |
@@ -26,9 +27,35 @@
 //!
 use crate::whisper::model::{DecoderLayer, EncoderLayer};
 
-/// `"metal"`, `"cuda"` or `"cpu"` — what the next `try_*` call will actually
-/// reach. Reported by the test binaries so a run can never be mislabelled.
+/// Explicit CPU selection is useful for reference runs. Defaults leave the
+/// established Metal/CUDA selection unchanged.
+fn cpu_selected() -> bool {
+    #[cfg(test)]
+    if TEST_CPU.with(|v| v.get()) { return true; }
+    std::env::var("MAKEPAD_WHISPER_BACKEND").as_deref() == Ok("cpu")
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_CPU: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn vulkan_selected() -> bool {
+    if cpu_selected() { return false; }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    return crate::whisper::vulkan_backend::is_selected();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    false
+}
+
+/// `"vulkan"`, `"metal"`, `"cuda"` or `"cpu"` — the available selected backend.
+/// Reported by the test binaries so a run can never be mislabelled.
 pub fn backend_name() -> &'static str {
+    if cpu_selected() { return "cpu"; }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if vulkan_selected() {
+        return if crate::whisper::vulkan_backend::is_available() { "vulkan" } else { "cpu" };
+    }
     if crate::whisper::metal_backend::is_requested() {
         return "metal";
     }
@@ -42,13 +69,18 @@ pub fn backend_name() -> &'static str {
 /// between shapes of the same computation (see `src/cpu/decoder.rs`), so it
 /// must not claim more than [`backend_name`] does.
 pub(crate) fn is_requested() -> bool {
-    crate::whisper::metal_backend::is_requested() || crate::whisper::cuda_backend::is_available()
+    backend_name() != "cpu"
 }
 
-/// Try Metal, then CUDA. Exactly one of the two is ever non-stub in a given
-/// build, so the ordering is documentation rather than policy.
+/// An explicitly selected Vulkan path falls back to CPU, never to a different
+/// GPU backend. The established ordering is unchanged otherwise.
 macro_rules! dispatch {
     ($name:ident ( $($arg:expr),* $(,)? )) => {{
+        if cpu_selected() { return None; }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if vulkan_selected() {
+            return crate::whisper::vulkan_backend::$name($($arg),*);
+        }
         if let Some(out) = crate::whisper::metal_backend::$name($($arg),*) {
             return Some(out);
         }
@@ -155,9 +187,36 @@ pub(crate) fn try_flash_attn_f32_packed(
 /// Not gated on [`set_enabled`]: dropping stale device-side K/V is never
 /// harmful, and skipping it while acceleration is off would leave a cache from
 /// a previous chunk alive for the next one that re-enables it.
+/// Free this thread's device-resident Whisper state (see the CUDA backend).
+pub fn release_device_state() {
+    crate::whisper::cuda_backend::release_device_state();
+}
+
 pub(crate) fn clear_decoder_kv_cache() {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    crate::whisper::vulkan_backend::clear_decoder_kv_cache();
     crate::whisper::metal_backend::clear_decoder_kv_cache();
     crate::whisper::cuda_backend::clear_decoder_kv_cache();
+}
+
+/// Larger Vulkan seams avoid intermediate host transfers while preserving the
+/// existing primitive seams for CPU fallback and alignment capture.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn try_encode(model: &crate::whisper::model::WhisperModel, mel: &[f32], frames: usize) -> Option<Vec<f32>> {
+    if !vulkan_selected() { return None; }
+    crate::whisper::vulkan_backend::try_encode(model, mel, frames)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn try_cross_kv(model: &crate::whisper::model::WhisperModel, input: &crate::whisper::tensor::Tensor) -> Option<Vec<(crate::whisper::tensor::Tensor, crate::whisper::tensor::Tensor)>> {
+    if !vulkan_selected() { return None; }
+    crate::whisper::vulkan_backend::try_cross_kv(model, input)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn try_decode(model: &crate::whisper::model::WhisperModel, tokens: &[i32], positions: &[i32], cache: &mut crate::whisper::decoder::KvCache, cross: &[(crate::whisper::tensor::Tensor, crate::whisper::tensor::Tensor)]) -> Option<Vec<f32>> {
+    if !vulkan_selected() { return None; }
+    crate::whisper::vulkan_backend::try_decode(model, tokens, positions, cache, cross)
 }
 
 #[allow(clippy::too_many_arguments)]

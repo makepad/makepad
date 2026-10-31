@@ -344,6 +344,7 @@ impl VideoEnhanceBackend {
                     // Bounce loops play BACKWARDS: every frame must decode
                     // on its own, never by forward-walking a GOP.
                     keyframe_only: true,
+                    ..Default::default()
                 },
             )
             .map_err(|e| AssetAiError::Backend(format!("enhance encode open: {e}")))?;

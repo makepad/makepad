@@ -2,10 +2,12 @@
 name = "makepad-agents"
 version = "0.1.0"
 edition = "2021"
+license = "MIT AND Unicode-3.0"
 publish = false
 
 [dependencies]
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-cell-width = { path = "../../libs/cell_width" }
 
 [[bin]]
 name = "agents"

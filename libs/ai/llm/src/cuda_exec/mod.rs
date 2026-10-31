@@ -149,6 +149,17 @@ impl CudaRawGraphSession {
 }
 
 impl CudaExecRuntime {
+    /// Graphs execute sequentially and share weights and persistent state.
+    /// All context leaves must be allocated before compiling the family.
+    pub fn create_raw_graph_sessions(
+        &self,
+        ctx: &Context,
+        graphs: &[(&crate::Graph, &[crate::TensorId])],
+    ) -> Result<Vec<CudaRawGraphSession>> {
+        Ok(self.imp.create_raw_sessions(ctx, graphs)?.into_iter()
+            .map(|imp| CudaRawGraphSession { imp }).collect())
+    }
+
     pub fn new() -> Result<Self> {
         Ok(Self {
             imp: imp::Runtime::new()?,
@@ -232,6 +243,17 @@ impl CudaExecRuntime {
         len: usize,
     ) -> Result<Vec<u8>> {
         self.imp.read_arena_bytes(&arena.imp, offset, len)
+    }
+
+    /// Write `bytes` at a logical offset of the mutable device arena (the
+    /// counterpart of `read_arena_bytes`, used to restore saved state).
+    pub fn write_arena_bytes(
+        &self,
+        arena: &CudaContextArena,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.imp.write_arena_bytes(&arena.imp, offset, bytes)
     }
 
     /// Zero logical byte ranges in the mutable device arena. Session reset

@@ -1,0 +1,497 @@
+// Vision graph kernels. All strides are in elements. Tiles use f32
+// accumulation and stay below the phone's 32 KiB shared-memory limit.
+
+// 32 output rows x 32 image patches, with a 32-wide reduction tile.
+// Each invocation accumulates a 2 x 2 register tile. Edge tiles are zero
+// padded; every invocation reaches every workgroup barrier.
+let vision_gemm = {
+    workgroup_size: 256
+    half_weights: 0
+    w: shader.buffer(f32)
+    wh: shader.buffer(f16)
+    x: shader.buffer(f32)
+    dst: shader.buffer_rw(f32)
+    k: shader.uniform(u32)
+    n: shader.uniform(u32)
+    m: shader.uniform(u32)
+    b2: shader.uniform(u32)
+    ratio2: shader.uniform(u32)
+    ratio3: shader.uniform(u32)
+    w0: shader.uniform(u32)
+    w1: shader.uniform(u32)
+    w2: shader.uniform(u32)
+    w3: shader.uniform(u32)
+    x0: shader.uniform(u32)
+    x1: shader.uniform(u32)
+    x2: shader.uniform(u32)
+    x3: shader.uniform(u32)
+    // Transposed, padded tiles keep adjacent output rows in adjacent banks.
+    wt: shader.workgroup(f32, 1056)
+    xt: shader.workgroup(f32, 1056)
+    main: fn() {
+        let lane = local_id().x
+        let row = lane % 16
+        let col = lane / 16
+        let rn = group_id().x * 32
+        let cm = group_id().y * 32
+        let batch = group_id().z
+        let i2 = batch % self.b2
+        let i3 = batch / self.b2
+        let wo = (i2 / self.ratio2) * self.w2 + (i3 / self.ratio3) * self.w3
+        let xo = i2 * self.x2 + i3 * self.x3
+        var a00 = 0.0
+        var a01 = 0.0
+        var a10 = 0.0
+        var a11 = 0.0
+        var base = u32(0)
+        while base < self.k {
+            for part in 0..4 {
+                let j = lane + part * 256
+                let r = j / 32
+                let d = j % 32
+                var av = 0.0
+                var bv = 0.0
+                if rn + r < self.n && base + d < self.k {
+                    let at = wo + (rn + r) * self.w1 + (base + d) * self.w0
+                    if self.half_weights == 1 {
+                        av = float(self.wh[at])
+                    } else {
+                        av = self.w[at]
+                    }
+                }
+                if cm + r < self.m && base + d < self.k {
+                    bv = self.x[xo + (cm + r) * self.x1 + (base + d) * self.x0]
+                }
+                self.wt[d * 33 + r] = av
+                self.xt[d * 33 + r] = bv
+            }
+            barrier()
+            for d in 0..32 {
+                let a0 = self.wt[d * 33 + row]
+                let a1 = self.wt[d * 33 + row + 16]
+                let b0 = self.xt[d * 33 + col]
+                let b1 = self.xt[d * 33 + col + 16]
+                a00 += a0 * b0
+                a01 += a0 * b1
+                a10 += a1 * b0
+                a11 += a1 * b1
+            }
+            barrier()
+            base += 32
+        }
+        let dest = batch * self.m * self.n
+        if rn + row < self.n {
+            if cm + col < self.m {
+                self.dst[dest + (cm + col) * self.n + rn + row] = a00
+            }
+            if cm + col + 16 < self.m {
+                self.dst[dest + (cm + col + 16) * self.n + rn + row] = a01
+            }
+        }
+        if rn + row + 16 < self.n {
+            if cm + col < self.m {
+                self.dst[dest + (cm + col) * self.n + rn + row + 16] = a10
+            }
+            if cm + col + 16 < self.m {
+                self.dst[dest + (cm + col + 16) * self.n + rn + row + 16] = a11
+            }
+        }
+    }
+}
+
+{
+    vision_gemm_f32: vision_gemm{}
+    vision_gemm_f16: vision_gemm{half_weights: 1}
+
+    vision_layer_norm: {
+        workgroup_size: 256
+        x: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        ne0: shader.uniform(u32)
+        ne1: shader.uniform(u32)
+        ne2: shader.uniform(u32)
+        rows: shader.uniform(u32)
+        groups_x: shader.uniform(u32)
+        x0: shader.uniform(u32)
+        x1: shader.uniform(u32)
+        x2: shader.uniform(u32)
+        x3: shader.uniform(u32)
+        eps: shader.uniform(f32)
+        sums: shader.workgroup(f32, 256)
+        squares: shader.workgroup(f32, 256)
+        main: fn() {
+            let row = group_id().x + group_id().y * self.groups_x
+            if row >= self.rows { return }
+            let lane = local_id().x
+            let at = (row % self.ne1) * self.x1 + ((row / self.ne1) % self.ne2) * self.x2 + (row / (self.ne1 * self.ne2)) * self.x3
+            var sum = 0.0
+            var sqr = 0.0
+            var c = lane
+            while c < self.ne0 {
+                let v = self.x[at + c * self.x0]
+                sum += v
+                sqr += v * v
+                c += 256
+            }
+            self.sums[lane] = sum
+            self.squares[lane] = sqr
+            barrier()
+            var off = u32(128)
+            while off > 0 {
+                if lane < off {
+                    self.sums[lane] += self.sums[lane + off]
+                    self.squares[lane] += self.squares[lane + off]
+                }
+                barrier()
+                off = off / 2
+            }
+            let mean = self.sums[0] / float(self.ne0)
+            let variance = self.squares[0] / float(self.ne0) - mean * mean
+            let inv = inverseSqrt(variance + self.eps)
+            c = lane
+            while c < self.ne0 {
+                self.dst[row * self.ne0 + c] = (self.x[at + c * self.x0] - mean) * inv
+                c += 256
+            }
+        }
+    }
+
+    vision_softmax: {
+        workgroup_size: 256
+        x: shader.buffer(f32)
+        mask: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        ne0: shader.uniform(u32)
+        ne1: shader.uniform(u32)
+        ne2: shader.uniform(u32)
+        rows: shader.uniform(u32)
+        groups_x: shader.uniform(u32)
+        x1: shader.uniform(u32)
+        x2: shader.uniform(u32)
+        x3: shader.uniform(u32)
+        has_mask: shader.uniform(u32)
+        mask_rows: shader.uniform(u32)
+        mask_stride: shader.uniform(u32)
+        scale: shader.uniform(f32)
+        red: shader.workgroup(f32, 256)
+        value: fn(at, row, c) {
+            var v = self.x[at + c] * self.scale
+            if self.has_mask == 1 {
+                v += self.mask[(row % self.ne1 % self.mask_rows) * self.mask_stride + c]
+            }
+            return v
+        }
+        main: fn() {
+            let row = group_id().x + group_id().y * self.groups_x
+            if row >= self.rows { return }
+            let lane = local_id().x
+            let at = (row % self.ne1) * self.x1 + ((row / self.ne1) % self.ne2) * self.x2 + (row / (self.ne1 * self.ne2)) * self.x3
+            var largest = -3.402823466e38
+            var c = lane
+            while c < self.ne0 {
+                largest = max(largest, self.value(at, row, c))
+                c += 256
+            }
+            self.red[lane] = largest
+            barrier()
+            var off = u32(128)
+            while off > 0 {
+                if lane < off { self.red[lane] = max(self.red[lane], self.red[lane + off]) }
+                barrier()
+                off = off / 2
+            }
+            largest = self.red[0]
+            barrier()
+            var sum = 0.0
+            c = lane
+            while c < self.ne0 {
+                let p = exp(self.value(at, row, c) - largest)
+                self.dst[row * self.ne0 + c] = p
+                sum += p
+                c += 256
+            }
+            self.red[lane] = sum
+            barrier()
+            off = 128
+            while off > 0 {
+                if lane < off { self.red[lane] += self.red[lane + off] }
+                barrier()
+                off = off / 2
+            }
+            var inv = 0.0
+            if self.red[0] > 0.0 { inv = 1.0 / self.red[0] }
+            c = lane
+            while c < self.ne0 {
+                self.dst[row * self.ne0 + c] *= inv
+                c += 256
+            }
+        }
+    }
+
+    vision_rope: {
+        workgroup_size: 64
+        src: shader.buffer(f32)
+        pos: shader.buffer(i32)
+        dst: shader.buffer_rw(f32)
+        ne0: shader.uniform(u32)
+        ne1: shader.uniform(u32)
+        ne2: shader.uniform(u32)
+        n_dims: shader.uniform(u32)
+        sect0: shader.uniform(u32)
+        sect1: shader.uniform(u32)
+        freq_base: shader.uniform(f32)
+        freq_scale: shader.uniform(f32)
+        ext_factor: shader.uniform(f32)
+        attn_factor: shader.uniform(f32)
+        corr0: shader.uniform(f32)
+        corr1: shader.uniform(f32)
+        s0: shader.uniform(u32)
+        s1: shader.uniform(u32)
+        s2: shader.uniform(u32)
+        s3: shader.uniform(u32)
+        main: fn() {
+            let head = group_id().x
+            let token = group_id().y
+            let batch = group_id().z
+            let so = head * self.s1 + token * self.s2 + batch * self.s3
+            let dout = ((batch * self.ne2 + token) * self.ne1 + head) * self.ne0
+            var i0 = 2 * local_id().x
+            while i0 < self.ne0 {
+                if i0 < 2 * self.n_dims {
+                    let ic = i0 / 2
+                    let sector = ic % (self.sect0 + self.sect1)
+                    var p = float(sector)
+                    var position = float(self.pos[token])
+                    if sector >= self.sect1 {
+                        p = float(sector) - float(self.sect0)
+                        position = float(self.pos[token + self.ne2])
+                    }
+                    let extrap = position * pow(self.freq_base, -2.0 * p / float(self.n_dims))
+                    var theta = self.freq_scale * extrap
+                    var magnitude = self.attn_factor
+                    if self.ext_factor != 0.0 {
+                        let ramp = (1.0 - clamp((float(ic) - self.corr0) / max(0.001, self.corr1 - self.corr0), 0.0, 1.0)) * self.ext_factor
+                        theta = theta * (1.0 - ramp) + extrap * ramp
+                        magnitude *= 1.0 + 0.1 * log(1.0 / self.freq_scale)
+                    }
+                    let ct = cos(theta) * magnitude
+                    let st = sin(theta) * magnitude
+                    let x0 = self.src[so + ic * self.s0]
+                    let x1 = self.src[so + (ic + self.n_dims) * self.s0]
+                    self.dst[dout + ic] = x0 * ct - x1 * st
+                    self.dst[dout + ic + self.n_dims] = x0 * st + x1 * ct
+                } else {
+                    self.dst[dout + i0] = self.src[so + i0 * self.s0]
+                    self.dst[dout + i0 + 1] = self.src[so + (i0 + 1) * self.s0]
+                }
+                i0 += 128
+            }
+        }
+    }
+
+    vision_upscale: {
+        workgroup_size: 256
+        src: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        n: shader.uniform(u32)
+        groups_x: shader.uniform(u32)
+        sw: shader.uniform(u32)
+        sh: shader.uniform(u32)
+        dw: shader.uniform(u32)
+        dh: shader.uniform(u32)
+        dc: shader.uniform(u32)
+        s0: shader.uniform(u32)
+        s1: shader.uniform(u32)
+        s2: shader.uniform(u32)
+        s3: shader.uniform(u32)
+        sfx: shader.uniform(f32)
+        sfy: shader.uniform(f32)
+        sf2: shader.uniform(f32)
+        sf3: shader.uniform(f32)
+        poffs: shader.uniform(f32)
+        aa: shader.uniform(u32)
+        main: fn() {
+            let idx = (group_id().x + group_id().y * self.groups_x) * 256 + local_id().x
+            if idx >= self.n { return }
+            let dx = idx % self.dw
+            let dy = (idx / self.dw) % self.dh
+            let chan = (idx / (self.dw * self.dh)) % self.dc
+            let batch = idx / (self.dw * self.dh * self.dc)
+            let base = u32(float(chan) / self.sf2) * self.s2 + u32(float(batch) / self.sf3) * self.s3
+            let fx = (float(dx) + self.poffs) / self.sfx - self.poffs
+            let fy = (float(dy) + self.poffs) / self.sfy - self.poffs
+            var value = 0.0
+            if self.aa == 1 {
+                let sx = max(1.0, 1.0 / self.sfx)
+                let sy = max(1.0, 1.0 / self.sfy)
+                let xlo = i32(max(0.0, floor(fx - sx + self.poffs)))
+                let xhi = i32(min(float(self.sw), ceil(fx + sx + self.poffs)))
+                let ylo = i32(max(0.0, floor(fy - sy + self.poffs)))
+                let yhi = i32(min(float(self.sh), ceil(fy + sy + self.poffs)))
+                var weight = 0.0
+                for y in ylo..yhi {
+                    let wy = max(0.0, 1.0 - abs(float(y) - fy) / sy)
+                    for x in xlo..xhi {
+                        let wx = max(0.0, 1.0 - abs(float(x) - fx) / sx)
+                        let w = wx * wy
+                        value += self.src[base + u32(y) * self.s1 + u32(x) * self.s0] * w
+                        weight += w
+                    }
+                }
+                if weight > 0.0 { value = value / weight }
+            } else {
+                let x0 = u32(clamp(floor(fx), 0.0, float(self.sw - 1)))
+                let y0 = u32(clamp(floor(fy), 0.0, float(self.sh - 1)))
+                let x1 = min(x0 + 1, self.sw - 1)
+                let y1 = min(y0 + 1, self.sh - 1)
+                let ax = clamp(fx - float(x0), 0.0, 1.0)
+                let ay = clamp(fy - float(y0), 0.0, 1.0)
+                value = self.src[base + y0 * self.s1 + x0 * self.s0] * (1.0 - ax) * (1.0 - ay)
+                    + self.src[base + y0 * self.s1 + x1 * self.s0] * ax * (1.0 - ay)
+                    + self.src[base + y1 * self.s1 + x0 * self.s0] * (1.0 - ax) * ay
+                    + self.src[base + y1 * self.s1 + x1 * self.s0] * ax * ay
+            }
+            self.dst[idx] = value
+        }
+    }
+
+    // Eight queries x 32 keys, online softmax, no quadratic score buffer.
+    // QK and PV both consume shared tiles. Head dimensions are traversed
+    // in 32-wide panels; output panels over 128 use additional workgroups.
+    // This uses about 7 KiB shared memory regardless of sequence/head length and
+    // does not depend on subgroup width (32 on desktop, up to 128 on phone).
+    vision_flash_f32: {
+        workgroup_size: 256
+        q: shader.buffer(f32)
+        k: shader.buffer(f32)
+        v: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        d: shader.uniform(u32)
+        dv: shader.uniform(u32)
+        nq: shader.uniform(u32)
+        nk: shader.uniform(u32)
+        h: shader.uniform(u32)
+        hkv: shader.uniform(u32)
+        panels: shader.uniform(u32)
+        q1: shader.uniform(u32)
+        q2: shader.uniform(u32)
+        q3: shader.uniform(u32)
+        k1: shader.uniform(u32)
+        k2: shader.uniform(u32)
+        k3: shader.uniform(u32)
+        v1: shader.uniform(u32)
+        v2: shader.uniform(u32)
+        v3: shader.uniform(u32)
+        scale: shader.uniform(f32)
+        qt: shader.workgroup(f32, 264)
+        kv: shader.workgroup(f32, 1056)
+        prob: shader.workgroup(f32, 264)
+        red: shader.workgroup(f32, 256)
+        maxima: shader.workgroup(f32, 8)
+        sums: shader.workgroup(f32, 8)
+        main: fn() {
+            let lane = local_id().x
+            let qr = lane / 32
+            let lc = lane % 32
+            let query = group_id().x * 8 + qr
+            let head = group_id().y
+            let kvhead = head / (self.h / self.hkv)
+            let batch = group_id().z / self.panels
+            let panel = group_id().z % self.panels
+            let parts = min(u32(4), (self.dv - panel * 128 + 31) / 32)
+            let qo = batch * self.q3 + head * self.q2
+            let ko = batch * self.k3 + kvhead * self.k2
+            let vo = batch * self.v3 + kvhead * self.v2
+            var acc = array(0.0, 0.0, 0.0, 0.0)
+            if lane < 8 {
+                self.maxima[lane] = -3.402823466e38
+                self.sums[lane] = 0.0
+            }
+            barrier()
+            var kb = u32(0)
+            while kb < self.nk {
+                var score = 0.0
+                var db = u32(0)
+                while db < self.d {
+                    var qval = 0.0
+                    if query < self.nq && db + lc < self.d {
+                        qval = self.q[qo + query * self.q1 + db + lc]
+                    }
+                    self.qt[qr * 33 + lc] = qval
+                    for part in 0..4 {
+                        let j = lane + part * 256
+                        let key = kb + j / 32
+                        let dim = db + j % 32
+                        var kval = 0.0
+                        if key < self.nk && dim < self.d {
+                            kval = self.k[ko + key * self.k1 + dim]
+                        }
+                        self.kv[(j / 32) * 33 + j % 32] = kval
+                    }
+                    barrier()
+                    for dim in 0..32 {
+                        score += self.qt[qr * 33 + dim] * self.kv[lc * 33 + dim]
+                    }
+                    barrier()
+                    db += 32
+                }
+                score *= self.scale
+                if kb + lc >= self.nk { score = -3.402823466e38 }
+                self.red[lane] = score
+                barrier()
+                var off = u32(16)
+                while off > 0 {
+                    if lc < off { self.red[lane] = max(self.red[lane], self.red[lane + off]) }
+                    barrier()
+                    off = off / 2
+                }
+                let largest = max(self.maxima[qr], self.red[qr * 32])
+                let alpha = exp(self.maxima[qr] - largest)
+                var p = 0.0
+                if kb + lc < self.nk { p = exp(score - largest) }
+                barrier()
+                self.prob[qr * 33 + lc] = p
+                self.red[lane] = p
+                barrier()
+                off = 16
+                while off > 0 {
+                    if lc < off { self.red[lane] += self.red[lane + off] }
+                    barrier()
+                    off = off / 2
+                }
+                if lc == 0 {
+                    self.sums[qr] = self.sums[qr] * alpha + self.red[qr * 32]
+                    self.maxima[qr] = largest
+                }
+                for part in 0..parts {
+                    for load_part in 0..4 {
+                        let j = lane + load_part * 256
+                        let key = kb + j / 32
+                        let dim = panel * 128 + part * 32 + j % 32
+                        var val = 0.0
+                        if key < self.nk && dim < self.dv {
+                            val = self.v[vo + key * self.v1 + dim]
+                        }
+                        self.kv[(j / 32) * 33 + j % 32] = val
+                    }
+                    barrier()
+                    var pv = 0.0
+                    for key in 0..32 {
+                        pv += self.prob[qr * 33 + key] * self.kv[key * 33 + lc]
+                    }
+                    acc[part] = alpha * acc[part] + pv
+                    barrier()
+                }
+                kb += 32
+            }
+            if query < self.nq {
+                for part in 0..parts {
+                    let dim = panel * 128 + part * 32 + lc
+                    if dim < self.dv {
+                        self.dst[((batch * self.nq + query) * self.h + head) * self.dv + dim] = acc[part] / self.sums[qr]
+                    }
+                }
+            }
+        }
+    }
+}

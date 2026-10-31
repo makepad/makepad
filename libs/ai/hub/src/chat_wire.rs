@@ -77,6 +77,11 @@ pub fn sanitize_public_error(message: &str) -> String {
 pub enum ProviderKind {
     /// Fleet or local Qwen chat backbone (Qwen3.8 when honestly ready).
     FleetQwen,
+    /// The Claude a fleet hub serves (`claude-cli` on a hub machine, its
+    /// owner's Claude Code login, tool-less): reached over the fleet like
+    /// [`ProviderKind::FleetQwen`], but the model runs at Anthropic, so it
+    /// is [`Locality::Cloud`].
+    FleetClaude,
     /// OpenAI Responses API (`gpt-5.6` by default).
     OpenAi,
     /// xAI Grok Responses API (`grok-4.5` by default).
@@ -114,8 +119,9 @@ impl Locality {
 impl ProviderKind {
     /// Every kind the broker can be asked for, in the order the providers
     /// route lists them.
-    pub const ALL: [ProviderKind; 6] = [
+    pub const ALL: [ProviderKind; 7] = [
         ProviderKind::FleetQwen,
+        ProviderKind::FleetClaude,
         ProviderKind::OpenAi,
         ProviderKind::Grok,
         ProviderKind::ClaudeCli,
@@ -126,6 +132,7 @@ impl ProviderKind {
     pub fn slug(&self) -> &'static str {
         match self {
             ProviderKind::FleetQwen => "fleet-qwen",
+            ProviderKind::FleetClaude => "fleet-claude",
             ProviderKind::OpenAi => "openai",
             ProviderKind::Grok => "grok",
             ProviderKind::ClaudeCli => "claude-cli",
@@ -137,6 +144,7 @@ impl ProviderKind {
     pub fn from_slug(s: &str) -> Option<ProviderKind> {
         match s {
             "fleet-qwen" => Some(ProviderKind::FleetQwen),
+            "fleet-claude" => Some(ProviderKind::FleetClaude),
             "openai" => Some(ProviderKind::OpenAi),
             "grok" => Some(ProviderKind::Grok),
             "claude-cli" => Some(ProviderKind::ClaudeCli),

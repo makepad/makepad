@@ -369,6 +369,8 @@ pub struct ExpandJob {
     /// Empty = legacy client; the lane identity then falls back to `kind`,
     /// which serializes every conversation onto one lane identity.
     pub session: String,
+    /// Pictures the prompt's image markers name (chat turns only).
+    pub images: Vec<crate::backend::ChatImage>,
 }
 
 /// The full Qwen ChatML prompt for one expansion. `think_prefill` is the
@@ -556,10 +558,24 @@ fn expand_through(
         .map_err(|e| {
             if e == "cancelled" {
                 AssetAiError::Cancelled
+            } else if e.starts_with(llama_worker::TOO_LONG)
+                || e.contains("session context overflow")
+            {
+                // The session refuses a token past its context before it
+                // writes it; the next job resets it. A request error.
+                AssetAiError::Params(e)
             } else {
                 AssetAiError::Backend(format!("llm: {e}"))
             }
         })
+}
+
+/// Drops the chat session and waits until its device memory is free.
+#[cfg(feature = "llm")]
+fn close_worker(worker: &mut Option<llama_worker::LlamaWorker>) {
+    if let Some(w) = worker.take() {
+        w.close();
+    }
 }
 
 impl ContentBackend for LlmBackend {
@@ -573,33 +589,77 @@ impl ContentBackend for LlmBackend {
             Generator::Stub(_) => Ok(()),
             #[cfg(feature = "llm")]
             Generator::Llama(worker) => {
-                let paths = ctx.ensure_files()?;
-                let gguf = paths
-                    .iter()
-                    .find(|p| p.extension().map_or(false, |e| e == "gguf"))
-                    .cloned()
-                    .ok_or_else(|| {
-                        AssetAiError::Backend(format!(
-                            "model {}: registry lists no .gguf file",
-                            self.model_id
-                        ))
-                    })?;
-                if worker.is_none() || self.gguf_path.as_deref() != Some(gguf.as_path()) {
+                ctx.ensure_files()?;
+                let gguf = ctx.path_by_role("llm-gguf")?;
+                // The model's own vision tower, when the registry pairs one
+                // with it: chat turns may then carry pictures.
+                let mmproj = match ctx.spec.file_by_role("mmproj") {
+                    Some(_) => Some(ctx.path_by_role("mmproj")?),
+                    None => None,
+                };
+                // A new window (POST /llm/context, or a GPU-budget ceiling) or
+                // a new KV precision: rebuild the session. Any job in flight
+                // has finished, ensure_loaded runs between jobs.
+                let wanted = llama_worker::llm_context_wanted();
+                let kv_wanted = crate::llm_context::kv_wanted();
+                if worker.is_some() && crate::llm_context::loaded().is_some_and(|c| c != wanted) {
+                    (ctx.progress)(&format!("context {} -> {wanted}: rebuilding the session", crate::llm_context::loaded().unwrap_or(0)), 0.05);
+                    close_worker(worker);
+                }
+                if worker.is_some() && crate::llm_context::kv_loaded().is_some_and(|k| k != kv_wanted) {
+                    (ctx.progress)(&format!("kv {} -> {}: rebuilding the session", crate::llm_context::kv_loaded().map_or("?", |k| k.slug()), kv_wanted.slug()), 0.05);
+                    close_worker(worker);
+                }
+                if worker.is_some() && self.gguf_path.as_deref() != Some(gguf.as_path()) {
+                    close_worker(worker);
+                }
+                if worker.is_none() {
+                    // UI first: the window is what fits next to the UI's
+                    // reserve, from this model's own accounting at its last
+                    // load; a model that would not leave the reserve free is
+                    // not loaded at all.
+                    let free_before = crate::residency::fresh_free_mb();
+                    let reserve = crate::gpu_yield::ui_reserve_mb();
+                    let known = crate::gpu_yield::llm_memory_of(&self.model_id)
+                        .filter(|m| m.kv == kv_wanted.slug());
+                    if let (Some(free), Some(memory), true) = (free_before, known.as_ref(), reserve > 0) {
+                        let fit = crate::gpu_yield::fit_context(memory, free, reserve, llama_worker::configured_context(), crate::llm_context::MIN_CONTEXT)
+                            .map_err(AssetAiError::Unavailable)?;
+                        crate::gpu_yield::settle_ceiling(fit, llama_worker::configured_context());
+                    }
+                    let wanted = llama_worker::llm_context_wanted();
                     let gb = std::fs::metadata(&gguf)
                         .map(|m| m.len() as f64 / 1e9)
                         .unwrap_or(0.0);
-                    (ctx.progress)(&format!("load llm gguf ({gb:.1}GB)"), 0.1);
+                    (ctx.progress)(&format!("load llm gguf ({gb:.1}GB, context {wanted})"), 0.1);
                     // Loads weights on the worker thread; blocks until the
                     // session reports in so load errors surface here.
-                    *worker = Some(
-                        llama_worker::LlamaWorker::spawn(
-                            gguf.clone(),
-                            self.model_id.clone(),
-                            ctx.progress,
-                        )
-                            .map_err(|e| AssetAiError::Backend(format!("llm load: {e}")))?,
-                    );
+                    let spawned = llama_worker::LlamaWorker::spawn(
+                        gguf.clone(),
+                        mmproj,
+                        self.model_id.clone(),
+                        ctx.progress,
+                    )
+                    .map_err(|e| AssetAiError::Backend(format!("llm load: {e}")))?;
+                    if let Some(m) = spawned.memory() {
+                        let mb = |b: usize| (b as u64).div_ceil(1 << 20);
+                        let after = crate::residency::fresh_free_mb();
+                        crate::gpu_yield::note_llm_memory(crate::gpu_yield::LlmMemory {
+                            model: self.model_id.clone(),
+                            context: wanted,
+                            kv: kv_wanted.slug().to_string(),
+                            weights_mb: mb(m.weights),
+                            kv_mb: mb(m.attention_kv),
+                            kv_bytes_per_token: m.attention_kv_per_token as u64,
+                            state_mb: mb(m.state),
+                            activations_mb: mb(m.activations),
+                            load_cost_mb: free_before.zip(after).map(|(b, a)| b.saturating_sub(a)),
+                        });
+                    }
+                    *worker = Some(spawned);
                     self.gguf_path = Some(gguf);
+                    crate::llm_context::set_loaded(wanted);
+                    crate::llm_context::set_kv_loaded(Some(kv_wanted));
                     (ctx.progress)("llm session ready", 0.9);
                 }
                 Ok(())
@@ -619,10 +679,13 @@ impl ContentBackend for LlmBackend {
         match &mut self.generator {
             #[cfg(feature = "llm")]
             Generator::Llama(worker) => {
-                // Dropping the worker closes the session thread; weights
-                // unmap there. Next ensure_loaded respawns.
-                *worker = None;
+                // Closing the worker ends the session thread; weights unmap
+                // there, and this returns once they have. Next ensure_loaded
+                // respawns.
+                close_worker(worker);
                 self.gguf_path = None;
+                crate::llm_context::set_loaded(0);
+                crate::llm_context::set_kv_loaded(None);
             }
             _ => {}
         }
@@ -801,7 +864,7 @@ fn llm_generate_streamed(
             // every token reasoning and then fail the identity-anchor check.
             crate::protocol::assemble_chat_prompt_with_think(
                 &system,
-                &[crate::protocol::ChatMessageJson {
+                &[crate::protocol::ChatMessageJson { images: None,
                     role: "user".to_string(),
                     text: user,
                 }],
@@ -864,6 +927,7 @@ fn llm_generate_streamed(
                     format!("expand:{}", params.target_domain)
                 },
                 session: params.chat_session.clone(),
+                images: if is_chat { params.chat_images.clone() } else { Vec::new() },
             };
             let sink = std::cell::RefCell::new(&mut *progress);
             let mut on_token = |k: u32, max: u32| {
@@ -944,6 +1008,10 @@ fn llm_generate_streamed(
 /// `None` when unset, so the caller keeps its own default rather than this
 /// function inventing one.
 pub fn configured_context_per_lane() -> Option<u32> {
+    // The runtime setting (POST /llm/context) outranks the environment.
+    if let Some(context) = crate::llm_context::requested() {
+        return Some(context);
+    }
     std::env::var("MAKEPAD_ASSET_AI_LLM_CONTEXT")
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
@@ -1080,7 +1148,7 @@ mod penalty_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Stall watchdog: no turn holds a lane or a queue slot without moving
+// Stall reporting: silence is visible and only the client cancels
 // ---------------------------------------------------------------------------
 
 /// What a turn is waiting on.
@@ -1115,30 +1183,15 @@ impl TurnPhase {
     }
 }
 
-/// How long a turn may make no progress at all before the watchdog takes its
-/// lane back, in seconds. `MAKEPAD_ASSET_AI_LLM_STALL_SECS` overrides it and
-/// 0 turns the watchdog off.
-///
-/// 300 s, derived from the two prefill rates this box has actually been
-/// measured at rather than from a feeling about how long is too long.
-///
-/// The finest progress signal a turn has is one prefill CHUNK — 512 tokens,
-/// which is 1.13 s at the 454 tok/s the live box ingested a 34,074-token cold
-/// prompt at (the 75-second turn that was escalated as a wedge and was not
-/// one), and 2.77 s at 185 tok/s, the slowest prefill rate the box has ever
-/// been measured at. A healthy turn is therefore never quiet for more than
-/// about three seconds.
-///
-/// The budget is not three seconds, because the signal is not always that
-/// fine. A turn the worker could not attribute to a lane says nothing at all
-/// until its whole prompt is in, and a full 131,072-token lane at that same
-/// 454 tok/s is 289 s of entirely legitimate silence. 300 s clears that worst
-/// case, clears the incident four times over, and is still short enough that
-/// an operator gets an answer instead of a frozen row.
+/// Seconds without real prefill/decode activity before reporting "not responding".
+/// This is a detector, never a cancellation budget. The client can Stop the turn.
+/// `MAKEPAD_ASSET_AI_LLM_STALL_SECS=0` disables the detector. The generous
+/// five-minute default allows slow batches; every completed batch renews it,
+/// including prefill whose lane cannot be attributed to an individual turn.
 #[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) const DEFAULT_STALL_SECS: u64 = 300;
 
-/// The watchdog's budget, in one place so the decision and the log agree.
+/// The silence threshold, shared by the receiver and its clock tests.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) struct StallPolicy {
@@ -1164,6 +1217,7 @@ impl StallPolicy {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn budget(&self) -> std::time::Duration {
         self.budget
     }
@@ -1204,10 +1258,56 @@ pub(crate) fn stall_verdict(
     (idle >= policy.budget).then_some(Stalled { phase, idle })
 }
 
+#[cfg(any(feature = "llm", test))]
+struct TurnActivity {
+    phase: TurnPhase,
+    last_progress: std::time::Instant,
+    not_responding: bool,
+}
+
+#[cfg(any(feature = "llm", test))]
+impl TurnActivity {
+    fn new(now: std::time::Instant) -> Self {
+        Self { phase: TurnPhase::Waiting, last_progress: now, not_responding: false }
+    }
+
+    fn progress(&mut self, now: std::time::Instant) -> bool {
+        self.last_progress = now;
+        std::mem::replace(&mut self.not_responding, false)
+    }
+
+    fn poll(&mut self, now: std::time::Instant, policy: &StallPolicy) -> Option<Stalled> {
+        if self.not_responding { return None; }
+        let verdict = stall_verdict(self.phase, self.last_progress, now, policy)?;
+        self.not_responding = true;
+        Some(verdict)
+    }
+}
+
 #[cfg(test)]
 mod stall_tests {
     use super::{stall_verdict, StallPolicy, TurnPhase, DEFAULT_STALL_SECS};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn chunks_renew_attributed_and_unattributed_turns_without_a_total_cap() {
+        let policy = StallPolicy::seconds(30);
+        let start = Instant::now();
+        for phase in [TurnPhase::Waiting, TurnPhase::Prefill, TurnPhase::Decode] {
+            let mut clock = super::TurnActivity::new(start);
+            clock.phase = phase;
+            for secs in (20..10_000).step_by(20) {
+                let now = start + Duration::from_secs(secs);
+                assert!(!clock.progress(now));
+                assert!(clock.poll(now + Duration::from_secs(19), &policy).is_none());
+            }
+            let silent = start + Duration::from_secs(20_000);
+            assert_eq!(clock.poll(silent, &policy).unwrap().phase, phase);
+            assert!(clock.poll(silent + Duration::from_secs(100), &policy).is_none());
+            assert!(clock.progress(silent + Duration::from_secs(101)));
+            assert!(clock.poll(silent + Duration::from_secs(120), &policy).is_none());
+        }
+    }
 
     /// The incident this watchdog was written after: a 34,074-token cold
     /// prefill that held its lane for 75 seconds, finished normally, and was
@@ -1348,7 +1448,17 @@ mod llama_worker {
     /// A player feels this as the wait before the FIRST token of a fresh
     /// conversation: a 7,900-token taught context is 10 s at 786 tok/s and
     /// 2.2 s at 3575.
-    const PREFILL_BATCH: usize = 512;
+    const PREFILL_BATCH_DEFAULT: usize = 512;
+
+    /// Tokens per prefill chunk; `MAKEPAD_ASSET_AI_LLM_PREFILL` lowers it on a
+    /// card too small for the default's compute buffers.
+    fn prefill_batch() -> usize {
+        std::env::var("MAKEPAD_ASSET_AI_LLM_PREFILL")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n >= 64)
+            .unwrap_or(PREFILL_BATCH_DEFAULT)
+    }
 
     /// Concurrent decode lanes. 1 keeps the single-lane worker, which is the
     /// path every existing deployment runs; >1 selects the batched worker.
@@ -1370,10 +1480,31 @@ mod llama_worker {
     /// same number that fits comfortably on a 96 GB card is an
     /// out-of-memory-at-load on a 32 GB one, and a hardcoded const has to be
     /// wrong for one of them.
+    /// The per-conversation window a session built now gets.
+    pub(super) fn llm_context_wanted() -> u32 {
+        context_per_lane()
+    }
+
+    /// The attention KV-cache type a session built now gets
+    /// (`crate::llm_context::kv_wanted`: runtime setting, env, default q8).
+    fn kv_cache_type() -> makepad_ai_llm::TensorType {
+        match crate::llm_context::kv_wanted() {
+            crate::llm_context::KvPrecision::Q8 => makepad_ai_llm::TensorType::Q8_0,
+            crate::llm_context::KvPrecision::F16 => makepad_ai_llm::TensorType::F16,
+        }
+    }
+
+    /// What is configured, under the ceiling the GPU budget set
+    /// (`crate::gpu_yield`: a yield to the UI, or the room at load).
     fn context_per_lane() -> u32 {
-        super::configured_context_per_lane().unwrap_or_else(|| {
+        crate::gpu_yield::capped_context(super::configured_context_per_lane().unwrap_or_else(|| {
             context_for_lanes(MAX_CONTEXT, lane_count())
-        })
+        }))
+    }
+
+    /// The window configured, before any GPU-budget ceiling.
+    pub(super) fn configured_context() -> u32 {
+        super::configured_context_per_lane().unwrap_or_else(|| context_for_lanes(MAX_CONTEXT, lane_count()))
     }
 
     /// Split a total context budget across lanes.
@@ -1447,11 +1578,10 @@ mod llama_worker {
         model_id: String,
         rx: mpsc::Receiver<WorkerMsg>,
     ) {
-        use super::{StallPolicy, TurnPhase};
+        use super::TurnPhase;
         use makepad_ai_llm::{
             LaneEvent, LaneExecutor, LaneOutcome, LaneRequest, LaneScheduler, SlotPhase,
         };
-        use std::time::Instant;
 
         struct JobLane {
             events: mpsc::Sender<WorkerEvent>,
@@ -1473,9 +1603,8 @@ mod llama_worker {
             /// lights up is that request's. When a backlog makes that
             /// ambiguous this stays `None`, the turn reports its phase without
             /// a token count, and the watchdog judges it on the box's clock —
-            /// an honest gap rather than a guessed lane, because the watchdog
-            /// CANCELS what it judges and cancelling a stranger's turn is
-            /// worse than any stall.
+            /// an honest gap rather than a guessed lane. Box activity is
+            /// forwarded to the waiting receiver even without attribution.
             lane: Option<usize>,
             phase: TurnPhase,
             /// Tokens of this turn's prompt already ingested, as last seen.
@@ -1484,8 +1613,6 @@ mod llama_worker {
             /// the job-store mutex and wakes everything waiting on it, so a
             /// number that has not changed must not be republished.
             stage: String,
-            /// When this turn last moved. What the watchdog measures.
-            last_progress: Instant,
             /// How the lane's prompt was ingested: (tokens, resumed). The
             /// scheduler's verdict, not a guess — this is what tells a client
             /// its conversation stayed warm.
@@ -1517,7 +1644,7 @@ mod llama_worker {
             .unwrap_or(8);
         // The scheduler chunks prefill with the same batch the session uses,
         // so the two cannot drift into a graph neither of them sized for.
-        let scheduler = LaneScheduler::new(table, queue_max).with_prefill_chunk(PREFILL_BATCH);
+        let scheduler = LaneScheduler::new(table, queue_max).with_prefill_chunk(prefill_batch());
         let advert_model = model_id.clone();
         let mut exec = LaneExecutor::new(session, scheduler, LlamaSamplingParams::default())
             .on_counts(move |counts| {
@@ -1534,15 +1661,6 @@ mod llama_worker {
         // samples the same way and a mid-session env change cannot make two
         // conversations disagree about what the model is.
         let (presence_penalty, frequency_penalty, penalty_last_n) = super::sampling_penalties();
-        let stall = StallPolicy::from_env();
-        // The box's own clock, for turns that have no lane of their own to be
-        // judged on. It is fed by ANY movement anywhere — a chunk ingested on
-        // any lane, a token produced on any lane, a lane retiring — because
-        // that is exactly what a queued turn is waiting for. If this stops,
-        // nothing on the box is moving and everything in flight is stuck
-        // together, which is when a queued turn deserves an answer instead of
-        // a wait that will never end.
-        let mut box_progress = Instant::now();
         // Per-slot ingest position at the last boundary. The one signal that
         // separates a prefill that is working from one that has stopped, and
         // the scheduler emits no event for it.
@@ -1579,14 +1697,9 @@ mod llama_worker {
         };
         eprintln!(
             "[llm-worker] batched worker: {lanes} lanes x {} tok, queue {queue_max}, \
-             speculation depth {}, {geometry}, stall watchdog {}",
+             speculation depth {}, {geometry}",
             context_per_lane(),
             exec.session().speculation_depth(),
-            if stall.is_off() {
-                "OFF".to_string()
-            } else {
-                format!("{}s", stall.budget().as_secs())
-            },
         );
         // The batched ladder this box will actually run, priced on its own
         // card. Printed once so the log proves which calibration the allocator
@@ -1631,14 +1744,15 @@ mod llama_worker {
                 let Some(WorkerMsg::Expand(job, cancel, events)) = msg else {
                     break;
                 };
+                if !job.images.is_empty() {
+                    let _ = events.send(WorkerEvent::Done(Err(
+                        "pictures in chat need the single-lane worker on this node \
+                         (MAKEPAD_ASSET_AI_LLM_LANES=1)"
+                            .to_string(),
+                    )));
+                    continue;
+                }
                 arrivals.push((job, cancel, events));
-            }
-            // An idle box has no clock to run. The loop blocks in `recv` while
-            // nothing is in flight, so without this the mark would still say
-            // "last movement" from before a quiet night and the first turn of
-            // the morning would read as stalled the instant it arrived.
-            if was_idle {
-                box_progress = Instant::now();
             }
             // A turn is alone only if the box had nothing and this drain
             // brought exactly one thing. Then `next_step` admits that one job
@@ -1780,7 +1894,6 @@ mod llama_worker {
                         phase: TurnPhase::Waiting,
                         ingested: 0,
                         stage: String::new(),
-                        last_progress: Instant::now(),
                         warm: None,
                         think_tokens: None,
                         // Only a turn that went in ALONE can leave the
@@ -1833,9 +1946,8 @@ mod llama_worker {
             // this step took the work the step admitted.
             //
             // One lane lighting up while one turn is waiting is one fact. Two
-            // of either is a guess, and this must not guess: the watchdog
-            // CANCELS what it judges, and cancelling a stranger's turn is worse
-            // than any stall. Read before the events below are applied, because
+            // of either is a guess, so leave attribution unknown in that case.
+            // Read before the events below are applied, because
             // a prompt short enough to fit one chunk is admitted and prefilled
             // in the same step, and would otherwise have left the candidate set
             // before anyone looked at it.
@@ -1859,7 +1971,6 @@ mod llama_worker {
                     if let Some(lane) = jobs.get_mut(id) {
                         lane.lane = Some(*index);
                         lane.phase = TurnPhase::Prefill;
-                        lane.last_progress = Instant::now();
                     }
                 }
             }
@@ -1874,9 +1985,8 @@ mod llama_worker {
             // herd per token. The single-lane worker has always published once
             // per chunk; this is the lane worker catching up to it.
             let mut touched: Vec<u64> = Vec::new();
-            if !events.is_empty() {
-                box_progress = Instant::now();
-            }
+            let step_moved = !events.is_empty();
+            let prefill_finished = events.iter().any(|event| matches!(event, LaneEvent::Prefilled { .. }));
             for event in events {
                 match event {
                     LaneEvent::Prefilled { job, ingested, resumed } => {
@@ -1901,7 +2011,6 @@ mod llama_worker {
                             // tokens it produces from here on.
                             lane.phase = TurnPhase::Decode;
                             lane.ingested = ingested;
-                            lane.last_progress = Instant::now();
                             let _ = lane.events.send(WorkerEvent::Serving(
                                 crate::backend::ServingUpdate::Prefill {
                                     tokens: ingested,
@@ -1912,7 +2021,6 @@ mod llama_worker {
                     }
                     LaneEvent::Token { job, token, produced } => {
                         let Some(lane) = jobs.get_mut(&job) else { continue };
-                        lane.last_progress = Instant::now();
                         lane.token_ids.push(token);
                         let _ =
                             lane.events
@@ -2149,82 +2257,14 @@ mod llama_worker {
                     let _ = lane.events.send(WorkerEvent::Stage(stage));
                 }
             }
-            // A prefill blocks every other lane BY DESIGN: `next_step` serves
-            // any lane that still needs its prompt before it plans a decode
-            // step at all, so a 34k-token ingest on lane 2 stops lanes 0 and 1
-            // dead for its whole duration. A turn starved by that is not
-            // stalled — it is waiting on work that is visibly happening — and
-            // reaping it would kill the conversation that was behaving. So a
-            // chunk landing anywhere feeds every turn's clock, and only a box
-            // where NOTHING ingests and nothing decodes runs the clock down.
-            if ingest_moved {
-                let now = Instant::now();
-                box_progress = now;
-                for (_, lane) in jobs.iter_mut() {
-                    lane.last_progress = now;
+            // Prefill occupies the shared worker. Every completed chunk feeds
+            // every waiting receiver, even with no attributable lane. The last
+            // chunk has already left Prefilling, so count its event as well.
+            // A queued turn also waits on other lanes' decode/retirement.
+            for lane in jobs.values() {
+                if ingest_moved || prefill_finished || (step_moved && lane.phase == TurnPhase::Waiting) {
+                    let _ = lane.events.send(WorkerEvent::Activity);
                 }
-            }
-
-            // The watchdog. A turn that is not moving is holding a lane the
-            // rest of the box needs, and the only thing worse than a stall is
-            // a stall nobody is told about.
-            let now = Instant::now();
-            let stalled: Vec<(u64, super::Stalled)> = jobs
-                .iter()
-                .filter_map(|(id, lane)| {
-                    // A turn with no lane of its own is judged on the box's
-                    // clock: what it is waiting for is the turns ahead of it
-                    // moving, and punishing it for their stall would kill the
-                    // one turn that was behaving.
-                    let clock = match lane.phase {
-                        TurnPhase::Waiting => box_progress,
-                        _ => lane.last_progress,
-                    };
-                    super::stall_verdict(lane.phase, clock, now, &stall)
-                        .map(|verdict| (*id, verdict))
-                })
-                .collect();
-            for (id, verdict) in stalled {
-                let Some(lane) = jobs.remove(&id) else { continue };
-                let on_lane = match lane.lane {
-                    Some(index) => format!("lane {index}"),
-                    None => "no lane (queued)".to_string(),
-                };
-                let progress = match lane.phase {
-                    TurnPhase::Decode => {
-                        format!("{} tokens generated", lane.token_ids.len())
-                    }
-                    _ => format!("{}/{} tok ingested", lane.ingested, lane.prompt_tokens),
-                };
-                // ONE line, and it names everything the next question needs:
-                // which turn, which lane, which phase, how long, and how far it
-                // had got. Written for somebody reading a box log at speed
-                // while a fleet view shows a frozen row.
-                eprintln!(
-                    "[llm-worker] turn {id}: STALLED in {} on {on_lane} - no progress for \
-                     {:.1}s ({progress}). Cancelling the turn and freeing the lane. Raise \
-                     MAKEPAD_ASSET_AI_LLM_STALL_SECS (now {}s) if this box legitimately \
-                     needs longer.",
-                    verdict.phase.name(),
-                    verdict.idle.as_secs_f64(),
-                    stall.budget().as_secs(),
-                );
-                // Cancel FIRST, then answer. `cancel` marks the lane done in
-                // whatever phase it is in — including a turn that never got
-                // past its first prefill chunk — and `step` reaps every done
-                // lane at the end of every step, so the slot is back before
-                // the next turn is admitted.
-                exec.scheduler().cancel(id);
-                // A failure, not a cancellation: nobody asked for this and the
-                // client has to be able to tell the two apart. Its `Finished`
-                // event arrives a step later for a job that is no longer in the
-                // map, and is ignored there.
-                let _ = lane.events.send(WorkerEvent::Done(Err(format!(
-                    "the box stopped making progress on this turn: nothing moved for {:.0}s \
-                     during {} ({progress}). The lane has been freed - retry the turn.",
-                    verdict.idle.as_secs_f64(),
-                    verdict.phase.name(),
-                ))));
             }
         }
     }
@@ -2232,6 +2272,8 @@ mod llama_worker {
     /// Streamed back to the blocked caller while a job runs on the session
     /// thread: per-token progress, then exactly one Done.
     enum WorkerEvent {
+        /// Actual work on the shared worker that this turn is waiting on.
+        Activity,
         Stage(String),
         Token(u32, u32),
         /// Chat serving facts as they become known — warmth at prefill, the
@@ -2258,28 +2300,35 @@ mod llama_worker {
     #[derive(Clone)]
     pub struct LlamaWorker {
         tx: mpsc::Sender<WorkerMsg>,
+        gone: std::sync::Arc<std::sync::Mutex<Option<mpsc::Receiver<()>>>>,
+        memory: Option<makepad_ai_llm::SessionMemory>,
     }
 
     impl LlamaWorker {
         pub fn spawn(
             gguf: PathBuf,
+            mmproj: Option<PathBuf>,
             model_id: String,
             progress: &mut dyn FnMut(&str, f64),
         ) -> Result<Self, String> {
             use std::time::{Duration, Instant};
             enum BootEvt {
                 Progress(String, f64),
-                Ready(Result<(), String>),
+                Ready(Result<Option<makepad_ai_llm::SessionMemory>, String>),
             }
             let (tx, rx) = mpsc::channel::<WorkerMsg>();
             let (boot_tx, boot_rx) = mpsc::channel::<BootEvt>();
+            // Dropped with the thread's state (after the session): the
+            // receiver sees the device memory is back.
+            let (gone_tx, gone_rx) = mpsc::channel::<()>();
             std::thread::Builder::new()
                 .name("llm-expander".to_string())
                 .spawn(move || {
+                    let _gone = gone_tx;
                     let config = LlamaSessionConfig {
                         max_context: Some(context_per_lane()),
                         max_sequences: lane_count() as u32,
-                        prefill_batch_size: PREFILL_BATCH,
+                        prefill_batch_size: prefill_batch(),
                         // MTP speculative decoding (nextn draft head). 3 is
                         // the measured sweet spot on served chat (Blackwell
                         // A/B: n3 106.3 vs n5 101.3 tok/s full head, 121.6
@@ -2291,6 +2340,10 @@ mod llama_worker {
                         // and the .draftvocab sidecar is picked up when it
                         // sits beside the gguf (full head otherwise).
                         spec_draft_max: 3,
+                        // q8 stores K/V as 8-bit blocks (about half the f16
+                        // bytes); see crate::llm_context for the setting.
+                        attention_k_type: kv_cache_type(),
+                        attention_v_type: kv_cache_type(),
                         ..LlamaSessionConfig::default()
                     };
                     let mut session = match LlamaSession::load_with_progress(
@@ -2301,7 +2354,7 @@ mod llama_worker {
                         },
                     ) {
                         Ok(session) => {
-                            let _ = boot_tx.send(BootEvt::Ready(Ok(())));
+                            let _ = boot_tx.send(BootEvt::Ready(Ok(session.memory().ok())));
                             session
                         }
                         Err(err) => {
@@ -2324,13 +2377,25 @@ mod llama_worker {
                         run_lane_worker(session, model_id.clone(), rx);
                     } else {
                         let mut prefix = super::PrefixCache::default();
+                        let mut vision = ChatVision::new(mmproj, model_id.clone());
+                        if vision.load_at_start() {
+                            if let Err(err) = vision.warm() {
+                                eprintln!("[llm-worker] vision tower at start: {err}");
+                            }
+                        }
                         while let Ok(WorkerMsg::Expand(job, cancel, events)) = rx.recv() {
                             // A turn occupies its lane for its duration.
                             // Claimed survives the turn — the conversation's KV
                             // stays resident and its next turn comes back here.
                             crate::lane_advert::lane_entered();
-                            let result =
-                                run_expand(&mut session, &mut prefix, &job, &cancel, &events);
+                            let result = run_expand(
+                                &mut session,
+                                &mut prefix,
+                                &mut vision,
+                                &job,
+                                &cancel,
+                                &events,
+                            );
                             crate::lane_advert::lane_left();
                             let _ = events.send(WorkerEvent::Done(result));
                         }
@@ -2365,7 +2430,7 @@ mod llama_worker {
             let mut mark = 0.10_f64;
             let mut shown = 0.0_f64;
             let mut phase_started = Instant::now();
-            loop {
+            let memory = loop {
                 match boot_rx.recv_timeout(HEARTBEAT) {
                     Ok(BootEvt::Progress(next_stage, next_mark)) => {
                         stage = next_stage;
@@ -2374,10 +2439,7 @@ mod llama_worker {
                         shown = shown.max(mark);
                         progress(&stage, shown);
                     }
-                    Ok(BootEvt::Ready(result)) => {
-                        result?;
-                        break;
-                    }
+                    Ok(BootEvt::Ready(result)) => break result?,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let elapsed = phase_started.elapsed().as_secs_f64();
                         let crept =
@@ -2393,8 +2455,26 @@ mod llama_worker {
                         return Err("llm worker died during load".to_string())
                     }
                 }
+            };
+            Ok(Self { tx, gone: std::sync::Arc::new(std::sync::Mutex::new(Some(gone_rx))), memory })
+        }
+
+        /// The session's own accounting of its device bytes, from its load.
+        pub fn memory(&self) -> Option<makepad_ai_llm::SessionMemory> {
+            self.memory
+        }
+
+        /// Drops this handle and waits until the session thread has dropped
+        /// the session, so its device memory is free before anything else
+        /// loads (a rebuilt session would otherwise briefly need twice the
+        /// weights). Other clones of the handle keep the thread alive; the
+        /// wait then ends when the last one goes.
+        pub fn close(self) {
+            let gone = self.gone.lock().unwrap().take();
+            drop(self.tx);
+            if let Some(gone) = gone {
+                let _ = gone.recv();
             }
-            Ok(Self { tx })
         }
 
         /// Blocks until the expansion finishes, forwarding per-token events
@@ -2411,26 +2491,341 @@ mod llama_worker {
             on_text: &mut dyn FnMut(&str),
             on_serving: crate::backend::ServingSink,
         ) -> Result<String, String> {
+            use std::time::{Duration, Instant};
             let (event_tx, event_rx) = mpsc::channel();
             self.tx
-                .send(WorkerMsg::Expand(job, cancel, event_tx))
+                .send(WorkerMsg::Expand(job, cancel.clone(), event_tx))
                 .map_err(|_| "llm worker thread is gone".to_string())?;
+            let policy = super::StallPolicy::from_env();
+            let mut clock = super::TurnActivity::new(Instant::now());
+            let mut stage = "waiting for a lane".to_string();
             loop {
-                match event_rx.recv() {
-                    Ok(WorkerEvent::Stage(name)) => on_stage(&name),
-                    Ok(WorkerEvent::Token(k, max)) => on_token(k, max),
-                    Ok(WorkerEvent::Text(text)) => on_text(&text),
-                    Ok(WorkerEvent::Serving(update)) => on_serving(update),
-                    Ok(WorkerEvent::Done(result)) => return result,
-                    Err(_) => return Err("llm worker dropped the reply".to_string()),
+                if cancel.is_cancelled() {
+                    return Err("cancelled".to_string());
+                }
+                match event_rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(event) => {
+                        let resumed = clock.progress(Instant::now());
+                        if resumed { on_stage(&stage); }
+                        match event {
+                            WorkerEvent::Activity => {}
+                            WorkerEvent::Stage(name) => {
+                                if name.starts_with("prefill") || name.starts_with("kv reuse") {
+                                    clock.phase = super::TurnPhase::Prefill;
+                                }
+                                stage = name;
+                                on_stage(&stage);
+                            }
+                            WorkerEvent::Token(k, max) => {
+                                clock.phase = super::TurnPhase::Decode;
+                                stage = format!("decode {k}/{max}");
+                                on_token(k, max);
+                            }
+                            WorkerEvent::Text(text) => on_text(&text),
+                            WorkerEvent::Serving(update) => on_serving(update),
+                            WorkerEvent::Done(result) => return result,
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Some(verdict) = clock.poll(Instant::now(), &policy) {
+                            let note = format!("not responding: no progress for {:.0}s during {}; Stop to cancel",
+                                verdict.idle.as_secs_f64(), verdict.phase.name());
+                            eprintln!("[llm-worker] {note}");
+                            on_stage(&note);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Err("llm worker dropped the reply".to_string()),
                 }
             }
         }
     }
 
+    /// The chat model's own vision tower (the registry's `mmproj` file),
+    /// on the session thread, and the pictures it has encoded.
+    ///
+    /// Loaded on the first picture by default (`MAKEPAD_ASSET_AI_LLM_VISION=
+    /// start` loads it with the session instead, `off` refuses pictures).
+    /// Encoded pictures are kept by key (host memory, a few MB each) so a
+    /// conversation re-prefilled after a miss does not encode them again.
+    pub(super) struct ChatVision {
+        mmproj: Option<PathBuf>,
+        /// The chat model, whose resident size the tower adds to.
+        model_id: String,
+        tower: Option<makepad_ai_llm::VisionTower>,
+        encoded: Vec<(String, std::rc::Rc<EncodedImage>)>,
+        /// The tower's device memory has been added to the model's figure.
+        measured: bool,
+    }
+
+    pub(super) struct EncodedImage {
+        embeddings: Vec<f32>,
+        tokens_w: usize,
+        tokens_h: usize,
+    }
+
+    /// Encoded pictures kept per worker.
+    const ENCODED_KEEP: usize = 8;
+    /// Longest picture edge fed to the tower (`MAKEPAD_ASSET_AI_LLM_IMAGE_PX`):
+    /// 768 px is a 48x48 patch grid = 576 image tokens.
+    const IMAGE_PX_DEFAULT: usize = 768;
+
+    fn vision_mode() -> String {
+        std::env::var("MAKEPAD_ASSET_AI_LLM_VISION")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .unwrap_or_default()
+    }
+
+    fn image_px() -> usize {
+        std::env::var("MAKEPAD_ASSET_AI_LLM_IMAGE_PX")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|px| *px >= 64)
+            .unwrap_or(IMAGE_PX_DEFAULT)
+    }
+
+    impl ChatVision {
+        pub(super) fn new(mmproj: Option<PathBuf>, model_id: String) -> Self {
+            let mmproj = if vision_mode() == "off" { None } else { mmproj };
+            crate::control::set_vision(mmproj.is_some(), false);
+            Self { mmproj, model_id, tower: None, encoded: Vec::new(), measured: false }
+        }
+
+        pub(super) fn load_at_start(&self) -> bool {
+            self.mmproj.is_some() && vision_mode() == "start"
+        }
+
+        pub(super) fn tower(&mut self) -> Result<&mut makepad_ai_llm::VisionTower, String> {
+            if self.tower.is_none() {
+                let path = self
+                    .mmproj
+                    .as_ref()
+                    .ok_or_else(|| "this node's chat model has no vision tower".to_string())?;
+                let started = std::time::Instant::now();
+                let mut tower = makepad_ai_llm::VisionTower::load(&path.to_string_lossy())
+                    .map_err(|e| format!("load vision tower: {e:?}"))?;
+                // One compiled grid at a time: on CUDA each holds its own
+                // device copy of the tower's weights.
+                tower.set_graph_cache_cap(1);
+                eprintln!(
+                    "[llm-worker] vision tower resident on {} in {:.2}s ({}), pictures up to {} px",
+                    tower.device_description(),
+                    started.elapsed().as_secs_f64(),
+                    path.display(),
+                    image_px(),
+                );
+                self.tower = Some(tower);
+                crate::control::set_vision(true, true);
+            }
+            Ok(self.tower.as_mut().unwrap())
+        }
+
+        /// Load the tower and compile its graph for a square picture of the
+        /// configured size, so the first picture costs no load.
+        pub(super) fn warm(&mut self) -> Result<(), String> {
+            let px = image_px();
+            {
+                // A flat grey square, encoded through the same path a request takes.
+                let rgb = vec![128u8; px * px * 3];
+                let started = std::time::Instant::now();
+                let free_before = crate::residency::fresh_free_mb();
+                let tower = self.tower()?;
+                let prepared = makepad_ai_llm::preprocess_rgb8(&rgb, px, px, &tower.config)
+                    .map_err(|e| format!("preprocess: {e:?}"))?;
+                tower.encode(&prepared).map_err(|e| format!("encode: {e:?}"))?;
+                if let (Some(before), Some(after)) = (free_before, crate::residency::fresh_free_mb()) {
+                    self.measured = true;
+                    let base = crate::control::model_mb(&self.model_id).unwrap_or(0);
+                    crate::control::set_model_mb(&self.model_id, Some(base + before.saturating_sub(after)));
+                }
+                eprintln!(
+                    "[llm-worker] vision tower warmed at {px} px in {:.2}s",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            Ok(())
+        }
+
+        fn encode(
+            &mut self,
+            image: &crate::backend::ChatImage,
+            events: &mpsc::Sender<WorkerEvent>,
+        ) -> Result<std::rc::Rc<EncodedImage>, String> {
+            if let Some(at) = self.encoded.iter().position(|(key, _)| *key == image.key) {
+                let hit = self.encoded.remove(at);
+                let encoded = hit.1.clone();
+                self.encoded.push(hit);
+                return Ok(encoded);
+            }
+            let _ = events.send(WorkerEvent::Stage("looking at the picture".to_string()));
+            let started = std::time::Instant::now();
+            let (rgb, width, height) = crate::vision_backend::decode_image_rgb8(&image.bytes)
+                .map_err(|e| format!("{e}"))?;
+            let (rgb, width, height) =
+                crate::vision_backend::downscale_to_fit(&rgb, width, height, image_px());
+            // The tower's device copy is made at its first encode (the
+            // compiled graph holds it): that is where its memory shows.
+            let free_before = if self.measured { None } else { crate::residency::fresh_free_mb() };
+            let tower = self.tower()?;
+            let prepared = makepad_ai_llm::preprocess_rgb8(&rgb, width, height, &tower.config)
+                .map_err(|e| format!("preprocess picture: {e:?}"))?;
+            let embeddings = tower
+                .encode(&prepared)
+                .map_err(|e| format!("encode picture: {e:?}"))?;
+            if let (Some(before), Some(after)) = (free_before, crate::residency::fresh_free_mb()) {
+                self.measured = true;
+                let base = crate::control::model_mb(&self.model_id).unwrap_or(0);
+                crate::control::set_model_mb(&self.model_id, Some(base + before.saturating_sub(after)));
+            }
+            let encoded = std::rc::Rc::new(EncodedImage {
+                embeddings,
+                tokens_w: prepared.tokens_w(),
+                tokens_h: prepared.tokens_h(),
+            });
+            eprintln!(
+                "[llm-worker] picture {}: {width}x{height} -> {} tokens in {:.2}s",
+                image.key,
+                encoded.tokens_w * encoded.tokens_h,
+                started.elapsed().as_secs_f64(),
+            );
+            self.encoded.push((image.key.clone(), encoded.clone()));
+            if self.encoded.len() > ENCODED_KEEP {
+                self.encoded.remove(0);
+            }
+            Ok(encoded)
+        }
+    }
+
+    impl Drop for ChatVision {
+        fn drop(&mut self) {
+            crate::control::set_vision(self.mmproj.is_some(), false);
+        }
+    }
+
+    /// A prompt ready to prefill: token runs and pictures, in order.
+    enum PromptSeg {
+        Tokens(Vec<i32>),
+        Image(std::rc::Rc<EncodedImage>),
+    }
+
+    fn prompt_len(segs: &[PromptSeg]) -> usize {
+        segs.iter()
+            .map(|seg| match seg {
+                PromptSeg::Tokens(tokens) => tokens.len(),
+                PromptSeg::Image(image) => image.tokens_w * image.tokens_h,
+            })
+            .sum()
+    }
+
+    /// Tokenize `text` (a whole prompt, or the delta past the resident
+    /// prefix), encoding the pictures its markers name.
+    fn prepare_prompt(
+        session: &LlamaSession,
+        vision: &mut ChatVision,
+        text: &str,
+        add_special: bool,
+        job: &ExpandJob,
+        events: &mpsc::Sender<WorkerEvent>,
+    ) -> Result<Vec<PromptSeg>, String> {
+        use crate::protocol::PromptPiece;
+        let pieces = crate::protocol::split_chat_images(text);
+        let last = pieces.len().saturating_sub(1);
+        let mut segs = Vec::with_capacity(pieces.len());
+        for (index, piece) in pieces.into_iter().enumerate() {
+            match piece {
+                PromptPiece::Text(text) => {
+                    let mut tokens = session
+                        .vocab()
+                        .tokenize(text, add_special && index == 0, true)
+                        .map_err(|e| format!("tokenize: {e:?}"))?;
+                    // ChatML already ends the turn. A GGUF with
+                    // add_eos_token=true would append EOS here and the first
+                    // decode token is then EOS (empty expansion).
+                    if index == last && tokens.last().copied() == session.vocab().eos_token_id() {
+                        tokens.pop();
+                    }
+                    segs.push(PromptSeg::Tokens(tokens));
+                }
+                PromptPiece::Image(key) => {
+                    let image = job.images.iter().find(|image| image.key == key).ok_or_else(|| {
+                        format!(
+                            "the conversation shows picture {key} but this request does not \
+                             carry it (resend each turn's images with it)"
+                        )
+                    })?;
+                    segs.push(PromptSeg::Image(vision.encode(image, events)?));
+                }
+            }
+        }
+        Ok(segs)
+    }
+
+    fn append_prompt(
+        session: &mut LlamaSession,
+        segs: &[PromptSeg],
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<(), String> {
+        let total = prompt_len(segs);
+        let mut done = 0usize;
+        for seg in segs {
+            match seg {
+                PromptSeg::Tokens(tokens) => {
+                    session
+                        .append_tokens_with_progress(tokens, &mut |d, _| progress(done + d, total))
+                        .map_err(|e| format!("{e:?}"))?;
+                    done += tokens.len();
+                }
+                PromptSeg::Image(image) => {
+                    session
+                        .append_image_embeddings(&image.embeddings, image.tokens_w, image.tokens_h)
+                        .map_err(|e| format!("picture: {e:?}"))?;
+                    done += image.tokens_w * image.tokens_h;
+                    progress(done, total);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Tokens kept free after a prompt so the answer has room.
+    const DECODE_RESERVE: usize = 128;
+
+    /// Marks a refusal that leaves the session as it was (a request error).
+    pub(super) const TOO_LONG: &str = "context overflow:";
+
+    /// `Some(message)` when `prompt` tokens plus `reserve` for the answer do
+    /// not fit `max_context`.
+    pub(super) fn overflow_message(prompt: usize, reserve: usize, max_context: usize) -> Option<String> {
+        (prompt + reserve > max_context).then(|| {
+            format!(
+                "{TOO_LONG} the prompt is {prompt} tokens and the answer needs {reserve} more, \
+                 but this node's context is {max_context} tokens (shorten the conversation, or \
+                 POST /llm/context to raise it)"
+            )
+        })
+    }
+
+    #[cfg(test)]
+    mod overflow_tests {
+        #[test]
+        fn the_refusal_names_the_counts_and_marks_itself() {
+            assert_eq!(super::overflow_message(1000, 128, 2048), None);
+            let message = super::overflow_message(85827, 128, 65536).unwrap();
+            assert!(message.starts_with(super::TOO_LONG));
+            assert!(message.contains("85827") && message.contains("65536"), "{message}");
+        }
+    }
+
+    /// Refuses a prompt the session cannot hold (with room to answer),
+    /// naming the counts. Called before anything touches the session.
+    fn check_fits(session: &LlamaSession, pieces: &[PromptSeg]) -> Result<(), String> {
+        overflow_message(prompt_len(pieces), DECODE_RESERVE, session.max_context())
+            .map_or(Ok(()), Err)
+    }
+
     fn run_expand(
         session: &mut LlamaSession,
         prefix: &mut super::PrefixCache,
+        vision: &mut ChatVision,
         job: &ExpandJob,
         cancel: &CancelToken,
         events: &mpsc::Sender<WorkerEvent>,
@@ -2440,20 +2835,6 @@ mod llama_worker {
         // Chat turns send a prompt that extends the previous prompt+reply.
         // Reuse the live KV (weights already resident) and prefill only the
         // suffix. Independent expand jobs with a different prompt reset.
-        const DECODE_RESERVE: usize = 128;
-        let tokenize_prompt = |session: &LlamaSession, text: &str, add_special: bool| {
-            let mut tokens = session
-                .vocab()
-                .tokenize(text, add_special, true)
-                .map_err(|e| format!("tokenize: {e:?}"))?;
-            // ChatML already ends the turn. A GGUF with add_eos_token=true
-            // would append EOS here and the first decode token is then EOS
-            // (empty expansion).
-            if tokens.last().copied() == session.vocab().eos_token_id() {
-                tokens.pop();
-            }
-            Ok::<Vec<i32>, String>(tokens)
-        };
         let (outcome, owner) = prefix.classify(&job.kind, &job.prompt_text);
         let committed_len = prefix.committed().len();
         eprintln!(
@@ -2477,42 +2858,46 @@ mod llama_worker {
         if outcome == PrefixOutcome::Hit {
             let delta = job.prompt_text[committed_len..].to_string();
             if !delta.is_empty() {
-                let extra = tokenize_prompt(session, &delta, false)?;
-                if session.remaining_context() < extra.len() + DECODE_RESERVE {
+                let extra = prepare_prompt(session, vision, &delta, false, job, events)?;
+                if session.remaining_context() < prompt_len(&extra) + DECODE_RESERVE {
+                    // The conversation outgrew the context: re-prefill it
+                    // whole, but only if it fits at all -- checked BEFORE the
+                    // reset, so a refusal leaves the resident prefix intact.
+                    let pieces = prepare_prompt(session, vision, &job.prompt_text, true, job, events)?;
+                    check_fits(session, &pieces)?;
                     session.reset().map_err(|e| format!("reset: {e:?}"))?;
                     prefix.invalidate();
                     outcome = PrefixOutcome::Cold;
-                    let tokens = tokenize_prompt(session, &job.prompt_text, true)?;
-                    prefilled = tokens.len();
+                    prefilled = prompt_len(&pieces);
                     let _ = events.send(WorkerEvent::Stage(format!(
-                        "prefill {} tok (context full)",
-                        tokens.len()
+                        "prefill {prefilled} tok (context full)"
                     )));
-                    session
-                        .append_tokens_with_progress(&tokens, &mut |done, total| {
-                            let _ = events.send(WorkerEvent::Stage(format!(
-                                "prefill {done}/{total} tok (context full)"
-                            )));
-                        })
-                        .map_err(|e| format!("prefill: {e:?}"))?;
+                    append_prompt(session, &pieces, &mut |done, total| {
+                        let _ = events.send(WorkerEvent::Stage(format!(
+                            "prefill {done}/{total} tok (context full)"
+                        )));
+                    })
+                    .map_err(|e| format!("prefill: {e}"))?;
                 } else {
-                    prefilled = extra.len();
-                    session
-                        .append_tokens_with_progress(&extra, &mut |done, total| {
-                            let _ = events.send(WorkerEvent::Stage(format!(
-                                "kv reuse {done}/{total} tok"
-                            )));
-                        })
-                        .map_err(|e| format!("prefill-continue: {e:?}"))?;
+                    prefilled = prompt_len(&extra);
+                    append_prompt(session, &extra, &mut |done, total| {
+                        let _ = events.send(WorkerEvent::Stage(format!(
+                            "kv reuse {done}/{total} tok"
+                        )));
+                    })
+                    .map_err(|e| format!("prefill-continue: {e}"))?;
                 }
             } else {
                 let _ = events.send(WorkerEvent::Stage("kv reuse".into()));
             }
         } else {
+            // Tokenize (and look at pictures) BEFORE touching the session, so
+            // a prompt that cannot fit is refused with the session intact.
+            let pieces = prepare_prompt(session, vision, &job.prompt_text, true, job, events)?;
+            check_fits(session, &pieces)?;
             session.reset().map_err(|e| format!("reset: {e:?}"))?;
             prefix.invalidate();
-            let tokens = tokenize_prompt(session, &job.prompt_text, true)?;
-            prefilled = tokens.len();
+            prefilled = prompt_len(&pieces);
             // Say WHY in the stage string: a user watching a turn take three
             // seconds should see that it is a session switch, not the model.
             let why = if outcome == PrefixOutcome::Interleaved {
@@ -2520,12 +2905,11 @@ mod llama_worker {
             } else {
                 ""
             };
-            session
-                .append_tokens_with_progress(&tokens, &mut |done, total| {
-                    let _ = events
-                        .send(WorkerEvent::Stage(format!("prefill {done}/{total} tok{why}")));
-                })
-                .map_err(|e| format!("prefill: {e:?}"))?;
+            append_prompt(session, &pieces, &mut |done, total| {
+                let _ = events
+                    .send(WorkerEvent::Stage(format!("prefill {done}/{total} tok{why}")));
+            })
+            .map_err(|e| format!("prefill: {e}"))?;
         }
         prefix.record(outcome, &owner, prefilled, started.elapsed());
         if outcome == PrefixOutcome::Interleaved {
@@ -2781,6 +3165,10 @@ mod tests {
         assert!(music.contains("[Verse]"));
         assert!(music.contains("[Chorus]"));
         assert!(music.contains("[Instrumental]"));
+        // YuE2: style tags, score_mode, and the score is never written by the LLM.
+        assert!(music.contains("yue2-3b"));
+        assert!(music.contains("\"score_mode\""));
+        assert!(music.contains("Never emit \"score\""));
         // Lyric text never goes in the caption, and structure talk never
         // goes in the lyrics (a run once literally sang "8 bars").
         assert!(music.contains("Never place lyric text in \"prompt\""));
@@ -2833,7 +3221,7 @@ mod tests {
         assert!(!prompt.contains("</think>"));
         let expand = crate::protocol::assemble_chat_prompt_with_think(
             "Target domain: video.\n\nSYS",
-            &[crate::protocol::ChatMessageJson {
+            &[crate::protocol::ChatMessageJson { images: None,
                 role: "user".to_string(),
                 text: "Intent: a pretty elf".to_string(),
             }],
@@ -2849,7 +3237,7 @@ mod tests {
             model: "qwen3.8-27b".to_string(),
             domain: Some("chat".to_string()),
             chat_system: Some("Answer directly.".to_string()),
-            chat_messages: Some(vec![crate::protocol::ChatMessageJson {
+            chat_messages: Some(vec![crate::protocol::ChatMessageJson { images: None,
                 role: "user".to_string(),
                 text: "hello".to_string(),
             }]),
@@ -2872,6 +3260,27 @@ mod tests {
     }
 
     #[test]
+    fn thinking_false_closes_the_think_block_per_request_only() {
+        let mut request = GenerateRequestJson {
+            model: "qwen3.8-27b".to_string(),
+            domain: Some("chat".to_string()),
+            chat_messages: Some(vec![crate::protocol::ChatMessageJson { images: None, role: "user".to_string(), text: "hi".to_string() }]),
+            ..GenerateRequestJson::default()
+        };
+        let default = GenerateParams::from_request(&request).unwrap().prompt;
+        assert!(default.ends_with("<|im_start|>assistant\n<think>\n"), "{default:?}");
+        request.thinking = Some(false);
+        let quiet = GenerateParams::from_request(&request).unwrap().prompt;
+        assert!(quiet.ends_with("</think>\n\n"), "{quiet:?}");
+        request.thinking = Some(true);
+        assert_eq!(GenerateParams::from_request(&request).unwrap().prompt, default);
+        // A model without an open think block is untouched.
+        request.model = "qwen3.5-9b".to_string();
+        request.thinking = Some(false);
+        assert!(GenerateParams::from_request(&request).unwrap().prompt.ends_with("<think>\n\n</think>\n\n"));
+    }
+
+    #[test]
     fn chatml_prompt_shape() {
         let mut p = params("rusty pirate cannon", "mesh");
         p.style = "low-poly stylized".to_string();
@@ -2888,7 +3297,7 @@ mod tests {
             let _ = backend.generate(&params("x", "video"), &mut sink, &CancelToken::new());
             crate::protocol::assemble_chat_prompt_with_think(
                 &format!("Target domain: video.\n\n{}", default_system_prompt("video")),
-                &[crate::protocol::ChatMessageJson {
+                &[crate::protocol::ChatMessageJson { images: None,
                     role: "user".to_string(),
                     text: "Intent: x".to_string(),
                 }],
@@ -2995,7 +3404,7 @@ mod tests {
     fn chat_request_skips_expander_and_is_prefix_stable() {
         use crate::protocol::{assemble_chat_prompt, ChatMessageJson, CHAT_COMMIT_SUFFIX};
 
-        let turn1 = vec![ChatMessageJson {
+        let turn1 = vec![ChatMessageJson { images: None,
             role: "user".into(),
             text: "hi".into(),
         }];
@@ -3005,9 +3414,9 @@ mod tests {
         assert!(p1.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
 
         let turn2 = vec![
-            ChatMessageJson { role: "user".into(), text: "hi".into() },
-            ChatMessageJson { role: "assistant".into(), text: "hello".into() },
-            ChatMessageJson { role: "user".into(), text: "second message".into() },
+            ChatMessageJson { images: None, role: "user".into(), text: "hi".into() },
+            ChatMessageJson { images: None, role: "assistant".into(), text: "hello".into() },
+            ChatMessageJson { images: None, role: "user".into(), text: "second message".into() },
         ];
         let p2 = assemble_chat_prompt("SYS", &turn2);
         let committed = format!("{p1}hello{CHAT_COMMIT_SUFFIX}");

@@ -14,7 +14,7 @@ use crate::ace_dit::{
     AceCondDevice, AceConditionEncoder, AceConditioning, AceCrossKvCache, AceDit, AceDitDevice,
 };
 use crate::ace_text::{ace_tokenize, AceTeDevice, AceTextEncoder};
-use crate::ace_vae::AceVaeDecoder;
+use crate::oobleck::{OobleckDecoder, ACE_OOBLECK};
 use makepad_ai_h3::h3_tokenizer::H3Tokenizer;
 use crate::{emit_progress, ProgressHook, Result};
 use std::path::{Path, PathBuf};
@@ -74,7 +74,7 @@ pub struct AcePipeline {
     pub tokenizer: H3Tokenizer,
     pub cond: AceConditionEncoder,
     pub dit: AceDit,
-    pub vae: AceVaeDecoder,
+    pub vae: OobleckDecoder,
     te_device: Option<AceTeDevice>,
     cond_device: Option<AceCondDevice>,
     dit_device: Option<AceDitDevice>,
@@ -106,7 +106,7 @@ impl AcePipeline {
         emit_progress(&mut progress, "load ace dit", 0.4)?;
         let dit = AceDit::load(&paths.transformer)?;
         emit_progress(&mut progress, "load ace vae", 0.85)?;
-        let vae = AceVaeDecoder::load(&paths.vae)?;
+        let vae = OobleckDecoder::load(&paths.vae, ACE_OOBLECK)?;
         let (te_device, cond_device, dit_device) = if ace_device_enabled() {
             emit_progress(&mut progress, "prepare ace device", 0.95)?;
             (

@@ -5,7 +5,10 @@ misaki's `us_gold.json` already speaks Kokoro's own symbol set, so no ARPAbet
 conversion is needed. Values are either a string or a POS-keyed dict; we take
 `DEFAULT`.
 
-    python3 build_lexicon.py us_gold.json ../data/us_lexicon.bin
+    python3 build_lexicon.py us_gold.json us_lexicon.bin
+
+The output is hosted with the Kokoro model (src/g2p/data.rs names its URL,
+size and sha256; update those after a rebuild), not kept in git.
 
 Format (little endian), entries sorted by key bytes:
 

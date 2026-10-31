@@ -1,0 +1,687 @@
+// 64x64 output tiles, four columns and four/eight rows per invocation.
+// Both shared operands use vec4 loads. Four adjacent K values reuse each
+// activation vector across the register rows; all accumulation is f32.
+let Register = {
+    workgroup_size: 256
+    rows: 4
+    half_w: 1
+    half_x: 0
+    vector_w: 1
+    vector_x: 1
+    half_vector8: 1
+    transpose_io: 0
+    w: shader.buffer(f16)
+    wf: shader.buffer(f32)
+    w4: shader.buffer(vec4u)
+    wf4: shader.buffer(vec4f)
+    x: shader.buffer(f32)
+    x4: shader.buffer(vec4f)
+    xh: shader.buffer(f16)
+    xh4: shader.buffer(vec4u)
+    xh2: shader.buffer(vec2u)
+    dst: shader.buffer_rw(f32)
+    bias: shader.buffer(f32)
+    has_bias: shader.uniform(u32)
+    ws: shader.uniform(u32)
+    n: shader.uniform(u32)
+    k: shader.uniform(u32)
+    m: shader.uniform(u32)
+    wt: shader.workgroup(vec4f, 512)
+    xt: shader.workgroup(vec4f, 512)
+    main: fn() {
+        let lane = local_id().x
+        let rn = group_id().x * 64
+        let cm = group_id().y * 64
+        let r = (lane / 16) * self.rows
+        let c = (lane % 16) * 4
+        var c0 = vec4f(0)
+        var c1 = vec4f(0)
+        var c2 = vec4f(0)
+        var c3 = vec4f(0)
+        var c4 = vec4f(0)
+        var c5 = vec4f(0)
+        var c6 = vec4f(0)
+        var c7 = vec4f(0)
+        var base = u32(0)
+        while base < self.k {
+            var j = lane
+            while j < 256 {
+                let wr = j / 4
+                let wd = (j % 4) * 8
+                var a = vec4f(0)
+                var b = vec4f(0)
+                if self.vector_w == 1 {
+                    if rn + wr < self.n && base + wd < self.k {
+                        let at = (rn + wr) * self.weight_stride() + base + wd
+                        if self.half_w == 1 {
+                            let v = self.w4[at / 8]
+                            let p0 = unpack_half2(v.x)
+                            let p1 = unpack_half2(v.y)
+                            let p2 = unpack_half2(v.z)
+                            let p3 = unpack_half2(v.w)
+                            a = vec4f(p0.x, p0.y, p1.x, p1.y)
+                            b = vec4f(p2.x, p2.y, p3.x, p3.y)
+                        } else {
+                            a = self.wf4[at / 4]
+                            b = self.wf4[at / 4 + 1]
+                        }
+                    }
+                } else {
+                    for t in 0..4 {
+                        a[t] = self.weight(rn + wr, base + wd + t)
+                        b[t] = self.weight(rn + wr, base + wd + 4 + t)
+                    }
+                }
+                self.wt[j * 2] = a
+                self.wt[j * 2 + 1] = b
+                if self.transpose_io == 1 {
+                    // Each invocation owns a complete 4x4 transpose: shared
+                    // vec4 stores never race over separate vector components.
+                    if j < 128 {
+                        let xd = (j % 8) * 4
+                        let xc = (j / 8) * 4
+                        let p = self.activation_nt(base + xd, cm + xc)
+                        let q = self.activation_nt(base + xd, cm + xc + 1)
+                        let u = self.activation_nt(base + xd, cm + xc + 2)
+                        let v = self.activation_nt(base + xd, cm + xc + 3)
+                        self.xt[xd * 16 + xc / 4] = vec4f(p.x, q.x, u.x, v.x)
+                        self.xt[(xd + 1) * 16 + xc / 4] = vec4f(p.y, q.y, u.y, v.y)
+                        self.xt[(xd + 2) * 16 + xc / 4] = vec4f(p.z, q.z, u.z, v.z)
+                        self.xt[(xd + 3) * 16 + xc / 4] = vec4f(p.w, q.w, u.w, v.w)
+                    }
+                } else {
+                    let xd = j / 8
+                    let xc = (j % 8) * 8
+                    a = vec4f(0)
+                    b = vec4f(0)
+                    if self.vector_x == 1 {
+                        if base + xd < self.k && cm + xc < self.m {
+                            let at = (base + xd) * self.m + cm + xc
+                            if self.half_x == 1 && self.half_vector8 == 1 {
+                                let v = self.xh4[at / 8]
+                                let p0 = unpack_half2(v.x)
+                                let p1 = unpack_half2(v.y)
+                                let p2 = unpack_half2(v.z)
+                                let p3 = unpack_half2(v.w)
+                                a = vec4f(p0.x, p0.y, p1.x, p1.y)
+                                b = vec4f(p2.x, p2.y, p3.x, p3.y)
+                            } else if self.half_x == 1 {
+                                let v = self.xh2[at / 4]
+                                let p0 = unpack_half2(v.x)
+                                let p1 = unpack_half2(v.y)
+                                a = vec4f(p0.x, p0.y, p1.x, p1.y)
+                                if cm + xc + 4 < self.m {
+                                    let z = self.xh2[at / 4 + 1]
+                                    let p2 = unpack_half2(z.x)
+                                    let p3 = unpack_half2(z.y)
+                                    b = vec4f(p2.x, p2.y, p3.x, p3.y)
+                                }
+                            } else {
+                                a = self.x4[at / 4]
+                                if cm + xc + 4 < self.m { b = self.x4[at / 4 + 1] }
+                            }
+                        }
+                    } else {
+                        for t in 0..4 {
+                            a[t] = self.activation(base + xd, cm + xc + t)
+                            b[t] = self.activation(base + xd, cm + xc + 4 + t)
+                        }
+                    }
+                    self.xt[j * 2] = a
+                    self.xt[j * 2 + 1] = b
+                }
+                j += self.workgroup_size
+            }
+            barrier()
+            for d in 0..8 {
+                let b0 = self.xt[(d * 4) * 16 + c / 4]
+                let b1 = self.xt[(d * 4 + 1) * 16 + c / 4]
+                let b2 = self.xt[(d * 4 + 2) * 16 + c / 4]
+                let b3 = self.xt[(d * 4 + 3) * 16 + c / 4]
+                c0 = self.madd(c0, self.wt[r * 8 + d], b0, b1, b2, b3)
+                c1 = self.madd(c1, self.wt[(r + 1) * 8 + d], b0, b1, b2, b3)
+                c2 = self.madd(c2, self.wt[(r + 2) * 8 + d], b0, b1, b2, b3)
+                c3 = self.madd(c3, self.wt[(r + 3) * 8 + d], b0, b1, b2, b3)
+                if self.rows == 8 {
+                    c4 = self.madd(c4, self.wt[(r + 4) * 8 + d], b0, b1, b2, b3)
+                    c5 = self.madd(c5, self.wt[(r + 5) * 8 + d], b0, b1, b2, b3)
+                    c6 = self.madd(c6, self.wt[(r + 6) * 8 + d], b0, b1, b2, b3)
+                    c7 = self.madd(c7, self.wt[(r + 7) * 8 + d], b0, b1, b2, b3)
+                }
+            }
+            barrier()
+            base += 32
+        }
+        self.store(rn + r, cm + c, c0)
+        self.store(rn + r + 1, cm + c, c1)
+        self.store(rn + r + 2, cm + c, c2)
+        self.store(rn + r + 3, cm + c, c3)
+        if self.rows == 8 {
+            self.store(rn + r + 4, cm + c, c4)
+            self.store(rn + r + 5, cm + c, c5)
+            self.store(rn + r + 6, cm + c, c6)
+            self.store(rn + r + 7, cm + c, c7)
+        }
+    }
+    madd: fn(acc, a, b0, b1, b2, b3) {
+        return (((acc + a.x * b0) + a.y * b1) + a.z * b2) + a.w * b3
+    }
+    weight_stride: fn() {
+        if self.transpose_io == 1 { return self.ws }
+        return self.k
+    }
+    weight: fn(r, d) {
+        if r < self.n && d < self.k {
+            if self.half_w == 1 { return f32(self.w[r * self.weight_stride() + d]) }
+            return self.wf[r * self.weight_stride() + d]
+        }
+        return 0.0
+    }
+    activation: fn(d, c) {
+        if d < self.k && c < self.m {
+            if self.half_x == 1 { return f32(self.xh[d * self.m + c]) }
+            return self.x[d * self.m + c]
+        }
+        return 0.0
+    }
+    activation_nt: fn(d, c) {
+        var v = vec4f(0)
+        if c < self.m {
+            if self.vector_x == 1 {
+                if d < self.k { v = self.x4[(c * self.k + d) / 4] }
+            } else {
+                for j in 0..4 {
+                    if d + j < self.k { v[j] = self.x[c * self.k + d + j] }
+                }
+            }
+        }
+        return v
+    }
+    store: fn(r, c, v) {
+        if r < self.n {
+            var b = 0.0
+            if self.transpose_io == 1 && self.has_bias != 0 { b = self.bias[r] }
+            for j in 0..4 {
+                if c + j < self.m {
+                    if self.transpose_io == 1 { self.dst[(c + j) * self.n + r] = v[j] + b }
+                    else { self.dst[r * self.m + c + j] = v[j] }
+                }
+            }
+        }
+    }
+}
+
+// Phone experiments. The 8x8 tile owns sixteen named vec4 accumulators;
+// no dynamically indexed local accumulator array reaches the driver.
+// Shared rows contain K-vectors for W and column-vectors for X. Padding
+// changes only their pitches, so packed/padded runs do identical arithmetic.
+let Tune = Register{
+    workgroup_size: 64
+    rows: 8
+    tile_n: 64
+    tile_m: 64
+    depth: 16
+    half_shared: 0
+    half_chain: 0
+    main: fn() {
+        let lane = local_id().x
+        let rn = group_id().x * self.tile_n
+        let cm = group_id().y * self.tile_m
+        let r = (lane / (self.tile_m / 8)) * self.rows
+        let c = (lane % (self.tile_m / 8)) * 8
+        var c00 = vec4f(0)
+        var c01 = vec4f(0)
+        var c10 = vec4f(0)
+        var c11 = vec4f(0)
+        var c20 = vec4f(0)
+        var c21 = vec4f(0)
+        var c30 = vec4f(0)
+        var c31 = vec4f(0)
+        var c40 = vec4f(0)
+        var c41 = vec4f(0)
+        var c50 = vec4f(0)
+        var c51 = vec4f(0)
+        var c60 = vec4f(0)
+        var c61 = vec4f(0)
+        var c70 = vec4f(0)
+        var c71 = vec4f(0)
+        var base = u32(0)
+        while base < self.k {
+            self.load_tile(base)
+            barrier()
+            let wp = u32(self.depth / 4)
+            let xp = u32(self.tile_m / 4)
+            let wa = r * wp
+            let xa = c / 4
+            if self.half_chain != 0 {
+                // One 8/16-product half chain per tile, then fold into f32.
+                // Each accumulator and every operand is a named register.
+                var h00 = vec4h(0)
+                var h01 = vec4h(0)
+                var h10 = vec4h(0)
+                var h11 = vec4h(0)
+                var h20 = vec4h(0)
+                var h21 = vec4h(0)
+                var h30 = vec4h(0)
+                var h31 = vec4h(0)
+                var h40 = vec4h(0)
+                var h41 = vec4h(0)
+                var h50 = vec4h(0)
+                var h51 = vec4h(0)
+                var h60 = vec4h(0)
+                var h61 = vec4h(0)
+                var h70 = vec4h(0)
+                var h71 = vec4h(0)
+                for d in 0..(self.depth / 4) {
+                    let b0 = self.shared_half(self.tx[xa + (d * 4) * xp])
+                    let b1 = self.shared_half(self.tx[xa + (d * 4 + 1) * xp])
+                    let b2 = self.shared_half(self.tx[xa + (d * 4 + 2) * xp])
+                    let b3 = self.shared_half(self.tx[xa + (d * 4 + 3) * xp])
+                    let b4 = self.shared_half(self.tx[xa + (d * 4) * xp + 1])
+                    let b5 = self.shared_half(self.tx[xa + (d * 4 + 1) * xp + 1])
+                    let b6 = self.shared_half(self.tx[xa + (d * 4 + 2) * xp + 1])
+                    let b7 = self.shared_half(self.tx[xa + (d * 4 + 3) * xp + 1])
+                    let a0 = self.shared_half(self.tw[wa + d])
+                    h00 = self.hmadd(h00, a0, b0, b1, b2, b3)
+                    h01 = self.hmadd(h01, a0, b4, b5, b6, b7)
+                    let a1 = self.shared_half(self.tw[wa + wp + d])
+                    h10 = self.hmadd(h10, a1, b0, b1, b2, b3)
+                    h11 = self.hmadd(h11, a1, b4, b5, b6, b7)
+                    let a2 = self.shared_half(self.tw[wa + 2 * wp + d])
+                    h20 = self.hmadd(h20, a2, b0, b1, b2, b3)
+                    h21 = self.hmadd(h21, a2, b4, b5, b6, b7)
+                    let a3 = self.shared_half(self.tw[wa + 3 * wp + d])
+                    h30 = self.hmadd(h30, a3, b0, b1, b2, b3)
+                    h31 = self.hmadd(h31, a3, b4, b5, b6, b7)
+                    if self.rows == 8 {
+                        let a4 = self.shared_half(self.tw[wa + 4 * wp + d])
+                        h40 = self.hmadd(h40, a4, b0, b1, b2, b3)
+                        h41 = self.hmadd(h41, a4, b4, b5, b6, b7)
+                        let a5 = self.shared_half(self.tw[wa + 5 * wp + d])
+                        h50 = self.hmadd(h50, a5, b0, b1, b2, b3)
+                        h51 = self.hmadd(h51, a5, b4, b5, b6, b7)
+                        let a6 = self.shared_half(self.tw[wa + 6 * wp + d])
+                        h60 = self.hmadd(h60, a6, b0, b1, b2, b3)
+                        h61 = self.hmadd(h61, a6, b4, b5, b6, b7)
+                        let a7 = self.shared_half(self.tw[wa + 7 * wp + d])
+                        h70 = self.hmadd(h70, a7, b0, b1, b2, b3)
+                        h71 = self.hmadd(h71, a7, b4, b5, b6, b7)
+                    }
+                }
+                c00 += self.expand(h00)
+                c01 += self.expand(h01)
+                c10 += self.expand(h10)
+                c11 += self.expand(h11)
+                c20 += self.expand(h20)
+                c21 += self.expand(h21)
+                c30 += self.expand(h30)
+                c31 += self.expand(h31)
+                if self.rows == 8 {
+                    c40 += self.expand(h40)
+                    c41 += self.expand(h41)
+                    c50 += self.expand(h50)
+                    c51 += self.expand(h51)
+                    c60 += self.expand(h60)
+                    c61 += self.expand(h61)
+                    c70 += self.expand(h70)
+                    c71 += self.expand(h71)
+                }
+            } else {
+                for d in 0..(self.depth / 4) {
+                    let b0 = self.shared_float(self.tx[xa + (d * 4) * xp])
+                    let b1 = self.shared_float(self.tx[xa + (d * 4 + 1) * xp])
+                    let b2 = self.shared_float(self.tx[xa + (d * 4 + 2) * xp])
+                    let b3 = self.shared_float(self.tx[xa + (d * 4 + 3) * xp])
+                    let b4 = self.shared_float(self.tx[xa + (d * 4) * xp + 1])
+                    let b5 = self.shared_float(self.tx[xa + (d * 4 + 1) * xp + 1])
+                    let b6 = self.shared_float(self.tx[xa + (d * 4 + 2) * xp + 1])
+                    let b7 = self.shared_float(self.tx[xa + (d * 4 + 3) * xp + 1])
+                    let a0 = self.shared_float(self.tw[wa + d])
+                    c00 = self.madd(c00, a0, b0, b1, b2, b3)
+                    c01 = self.madd(c01, a0, b4, b5, b6, b7)
+                    let a1 = self.shared_float(self.tw[wa + wp + d])
+                    c10 = self.madd(c10, a1, b0, b1, b2, b3)
+                    c11 = self.madd(c11, a1, b4, b5, b6, b7)
+                    let a2 = self.shared_float(self.tw[wa + 2 * wp + d])
+                    c20 = self.madd(c20, a2, b0, b1, b2, b3)
+                    c21 = self.madd(c21, a2, b4, b5, b6, b7)
+                    let a3 = self.shared_float(self.tw[wa + 3 * wp + d])
+                    c30 = self.madd(c30, a3, b0, b1, b2, b3)
+                    c31 = self.madd(c31, a3, b4, b5, b6, b7)
+                    if self.rows == 8 {
+                        let a4 = self.shared_float(self.tw[wa + 4 * wp + d])
+                        c40 = self.madd(c40, a4, b0, b1, b2, b3)
+                        c41 = self.madd(c41, a4, b4, b5, b6, b7)
+                        let a5 = self.shared_float(self.tw[wa + 5 * wp + d])
+                        c50 = self.madd(c50, a5, b0, b1, b2, b3)
+                        c51 = self.madd(c51, a5, b4, b5, b6, b7)
+                        let a6 = self.shared_float(self.tw[wa + 6 * wp + d])
+                        c60 = self.madd(c60, a6, b0, b1, b2, b3)
+                        c61 = self.madd(c61, a6, b4, b5, b6, b7)
+                        let a7 = self.shared_float(self.tw[wa + 7 * wp + d])
+                        c70 = self.madd(c70, a7, b0, b1, b2, b3)
+                        c71 = self.madd(c71, a7, b4, b5, b6, b7)
+                    }
+                }
+            }
+            barrier()
+            base += self.depth
+        }
+        self.store(rn + r, cm + c, c00)
+        self.store(rn + r, cm + c + 4, c01)
+        self.store(rn + r + 1, cm + c, c10)
+        self.store(rn + r + 1, cm + c + 4, c11)
+        self.store(rn + r + 2, cm + c, c20)
+        self.store(rn + r + 2, cm + c + 4, c21)
+        self.store(rn + r + 3, cm + c, c30)
+        self.store(rn + r + 3, cm + c + 4, c31)
+        if self.rows == 8 {
+            self.store(rn + r + 4, cm + c, c40)
+            self.store(rn + r + 4, cm + c + 4, c41)
+            self.store(rn + r + 5, cm + c, c50)
+            self.store(rn + r + 5, cm + c + 4, c51)
+            self.store(rn + r + 6, cm + c, c60)
+            self.store(rn + r + 6, cm + c + 4, c61)
+            self.store(rn + r + 7, cm + c, c70)
+            self.store(rn + r + 7, cm + c + 4, c71)
+        }
+    }
+    put_w: fn(at, v) { self.tw[at] = v }
+    put_x: fn(at, v) { self.tx[at] = v }
+    shared_float: fn(v) { return vec4f(f32(v.x), f32(v.y), f32(v.z), f32(v.w)) }
+    shared_half: fn(v) { return vec4h(f16(v.x), f16(v.y), f16(v.z), f16(v.w)) }
+    expand: fn(v) { return vec4f(f32(v.x), f32(v.y), f32(v.z), f32(v.w)) }
+    hmadd: fn(acc, a, b0, b1, b2, b3) {
+        return (((acc + a.x * b0) + a.y * b1) + a.z * b2) + a.w * b3
+    }
+    weight4: fn(r, d) {
+        return vec4f(self.weight(r, d), self.weight(r, d + 1),
+            self.weight(r, d + 2), self.weight(r, d + 3))
+    }
+    load_tile: fn(base) {
+        let lane = local_id().x
+        let rn = group_id().x * self.tile_n
+        let cm = group_id().y * self.tile_m
+        let wp = u32(self.depth / 4)
+        let xp = u32(self.tile_m / 4)
+        var j = lane
+        while j < self.tile_n * self.depth / 8 {
+            let r = j / (self.depth / 8)
+            let d = (j % (self.depth / 8)) * 8
+            var a = vec4f(0)
+            var b = vec4f(0)
+            if self.vector_w == 1 {
+                if rn + r < self.n && base + d < self.k {
+                    let at = (rn + r) * self.weight_stride() + base + d
+                    if self.half_w == 1 {
+                        let v = self.w4[at / 8]
+                        let p0 = unpack_half2(v.x)
+                        let p1 = unpack_half2(v.y)
+                        let p2 = unpack_half2(v.z)
+                        let p3 = unpack_half2(v.w)
+                        a = vec4f(p0.x, p0.y, p1.x, p1.y)
+                        b = vec4f(p2.x, p2.y, p3.x, p3.y)
+                    } else {
+                        a = self.wf4[at / 4]
+                        b = self.wf4[at / 4 + 1]
+                    }
+                }
+            } else {
+                a = self.weight4(rn + r, base + d)
+                b = self.weight4(rn + r, base + d + 4)
+            }
+            self.put_w(r * wp + d / 4, a)
+            self.put_w(r * wp + d / 4 + 1, b)
+            j += self.workgroup_size
+        }
+        j = lane
+        if self.transpose_io == 1 {
+            while j < self.depth * self.tile_m / 16 {
+                let d = (j % (self.depth / 4)) * 4
+                let c = (j / (self.depth / 4)) * 4
+                let p = self.activation_nt(base + d, cm + c)
+                let q = self.activation_nt(base + d, cm + c + 1)
+                let u = self.activation_nt(base + d, cm + c + 2)
+                let v = self.activation_nt(base + d, cm + c + 3)
+                self.put_x(d * xp + c / 4, vec4f(p.x, q.x, u.x, v.x))
+                self.put_x((d + 1) * xp + c / 4, vec4f(p.y, q.y, u.y, v.y))
+                self.put_x((d + 2) * xp + c / 4, vec4f(p.z, q.z, u.z, v.z))
+                self.put_x((d + 3) * xp + c / 4, vec4f(p.w, q.w, u.w, v.w))
+                j += self.workgroup_size
+            }
+        } else {
+            while j < self.depth * self.tile_m / 8 {
+                let d = j / (self.tile_m / 8)
+                let c = (j % (self.tile_m / 8)) * 8
+                var a = vec4f(0)
+                var b = vec4f(0)
+                if self.vector_x == 1 {
+                    if base + d < self.k && cm + c < self.m {
+                        let at = (base + d) * self.m + cm + c
+                        if self.half_x == 1 && self.half_vector8 == 1 {
+                            let v = self.xh4[at / 8]
+                            let p0 = unpack_half2(v.x)
+                            let p1 = unpack_half2(v.y)
+                            let p2 = unpack_half2(v.z)
+                            let p3 = unpack_half2(v.w)
+                            a = vec4f(p0.x, p0.y, p1.x, p1.y)
+                            b = vec4f(p2.x, p2.y, p3.x, p3.y)
+                        } else if self.half_x == 1 {
+                            let v = self.xh2[at / 4]
+                            let p0 = unpack_half2(v.x)
+                            let p1 = unpack_half2(v.y)
+                            a = vec4f(p0.x, p0.y, p1.x, p1.y)
+                            if cm + c + 4 < self.m {
+                                let v = self.xh2[at / 4 + 1]
+                                let p0 = unpack_half2(v.x)
+                                let p1 = unpack_half2(v.y)
+                                b = vec4f(p0.x, p0.y, p1.x, p1.y)
+                            }
+                        } else {
+                            a = self.x4[at / 4]
+                            if cm + c + 4 < self.m { b = self.x4[at / 4 + 1] }
+                        }
+                    }
+                } else {
+                    a = vec4f(self.activation(base + d, cm + c), self.activation(base + d, cm + c + 1),
+                        self.activation(base + d, cm + c + 2), self.activation(base + d, cm + c + 3))
+                    b = vec4f(self.activation(base + d, cm + c + 4), self.activation(base + d, cm + c + 5),
+                        self.activation(base + d, cm + c + 6), self.activation(base + d, cm + c + 7))
+                }
+                self.put_x(d * xp + c / 4, a)
+                self.put_x(d * xp + c / 4 + 1, b)
+                j += self.workgroup_size
+            }
+        }
+    }
+}
+// Shared declarations live on these sibling prototypes: ordinary shader IO
+// keeps its original type and length when a child overrides other constants.
+let Tune16 = Tune{tw: shader.workgroup(vec4f, 256) tx: shader.workgroup(vec4f, 256)}
+let Tune8 = Tune{depth: 8 tw: shader.workgroup(vec4f, 128) tx: shader.workgroup(vec4f, 128)}
+let TuneHalf = Tune{
+    half_shared: 1
+    put_w: fn(at, v) { self.tw[at] = vec4h(f16(v.x), f16(v.y), f16(v.z), f16(v.w)) }
+    put_x: fn(at, v) { self.tx[at] = vec4h(f16(v.x), f16(v.y), f16(v.z), f16(v.w)) }
+}
+let TuneHalf16 = TuneHalf{tw: shader.workgroup(vec4h, 256) tx: shader.workgroup(vec4h, 256)}
+let TuneHalf8 = TuneHalf{depth: 8 half_chain: 8 tw: shader.workgroup(vec4h, 128) tx: shader.workgroup(vec4h, 128)}
+
+// One 64x16 accumulator per subgroup. Four subgroups use 24 KiB including
+// edge scratch; smaller workgroups narrow the column tile, never the rows.
+let Wide = {
+    workgroup_size: 128
+    subgroups: 4
+    half_x: 0
+    A: shader.coopmat(f16, 64, 16, shader.matrix_a)
+    B: shader.coopmat(f16, 16, 16, shader.matrix_b)
+    C: shader.coopmat(f32, 64, 16, shader.matrix_accumulator)
+    w: shader.buffer(f16)
+    w4: shader.buffer(vec4u)
+    x: shader.buffer(f32)
+    x4: shader.buffer(vec4f)
+    xh: shader.buffer(f16)
+    xh4: shader.buffer(vec4u)
+    xh2: shader.buffer(vec2u)
+    vector_w: 1
+    vector_x: 1
+    half_vector8: 1
+    dst: shader.buffer_rw(f32)
+    n: shader.uniform(u32)
+    k: shader.uniform(u32)
+    m: shader.uniform(u32)
+    wt: shader.workgroup(f16, 2048)
+    xt: shader.workgroup(f16, 2048)
+    out: shader.workgroup(f32, 4096)
+    main: fn() {
+        let lane = local_id().x
+        let bm = u32(16 * self.subgroups)
+        let rn = group_id().x * 64
+        let cm = group_id().y * bm
+        let sc = subgroup_id() * 16
+        var acc = coopmat_fill(self.C, 0)
+        var base = u32(0)
+        while base < self.k {
+            var j = lane
+            while j < 256 {
+                let r = j / 4
+                let d = (j % 4) * 8
+                if self.vector_w == 1 {
+                    var v = vec4u(0)
+                    if rn + r < self.n && base + d < self.k {
+                        v = self.w4[((rn + r) * self.k + base + d) / 8]
+                    }
+                    self.put_w(j * 8, v)
+                } else {
+                    for t in 0..8 {
+                        var v = f16(0)
+                        if rn + r < self.n && base + d + t < self.k {
+                            v = self.w[(rn + r) * self.k + base + d + t]
+                        }
+                        self.wt[j * 8 + t] = v
+                    }
+                }
+                j += self.workgroup_size
+            }
+            j = lane
+            while j < 32 * bm / 8 {
+                let d = j * 8 / bm
+                let c = j * 8 % bm
+                if self.vector_x == 1 && self.half_x == 1 && self.half_vector8 == 1 {
+                    var v = vec4u(0)
+                    if base + d < self.k && cm + c < self.m {
+                        v = self.xh4[((base + d) * self.m + cm + c) / 8]
+                    }
+                    let p0 = unpack_half2(v.x)
+                    let p1 = unpack_half2(v.y)
+                    let p2 = unpack_half2(v.z)
+                    let p3 = unpack_half2(v.w)
+                    self.xt[j * 8] = f16(p0.x)
+                    self.xt[j * 8 + 1] = f16(p0.y)
+                    self.xt[j * 8 + 2] = f16(p1.x)
+                    self.xt[j * 8 + 3] = f16(p1.y)
+                    self.xt[j * 8 + 4] = f16(p2.x)
+                    self.xt[j * 8 + 5] = f16(p2.y)
+                    self.xt[j * 8 + 6] = f16(p3.x)
+                    self.xt[j * 8 + 7] = f16(p3.y)
+                } else if self.vector_x == 1 && self.half_x == 1 {
+                    for t in 0..2 {
+                        var v = vec2u(0)
+                        if base + d < self.k && cm + c + t * 4 < self.m {
+                            v = self.xh2[((base + d) * self.m + cm + c + t * 4) / 4]
+                        }
+                        let p0 = unpack_half2(v.x)
+                        let p1 = unpack_half2(v.y)
+                        self.xt[j * 8 + t * 4] = f16(p0.x)
+                        self.xt[j * 8 + t * 4 + 1] = f16(p0.y)
+                        self.xt[j * 8 + t * 4 + 2] = f16(p1.x)
+                        self.xt[j * 8 + t * 4 + 3] = f16(p1.y)
+                    }
+                } else if self.vector_x == 1 {
+                    for t in 0..2 {
+                        var v = vec4f(0)
+                        if base + d < self.k && cm + c + t * 4 < self.m {
+                            v = self.x4[((base + d) * self.m + cm + c + t * 4) / 4]
+                        }
+                        self.xt[j * 8 + t * 4] = f16(v.x)
+                        self.xt[j * 8 + t * 4 + 1] = f16(v.y)
+                        self.xt[j * 8 + t * 4 + 2] = f16(v.z)
+                        self.xt[j * 8 + t * 4 + 3] = f16(v.w)
+                    }
+                } else {
+                    for t in 0..8 {
+                        var v = f16(0)
+                        if base + d < self.k && cm + c + t < self.m {
+                            if self.half_x == 1 { v = self.xh[(base + d) * self.m + cm + c + t] }
+                            else { v = f16(self.x[(base + d) * self.m + cm + c + t]) }
+                        }
+                        self.xt[j * 8 + t] = v
+                    }
+                }
+                j += self.workgroup_size
+            }
+            barrier()
+            for d in 0..2 {
+                let a = coopmat_load(self.A, self.wt[d * 16], 32, 0)
+                let b = coopmat_load(self.B, self.xt[d * 16 * bm + sc], bm, 0)
+                acc = coopmat_mul_add(a, b, acc)
+            }
+            barrier()
+            base += 32
+        }
+        if rn + 64 <= self.n && cm + bm <= self.m {
+            coopmat_store(acc, self.dst[rn * self.m + cm + sc], self.m, 0)
+        } else {
+            coopmat_store(acc, self.out[sc], bm, 0)
+            barrier()
+            var j = lane
+            while j < 64 * bm {
+                let r = j / bm
+                let c = j % bm
+                if rn + r < self.n && cm + c < self.m {
+                    self.dst[(rn + r) * self.m + cm + c] = self.out[j]
+                }
+                j += self.workgroup_size
+            }
+        }
+    }
+    put_w: fn(at, v) {
+        let p0 = unpack_half2(v.x)
+        let p1 = unpack_half2(v.y)
+        let p2 = unpack_half2(v.z)
+        let p3 = unpack_half2(v.w)
+        self.wt[at] = f16(p0.x)
+        self.wt[at + 1] = f16(p0.y)
+        self.wt[at + 2] = f16(p1.x)
+        self.wt[at + 3] = f16(p1.y)
+        self.wt[at + 4] = f16(p2.x)
+        self.wt[at + 5] = f16(p2.y)
+        self.wt[at + 6] = f16(p3.x)
+        self.wt[at + 7] = f16(p3.y)
+    }
+}
+{
+    gemm_register_4x4: Register{}
+    gemm_register_8x4: Register{rows: 8 workgroup_size: 128}
+    gemm_register_nt_4x4: Register{transpose_io: 1}
+    gemm_register_nt_8x4: Register{transpose_io: 1 rows: 8 workgroup_size: 128}
+    gemm_tune_4x8_k8_w128: Tune8{rows: 4 workgroup_size: 128}
+    gemm_tune_nt_4x8_k8_w128: Tune8{rows: 4 workgroup_size: 128 transpose_io: 1}
+    gemm_tune_4x8_k16_w128: Tune16{rows: 4 workgroup_size: 128}
+    gemm_tune_nt_4x8_k16_w128: Tune16{rows: 4 workgroup_size: 128 transpose_io: 1}
+    gemm_tune_8x8_k8_w64: Tune8{}
+    gemm_tune_nt_8x8_k8_w64: Tune8{transpose_io: 1}
+    gemm_tune_8x8_k16_w64: Tune16{}
+    gemm_tune_nt_8x8_k16_w64: Tune16{transpose_io: 1}
+    gemm_tune_hs_8x8_k16_w64: TuneHalf16{}
+    gemm_tune_nt_hs_8x8_k16_w64: TuneHalf16{transpose_io: 1}
+    gemm_tune_h8_4x8_k8_w128: TuneHalf8{rows: 4 workgroup_size: 128}
+    gemm_tune_nt_h8_4x8_k8_w128: TuneHalf8{rows: 4 workgroup_size: 128 transpose_io: 1}
+    gemm_tune_h16_4x8_k16_w128: TuneHalf16{rows: 4 workgroup_size: 128 half_chain: 16}
+    gemm_tune_nt_h16_4x8_k16_w128: TuneHalf16{rows: 4 workgroup_size: 128 half_chain: 16 transpose_io: 1}
+    gemm_tune_h8_8x8_k8_w64: TuneHalf8{}
+    gemm_tune_nt_h8_8x8_k8_w64: TuneHalf8{transpose_io: 1}
+    gemm_tune_h16_8x8_k16_w64: TuneHalf16{half_chain: 16}
+    gemm_tune_nt_h16_8x8_k16_w64: TuneHalf16{half_chain: 16 transpose_io: 1}
+    gemm_coop_64x16x16: Wide{}
+}

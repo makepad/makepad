@@ -8,7 +8,7 @@
 //! same-seed outputs match the reference distributionally, not bit-for-bit.
 
 use crate::sa3::{
-    expo_fourier, linear, sa3_latent_len, sa3_sigmas, sa3_valid_len, Sa3Tensors, SA3_COND_DIM,
+    expo_fourier, linear, sa3_latent_len, sa3_sigmas, sa3_valid_len, sa3_whole_seconds, Sa3Tensors, SA3_COND_DIM,
     SA3_COND_TOKENS, SA3_DOWNSAMPLE, SA3_LATENT_DIM, SA3_SECONDS_MAX, SA3_TEXT_TOKENS,
     SA3_TIMESTEP_FEATURES,
 };
@@ -324,14 +324,21 @@ impl Sa3Pipeline {
         mut progress: Option<ProgressHook>,
         cancel: Option<&dyn Fn() -> bool>,
     ) -> Result<Vec<Vec<f32>>> {
-        let latent_len = sa3_latent_len(seconds);
-        let valid_len = sa3_valid_len(seconds);
+        // The model was trained on WHOLE seconds (`seconds_total =
+        // ceil(samples / sr)` in the reference dataset). A fractional
+        // conditioning value is out of distribution, and through the
+        // high-frequency Fourier features it often decodes to full-scale
+        // noise (0.9, 1.05, 1.2, 2.2 s did; 1, 2, 3 s never). So the clip is
+        // made at the next whole second and cut to the requested length.
+        let whole = sa3_whole_seconds(seconds);
+        let latent_len = sa3_latent_len(whole);
+        let valid_len = sa3_valid_len(whole);
         if cancel.is_some_and(|is_cancelled| is_cancelled()) {
             return Err(DiffusionError::Cancelled);
         }
         let cond = {
             let mut sub = band_progress(&mut progress, 0.0, 0.08);
-            self.conditioning_with_progress(token_ids, token_mask, seconds, hook_ref(&mut sub))?
+            self.conditioning_with_progress(token_ids, token_mask, whole, hook_ref(&mut sub))?
         };
         let latents = {
             let mut sub = band_progress(&mut progress, 0.08, 0.77);

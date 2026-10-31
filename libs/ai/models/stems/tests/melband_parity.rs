@@ -20,6 +20,19 @@
 //! stays green. On a machine that has all three they are the contract: a
 //! separator that then fails to build is a FAILURE, not a skip -- a renamed
 //! tensor or a wrong extent would otherwise turn every gate here green.
+//!
+//! The de-reverb model is the same graph over other weights, so it is held to
+//! the same oracle at its last tap only: `00_input` (8 seconds of a real
+//! reverberant vocal) and `06_output` (the float64 dry voice), at
+//! `MAKEPAD_DEREVERB_TAPS` (default `local/dereverb_ref/taps`), with its
+//! checkpoint at `MAKEPAD_DEREVERB_CKPT` (default
+//! `local/stems_ref/ckpt/dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt`).
+//! It skips on the same terms. The taps are 352800 frames from 60 s into a
+//! 16-bit 44.1 kHz stereo vocal stem with heavy echo, through
+//! audio-separator's `MelBandRoformer` (built from the checkpoint's own
+//! `dereverb_mel_band_roformer_anvuew.yaml`, `model.double()`, on the CPU),
+//! with the reference's `zero_dc` applied to the masked spectrum before the
+//! inverse transform, which that class leaves out.
 
 use makepad_ai_common::backend::DeviceRuntime;
 use makepad_ai_stems::config::{AUDIO_CHANNELS, DIM, FEATURES, FREQ_BINS};
@@ -29,7 +42,7 @@ use makepad_ai_stems::melband::config::{
 use makepad_ai_stems::melband::{instrumental, Stage, StageProbe, CHUNK};
 use makepad_ai_stems::model::feature_index;
 use makepad_ai_stems::stft::Stft;
-use makepad_ai_stems::{demix_all_lanes, ChunkSeparator, StereoBuf, VocalsModel};
+use makepad_ai_stems::{demix_all_lanes, ChunkSeparator, DereverbModel, StereoBuf, VocalsModel};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -568,4 +581,57 @@ fn the_instrumental_and_the_vocal_sum_back_to_the_mix() {
     }
     eprintln!("  mix - vocals + vocals: worst error {worst:.3e}");
     assert!(worst <= f32::EPSILON, "the lanes re-sum to the mix only within {worst:e}");
+}
+
+#[test]
+fn a_dereverb_chunk_matches_the_reference_forward() {
+    let ckpt = located(
+        "MAKEPAD_DEREVERB_CKPT",
+        "local/stems_ref/ckpt/dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt",
+    );
+    let taps = located("MAKEPAD_DEREVERB_TAPS", "local/dereverb_ref/taps");
+    if !ckpt.is_file() {
+        eprintln!("SKIP: de-reverb checkpoint absent (want {})", ckpt.display());
+        return;
+    }
+    if !taps.join("00_input.npy").is_file() {
+        eprintln!("SKIP: de-reverb taps absent (want {}/00_input.npy)", taps.display());
+        return;
+    }
+    let vocal = read_input(&taps);
+
+    let _device = DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    if !device_present() {
+        return;
+    }
+    let mut model = DereverbModel::load(&ckpt).expect("the separator builds from its checkpoint");
+    assert_eq!(model.targets(), 1);
+    let dry = model.separate_chunk(&vocal).expect("separate_chunk");
+
+    let (out_shape, output) = read_npy(&taps.join("06_output.npy"));
+    assert_eq!(out_shape, vec![AUDIO_CHANNELS, CHUNK.samples]);
+    let mut worst_snr = f64::INFINITY;
+    let mut worst_max = 0.0f32;
+    for ch in 0..AUDIO_CHANNELS {
+        let want = &output[ch * CHUNK.samples..(ch + 1) * CHUNK.samples];
+        let diff = Diff::of(dry.channel(ch), want);
+        eprintln!(
+            "  dry ch{ch}: max_abs {:.3e}  snr {:.1} dB  (rms {:.6})",
+            diff.max_abs,
+            diff.snr_db(),
+            diff.rms_signal
+        );
+        assert!(
+            diff.rms_signal > 1e-3,
+            "the fixture's dry voice is near silent on ch{ch}; an SNR against it says nothing"
+        );
+        worst_snr = worst_snr.min(diff.snr_db());
+        worst_max = worst_max.max(diff.max_abs);
+    }
+
+    // The vocals model's gates. The port scores 133 dB on this excerpt; the
+    // vocals weights loaded in its place score 8 dB, since they keep the
+    // reverb a de-reverb must take out.
+    assert!(worst_snr >= 100.0, "dry SNR vs the oracle is only {worst_snr:.1} dB");
+    assert!(worst_max < 2e-3, "max abs deviation {worst_max:.3e}");
 }

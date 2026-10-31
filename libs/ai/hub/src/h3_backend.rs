@@ -702,6 +702,14 @@ impl ContentBackend for H3Backend {
             job.frames,
         )?;
 
+        // The container the result goes into must be writable BEFORE minutes of
+        // denoising: open the muxer once, with the same codec and audio options,
+        // and refuse the job now if this machine cannot write it.
+        #[cfg(feature = "video")]
+        if matches!(self.mux, Mux::Platform) {
+            h3_mux::preflight(job.audio, h264)?;
+        }
+
         let interpolate = match params.interpolate {
             None | Some(1) => 1,
             Some(factor @ (2 | 4)) => factor,
@@ -1313,6 +1321,36 @@ mod h3_mux {
         PcmAudioTrackOptions, VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
     };
     use std::path::Path;
+
+    /// Open the real encoder once (tiny canvas, the job's codec and audio option),
+    /// push a frame and a blip of audio, finish, delete: if this machine cannot
+    /// write the container, the job fails here, before any denoising.
+    pub fn preflight(audio: bool, h264: bool) -> Result<(), AssetAiError> {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("h3-preflight-{}.mp4", std::process::id()));
+        let path_text = path.to_string_lossy().into_owned();
+        let options = VideoFileEncoderOptions {
+            codec: if h264 { VideoFileCodec::H264 } else { VideoFileCodec::H265 },
+            width: 64,
+            height: 64,
+            fps_num: 8,
+            fps_den: 1,
+            video_bitrate_bps: 500_000,
+            audio: audio.then_some(PcmAudioTrackOptions { sample_rate: MUX_AUDIO_RATE, channels: 2, aac_bitrate_bps: 128_000 }),
+            ..Default::default()
+        };
+        let run = || -> Result<(), String> {
+            let mut enc = VideoFileEncoder::new(&path_text, options).map_err(|e| e.to_string())?;
+            enc.push_frame_rgb8(&vec![0u8; 64 * 64 * 3], None).map_err(|e| e.to_string())?;
+            if audio {
+                enc.push_audio_i16(&vec![0i16; 2 * 1024]).map_err(|e| e.to_string())?;
+            }
+            enc.finish().map_err(|e| e.to_string())
+        };
+        let result = run();
+        let _ = std::fs::remove_file(&path);
+        result.map_err(|e| AssetAiError::Backend(format!("video container check failed before generation (audio={audio}): {e}")))
+    }
 
     pub fn mux_mp4(input: &MuxInput, tmp_dir: &Path) -> Result<Vec<u8>, AssetAiError> {
         std::fs::create_dir_all(tmp_dir)

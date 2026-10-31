@@ -97,7 +97,10 @@ fn build_metallib() {
             let v = v.trim().to_ascii_lowercase();
             !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
         })
-        .unwrap_or(precompile_default);
+        .unwrap_or(precompile_default)
+        // Run by Relax (a dev run): no 8-14 s `xcrun metal -O3` per (re)run; the empty metallib
+        // makes libs/ggml compile the shader source at first Metal use, as without the feature.
+        && env::var_os("MAKEPAD_RUN_BUILD_SCRIPT").is_none();
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let _ = fs::create_dir_all(&out_dir);

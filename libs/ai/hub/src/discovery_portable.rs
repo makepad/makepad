@@ -1,7 +1,6 @@
 //! Portable fleet discovery: keep the shared vocabulary while reporting
 //! that UDP LAN discovery is unavailable.
 
-use makepad_micro_serde::*;
 
 pub const DISCOVERY_PORT: u16 = 41830;
 pub const DEFAULT_FLEET: &str = "gen";
@@ -23,14 +22,6 @@ pub fn fleet_from_env() -> String {
     normalize_fleet(&std::env::var("MAKEPAD_ASSET_AI_FLEET").unwrap_or_default())
 }
 
-#[derive(Clone, Debug, SerJson, DeJson)]
-pub struct BeaconJson {
-    pub service: String,
-    pub node_id: u64,
-    pub port: u16,
-    pub fleet: Option<String>,
-}
-
 pub fn mint_node_id() -> u64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -39,7 +30,6 @@ pub fn mint_node_id() -> u64 {
     nanos ^ ((std::process::id() as u64) << 32)
 }
 
-pub fn start_beacon(_node_id: u64, _http_port: u16, _fleet: String) {}
 
 #[derive(Clone, Debug)]
 pub struct DiscoveredNode {
@@ -69,6 +59,9 @@ pub fn start_listener() -> Discovery {
     }
 }
 
+/// Nothing listens here: nothing to stop.
+pub fn stop_listener() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,4 +76,28 @@ mod tests {
         assert_eq!(normalize_fleet(""), DEFAULT_FLEET);
         assert_eq!(normalize_fleet(" Game "), "game");
     }
+}
+
+pub struct Beacon;
+
+impl Beacon {
+    pub fn stop(&mut self) {}
+}
+
+pub fn start_fleet_beacon(_node_id: u64, _tls_port: u16, _fleet: String, _node_key: String) -> Option<Beacon> {
+    None
+}
+
+pub const DEFAULT_TLS_PORT: u16 = 8123;
+
+pub fn gateway_nodes(_port: u16, _timeout: std::time::Duration) -> Vec<String> {
+    Vec::new()
+}
+
+pub fn answers(_host_port: &str, _timeout: std::time::Duration) -> bool {
+    false
+}
+
+pub fn network_addresses() -> Vec<std::net::Ipv4Addr> {
+    Vec::new()
 }

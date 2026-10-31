@@ -18,6 +18,9 @@ fn pad_to(v: usize, align: usize) -> usize {
 /// KV cache for the decoder self-attention.
 /// Stores K and V for each layer, growing as tokens are generated.
 pub struct KvCache {
+    /// Renewed by clear so device caches cannot outlive a decoding session.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(crate) vulkan_id: std::sync::Arc<()>,
     /// Per-layer K cache: each is [n_past, n_state]
     pub k: Vec<Vec<f32>>,
     /// Per-layer V cache: each is [n_past, n_state]
@@ -28,6 +31,8 @@ pub struct KvCache {
 impl KvCache {
     pub fn new(n_layers: usize) -> Self {
         KvCache {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            vulkan_id: std::sync::Arc::new(()),
             k: vec![Vec::new(); n_layers],
             v: vec![Vec::new(); n_layers],
             n_past: 0,
@@ -35,6 +40,8 @@ impl KvCache {
     }
 
     pub fn clear(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        { self.vulkan_id = std::sync::Arc::new(()); }
         for k in &mut self.k {
             k.clear();
         }
@@ -78,6 +85,12 @@ pub fn decode(
     cross_kv: &[(Tensor, Tensor)],
     mut capture: Option<&mut crate::whisper::align::AlignCapture>,
 ) -> Tensor {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if capture.is_none() {
+        if let Some(data) = crate::whisper::accel::try_decode(model, tokens, positions, kv_cache, cross_kv) {
+            return Tensor { data, shape: vec![tokens.len(), model.hparams.n_vocab as usize] };
+        }
+    }
     let n_tokens = tokens.len();
     let n_state = model.hparams.n_text_state as usize;
     let n_head = model.hparams.n_text_head as usize;

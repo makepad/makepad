@@ -2300,6 +2300,163 @@ mod imp {
         }
     }
 
+    pub fn gpu_linear_nt_cached_bf16_f32acc_keyed(
+        _x: &GpuTensor,
+        _parts: &[GpuLinearPart<'_>],
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_q8_0_f32acc_keyed(
+        _x: &GpuTensor,
+        _parts: &[GpuLinearPart<'_>],
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_q8_0_swiglu_keyed(
+        _x: &GpuTensor,
+        _qualified_key: &str,
+        _n: usize,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct GpuSamplingParams {
+        pub vocab_start: u32,
+        pub end_token: u32,
+        pub min_tokens: u32,
+        pub top_k: u32,
+        pub penalty_window: u32,
+        pub keep_first: u32,
+        pub round_logits_bf16: u32,
+        pub temperature: f32,
+        pub top_p: f32,
+        pub repetition_penalty: f32,
+        pub guidance: f32,
+        pub seed: u64,
+    }
+
+    pub fn gpu_sample_top_k_top_p(
+        _logits: &GpuTensor,
+        _unconditional: Option<&GpuTensor>,
+        _allowed: &GpuTensor,
+        _counts: &GpuTensor,
+        _state: &GpuTensor,
+        _out: &GpuTensor,
+        _workspace: &GpuTensor,
+        _params: GpuSamplingParams,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_sample_history_push(
+        _counts: &GpuTensor,
+        _history: &GpuTensor,
+        _state: &GpuTensor,
+        _token: &GpuTensor,
+        _vocab_start: u32,
+        _window: usize,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_upload_u32_into(_tensor: &GpuTensor, _values: &[u32]) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_download_u32_scalar(_tensor: &GpuTensor) -> Result<u32, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_increment_u32(_tensor: &GpuTensor, _amount: u32) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_add_rms_norm_keyed(
+        _x: &GpuTensor,
+        _add: &GpuTensor,
+        _qualified_key: &str,
+        _scale: &[f32],
+        _eps: f32,
+    ) -> Result<(GpuTensor, GpuTensor), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_qk_rms_norm_rope_cache(
+        _qkv: &GpuTensor,
+        _q_key: &str,
+        _q_scale: &[f32],
+        _k_key: &str,
+        _k_scale: &[f32],
+        _cos: &GpuTensor,
+        _sin: &GpuTensor,
+        _position: &GpuTensor,
+        _key_cache: &GpuTensor,
+        _value_cache: &GpuTensor,
+        _heads: usize,
+        _kv_heads: usize,
+        _eps: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_qk_rms_norm_rope_cache_bf16(
+        _qkv: &GpuTensor,
+        _q_key: &str,
+        _q_scale: &[f32],
+        _k_key: &str,
+        _k_scale: &[f32],
+        _cos: &GpuTensor,
+        _sin: &GpuTensor,
+        _position: &GpuTensor,
+        _key_cache: &GpuBf16Buf,
+        _value_cache: &GpuBf16Buf,
+        _heads: usize,
+        _kv_heads: usize,
+        _eps: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_attention_gqa_decode_split_bf16(
+        _q: &GpuTensor,
+        _k: &GpuBf16Buf,
+        _v: &GpuBf16Buf,
+        _sequence: usize,
+        _head_count: usize,
+        _kv_heads: usize,
+        _scale: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_attention_gqa_decode_split_device_bf16(
+        _q: &GpuTensor,
+        _k: &GpuBf16Buf,
+        _v: &GpuBf16Buf,
+        _sequence: &GpuTensor,
+        _head_count: usize,
+        _kv_heads: usize,
+        _scale: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_attention_gqa_decode_split_device(
+        _q: &GpuTensor,
+        _k: &GpuTensor,
+        _v: &GpuTensor,
+        _sequence: &GpuTensor,
+        _head_count: usize,
+        _kv_heads: usize,
+        _scale: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
     pub fn gpu_linear_nt_cached_bf16_mm(
         _x: &GpuTensor,
         _cache_namespace: &str,
@@ -2348,6 +2505,29 @@ mod imp {
     }
 
     pub fn gpu_graph_launch(_graph: &GpuStepGraph) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct GpuKernelTiming {
+        pub class: String,
+        pub rows: u32,
+        pub cols: u32,
+        pub count: usize,
+        pub microseconds: f64,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct GpuKernelProfile {
+        pub classes: Vec<GpuKernelTiming>,
+        pub kernel_microseconds: f64,
+        pub span_microseconds: f64,
+    }
+
+    pub fn gpu_profile_kernels<T>(
+        _reserve_launches: usize,
+        _run: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(T, GpuKernelProfile), String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
@@ -2515,6 +2695,16 @@ mod imp {
         _group_cols: usize,
         _cache_namespace: &str,
         _cache_key: &str,
+        _scale: &[f32],
+        _eps: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_rms_norm_mul_keyed(
+        _x: &GpuTensor,
+        _group_cols: usize,
+        _qualified_key: &str,
         _scale: &[f32],
         _eps: f32,
     ) -> Result<GpuTensor, String> {
@@ -2883,6 +3073,15 @@ mod imp {
         }
     }
 
+    pub fn gpu_gather_rows_cached_bf16(
+        _indices: &GpuTensor,
+        _qualified_key: &str,
+        _table_rows: usize,
+        _cols: usize,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
     pub fn gpu_upload_u32(_values: &[u32]) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
@@ -2972,6 +3171,111 @@ mod imp {
         pub fn cols(&self) -> usize {
             self.cols
         }
+    }
+
+    #[repr(i32)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum GpuAttentionPrecision {
+        Bf16F32 = 0,
+        F16Pv = 1,
+        F16QkPv = 2,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum GpuLinearPrecision {
+        Bf16F32,
+        F16F16,
+        Fp8F32,
+    }
+
+    pub struct GpuLinearScratch {}
+
+    pub fn gpu_linear_scratch(
+        _rows: usize, _max_input: usize, _max_output: usize, _precision: GpuLinearPrecision,
+    ) -> Result<GpuLinearScratch, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_weight_cache_ensure_bf16_precision_keyed<F>(
+        _key: &str, _n: usize, _k: usize, _precision: GpuLinearPrecision, _load: F,
+    ) -> Result<(), String>
+    where F: FnOnce() -> Result<Vec<u8>, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_precision_into(
+        _x: &GpuTensor, _scratch: &GpuLinearScratch, _parts: &[(&str, usize)],
+        _bias: Option<&GpuTensor>, _out: &GpuTensor,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    // Fixed-workspace sequence operations (CUDA; distinct bf16 storage).
+    pub fn gpu_synchronize() -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_alloc_bf16(_rows: usize, _cols: usize) -> Result<GpuBf16Buf, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_copy_f32_to_bf16_into(
+        _src: &GpuTensor, _dst: &GpuBf16Buf, _start: usize,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_attention_gqa_flash_bf16_buf_into(
+        _q: &GpuBf16Buf, _k: &GpuBf16Buf, _v: &GpuBf16Buf, _out: &GpuTensor,
+        _heads: usize, _kv_heads: usize, _scale: f32, _causal: bool,
+        _precision: GpuAttentionPrecision,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_bf16_f32acc_into(
+        _x: &GpuTensor, _scratch: &GpuBf16Buf,
+        _parts: &[(&str, usize)], _bias: Option<&GpuTensor>, _out: &GpuTensor,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_add_rms_norm_into(
+        _x: &GpuTensor, _update: Option<&GpuTensor>, _weight: &GpuTensor,
+        _residual: &GpuTensor, _normed: &GpuTensor, _eps: f32,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_qkv_rms_rope_bf16_into(
+        _qkv: &GpuTensor, _qw: &GpuTensor, _kw: &GpuTensor, _cos: &GpuTensor, _sin: &GpuTensor,
+        _q: &GpuBf16Buf, _k: &GpuBf16Buf, _v: &GpuBf16Buf,
+        _head_dim: usize, _kv_offset: usize, _eps: f32,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_swiglu_value_gate_into(_x: &GpuTensor, _out: &GpuTensor) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_add_row_position_into(
+        _x: &GpuTensor, _row: &GpuTensor, _position: &GpuTensor, _out: &GpuTensor,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_scaled_sub_bf16_into(
+        _state: &GpuTensor, _velocity: &GpuTensor, _step: f32, _out: &GpuTensor,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_conv1d_cached(
+        _x: &GpuTensor, _weight: &[f32], _bias: &[f32], _out_channels: usize,
+        _taps: usize, _dilation: usize, _padding: usize, _namespace: &str, _key: &str,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
     }
 
     pub fn gpu_linear_nt_cached_bf16_mm_from_buf(
@@ -3104,6 +3408,16 @@ mod imp {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
+    /// Depthwise 1-D conv over time (Cantor's ConvNeXt blocks); the Metal
+    /// kernel is not written yet.
+    pub fn gpu_dwconv1d(
+        _x: &GpuTensor,
+        _weight: &GpuTensor,
+        _bias: Option<&GpuTensor>,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
     pub fn gpu_alias_snake_updown2x(
         _x: &GpuTensor,
         _params: &GpuTensor,
@@ -3139,6 +3453,35 @@ mod imp {
     where
         F: FnOnce() -> Result<Vec<u8>, String>,
     {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_weight_cache_ensure_bf16_keyed<F>(
+        _qualified_key: &str,
+        _n: usize,
+        _k: usize,
+        _load: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<Vec<u8>, String>,
+    {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_weight_cache_ensure_q8_0_from_bf16_keyed(
+        _qualified_key: &str,
+        _bf16_key: &str,
+        _n: usize,
+        _k: usize,
+    ) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_weight_cache_ensure_q8_0_concat_bf16_keyed(
+        _qualified_key: &str,
+        _parts: &[GpuLinearPart<'_>],
+        _k: usize,
+    ) -> Result<(), String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
@@ -3248,6 +3591,35 @@ mod imp {
         _scale: f32,
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_alloc_f32(_rows: usize, _cols: usize) -> Result<GpuTensor, String> {
+        Err("gpu_alloc_f32 requires CUDA".to_string())
+    }
+
+    pub fn gpu_attention_gqa_decode_split(
+        _q: &GpuTensor,
+        _k: &GpuTensor,
+        _v: &GpuTensor,
+        _sequence: usize,
+        _head_count: usize,
+        _kv_heads: usize,
+        _scale: f32,
+    ) -> Result<GpuTensor, String> {
+        Err("gpu_attention_gqa_decode_split requires CUDA".to_string())
+    }
+
+    pub fn gpu_attention_gqa_flash_bf16(
+        _q: &GpuTensor,
+        _k: &GpuTensor,
+        _v: &GpuTensor,
+        _head_count: usize,
+        _kv_heads: usize,
+        _scale: f32,
+        _causal: bool,
+        _precision: GpuAttentionPrecision,
+    ) -> Result<GpuTensor, String> {
+        Err("gpu_attention_gqa_flash_bf16 requires CUDA".to_string())
     }
 
     pub fn gpu_attention_packed_flash_cross_bf16pre_f16(

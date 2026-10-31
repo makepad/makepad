@@ -1,0 +1,98 @@
+// Newton's method on z^power - 1 (power 2..8), one tile per call: res x res
+// texels, row-major, texel centres at view.x + (col + 0.5) * step; z starts
+// at the texel. z <- ((p-1) z^p + 1) / (p z^(p-1)) until a step's |dz|^2 is
+// below 1e-10, at most max_iter (<= 1024) steps.
+//
+// Per texel a u32: the top byte is 1 + the root reached (the root nearest
+// z's angle, 0..power-1), or 255 when no root was reached; the low 24 bits
+// are (n - frac) in 1/64 steps, n the steps taken and frac =
+// min(log2(max(ln(d) / ln(1e-10), 1)), 1) of the last step d (quadratic
+// convergence runs it 0..1), 1 when d is 0.
+// view (f64): x0, y0, step.
+let view = input(f64)
+let out = output(u32)
+let res = param(256, 1, 4096)
+let max_iter = param(500, 1, 1024)
+let power = param(3, 2, 8)
+
+fn element(i) {
+    let r = int(res)
+    let col = i % r
+    let row = i / r
+    let step = view[2]
+    let zr = view[0] + (f64(col) + 0.5) * step
+    let zi = view[1] + (f64(row) + 0.5) * step
+    let p = int(power)
+    let pf = f64(p)
+    let pm1 = f64(p - 1)
+    let mi = int(max_iter)
+    let n = 0
+    let d = f64(1.0)
+    let alive = 1
+    for it in 0..1024 {
+        if it >= mi {
+            break
+        }
+        // w = z^(p-1)
+        let wr = f64(1.0)
+        let wi = f64(0.0)
+        for j in 0..7 {
+            if j >= p - 1 {
+                break
+            }
+            let t = wr * zr - wi * zi
+            wi = wr * zi + wi * zr
+            wr = t
+        }
+        let zpr = wr * zr - wi * zi
+        let zpi = wr * zi + wi * zr
+        let ar = pm1 * zpr + 1.0
+        let ai = pm1 * zpi
+        let br = pf * wr
+        let bi = pf * wi
+        let den = br * br + bi * bi
+        let nr = (ar * br + ai * bi) / den
+        let ni = (ai * br - ar * bi) / den
+        let dr = nr - zr
+        let di = ni - zi
+        let s = dr * dr + di * di
+        zr = nr
+        zi = ni
+        d = s
+        n = n + 1
+        // NaN (z hit 0) compares false: such a texel stays unconverged
+        if s < 1e-10 {
+            alive = 0
+            break
+        }
+    }
+    if alive == 1 {
+        out[i] = -16777216
+    } else {
+        let ang = atan2(zi, zr)
+        let kf = floor(ang / 6.283185307179586 * pf + 0.5)
+        let k = int(float(kf)) % p
+        if k < 0 {
+            k = k + p
+        }
+        let frac = f64(1.0)
+        if d > 0.0 {
+            let q = ln(d) / ln(f64(1e-10))
+            if q < 1.0 {
+                q = f64(1.0)
+            }
+            frac = log2(q)
+            if frac > 1.0 {
+                frac = f64(1.0)
+            }
+        }
+        let w = (f64(n) - frac) * 64.0
+        if w < 0.0 {
+            w = f64(0.0)
+        }
+        if w > 16777215.0 {
+            w = f64(16777215.0)
+        }
+        out[i] = (k + 1) * 16777216 + int(float(floor(w)))
+    }
+}

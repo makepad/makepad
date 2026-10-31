@@ -352,6 +352,17 @@ impl Context {
         Ok(())
     }
 
+    /// Drops the process's pages of the read-only mapping in `[offset,
+    /// offset + len)` (a backend that copied them to device memory); reads
+    /// fault them back from the file. No-op above `ro_split()`.
+    pub fn release_ro_pages(&self, offset: usize, len: usize) {
+        if let Some(region) = &self.ro_region {
+            if offset < self.ro_split() {
+                region.release(offset, len.min(self.ro_split() - offset));
+            }
+        }
+    }
+
     /// Bytes at a logical offset, served from whichever region holds it
     /// (read-only mapping below ro_split, owned arena above).
     pub fn data_at(&self, offset: usize, len: usize) -> Result<&[u8], String> {

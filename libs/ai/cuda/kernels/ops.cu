@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <math_constants.h>
 #include <stdint.h>
+#include "launch_profile.cuh"
 
 struct __align__(4) block_q8_1 {
     half d;
@@ -3172,6 +3173,7 @@ extern "C" cudaError_t makepad_cuda_rms_norm_rows_weighted_f32_f32weights_precis
         return cudaErrorInvalidValue;
     }
     const uint32_t block = n < 1024 ? 256 : 1024;
+    MakepadLaunchTiming timing("rms_norm", stream, row_count, n);
     makepad_cuda_rms_norm_rows_weighted_f32_f32weights_precise_kernel<<<row_count, block, 0, stream>>>(
         input, weights_f32, output, row_count, row_stride, n, eps);
     return cudaGetLastError();

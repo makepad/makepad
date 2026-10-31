@@ -41,6 +41,7 @@ fn write_wav(path: &str, samples: &[f32]) -> std::io::Result<()> {
 }
 
 fn main() {
+    makepad_ai_speech::g2p::data::load_default().unwrap_or_else(|e| panic!("{e}"));
     makepad_ai_speech::kokoro::accel::force_cpu(true);
     makepad_ai_speech::kokoro::generator::force_deterministic(true);
 

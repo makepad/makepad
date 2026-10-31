@@ -20,6 +20,8 @@ mod imp {
     const SEEK_END: c_int = 2;
     const PROT_READ: c_int = 1;
     const MAP_SHARED: c_int = 1;
+    // MADV_DONTNEED is 4 on Linux, Android and macOS.
+    const MADV_DONTNEED: c_int = 4;
     /// macOS: issue an async advisory read with no copy to user space.
     #[cfg(target_os = "macos")]
     const F_RDADVISE: c_int = 44;
@@ -46,6 +48,7 @@ mod imp {
         ) -> *mut c_void;
         fn munmap(addr: *mut c_void, len: usize) -> c_int;
         fn getpagesize() -> c_int;
+        fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
         fn mincore(addr: *const c_void, len: usize, vec: *mut c_char) -> c_int;
         #[cfg(target_os = "macos")]
         fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
@@ -186,6 +189,20 @@ mod imp {
             self.len
         }
 
+        /// Drops this mapping's pages in `[offset, offset + len)` (whole
+        /// pages inside it) from the process: a backend that copied the
+        /// bytes to device memory no longer pays for them twice. A later
+        /// read faults them back in from the file.
+        pub fn release(&self, offset: usize, len: usize) {
+            let page = unsafe { getpagesize() }.max(1) as usize;
+            let start = offset.next_multiple_of(page);
+            let end = (offset + len).min(self.len) / page * page;
+            if end > start {
+                // Safety: the range lies inside the live mapping.
+                unsafe { madvise((self.ptr as *mut u8).add(start) as *mut c_void, end - start, MADV_DONTNEED) };
+            }
+        }
+
         pub fn is_empty(&self) -> bool {
             self.len == 0
         }
@@ -237,6 +254,8 @@ mod imp {
         pub fn len(&self) -> usize {
             0
         }
+
+        pub fn release(&self, _offset: usize, _len: usize) {}
 
         pub fn is_empty(&self) -> bool {
             true

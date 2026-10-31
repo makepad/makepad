@@ -16,10 +16,12 @@
 //! format ([`crate::providers::claude::parse_stream_line`]), `codex` speaks
 //! its own item/turn events ([`crate::providers::codex_cli`]).
 
+use std::ffi::OsStr;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::OnceLock;
 
 enum IoLine {
     Out(String),
@@ -36,21 +38,52 @@ pub fn find_cli(env_override: &str, name: &str, extra: &[&str]) -> Option<PathBu
         let p = PathBuf::from(p);
         return p.is_file().then_some(p);
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut candidates: Vec<PathBuf> =
-        extra.iter().map(|e| PathBuf::from(e.replacen('~', &home, 1))).collect();
-    candidates.push(PathBuf::from(&home).join(".local/bin").join(name));
+    // USERPROFILE on Windows (HOME is usually unset there), HOME elsewhere.
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
+    find_cli_in(std::env::var_os("PATH").as_deref(), Path::new(&home), name, extra)
+}
+
+/// [`find_cli`] past the override, with `PATH` and the home dir given.
+fn find_cli_in(path: Option<&OsStr>, home: &Path, name: &str, extra: &[&str]) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = path.map(|path| std::env::split_paths(path).map(|dir| dir.join(name)).collect()).unwrap_or_default();
+    let home_text = home.to_string_lossy();
+    candidates.extend(extra.iter().map(|e| PathBuf::from(e.replacen('~', &home_text, 1))));
+    candidates.push(home.join(".local/bin").join(name));
     candidates.push(PathBuf::from("/usr/local/bin").join(name));
     candidates.push(PathBuf::from("/opt/homebrew/bin").join(name));
-    candidates.into_iter().find(|p| p.is_file())
+    candidates.into_iter().find_map(executable)
+}
+
+/// The file that runs `candidate`. On Windows a command is a file named
+/// with one of the PATHEXT extensions (`claude` installs as `claude.exe`,
+/// a package manager's install as `claude.cmd` beside an extensionless
+/// shell shim that Windows cannot start), so those names are tried in
+/// PATHEXT's order.
+fn executable(candidate: PathBuf) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let pathext = std::env::var("PATHEXT").unwrap_or_default();
+        // Only what CreateProcess starts (std runs .bat/.cmd through cmd).
+        let mut exts: Vec<String> = pathext
+            .split(';')
+            .map(|ext| ext.trim().to_ascii_lowercase())
+            .filter(|ext| matches!(ext.as_str(), ".com" | ".exe" | ".bat" | ".cmd"))
+            .collect();
+        for ext in [".exe", ".cmd"] {
+            if !exts.iter().any(|e| e == ext) {
+                exts.push(ext.to_string());
+            }
+        }
+        exts.iter()
+            .map(|ext| {
+                let mut file = candidate.clone().into_os_string();
+                file.push(ext);
+                PathBuf::from(file)
+            })
+            .find(|file| file.is_file())
+    }
+    #[cfg(not(windows))]
+    candidate.is_file().then_some(candidate)
 }
 
 /// An empty, PRIVATE working directory for ONE CLI turn. Every CLI here
@@ -174,13 +207,23 @@ impl CliTurn {
     /// `turn_dir` is the per-turn working directory to remove when the
     /// turn ends, however it ends.
     pub fn spawn(
-        mut command: Command,
+        command: Command,
         stdin: Option<String>,
         what: &str,
         turn_dir: Option<PathBuf>,
     ) -> Result<CliTurn, String> {
+        CliTurn::start(command, stdin, false, what, turn_dir)
+    }
+
+    fn start(
+        mut command: Command,
+        stdin: Option<String>,
+        keep_stdin: bool,
+        what: &str,
+        turn_dir: Option<PathBuf>,
+    ) -> Result<CliTurn, String> {
         command
-            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin.is_some() || keep_stdin { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
@@ -199,7 +242,8 @@ impl CliTurn {
             }
         };
         let mut child = child;
-        if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        // (Taken only for a prompt: a live process keeps its pipe.)
+        if let Some((text, mut pipe)) = stdin.and_then(|text| Some((text, child.stdin.take()?))) {
             std::thread::spawn(move || {
                 let _ = pipe.write_all(text.as_bytes());
             });
@@ -211,6 +255,30 @@ impl CliTurn {
         spawn_reader(child.stdout.take(), tx.clone(), IoLine::Out, true);
         spawn_reader(child.stderr.take(), tx, IoLine::Err, false);
         Ok(CliTurn { child, rx, stderr_tail: String::new(), finished: false, turn_dir })
+    }
+
+    /// [`Self::spawn`] for a process that stays up across turns: stdin
+    /// stays open, and each line sent on the returned channel is written to
+    /// it (from a writer thread that lives as long as the process; dropping
+    /// the sender closes stdin).
+    pub fn spawn_live(command: Command, what: &str, turn_dir: Option<PathBuf>) -> Result<(CliTurn, Sender<String>), String> {
+        let mut turn = CliTurn::start(command, None, true, what, turn_dir)?;
+        let (tx, rx) = channel::<String>();
+        if let Some(mut pipe) = turn.child.stdin.take() {
+            std::thread::spawn(move || {
+                for line in rx {
+                    if pipe.write_all(line.as_bytes()).and_then(|_| pipe.flush()).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        Ok((turn, tx))
+    }
+
+    /// Whether the process is still running.
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Non-blocking: everything that arrived since the last call.
@@ -241,10 +309,14 @@ impl CliTurn {
         categorize_cli_error(what, &self.stderr_tail, true)
     }
 
-    /// Reap a finished process and remove its turn directory.
+    /// Reap a finished process and remove its turn directory. Never waits:
+    /// a process still exiting (the CLI goes on for a second or so after
+    /// its result line) is reaped on the reaper thread.
     pub fn wait(mut self) {
-        let _ = self.child.wait();
-        self.cleanup();
+        match self.child.try_wait() {
+            Ok(Some(_)) | Err(_) => self.cleanup(),
+            Ok(None) => reap_later(self),
+        }
     }
 
     /// Kill the process and everything it spawned (the group we created),
@@ -271,6 +343,34 @@ impl CliTurn {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+}
+
+/// Finished turns whose processes have not exited yet, reaped (waited for,
+/// their turn directories removed) on one long-lived thread, so whoever
+/// polls a turn never waits for a process to exit.
+fn reap_later(turn: CliTurn) {
+    static REAPER: OnceLock<Option<Sender<CliTurn>>> = OnceLock::new();
+    let reaper = REAPER.get_or_init(|| {
+        let (tx, rx) = channel::<CliTurn>();
+        let spawned = std::thread::Builder::new().name("cli-reaper".into()).spawn(move || {
+            for mut turn in rx {
+                let _ = turn.child.wait();
+                turn.cleanup();
+            }
+        });
+        spawned.ok().map(|_| tx)
+    });
+    let turn = match reaper {
+        Some(tx) => match tx.send(turn) {
+            Ok(()) => return,
+            Err(failed) => failed.0,
+        },
+        None => turn,
+    };
+    // No reaper thread: reap here, as before.
+    let mut turn = turn;
+    let _ = turn.child.wait();
+    turn.cleanup();
 }
 
 fn spawn_reader<R: std::io::Read + Send + 'static>(
@@ -402,5 +502,33 @@ mod tests {
         std::env::remove_var("MAKEPAD_TEST_CLI_OVERRIDE");
         // Without it, a PATH binary is found.
         assert!(find_cli("MAKEPAD_TEST_CLI_OVERRIDE_UNSET", "sh", &[]).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finds_a_cli_by_its_pathext_name() {
+        let root = std::env::temp_dir().join(format!("makepad-find-cli-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (exe_dir, cmd_dir, home) = (root.join("exe"), root.join("cmd"), root.join("home"));
+        let local_bin = home.join(".local/bin");
+        for dir in [&exe_dir, &cmd_dir, &local_bin] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(exe_dir.join("fake-cli.exe"), b"").unwrap();
+        // A package manager's install: an extensionless shell shim Windows cannot start, and its .cmd.
+        std::fs::write(cmd_dir.join("fake-cli"), b"").unwrap();
+        std::fs::write(cmd_dir.join("fake-cli.cmd"), b"").unwrap();
+        std::fs::write(local_bin.join("fake-cli.exe"), b"").unwrap();
+        let nowhere = root.join("nowhere");
+
+        let path = std::env::join_paths([&exe_dir]).unwrap();
+        assert_eq!(find_cli_in(Some(&path), &nowhere, "fake-cli", &[]), Some(exe_dir.join("fake-cli.exe")));
+        let path = std::env::join_paths([&cmd_dir, &exe_dir]).unwrap();
+        assert_eq!(find_cli_in(Some(&path), &nowhere, "fake-cli", &[]), Some(cmd_dir.join("fake-cli.cmd")));
+        // Not on PATH: ~/.local/bin, where the claude installer puts claude.exe.
+        let path = std::env::join_paths([&nowhere]).unwrap();
+        assert_eq!(find_cli_in(Some(&path), &home, "fake-cli", &[]), Some(local_bin.join("fake-cli.exe")));
+        assert_eq!(find_cli_in(Some(&path), &nowhere, "fake-cli", &[]), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

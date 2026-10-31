@@ -1,0 +1,191 @@
+// Full (non-causal, maskless) attention with 64 f32 channels per head,
+// 64 queries x 32 keys per step, any row/head strides (the Whisper encoder
+// and the vision tower).
+// Q remains in shared memory; K is transposed in complete 4x4 blocks.
+// After QK, the 8 KiB key tile is reused for P. With Q (16 KiB) and
+// V (8 KiB), total shared storage is exactly 32 KiB, independent of nk.
+// Each invocation owns four rows, four scores and eight output channels
+// per row. All register tiles are named vec4 values, never local arrays.
+// Row maxima and sums are read back from the shared P tile (no subgroup
+// operations), so any subgroup size works.
+{
+    attention_d64: {
+        workgroup_size: 128
+        q: shader.buffer(vec4f)
+        k: shader.buffer(vec4f)
+        v: shader.buffer(vec4f)
+        dst: shader.buffer_rw(vec4f)
+        nq: shader.uniform(u32)
+        nk: shader.uniform(u32)
+        scale: shader.uniform(f32)
+        // Row and head strides of q, k, v and dst in vec4 units.
+        q_row: shader.uniform(u32)
+        q_head: shader.uniform(u32)
+        k_row: shader.uniform(u32)
+        k_head: shader.uniform(u32)
+        v_row: shader.uniform(u32)
+        v_head: shader.uniform(u32)
+        d_row: shader.uniform(u32)
+        d_head: shader.uniform(u32)
+        qs: shader.workgroup(vec4f, 1024)
+        kp: shader.workgroup(vec4f, 512)
+        vs: shader.workgroup(vec4f, 512)
+        madd: fn(acc, a, b0, b1, b2, b3) {
+            return (((acc + a.x * b0) + a.y * b1) + a.z * b2) + a.w * b3
+        }
+        max4: fn(a) { return max(max(a.x, a.y), max(a.z, a.w)) }
+        sum4: fn(a) { return (a.x + a.y) + (a.z + a.w) }
+        load_key: fn(row, dim, head) {
+            if row < self.nk { return self.k[row * self.k_row + head * self.k_head + dim] }
+            return vec4f(0.0)
+        }
+        mask: fn(s, key) {
+            var a = s * self.scale
+            if key >= self.nk { a.x = -3.0e38 }
+            if key + 1 >= self.nk { a.y = -3.0e38 }
+            if key + 2 >= self.nk { a.z = -3.0e38 }
+            if key + 3 >= self.nk { a.w = -3.0e38 }
+            return a
+        }
+        store: fn(row, dim, head, lo, hi, sum) {
+            if row < self.nq {
+                let at = row * self.d_row + head * self.d_head + dim
+                self.dst[at] = lo / sum
+                self.dst[at + 1] = hi / sum
+            }
+        }
+        main: fn() {
+            let t = local_id().x
+            let head = group_id().x
+            let first = group_id().y * 64
+            let r = (t / 8) * 4
+            let c = t % 8
+            var j = t
+            while j < 1024 {
+                let row = first + j / 16
+                var a = vec4f(0.0)
+                if row < self.nq { a = self.q[row * self.q_row + head * self.q_head + j % 16] }
+                self.qs[j] = a
+                j += 128
+            }
+            var o00 = vec4f(0.0)
+            var o01 = vec4f(0.0)
+            var o10 = vec4f(0.0)
+            var o11 = vec4f(0.0)
+            var o20 = vec4f(0.0)
+            var o21 = vec4f(0.0)
+            var o30 = vec4f(0.0)
+            var o31 = vec4f(0.0)
+            var mx = vec4f(-3.0e38)
+            var sum = vec4f(0.0)
+            var base = u32(0)
+            while base < self.nk {
+                let kr = (t / 16) * 4
+                let kd = t % 16
+                let k0 = self.load_key(base + kr, kd, head)
+                let k1 = self.load_key(base + kr + 1, kd, head)
+                let k2 = self.load_key(base + kr + 2, kd, head)
+                let k3 = self.load_key(base + kr + 3, kd, head)
+                // Whole-vector stores avoid races between vector components.
+                self.kp[(kd * 4) * 8 + kr / 4] = vec4f(k0.x, k1.x, k2.x, k3.x)
+                self.kp[(kd * 4 + 1) * 8 + kr / 4] = vec4f(k0.y, k1.y, k2.y, k3.y)
+                self.kp[(kd * 4 + 2) * 8 + kr / 4] = vec4f(k0.z, k1.z, k2.z, k3.z)
+                self.kp[(kd * 4 + 3) * 8 + kr / 4] = vec4f(k0.w, k1.w, k2.w, k3.w)
+                j = t
+                while j < 512 {
+                    var a = vec4f(0.0)
+                    if base + j / 16 < self.nk {
+                        a = self.v[(base + j / 16) * self.v_row + head * self.v_head + j % 16]
+                    }
+                    self.vs[j] = a
+                    j += 128
+                }
+                barrier()
+                var s0 = vec4f(0.0)
+                var s1 = vec4f(0.0)
+                var s2 = vec4f(0.0)
+                var s3 = vec4f(0.0)
+                for d in 0..16 {
+                    let b0 = self.kp[(d * 4) * 8 + c]
+                    let b1 = self.kp[(d * 4 + 1) * 8 + c]
+                    let b2 = self.kp[(d * 4 + 2) * 8 + c]
+                    let b3 = self.kp[(d * 4 + 3) * 8 + c]
+                    s0 = self.madd(s0, self.qs[r * 16 + d], b0, b1, b2, b3)
+                    s1 = self.madd(s1, self.qs[(r + 1) * 16 + d], b0, b1, b2, b3)
+                    s2 = self.madd(s2, self.qs[(r + 2) * 16 + d], b0, b1, b2, b3)
+                    s3 = self.madd(s3, self.qs[(r + 3) * 16 + d], b0, b1, b2, b3)
+                }
+                s0 = self.mask(s0, base + c * 4)
+                s1 = self.mask(s1, base + c * 4)
+                s2 = self.mask(s2, base + c * 4)
+                s3 = self.mask(s3, base + c * 4)
+                // The row maxima go through shared memory: the eight lanes
+                // of a row write their scores, then each reads the row (a
+                // subgroup shuffle in this loop fails pipeline creation on
+                // one phone driver). All K readers finish first.
+                barrier()
+                self.kp[r * 8 + c] = s0
+                self.kp[(r + 1) * 8 + c] = s1
+                self.kp[(r + 2) * 8 + c] = s2
+                self.kp[(r + 3) * 8 + c] = s3
+                barrier()
+                var row = vec4f(-3.0e38)
+                for d in 0..8 {
+                    row = max(row, vec4f(self.max4(self.kp[r * 8 + d]), self.max4(self.kp[(r + 1) * 8 + d]),
+                        self.max4(self.kp[(r + 2) * 8 + d]), self.max4(self.kp[(r + 3) * 8 + d])))
+                }
+                let next = max(mx, row)
+                let corr = exp(mx - next)
+                s0 = exp(s0 - next.x)
+                s1 = exp(s1 - next.y)
+                s2 = exp(s2 - next.z)
+                s3 = exp(s3 - next.w)
+                sum = sum * corr
+                mx = next
+                barrier()
+                self.kp[r * 8 + c] = s0
+                self.kp[(r + 1) * 8 + c] = s1
+                self.kp[(r + 2) * 8 + c] = s2
+                self.kp[(r + 3) * 8 + c] = s3
+                o00 *= corr.x
+                o01 *= corr.x
+                o10 *= corr.y
+                o11 *= corr.y
+                o20 *= corr.z
+                o21 *= corr.z
+                o30 *= corr.w
+                o31 *= corr.w
+                barrier()
+                for d in 0..8 {
+                    let p0 = self.kp[r * 8 + d]
+                    let p1 = self.kp[(r + 1) * 8 + d]
+                    let p2 = self.kp[(r + 2) * 8 + d]
+                    let p3 = self.kp[(r + 3) * 8 + d]
+                    sum += vec4f(self.sum4(p0), self.sum4(p1), self.sum4(p2), self.sum4(p3))
+                    let b0 = self.vs[(d * 4) * 16 + c * 2]
+                    let b1 = self.vs[(d * 4 + 1) * 16 + c * 2]
+                    let b2 = self.vs[(d * 4 + 2) * 16 + c * 2]
+                    let b3 = self.vs[(d * 4 + 3) * 16 + c * 2]
+                    o00 = self.madd(o00, p0, b0, b1, b2, b3)
+                    o10 = self.madd(o10, p1, b0, b1, b2, b3)
+                    o20 = self.madd(o20, p2, b0, b1, b2, b3)
+                    o30 = self.madd(o30, p3, b0, b1, b2, b3)
+                    let b4 = self.vs[(d * 4) * 16 + c * 2 + 1]
+                    let b5 = self.vs[(d * 4 + 1) * 16 + c * 2 + 1]
+                    let b6 = self.vs[(d * 4 + 2) * 16 + c * 2 + 1]
+                    let b7 = self.vs[(d * 4 + 3) * 16 + c * 2 + 1]
+                    o01 = self.madd(o01, p0, b4, b5, b6, b7)
+                    o11 = self.madd(o11, p1, b4, b5, b6, b7)
+                    o21 = self.madd(o21, p2, b4, b5, b6, b7)
+                    o31 = self.madd(o31, p3, b4, b5, b6, b7)
+                }
+                barrier()
+                base += 32
+            }
+            self.store(first + r, c * 2, head, o00, o01, sum.x)
+            self.store(first + r + 1, c * 2, head, o10, o11, sum.y)
+            self.store(first + r + 2, c * 2, head, o20, o21, sum.z)
+            self.store(first + r + 3, c * 2, head, o30, o31, sum.w)
+        }
+    }
+}

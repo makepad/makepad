@@ -26,6 +26,13 @@ that still retain ggml block layouts, kernel structure, or constants.
   libs/ai/metal/shaders/ggml/              vendored ggml-metal snapshot
   libs/ai/loader/src/formats/gguf.rs       GGUF reader (moved from llama)
   libs/ai/loader/src/quant.rs              GGUF dtype / block metadata
+  libs/ai/loader/src/quant_encode.rs       Q8_0 and K-quant scale searches
+
+The Rust Q4_K/Q5_K weighted affine search, Q6_K signed scale search, and
+Q8_0 rounding in quant_encode.rs are ported from ggml/src/ggml-quants.c,
+read 2026-10-12 from the upstream repository above. Their block layouts
+remain compatible with the existing dequantizers. The copyright and full
+MIT permission notice in this section apply to these ports as well.
 
 Pinned Metal snapshot (see that directory's LICENSE):
   commit 364c77f4ca2737e3287652e0e8a8c6dce3231bba
@@ -77,7 +84,9 @@ libs/ai/models/flux/assets/clip_merges_utf8.txt
   CLIP BPE merges table. CLIP (OpenAI) is MIT-licensed.
   Copyright (c) 2021 OpenAI.
 
-libs/ai/models/flux/assets/t5_tokenizer.json
+t5_tokenizer.json (downloaded with the FLUX.1 models from
+https://makepad.nl/models/flux/t5_tokenizer.json, see
+libs/ai/models/flux/src/t5.rs; not kept in this repository)
   T5 SentencePiece / HuggingFace tokenizer dump.
   T5 (Google) is Apache License 2.0.
   https://github.com/google-research/text-to-text-transfer-transformer
@@ -86,10 +95,91 @@ These files are data tables required to run the corresponding checkpoints.
 They are not model weights.
 
 ========================================================================
+Kokoro speech: Mandarin front end and its data
+========================================================================
+
+libs/ai/models/speech/src/g2p/zh/   Mandarin text-to-phoneme front end
+  Ported from misaki (https://github.com/hexgrad/misaki, Apache License 2.0,
+  Hexgrad): zh.py, zh_frontend.py, tone_sandhi.py (their word lists are
+  carried over) and transcription.py. misaki's zh_frontend and tone_sandhi
+  are adapted from PaddleSpeech (Apache License 2.0, Copyright (c) 2021
+  PaddlePaddle Authors); transcription.py from pinyin-to-ipa (MIT,
+  Stefan Taubert).
+
+Kokoro G2P lexicon tables us_lexicon.bin, zh_pinyin.bin, zh_words.bin
+  Downloaded with the Kokoro model (https://makepad.nl/models/speech/kokoro-g2p/,
+  see libs/ai/models/speech/src/g2p/data.rs), not kept in this repository.
+  us_lexicon.bin is packed by libs/ai/models/speech/tools/build_lexicon.py
+  from misaki's us_gold.json (https://github.com/hexgrad/misaki, Apache
+  License 2.0, Hexgrad).
+  zh_pinyin.bin and zh_words.bin are packed by
+  libs/ai/models/speech/tools/build_zh_lexicon.py from three MIT-licensed sources:
+  pinyin-data and phrase-pinyin-data (Copyright (c) mozillazg,
+  https://github.com/mozillazg/pinyin-data and .../phrase-pinyin-data) and
+  the word dictionary of jieba (Copyright (c) 2013 Sun Junyi,
+  https://github.com/fxsjy/jieba).
+
+libs/ai/models/speech/src/g2p/vocab*.rs
+  Symbol tables generated from the Kokoro model configs (Apache License 2.0).
+
+Kokoro-82M v1.0 and v1.1-zh weights and voices (Hexgrad, Apache License 2.0)
+are downloaded by the user, not redistributed here. The v1.1-zh voices
+(zf_001 ... zm_100) were trained on Chinese data that LongMaoData
+(https://www.longmaosoft.com/) granted to Hexgrad freely and permissively;
+credit LongMaoData wherever those voices are offered. Whisper
+large-v3-turbo (OpenAI, MIT) transcribes speech; its ggml conversion is from
+https://github.com/ggerganov/whisper.cpp (MIT).
+
+========================================================================
+Oobleck VAE and SnakeBeta (stable-audio-tools, BigVGAN)
+========================================================================
+
+License: MIT
+Copyright (c) 2023 Stability AI (stable-audio-tools, Oobleck autoencoder)
+Copyright (c) 2022 NVIDIA CORPORATION (BigVGAN, SnakeBeta activation)
+Upstream: https://github.com/Stability-AI/stable-audio-tools
+          https://github.com/NVIDIA/BigVGAN
+
+libs/ai/models/music/src/oobleck.rs reimplements the Oobleck decoder
+structure (weight-normalised convolutions, log-scale SnakeBeta, residual
+units) used by the ACE-Step and YuE2 VAE checkpoints.
+
+========================================================================
+YuE2 inference reference (multimodal-art-projection/YuE)
+========================================================================
+
+License: Apache License 2.0
+Upstream: https://github.com/multimodal-art-projection/YuE (src/yue2)
+
+libs/ai/models/music/src/yue2*.rs are a native port of the YuE2 inference
+protocol and architecture (prompt format, token ids, sampling order, the
+AR-NAR mixture-of-transformers forward, flow-matching schedule, tiled VAE
+decode). No upstream source is vendored. The YuE2 weights are licensed
+separately (CC BY-NC 4.0, see below and the registry record yue2-3b).
+
+========================================================================
+PaddleOCR PP-OCRv5 mobile text detection (PaddlePaddle/PaddleOCR)
+========================================================================
+
+License: Apache License 2.0
+Copyright (c) PaddlePaddle Authors
+Upstream: https://github.com/PaddlePaddle/PaddleOCR
+Weights: https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det (Apache-2.0)
+
+libs/ai/models/textdet lowers the PP-OCRv5 mobile detection program
+(inference.json + inference.pdiparams) to its own graph and file with our
+converter (src/paddle.rs, loader/src/formats/paddle.rs) and runs it with its
+own kernels; its pre-processing (longer side 960, multiples of 32, BGR
+mean/std) and DB post-processing thresholds (0.3 / 0.6 / unclip 1.5) follow
+the model's inference.yml. No upstream source is vendored. The converted
+weights file is a derivative of the Apache-2.0 weights and carries this
+notice.
+
+========================================================================
 What this NOTICE does not cover
 ========================================================================
 
-Model *weights* that a user downloads (FLUX, Hunyuan, Qwen, MiniMax, …)
+Model *weights* that a user downloads (FLUX, Hunyuan, Qwen, MiniMax, YuE2, …)
 are licensed separately by their authors. This stack does not host or
 redistribute those weights. The Asset UI requires an explicit per-model
 acknowledgement of the registry license record before a model is cleared

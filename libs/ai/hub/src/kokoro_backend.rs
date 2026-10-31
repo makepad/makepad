@@ -19,12 +19,16 @@
 //! the service cache, then the makepad-tts conventions (env override /
 //! working dir / next to the exe) as a dev fallback, then download+convert.
 //!
-//! Request: `{model: "kokoro", text, voice, speed}` -> one `audio/wav`
-//! artifact (mono 16-bit PCM, 24 kHz).
+//! Request: `{model: "kokoro", text, voice, speed}` -> an `audio/wav`
+//! artifact (mono 16-bit PCM, 24 kHz), then an `application/json`
+//! [`SpeechTimingsJson`] with every word's start and end, read off Kokoro's
+//! duration predictor (absent when the synth has no timings: the stub).
 
 use crate::backend::{CancelToken, ArtifactData, BackendCtx, ContentBackend, GenerateParams, ProgressSink};
 use crate::error::AssetAiError;
+use crate::protocol::{SpeechTimingsJson, WordTimingJson, SPEECH_TIMINGS_FORMAT, SPEECH_TIMINGS_VERSION};
 use crate::wav::encode_wav_pcm16_mono;
+use makepad_micro_serde::SerJson;
 
 pub const DEFAULT_VOICE: &str = "bm_daniel";
 
@@ -50,6 +54,8 @@ enum Synth {
 pub struct KokoroBackend {
     model_id: String,
     synth: Synth,
+    /// Where a streaming job's finished clauses go (set by the server per job).
+    chunk_sink: Option<Box<dyn FnMut(ArtifactData) + Send>>,
 }
 
 impl KokoroBackend {
@@ -57,6 +63,7 @@ impl KokoroBackend {
     pub fn with_stub(model_id: &str, synth: SynthFn) -> Self {
         Self {
             model_id: model_id.to_string(),
+            chunk_sink: None,
             synth: Synth::Stub(synth),
         }
     }
@@ -66,6 +73,7 @@ impl KokoroBackend {
     pub fn new_kokoro(model_id: &str) -> Self {
         Self {
             model_id: model_id.to_string(),
+            chunk_sink: None,
             synth: Synth::Kokoro(kokoro_synth::KokoroSynth::new()),
         }
     }
@@ -101,6 +109,32 @@ impl ContentBackend for KokoroBackend {
         }
     }
 
+    fn set_chunk_sink(&mut self, sink: Option<Box<dyn FnMut(ArtifactData) + Send>>) {
+        self.chunk_sink = sink;
+    }
+
+    fn is_resident(&self) -> bool {
+        match &self.synth {
+            Synth::Stub(_) => false,
+            #[cfg(feature = "tts")]
+            Synth::Kokoro(synth) => synth.is_resident(),
+        }
+    }
+
+    /// The device copy of the weights lives only for a job (`synthesize`).
+    fn holds_gpu_between_jobs(&self) -> bool {
+        false
+    }
+
+    fn unload(&mut self) -> Result<(), AssetAiError> {
+        match &mut self.synth {
+            Synth::Stub(_) => {}
+            #[cfg(feature = "tts")]
+            Synth::Kokoro(synth) => synth.unload(),
+        }
+        Ok(())
+    }
+
     fn generate(
         &mut self,
         params: &GenerateParams,
@@ -126,10 +160,18 @@ impl ContentBackend for KokoroBackend {
         };
         cancel.check()?;
         progress("synthesize", 0.1);
-        let (samples, sample_rate) = match &mut self.synth {
-            Synth::Stub(synth) => synth(&job)?,
+        let (samples, sample_rate, timings) = match &mut self.synth {
+            Synth::Stub(synth) => {
+                let (samples, sample_rate) = synth(&job)?;
+                (samples, sample_rate, None)
+            }
             #[cfg(feature = "tts")]
-            Synth::Kokoro(synth) => synth.synthesize(&job, &mut *progress, cancel)?,
+            Synth::Kokoro(synth) => {
+                let mut sink = if params.stream { self.chunk_sink.take() } else { None };
+                let result = synth.synthesize(&job, &mut *progress, cancel, sink.as_mut().map(|s| &mut **s as &mut dyn FnMut(ArtifactData)));
+                self.chunk_sink = sink.or(self.chunk_sink.take());
+                result?
+            }
         };
         cancel.check()?;
         if samples.is_empty() {
@@ -139,12 +181,29 @@ impl ContentBackend for KokoroBackend {
         }
         progress("encode", 0.9);
         let wav = encode_wav_pcm16_mono(&samples, sample_rate);
-        progress("done", 1.0);
-        Ok(vec![ArtifactData {
+        let mut artifacts = vec![ArtifactData {
             content_type: "audio/wav",
             ext: "wav",
             bytes: wav,
-        }])
+        }];
+        if let Some(words) = timings {
+            artifacts.push(ArtifactData {
+                content_type: "application/json",
+                ext: "json",
+                bytes: timings_json(words).serialize_json().into_bytes(),
+            });
+        }
+        progress("done", 1.0);
+        Ok(artifacts)
+    }
+}
+
+/// The timings sidecar for one synthesis.
+pub fn timings_json(words: Vec<WordTimingJson>) -> SpeechTimingsJson {
+    SpeechTimingsJson {
+        format: SPEECH_TIMINGS_FORMAT.to_string(),
+        version: SPEECH_TIMINGS_VERSION,
+        words,
     }
 }
 
@@ -157,7 +216,9 @@ mod kokoro_synth {
     use super::SpeechJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
+    use crate::protocol::WordTimingJson;
     use crate::registry::FileSpec;
+    use crate::speech::kokoro_bank::KokoroBank;
     use makepad_ai_speech::kokoro::KokoroSpeaker;
     use std::path::{Path, PathBuf};
 
@@ -206,8 +267,9 @@ mod kokoro_synth {
     pub struct KokoroSynth {
         model_path: Option<PathBuf>,
         cache_dir: Option<PathBuf>,
-        /// One speaker per loaded voice; reloaded when the voice changes.
-        loaded: Option<(String, KokoroSpeaker)>,
+        /// The models loaded (v1.0, and v1.1-zh when a Mandarin voice of that
+        /// set is asked for); a voice swaps its style table under them.
+        bank: Option<KokoroBank>,
     }
 
     impl KokoroSynth {
@@ -215,7 +277,7 @@ mod kokoro_synth {
             Self {
                 model_path: None,
                 cache_dir: None,
-                loaded: None,
+                bank: None,
             }
         }
 
@@ -235,9 +297,14 @@ mod kokoro_synth {
             let total = spec.files.len();
             for (index, file) in spec.files.iter().enumerate() {
                 let Some(converted) = file.converted_path(cache_dir) else {
-                    // Old-style entry (pre-converted local file, no
-                    // converts_to): nothing to ensure — the resolution below
-                    // errors helpfully if it is missing.
+                    // A file used as downloaded (the G2P lexicon tables):
+                    // fetch and verify it (a no-op when the cache has it).
+                    // An old-style local entry (pre-converted file) has
+                    // nothing to fetch; the resolution below names it.
+                    if !file.local {
+                        ctx.downloader
+                            .ensure_file(file, cache_dir, ctx.download_progress, ctx.cancel)?;
+                    }
                     continue;
                 };
                 let upstream = file.dest_path(cache_dir);
@@ -278,6 +345,9 @@ mod kokoro_synth {
                 })?;
             }
 
+            // The G2P tables, downloaded next to the converted weights.
+            makepad_ai_speech::g2p::data::load(&cache_dir.join("tts")).map_err(AssetAiError::Backend)?;
+
             // Resolve the model weights: cache first, then the makepad-tts
             // conventions (env / working dir / exe dir) as the dev fallback.
             let model_file = spec
@@ -302,7 +372,7 @@ mod kokoro_synth {
                 Some(path) => {
                     if self.model_path.as_ref() != Some(&path) {
                         self.model_path = Some(path);
-                        self.loaded = None;
+                        self.bank = None;
                     }
                     Ok(())
                 }
@@ -314,43 +384,47 @@ mod kokoro_synth {
             }
         }
 
-        fn voice_path(&self, voice: &str) -> Result<String, AssetAiError> {
-            let file_name = format!("{voice}.mkvoice");
-            if let Some(cache_dir) = &self.cache_dir {
-                let cached = cache_dir.join("tts").join(&file_name);
-                if cached.is_file() {
-                    return Ok(cached.to_string_lossy().into_owned());
-                }
-            }
-            makepad_ai_speech::kokoro::named_voice_path_if_present(&file_name).ok_or_else(|| {
-                AssetAiError::Backend(format!(
-                    "voice pack {file_name} not found in the cache tts/ dir or next to the service"
-                ))
-            })
+        pub fn is_resident(&self) -> bool {
+            self.bank.is_some()
         }
 
+        /// Drop the models and the device-resident weights of this thread.
+        pub fn unload(&mut self) {
+            self.bank = None;
+            makepad_ai_speech::kokoro::accel::release_device_state();
+        }
+
+        /// `(samples, sample_rate, word timings)`.
         pub fn synthesize(
             &mut self,
             job: &SpeechJob,
             progress: ProgressSink,
             cancel: &CancelToken,
-        ) -> Result<(Vec<f32>, u32), AssetAiError> {
+            mut on_clause: Option<&mut dyn FnMut(super::ArtifactData)>,
+        ) -> Result<(Vec<f32>, u32, Option<Vec<WordTimingJson>>), AssetAiError> {
             let model_path = self
                 .model_path
                 .clone()
                 .ok_or_else(|| AssetAiError::Backend("kokoro used before ensure_loaded".into()))?;
-            if self.loaded.as_ref().map(|(voice, _)| voice.as_str()) != Some(job.voice.as_str()) {
-                progress("load voice", 0.05);
-                let voice_path = self.voice_path(&job.voice)?;
-                let speaker = KokoroSpeaker::load_with_voice(
-                    &model_path.to_string_lossy(),
-                    &voice_path,
-                )
-                .map_err(|e| AssetAiError::Backend(format!("kokoro load: {e:?}")))?;
-                self.loaded = Some((job.voice.clone(), speaker));
+            if self.bank.is_none() {
+                progress("load model", 0.05);
+                let zh = KokoroBank::sibling_zh_model(&model_path)
+                    .or_else(|| self.cache_dir.as_ref().map(|d| d.join("tts").join(crate::speech::weights::KOKORO_ZH_MODEL_FILE)).filter(|p| p.is_file()));
+                self.bank = Some(KokoroBank::new(model_path, zh));
             }
             cancel.check()?;
-            let (_, speaker) = self.loaded.as_mut().unwrap();
+            let cache_dir = self.cache_dir.clone();
+            let find_voice = move |voice: &str| {
+                let file_name = format!("{voice}.mkvoice");
+                if let Some(cache_dir) = &cache_dir {
+                    let cached = cache_dir.join("tts").join(&file_name);
+                    if cached.is_file() {
+                        return Some(cached);
+                    }
+                }
+                makepad_ai_speech::kokoro::named_voice_path_if_present(&file_name).map(PathBuf::from)
+            };
+            let bank = self.bank.as_mut().unwrap();
             // Per-text-chunk progress + cancel boundary (a chunk is one
             // sentence-sized 510-phoneme window, sub-second each — the
             // granularity floor for this backend).
@@ -361,11 +435,30 @@ mod kokoro_synth {
                 );
                 !cancel.is_cancelled()
             };
-            let audio = speaker
-                .synthesize_with_speed_observed(&job.text, job.speed, &mut on_chunk)
-                .map_err(|e| AssetAiError::Backend(format!("kokoro synthesize: {e:?}")))?;
+            let audio = match on_clause.as_mut() {
+                Some(sink) => bank.synthesize_streaming(&job.voice, &find_voice, &job.text, job.speed as f32, &mut on_chunk, &mut |samples: &[f32]| {
+                    sink(super::ArtifactData {
+                        content_type: "audio/wav",
+                        ext: "wav",
+                        bytes: crate::wav::encode_wav_pcm16_mono(samples, makepad_ai_speech::kokoro::SAMPLE_RATE),
+                    });
+                }),
+                None => bank.synthesize(&job.voice, &find_voice, &job.text, job.speed as f32, &mut on_chunk),
+            }
+            .map_err(|e| AssetAiError::Backend(format!("kokoro synthesize: {e}")));
+            // The device copy of the weights (~0.4 GB) lives only for the job: the
+            // upload is a fraction of a second, and the card is shared with the chat
+            // model and the desktop between jobs.
+            makepad_ai_speech::kokoro::accel::release_device_state();
+            let audio = audio?;
             cancel.check()?;
-            Ok((audio.samples, audio.sample_rate))
+            let timings = audio.timings.map(|words| {
+                words
+                    .into_iter()
+                    .map(|w| WordTimingJson { word: w.word, start: w.start, end: w.end })
+                    .collect()
+            });
+            Ok((audio.samples, audio.sample_rate, timings))
         }
     }
 }
@@ -426,6 +519,22 @@ mod tests {
             u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
             24_000
         );
+    }
+
+    #[test]
+    fn timings_sidecar_round_trips() {
+        use makepad_micro_serde::DeJson;
+        let json = timings_json(vec![
+            WordTimingJson { word: "Hello,".into(), start: 0.35, end: 0.675 },
+            WordTimingJson { word: "world.".into(), start: 0.725, end: 1.35 },
+        ])
+        .serialize_json();
+        let back = SpeechTimingsJson::deserialize_json(&json).unwrap();
+        assert_eq!(back.format, "tts-timings");
+        assert_eq!(back.version, 1);
+        assert_eq!(back.words.len(), 2);
+        assert_eq!(back.words[0].word, "Hello,");
+        assert!((back.words[1].end - 1.35).abs() < 1e-9);
     }
 
     #[test]

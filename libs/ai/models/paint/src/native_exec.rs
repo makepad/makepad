@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn missing_weights_are_a_precise_unavailable() {
-        let err = NativeHunyuanExec::at(PathBuf::from("/no/such/hunyuan/weights")).unwrap_err();
+        let Err(err) = NativeHunyuanExec::at(PathBuf::from("/no/such/hunyuan/weights")) else { panic!("came up without weights") };
         match err {
             PbrError::Unavailable(m) => assert!(m.contains("missing"), "{m}"),
             other => panic!("{other:?}"),
@@ -572,12 +572,13 @@ mod tests {
     #[test]
     fn at_bins_reports_the_given_vae_path() {
         let missing = PathBuf::from("/cache/paint21/vae/diffusion_pytorch_model.bin");
-        let err = NativeHunyuanExec::at_bins(HunyuanBins {
+        let Err(err) = NativeHunyuanExec::at_bins(HunyuanBins {
             vae: missing.clone(),
             unet: PathBuf::from("/cache/paint21/unet/diffusion_pytorch_model.bin"),
             dino: PathBuf::from("/cache/paint21/dinov2-giant/model.safetensors"),
-        })
-        .unwrap_err();
+        }) else {
+            panic!("came up without weights")
+        };
         match err {
             PbrError::Unavailable(m) => {
                 assert!(m.contains("missing"), "{m}");

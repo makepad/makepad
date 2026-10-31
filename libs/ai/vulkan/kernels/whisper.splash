@@ -1,0 +1,373 @@
+// Whisper: row-major f32 activations, packed f16 or f32 weights, f32 sums.
+// Weight rows are padded to eight elements. Addresses and strides refer to
+// elements, never descriptors. No kernel assumes a 32-lane subgroup.
+let matrix = {
+    workgroup_size: 128
+    half_weights: 1
+    x: shader.buffer(f32)
+    x4: shader.buffer(vec4f)
+    w4: shader.buffer(vec4u)
+    wf4: shader.buffer(vec4f)
+    bias: shader.buffer(f32)
+    dst: shader.buffer_rw(f32)
+    m: shader.uniform(u32)
+    n: shader.uniform(u32)
+    k: shader.uniform(u32)
+    ws: shader.uniform(u32)
+    has_bias: shader.uniform(u32)
+    load_x: fn(row, col) {
+        if row < self.m && col + 3 < self.k && self.k % 4 == 0 {
+            return self.x4[(row * self.k + col) / 4]
+        }
+        var v = vec4f(0.0)
+        if row < self.m {
+            for c in 0..4 {
+                if col + c < self.k { v[c] = self.x[row * self.k + col + c] }
+            }
+        }
+        return v
+    }
+}
+
+// A 32x32 output tile and 32-wide reduction tile, 8 KiB shared memory.
+// Each invocation accumulates two rows of four columns. The global reads
+// are vec4f activations and vec4u packed weights (eight f16 values/load).
+let gemm = matrix{
+    ax: shader.workgroup(f32, 1024)
+    bw: shader.workgroup(f32, 1024)
+    main: fn() {
+        let t = local_id().x
+        let row = t / 8
+        let col = (t % 8) * 4
+        let mr = group_id().y * 32
+        let nr = group_id().x * 32
+        var acc0 = vec4f(0.0)
+        var acc1 = vec4f(0.0)
+        var base = u32(0)
+        while base < self.k {
+            let a0 = self.load_x(mr + row, base + col)
+            let a1 = self.load_x(mr + row + 16, base + col)
+            for c in 0..4 {
+                self.ax[row * 32 + col + c] = a0[c]
+                self.ax[(row + 16) * 32 + col + c] = a1[c]
+            }
+            let wr = t / 4
+            let wc = (t % 4) * 8
+            var lo = vec4f(0.0)
+            var hi = vec4f(0.0)
+            if nr + wr < self.n && base + wc < self.k {
+                let off = (nr + wr) * self.ws + base + wc
+                if self.half_weights == 1 {
+                    let p = self.w4[off / 8]
+                    lo = vec4f(unpack_half2(p.x), unpack_half2(p.y))
+                    hi = vec4f(unpack_half2(p.z), unpack_half2(p.w))
+                } else {
+                    lo = self.wf4[off / 4]
+                    hi = self.wf4[off / 4 + 1]
+                }
+            }
+            for c in 0..4 {
+                self.bw[(wc + c) * 32 + wr] = lo[c]
+                self.bw[(wc + c + 4) * 32 + wr] = hi[c]
+            }
+            barrier()
+            for j in 0..32 {
+                let w = vec4f(self.bw[j * 32 + col], self.bw[j * 32 + col + 1],
+                              self.bw[j * 32 + col + 2], self.bw[j * 32 + col + 3])
+                acc0 += self.ax[row * 32 + j] * w
+                acc1 += self.ax[(row + 16) * 32 + j] * w
+            }
+            barrier()
+            base += 32
+        }
+        for c in 0..4 {
+            if nr + col + c < self.n {
+                var b = 0.0
+                if self.has_bias != 0 { b = self.bias[nr + col + c] }
+                if mr + row < self.m {
+                    self.dst[(mr + row) * self.n + nr + col + c] = acc0[c] + b
+                }
+                if mr + row + 16 < self.m {
+                    self.dst[(mr + row + 16) * self.n + nr + col + c] = acc1[c] + b
+                }
+            }
+        }
+    }
+}
+
+// Decode: four output rows per workgroup, eight weights per vector load.
+// Reductions span all actual subgroups, including a single subgroup of 128.
+let gemv = matrix{
+    partial: shader.workgroup(vec4f, 128)
+    main: fn() {
+        let t = local_id().x
+        let row = group_id().x * 4
+        let batch = group_id().y
+        var acc = vec4f(0.0)
+        var c = t * 8
+        while c < self.k {
+            let x0 = self.load_x(batch, c)
+            let x1 = self.load_x(batch, c + 4)
+            for r in 0..4 {
+                if row + r < self.n {
+                    let off = (row + r) * self.ws + c
+                    var lo = vec4f(0.0)
+                    var hi = vec4f(0.0)
+                    if self.half_weights == 1 {
+                        let p = self.w4[off / 8]
+                        lo = vec4f(unpack_half2(p.x), unpack_half2(p.y))
+                        hi = vec4f(unpack_half2(p.z), unpack_half2(p.w))
+                    } else {
+                        lo = self.wf4[off / 4]
+                        hi = self.wf4[off / 4 + 1]
+                    }
+                    acc[r] += dot(x0, lo) + dot(x1, hi)
+                }
+            }
+            c += self.workgroup_size * 8
+        }
+        let total = vec4f(subgroup_add(acc.x), subgroup_add(acc.y),
+                          subgroup_add(acc.z), subgroup_add(acc.w))
+        if subgroup_lane() == 0 { self.partial[subgroup_id()] = total }
+        barrier()
+        if t == 0 {
+            var result = vec4f(0.0)
+            for s in 0..(self.workgroup_size + subgroup_size() - 1) / subgroup_size() {
+                result += self.partial[s]
+            }
+            for r in 0..4 {
+                if row + r < self.n {
+                    var b = 0.0
+                    if self.has_bias != 0 { b = self.bias[row + r] }
+                    self.dst[batch * self.n + row + r] = result[r] + b
+                }
+            }
+        }
+    }
+}
+
+{
+    whisper_gemm_f16: gemm{}
+    whisper_gemm_f32: gemm{half_weights: 0}
+    whisper_gemv_f16: gemv{}
+    whisper_gemv_f32: gemv{half_weights: 0}
+
+    // op 0 add, 1 multiply, 2 GELU. b_len supports scalar, row and full
+    // elementwise broadcasts; callers validate the corresponding shapes.
+    whisper_elementwise: {
+        workgroup_size: 128
+        a: shader.buffer(f32)
+        b: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        n: shader.uniform(u32)
+        b_len: shader.uniform(u32)
+        op: shader.uniform(u32)
+        main: fn() {
+            let i = global_id().x
+            if i < self.n {
+                let x = self.a[i]
+                var out = x
+                if self.op == 0 {
+                    out = x + self.b[i % self.b_len]
+                } else if self.op == 1 {
+                    out = x * self.b[i % self.b_len]
+                } else {
+                    out = 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
+                }
+                self.dst[i] = out
+            }
+        }
+    }
+
+    // Two-pass variance matches the CPU formula (avoids cancellation in
+    // E[x*x] - E[x]*E[x]). Every lane participates in both reductions.
+    whisper_norm: {
+        workgroup_size: 128
+        x: shader.buffer(f32)
+        mul: shader.buffer(f32)
+        add: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        cols: shader.uniform(u32)
+        affine: shader.uniform(u32)
+        eps: shader.uniform(f32)
+        partial: shader.workgroup(f32, 128)
+        block_sum: fn(v) {
+            let s = subgroup_add(v)
+            if subgroup_lane() == 0 { self.partial[subgroup_id()] = s }
+            barrier()
+            var sum = 0.0
+            for j in 0..(self.workgroup_size + subgroup_size() - 1) / subgroup_size() {
+                sum += self.partial[j]
+            }
+            barrier()
+            return sum
+        }
+        main: fn() {
+            let t = local_id().x
+            let row = group_id().x * self.cols
+            var sum = 0.0
+            var c = t
+            while c < self.cols {
+                sum += self.x[row + c]
+                c += self.workgroup_size
+            }
+            let mean = self.block_sum(sum) / float(self.cols)
+            var variance = 0.0
+            c = t
+            while c < self.cols {
+                let delta = self.x[row + c] - mean
+                variance += delta * delta
+                c += self.workgroup_size
+            }
+            let inv = 1.0 / sqrt(self.block_sum(variance) / float(self.cols) + self.eps)
+            c = t
+            while c < self.cols {
+                var value = (self.x[row + c] - mean) * inv
+                if self.affine != 0 { value = value * self.mul[c] + self.add[c] }
+                self.dst[row + c] = value
+                c += self.workgroup_size
+            }
+        }
+    }
+
+    // Front-end convolution lowered to a GEMM. The first input is
+    // channels-first mel; subsequent convolution inputs are time-major.
+    whisper_im2col: {
+        workgroup_size: 128
+        x: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        ic: shader.uniform(u32)
+        iw: shader.uniform(u32)
+        ow: shader.uniform(u32)
+        kw: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        pad: shader.uniform(u32)
+        time_major: shader.uniform(u32)
+        main: fn() {
+            let i = global_id().x
+            let width = self.ic * self.kw
+            if i < self.ow * width {
+                let t = i / width
+                let ci = (i % width) / self.kw
+                let kk = i % self.kw
+                let pos = i32(t * self.stride + kk) - i32(self.pad)
+                var v = 0.0
+                if pos >= 0 && pos < i32(self.iw) {
+                    if self.time_major != 0 {
+                        v = self.x[u32(pos) * self.ic + ci]
+                    } else {
+                        v = self.x[ci * self.iw + u32(pos)]
+                    }
+                }
+                self.dst[i] = v
+            }
+        }
+    }
+
+    // Online attention: eight queries x 32 keys, 64 channels/head, <20 KiB
+    // shared memory. Q/K/V are read with 16-byte loads. Scores never leave
+    // the tile, so a 1500-frame encoder has no quadratic allocation.
+    // The 64-channel head is shared by every supported Whisper model.
+    whisper_attention: {
+        workgroup_size: 128
+        q: shader.buffer(vec4f)
+        k: shader.buffer(vec4f)
+        v: shader.buffer(vec4f)
+        dst: shader.buffer_rw(vec4f)
+        nq: shader.uniform(u32)
+        nk: shader.uniform(u32)
+        heads: shader.uniform(u32)
+        past: shader.uniform(u32)
+        causal: shader.uniform(u32)
+        scale: shader.uniform(f32)
+        qs: shader.workgroup(vec4f, 128)
+        ks: shader.workgroup(vec4f, 512)
+        vs: shader.workgroup(vec4f, 512)
+        scores: shader.workgroup(f32, 256)
+        maxima: shader.workgroup(f32, 8)
+        sums: shader.workgroup(f32, 8)
+        correction: shader.workgroup(f32, 8)
+        main: fn() {
+            let t = local_id().x
+            let head = group_id().x
+            let first = group_id().y * 8
+            let qi = t / 16
+            let dim = t % 16
+            let row_stride = self.heads * 16
+            var query = vec4f(0.0)
+            if first + qi < self.nq {
+                query = self.q[(first + qi) * row_stride + head * 16 + dim]
+            }
+            self.qs[t] = query
+            if t < 8 {
+                self.maxima[t] = -3.0e38
+                self.sums[t] = 0.0
+            }
+            barrier()
+            var acc = vec4f(0.0)
+            var base = u32(0)
+            while base < self.nk {
+                var p = t
+                while p < 512 {
+                    let key = base + p / 16
+                    let off = key * row_stride + head * 16 + p % 16
+                    var key_vec = vec4f(0.0)
+                    var val_vec = vec4f(0.0)
+                    if key < self.nk {
+                        key_vec = self.k[off]
+                        val_vec = self.v[off]
+                    }
+                    self.ks[p] = key_vec
+                    self.vs[p] = val_vec
+                    p += self.workgroup_size
+                }
+                barrier()
+                // Each invocation owns two scores; no subgroup-size
+                // assumption or cross-subgroup shuffle is involved.
+                for pair in 0..2 {
+                    let score_i = t + pair * 128
+                    let qr = score_i / 32
+                    let kr = score_i % 32
+                    var score = -3.0e38
+                    if first + qr < self.nq && base + kr < self.nk {
+                        if self.causal == 0 || base + kr <= self.past + first + qr {
+                            var product = 0.0
+                            for d4 in 0..16 {
+                                product += dot(self.qs[qr * 16 + d4], self.ks[kr * 16 + d4])
+                            }
+                            score = product * self.scale
+                        }
+                    }
+                    self.scores[score_i] = score
+                }
+                barrier()
+                if dim == 0 {
+                    var mx = self.maxima[qi]
+                    for j in 0..32 { mx = max(mx, self.scores[qi * 32 + j]) }
+                    let corr = exp(self.maxima[qi] - mx)
+                    var sum = 0.0
+                    for j in 0..32 {
+                        let score = self.scores[qi * 32 + j]
+                        var prob = 0.0
+                        if score > -3.0e38 { prob = exp(score - mx) }
+                        self.scores[qi * 32 + j] = prob
+                        sum += prob
+                    }
+                    self.correction[qi] = corr
+                    self.sums[qi] = self.sums[qi] * corr + sum
+                    self.maxima[qi] = mx
+                }
+                barrier()
+                acc = acc * self.correction[qi]
+                for j in 0..32 {
+                    acc += self.scores[qi * 32 + j] * self.vs[j * 16 + dim]
+                }
+                barrier()
+                base += 32
+            }
+            if first + qi < self.nq {
+                self.dst[(first + qi) * row_stride + head * 16 + dim] = acc / self.sums[qi]
+            }
+        }
+    }
+}

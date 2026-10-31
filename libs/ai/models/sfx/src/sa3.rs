@@ -66,6 +66,13 @@ pub const SA3_AE_FF_INNER: usize = 2304;
 // Size math (mirrors StableAudioModel.generate + data/utils.py).
 // ---------------------------------------------------------------------------
 
+/// The duration a clip is generated at: the requested one rounded up to a
+/// whole second (at least one), the only values the model was trained on.
+/// The output is then cut to the requested length.
+pub fn sa3_whole_seconds(seconds: f64) -> f64 {
+    seconds.ceil().max(1.0)
+}
+
 /// Padded/aligned audio sample count for a requested duration.
 pub fn sa3_audio_sample_size(seconds: f64) -> usize {
     let target = ((seconds + SA3_DURATION_PAD_SECONDS) * SA3_SAMPLE_RATE as f64) as usize;
@@ -485,6 +492,14 @@ mod tests {
         for (g, e) in got.iter().zip(expected) {
             assert!((g - e).abs() < 3e-6, "sigma {g} vs {e}");
         }
+    }
+
+    #[test]
+    fn clips_are_made_at_whole_seconds() {
+        assert_eq!(sa3_whole_seconds(1.0), 1.0);
+        assert_eq!(sa3_whole_seconds(1.2), 2.0);
+        assert_eq!(sa3_whole_seconds(0.5), 1.0);
+        assert_eq!(sa3_whole_seconds(2.0001), 3.0);
     }
 
     #[test]

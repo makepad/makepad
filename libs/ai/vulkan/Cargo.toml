@@ -1,0 +1,10 @@
+[package]
+name = "makepad-ai-vulkan"
+version = "0.1.0"
+edition = "2021"
+description = "The AI runtime's Vulkan compute backend: device, device-address buffers, Splash kernels compiled to SPIR-V by our shader compiler."
+license = "MIT"
+
+[dependencies]
+makepad-vulkan = { path = "../../vulkan" }
+makepad-script = { path = "../../../platform/script" }

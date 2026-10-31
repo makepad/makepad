@@ -463,7 +463,7 @@ fn is_crlf(ch: char) -> bool {
     matches!(ch, '\r' | '\n')
 }
 
-fn split_qwen2_words(text: &str) -> Vec<&str> {
+pub fn split_qwen2_words(text: &str) -> Vec<&str> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let slice = |start_index: usize, end_index: usize| -> &str {
         let start = chars[start_index].0;

@@ -1,5 +1,7 @@
 // Quantization block formats matching GGML's layout.
-// All blocks quantize 32 elements (QK=32).
+// Legacy blocks quantize 32 elements; K blocks quantize 256.
+
+pub use makepad_ai_loader::quant::{dequantize_q4_k, dequantize_q5_k, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K};
 
 pub const QK: usize = 32;
 
@@ -418,6 +420,8 @@ pub fn block_size(ggml_type: u32) -> usize {
         7 => 24, // Q5_1
         8 => 34, // Q8_0
         9 => 36, // Q8_1
+        GGML_TYPE_Q4_K => 144,
+        GGML_TYPE_Q5_K => 176,
         _ => panic!("unsupported ggml type {}", ggml_type),
     }
 }
@@ -427,7 +431,8 @@ pub fn block_elements(ggml_type: u32) -> usize {
     match ggml_type {
         0 => 1,  // F32
         1 => 1,  // F16
-        _ => QK, // all quantized types use QK=32
+        GGML_TYPE_Q4_K | GGML_TYPE_Q5_K => 256,
+        _ => QK,
     }
 }
 

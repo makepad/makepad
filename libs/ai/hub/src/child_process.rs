@@ -71,23 +71,24 @@ pub(crate) fn kill_tree(child: &mut Child) -> io::Result<()> {
 fn configure(command: &mut Command) -> io::Result<()> {
     use std::os::unix::process::CommandExt;
 
-    #[cfg(target_os = "linux")]
-    let parent_pid = std::process::id() as i32;
+    // The own process group goes through the spawn attributes (posix_spawn's
+    // POSIX_SPAWN_SETPGROUP where std can use posix_spawn): no code of ours runs in
+    // the child between fork and exec. That matters most under the JIT, where a
+    // forked child running a not-yet-compiled closure waits forever on a lock
+    // another parent thread held at fork (HUBAPPTEST, 2026-10-25).
+    command.process_group(0);
 
-    // SAFETY: this closure runs after fork and invokes only small libc
-    // syscalls plus errno inspection. Failures are intentionally ignored so
-    // the existing polling/direct-kill behavior remains the fallback.
-    unsafe {
-        command.pre_exec(move || {
-            #[cfg(target_os = "linux")]
-            {
-                let pdeath = unix::prctl(
-                    unix::PR_SET_PDEATHSIG,
-                    unix::SIGKILL as usize,
-                    0,
-                    0,
-                    0,
-                );
+    // Linux only: ask for SIGKILL when the service dies. This needs code in the
+    // child (prctl has no spawn attribute), so Linux keeps the fork path.
+    #[cfg(target_os = "linux")]
+    {
+        let parent_pid = std::process::id() as i32;
+        // SAFETY: this closure runs after fork and invokes only small libc
+        // syscalls plus errno inspection. Failures are intentionally ignored so
+        // the existing polling/direct-kill behavior remains the fallback.
+        unsafe {
+            command.pre_exec(move || {
+                let pdeath = unix::prctl(unix::PR_SET_PDEATHSIG, unix::SIGKILL as usize, 0, 0, 0);
                 if pdeath != 0 {
                     let _ = io::Error::last_os_error().raw_os_error();
                 } else if unix::getppid() != parent_pid {
@@ -95,13 +96,9 @@ fn configure(command: &mut Command) -> io::Result<()> {
                     // those two operations.
                     let _ = unix::kill(unix::getpid(), unix::SIGKILL);
                 }
-            }
-
-            if unix::setpgid(0, 0) != 0 {
-                let _ = io::Error::last_os_error().raw_os_error();
-            }
-            Ok(())
-        });
+                Ok(())
+            });
+        }
     }
     Ok(())
 }
@@ -123,7 +120,6 @@ mod unix {
 
     extern "C" {
         pub(super) fn kill(pid: i32, signal: i32) -> i32;
-        pub(super) fn setpgid(pid: i32, pgid: i32) -> i32;
     }
 
     #[cfg(target_os = "linux")]
@@ -152,66 +148,19 @@ mod windows {
     use std::process::Child;
     use std::sync::OnceLock;
 
-    type Handle = *mut c_void;
-    type Bool = i32;
-
-    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
-
-    #[repr(C)]
-    struct JobObjectBasicLimitInformation {
-        per_process_user_time_limit: i64,
-        per_job_user_time_limit: i64,
-        limit_flags: u32,
-        minimum_working_set_size: usize,
-        maximum_working_set_size: usize,
-        active_process_limit: u32,
-        affinity: usize,
-        priority_class: u32,
-        scheduling_class: u32,
-    }
-
-    #[repr(C)]
-    struct IoCounters {
-        read_operation_count: u64,
-        write_operation_count: u64,
-        other_operation_count: u64,
-        read_transfer_count: u64,
-        write_transfer_count: u64,
-        other_transfer_count: u64,
-    }
-
-    #[repr(C)]
-    struct JobObjectExtendedLimitInformation {
-        basic_limit_information: JobObjectBasicLimitInformation,
-        io_info: IoCounters,
-        process_memory_limit: usize,
-        job_memory_limit: usize,
-        peak_process_memory_used: usize,
-        peak_job_memory_used: usize,
-    }
+    use makepad_windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::JobObjects::*,
+    };
 
     #[cfg(target_pointer_width = "64")]
-    const _: () = assert!(size_of::<JobObjectBasicLimitInformation>() == 64);
+    const _: () = assert!(size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>() == 64);
     #[cfg(target_pointer_width = "64")]
-    const _: () = assert!(size_of::<JobObjectExtendedLimitInformation>() == 144);
+    const _: () = assert!(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 144);
     #[cfg(target_pointer_width = "32")]
-    const _: () = assert!(size_of::<JobObjectBasicLimitInformation>() == 48);
+    const _: () = assert!(size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>() == 48);
     #[cfg(target_pointer_width = "32")]
-    const _: () = assert!(size_of::<JobObjectExtendedLimitInformation>() == 112);
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
-        fn SetInformationJobObject(
-            job: Handle,
-            information_class: i32,
-            information: *const c_void,
-            information_length: u32,
-        ) -> Bool;
-        fn AssignProcessToJobObject(job: Handle, process: Handle) -> Bool;
-        fn CloseHandle(object: Handle) -> Bool;
-    }
+    const _: () = assert!(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() == 112);
 
     // Store the handle bits rather than a raw pointer so the process-wide
     // `OnceLock` is plainly Send + Sync.
@@ -236,28 +185,28 @@ mod windows {
     }
 
     fn create_job() -> JobState {
-        // SAFETY: all pointers and structure sizes match the Win32 ABI and
-        // are guarded by the compile-time layout assertions above.
+        // SAFETY: the generated metadata supplies the Win32 structures and ABI.
         unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return JobState::Failed(last_error_code());
-            }
-            let mut info: JobObjectExtendedLimitInformation = zeroed();
-            info.basic_limit_information.limit_flags =
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let job = CreateJobObjectW(None, None);
+            let job = match job {
+                Ok(job) => job,
+                Err(_) => return JobState::Failed(last_error_code()),
+            };
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             if SetInformationJobObject(
                 job,
-                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                JobObjectExtendedLimitInformation,
                 &info as *const _ as *const c_void,
-                size_of::<JobObjectExtendedLimitInformation>() as u32,
-            ) == 0
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .is_err()
             {
                 let code = last_error_code();
                 let _ = CloseHandle(job);
                 return JobState::Failed(code);
             }
-            JobState::Ready(Job(job as usize))
+            JobState::Ready(Job(job.0 as usize))
         }
     }
 
@@ -265,8 +214,9 @@ mod windows {
         let job = service_job()?;
         // SAFETY: `Child` owns a live process handle until it is dropped.
         if unsafe {
-            AssignProcessToJobObject(job.0 as Handle, child.as_raw_handle() as Handle)
-        } == 0
+            AssignProcessToJobObject(HANDLE(job.0 as *mut c_void), HANDLE(child.as_raw_handle()))
+        }
+        .is_err()
         {
             Err(io::Error::last_os_error())
         } else {
