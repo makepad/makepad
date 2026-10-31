@@ -247,10 +247,15 @@ pub mod info_flags {
     /// both eyes side by side, and the app hands the result on; the XR window only paces them
     /// (its `XrFrame`s and `FrameReady`s), it is never presented.
     pub const XR_OFFSCREEN: u32 = 2048;
+    /// Clip-space z runs 0..w at full float precision: always on Vulkan, Metal and D3D11, and
+    /// on GLES when the context has `GL_EXT_clip_control` (ZERO_TO_ONE). Without it GLES maps
+    /// 0..w to -w..w in the vertex output, which keeps depth correct but rounds away the
+    /// float32 precision reverse-Z gains near 0 (`Draw::REVERSE_Z`).
+    pub const CLIP_Z_ZERO_TO_ONE: u32 = 4096;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN, CLIP_Z_ZERO_TO_ONE];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");

@@ -26,6 +26,10 @@ pub type LocalId = u32;
 /// object ...).
 pub const NO_EXPR: ExprId = u32::MAX;
 
+/// GL: the vertex uniform [`IrGlobalKind::ClipZZeroToOne`] prints as; the GL host looks it up
+/// by this name, so the compiler and the host share one spelling.
+pub const MP_CLIP_Z_ZERO_TO_ONE: &str = "mp_clip_z_zero_to_one";
+
 #[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum IrScalar {
@@ -182,6 +186,10 @@ pub enum IrGlobalKind {
     ScopeUniformBlock,
     /// GL: the host's clip-space Y flip for bottom-up render targets.
     ClipYFlip,
+    /// GL: 1.0 when the host runs the program with clip-space z 0..w (`GL_EXT_clip_control`
+    /// ZERO_TO_ONE), so the vertex output keeps z as the other backends do; 0.0 (unset)
+    /// otherwise, and the output maps 0..w to GL's -w..w (`2.0 * z - w`).
+    ClipZZeroToOne,
     /// HLSL: the draw's first instance. `SV_InstanceID` starts at zero for every draw, so the
     /// host passes the first instance (`StartInstanceLocation` is not seen by the shader) in a
     /// constant buffer at b13; an unbound buffer reads zero.

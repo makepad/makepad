@@ -18,6 +18,9 @@ macro_rules! gl_functions {
             $(pub $name: unsafe extern "C" fn($($arg),*) $(-> $ret)?,)*
             /// KHR_parallel_shader_compile: links finish on driver threads while frames render.
             pub glMaxShaderCompilerThreadsKHR: Option<unsafe extern "C" fn(GLuint)>,
+            /// EXT_clip_control: clip-space z 0..w (ZERO_TO_ONE), the convention of the other
+            /// backends. GLES has no core glClipControl; the desktop entry point is never used.
+            pub glClipControlEXT: Option<unsafe extern "C" fn(GLenum, GLenum)>,
         }
         impl Gl {
             pub fn load(get: impl Fn(&CStr) -> *mut c_void) -> Result<Self, String> {
@@ -30,6 +33,10 @@ macro_rules! gl_functions {
                     glMaxShaderCompilerThreadsKHR: {
                         let f = get(c"glMaxShaderCompilerThreadsKHR");
                         (!f.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn(GLuint)>(f) })
+                    },
+                    glClipControlEXT: {
+                        let f = get(c"glClipControlEXT");
+                        (!f.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn(GLenum, GLenum)>(f) })
                     },
                 })
             }
@@ -173,6 +180,10 @@ pub const BLEND: GLenum = 0x0BE2;
 pub const SCISSOR_TEST: GLenum = 0x0C11;
 pub const LEQUAL: GLenum = 0x0203;
 pub const GEQUAL: GLenum = 0x0206;
+// EXT_clip_control
+pub const LOWER_LEFT_EXT: GLenum = 0x8CA1;
+pub const NEGATIVE_ONE_TO_ONE_EXT: GLenum = 0x935E;
+pub const ZERO_TO_ONE_EXT: GLenum = 0x935F;
 pub const ONE: GLenum = 1;
 pub const ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
 pub const FUNC_ADD: GLenum = 0x8006;

@@ -21,6 +21,15 @@ pub struct Texture {
     pub sampler: SpirvSampler,
 }
 
+/// The vertex uniform the GL host sets to 1.0 when it runs the program with clip-space z 0..w
+/// (`GL_EXT_clip_control` ZERO_TO_ONE), as the compiler names it
+/// (`makepad_shader::shader_ir::MP_CLIP_Z_ZERO_TO_ONE`).
+pub const CLIP_Z_ZERO_TO_ONE_UNIFORM: &str = "mp_clip_z_zero_to_one";
+
+/// A GLES program. The host sets `mp_clip_y_flip` to 1.0 (every target stores its top row
+/// first). When the context has `GL_EXT_clip_control`, a program whose vertex shader reads
+/// [`CLIP_Z_ZERO_TO_ONE_UNIFORM`] gets 1.0 there and runs with clip-space z 0..w, the
+/// convention of the other backends; any other program runs with GL's -w..w.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlslPipeline {
     pub vertex: String,

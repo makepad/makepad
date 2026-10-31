@@ -105,6 +105,9 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
     let mut vertex = shared.clone();
     textures(&cx, output, false, &mut vertex);
     vertex.push_str("vec4 vtx_pos;\nuniform float mp_clip_y_flip;\n");
+    if !output.use_vulkan {
+        writeln!(vertex, "uniform float {};", MP_CLIP_Z_ZERO_TO_ONE).ok();
+    }
     private_globals(&cx, &ir, true, &mut vertex);
     let entry = ir.functions[vertex_main as usize].entry.clone().unwrap();
     for io in &entry.inputs {

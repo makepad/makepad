@@ -158,6 +158,7 @@ impl Metal {
             backend: backend_id::METAL,
             dialect: dialect::MSL,
             flags: info_flags::WINDOW_LAYERS
+                | info_flags::CLIP_Z_ZERO_TO_ONE
                 | if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 }
                 | if shell.is_some() && cfg!(target_os = "macos") { info_flags::WINDOW_BADGES } else { 0 },
             formats,

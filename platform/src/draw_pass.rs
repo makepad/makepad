@@ -493,6 +493,17 @@ impl DrawPass {
 
     /// Use `GREATER_OR_EQUAL` depth comparison for all draws in this pass
     /// (for reverse-Z depth buffers where 1.0 is the near plane and 0.0 is far).
+    ///
+    /// This sets only the compare. Pair it with a depth clear of 0.0
+    /// (`set_depth_texture(.., DrawPassClearDepth::ClearWith(0.0))` or
+    /// `InitWith(0.0)`), the pass's own camera (`set_keep_camera_matrix(cx, true)`:
+    /// the built-in 2D ortho gives later layers smaller depth, so their order
+    /// would flip) and a reversed 0..1 projection such as
+    /// `Mat4f::perspective_reverse_z`. The float32 precision gain needs a float
+    /// depth texture and clip-space z 0..w (`info_flags::CLIP_Z_ZERO_TO_ONE`;
+    /// GLES without `GL_EXT_clip_control` stays correct at forward-Z precision).
+    /// Comparison samplers keep their less-or-equal compare, and the WebGL 2
+    /// backend does not apply this flag yet.
     pub fn set_reverse_z(&self, cx: &mut Cx, reverse_z: bool) {
         cx.passes[self.draw_pass_id()].reverse_z = reverse_z;
     }

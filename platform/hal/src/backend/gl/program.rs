@@ -39,6 +39,9 @@ pub(super) struct GlProgram {
     pub inst_base: GLint,
     /// the unit of the instance words (programs that fetch instances by id)
     pub words_unit: Option<u32>,
+    /// draws with clip-space z 0..w: the context has EXT_clip_control and the vertex shader
+    /// reads `mp_clip_z_zero_to_one` (set to 1.0); other programs keep GL's -w..w
+    pub zero_to_one: bool,
     /// whether the geometry arrays are enabled (a draw without a vertex buffer disables them)
     pub geometry_on: bool,
 }
@@ -148,6 +151,9 @@ impl Renderer {
         unsafe { (gl.glUseProgram)(program) };
         let flip = uniform("mp_clip_y_flip");
         if flip >= 0 { unsafe { (gl.glUniform1f)(flip, 1.0) } }
+        let clip_z = uniform(crate::glsl::CLIP_Z_ZERO_TO_ONE_UNIFORM);
+        let zero_to_one = self.caps.clip_control && clip_z >= 0;
+        if zero_to_one { unsafe { (gl.glUniform1f)(clip_z, 1.0) } }
         let mut block_sizes = Vec::with_capacity(code.blocks.len());
         for (binding, name) in code.blocks.iter().enumerate() {
             let index = unsafe { (gl.glGetUniformBlockIndex)(program, cstr(name).as_ptr()) };
@@ -223,7 +229,7 @@ impl Renderer {
             (gl.glUseProgram)(0);
         }
         self.programs.insert(state.key, GlProgram { name: program, vao, geometry, instance, vertex_stride: code.vertex_stride as i32,
-            samplers, targets, shapes: code.textures.iter().map(|t| t.shape).collect(), pick, inst_base, words_unit, geometry_on: true });
+            samplers, targets, shapes: code.textures.iter().map(|t| t.shape).collect(), pick, inst_base, words_unit, zero_to_one, geometry_on: true });
         Ok(Linked { block_sizes })
     }
 

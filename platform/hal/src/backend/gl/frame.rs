@@ -525,7 +525,15 @@ impl Renderer {
 
     fn run_draw(&mut self, d: &DrawJob, bound: &mut Bound) {
         let key = d.program.key;
-        let Some(words_unit) = self.programs.get(&key).map(|p| p.words_unit) else { return };
+        let Some((words_unit, zero_to_one)) = self.programs.get(&key).map(|p| (p.words_unit, p.zero_to_one)) else { return };
+        // the clip-space z range follows the program (compiler programs agree, so this is set
+        // once); context state, which clears and blits ignore
+        if self.caps.clip_control && self.clip_z != Some(zero_to_one) {
+            if let Some(clip_control) = self.ctx.gl.glClipControlEXT {
+                unsafe { clip_control(sys::LOWER_LEFT_EXT, if zero_to_one { sys::ZERO_TO_ONE_EXT } else { sys::NEGATIVE_ONE_TO_ONE_EXT }) }
+            }
+            self.clip_z = Some(zero_to_one);
+        }
         // instance words of a retained buffer, for a program that fetches instances by id
         let mut words = None;
         if let Some(unit) = words_unit {

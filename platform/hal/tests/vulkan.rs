@@ -72,6 +72,11 @@ fn frame_done(hal: &Hal, sid: u32, frame: u64) -> u64 {
 }
 
 fn shader() -> Vec<u8> {
+    colour_shader([1.0; 4])
+}
+
+/// The geometry passes through as the clip position; the fragment is one constant colour.
+fn colour_shader(rgba: [f32; 4]) -> Vec<u8> {
     let mut ir = IrModule::new();
     let vec4 = ir.vec_ty(4, IrScalar::F32);
     let mut vertex = IrFunction::new("vertex_main".into(), TY_VOID);
@@ -84,8 +89,8 @@ fn shader() -> Vec<u8> {
     let mut fragment = IrFunction::new("fragment_main".into(), TY_VOID);
     fragment.entry = Some(IrEntry { stage: IrStage::Fragment, inputs: Vec::new(),
         outputs: vec![IrEntryIo { name: "color".into(), ty: vec4, binding: IrIoBinding::Location(0) }] });
-    let one = fragment.expr(ExprKind::Lit(IrLit::F32(1.0)), TY_F32);
-    let color = fragment.expr(ExprKind::Construct(vec![one; 4]), vec4);
+    let lanes = rgba.map(|c| fragment.expr(ExprKind::Lit(IrLit::F32(c)), TY_F32)).to_vec();
+    let color = fragment.expr(ExprKind::Construct(lanes), vec4);
     let output = fragment.expr(ExprKind::EntryOut(0), vec4);
     fragment.body.extend([Stmt::Assign(output, color), Stmt::Return(NO_EXPR)]);
     ir.functions.extend([vertex, fragment]);
@@ -685,5 +690,86 @@ fn a_pass_a_pixel_larger_than_its_target_still_draws() {
     // the clear in the top corners, the triangle's base along the bottom
     for x in [0, 31] { assert_eq!(&image[x * 4..][..4], &[17, 34, 51, 255]); }
     for x in [6, 16, 26] { assert_eq!(&image[(29 * 32 + x) * 4..][..4], &[255; 4], "x {x}"); }
+    assert!(hal.close(sid));
+}
+
+/// One frame of three depth-tested passes, each into its own colour and DEPTH32F pair: forward
+/// (clear 1, LESS_OR_EQUAL), reverse-Z (clear 0, GREATER_OR_EQUAL), forward again, with the
+/// same three pipelines (so one program draws under both compare ops in one frame). Red,
+/// green, blue draw in that order: red and blue at the same depth, green nearer. Reverse-Z
+/// depths are 2^-30 / 2^-29, which Vulkan's native 0..1 clip z keeps apart in float32. The
+/// fixtures pass the clip position through: this covers the compare op, the pipeline
+/// variants and the 0.0 clear, not a clip-z mapping (Vulkan has none).
+#[test]
+fn reverse_z_resolves_float32_depth_near_zero() {
+    let Some((hal, info)) = open() else { return };
+    let sid = info.session;
+    assert_ne!(info.flags & info_flags::CLIP_Z_ZERO_TO_ONE, 0, "Vulkan clip z runs 0..w");
+    let (near, far) = (f32::exp2(-29.0), f32::exp2(-30.0));
+    let (vb, ib) = (Id::new(10, 1), Id::new(11, 1));
+    let mut w = CmdWriter::new(sid);
+    let mut vertices = Vec::new();
+    for z in [far, near, far, 0.75, 0.5, 0.75] {
+        vertices.extend([-1.0f32, -1.0, z, 1.0, 1.0, -1.0, z, 1.0, 0.0, 1.0, z, 1.0]);
+    }
+    let vertices: Vec<u8> = vertices.into_iter().flat_map(f32::to_le_bytes).collect();
+    w.buffer_create(vb, buffer_kind::VERTEX, vertices.len() as u64, Attr::default());
+    w.buffer_update(vb, 0, &vertices);
+    let indices: Vec<u8> = (0u16..18).flat_map(|i| i.to_le_bytes()).collect();
+    w.buffer_create(ib, buffer_kind::INDEX, indices.len() as u64, Attr::default());
+    w.buffer_update(ib, 0, &indices);
+    let mut waiting = Vec::new();
+    for (c, rgba) in [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]].into_iter().enumerate() {
+        let id = Id::new(10 + c as u32, 1);
+        let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &colour_shader(rgba),
+            &[u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, 0], &[16]);
+        w.pipeline_create(id, dialect::SPIRV, Attr::default(), &blob);
+        waiting.push(id);
+    }
+    for i in 0..3 {
+        w.texture_create(Id::new(10 + i, 1), usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 32, 32, [1, 1], Attr::default());
+        w.texture_create(Id::new(20 + i, 1), usage::RENDER_TARGET, format::DEPTH32F, 32, 32, [1, 1], Attr::default());
+    }
+    hal.submit(&w.buf());
+    until(&hal, sid, |e| {
+        if let HalEvent::PipelineReady { pipeline } = e { waiting.retain(|p| *p != pipeline) }
+        waiting.is_empty()
+    });
+    // (first vertex, clear depth, draw flags)
+    let passes = [(9, 1.0, Draw::DEPTH_WRITE), (0, 0.0, Draw::DEPTH_WRITE | Draw::REVERSE_Z), (9, 1.0, Draw::DEPTH_WRITE)];
+    // Variant creation is asynchronous: repeat the frame until it encoded every draw.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut frame = 1;
+    loop {
+        assert!(Instant::now() < deadline, "pipeline variants did not become drawable");
+        let before = hal.with_world(|w| w.session(sid).unwrap().stats);
+        w.clear();
+        w.frame_begin(frame, FrameMeta::default());
+        for (i, (first, clear_depth, flags)) in passes.into_iter().enumerate() {
+            let mut p = pass(Id::new(10 + i as u32, 1), 32, 32, [0.0, 0.0, 0.0, 1.0]);
+            p.depth = Id::new(20 + i as u32, 1);
+            p.clear_depth = clear_depth;
+            w.pass(p);
+            for c in 0..3 {
+                w.draw(Draw { pipeline: Id::new(10 + c, 1), vb, ib, index: [first + 3 * c, 3], inst: Inst::inline(Slice::EMPTY, 1),
+                    scissor: [f32::NAN; 4], flags, ..Default::default() });
+            }
+        }
+        w.frame_end(Id::new(12, 1), target::TEXTURE);
+        hal.submit(&w.buf());
+        frame_done(&hal, sid, frame);
+        let after = hal.with_world(|w| w.session(sid).unwrap().stats);
+        assert_eq!(after.bad_args, 0);
+        assert_eq!((after.passes - before.passes, after.draws - before.draws), (3, 9));
+        if before.skipped_draws == after.skipped_draws { break; }
+        frame += 1;
+    }
+    for (i, name) in ["forward", "reverse-Z", "forward after reverse"].into_iter().enumerate() {
+        w.clear();
+        w.texture_readback(Id::new(10 + i as u32, 1), 20 + i as u32, [0, 0, 32, 32]);
+        hal.submit(&w.buf());
+        let image = pixels(&hal, sid, 20 + i as u32);
+        assert_eq!(&image[(16 * 32 + 16) * 4..][..4], &[0, 255, 0, 255], "{name} pass");
+    }
     assert!(hal.close(sid));
 }

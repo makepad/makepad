@@ -1018,6 +1018,43 @@ impl Mat4f {
         }
     }
 
+    /// Reversed-Z perspective in the 0..w clip-z convention every backend shares: distance
+    /// `near` maps to depth 1.0 and `far` to 0.0, so float32 depth keeps its precision far
+    /// away; `far = f32::INFINITY` gives an infinite far plane (depth = near / distance).
+    /// `fov_y` in degrees, like [`Mat4f::perspective`]. Pair it with
+    /// `DrawPass::set_reverse_z(cx, true)` and a depth clear of 0.0. Code that unprojects
+    /// NDC z = -1 and +1 as near and far assumes [`Mat4f::perspective`]'s -1..1: here near
+    /// is z = 1 and far z = 0 (with an infinite far plane, z = 0 unprojects to w = 0).
+    pub fn perspective_reverse_z(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4f {
+        let f = 1.0 / f32::tan(fov_y * TORAD / 2.0);
+        let (a, b) = if far.is_finite() {
+            let r = near / (far - near);
+            (r, far * r)
+        } else {
+            (0.0, near)
+        };
+        Mat4f {
+            v: [
+                f / aspect,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                f,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                a,
+                -1.0,
+                0.0,
+                0.0,
+                b,
+                0.0,
+            ],
+        }
+    }
+
     pub fn from_camera_fov(fov: &CameraFov, near: f32, far: f32) -> Mat4f {
         let tan_left = fov.angle_left.tan();
         let tan_right = fov.angle_right.tan();
@@ -2243,6 +2280,35 @@ mod tests {
             eprintln!("Confirmed: mul(a,b) = b*a (reversed)");
         } else {
             panic!("Unexpected transform result: ({}, {})", out.x, out.y);
+        }
+    }
+
+    #[test]
+    fn perspective_reverse_z_maps_near_to_one_and_far_to_zero() {
+        let depth = |m: &Mat4f, distance: f32| {
+            let p = m.transform_vec4(Vec4f {
+                x: 0.0,
+                y: 0.0,
+                z: -distance,
+                w: 1.0,
+            });
+            assert_eq!(p.w, distance);
+            p.z / p.w
+        };
+        let (near, far) = (0.1, 1000.0);
+        let m = Mat4f::perspective_reverse_z(60.0, 1.5, near, far);
+        assert!((depth(&m, near) - 1.0).abs() < 1e-6);
+        assert!(depth(&m, far).abs() < 1e-6);
+        let mut last = 2.0;
+        for distance in [0.1, 0.5, 1.0, 10.0, 100.0, 999.0] {
+            let d = depth(&m, distance);
+            assert!(d < last, "depth falls with distance: {distance} -> {d}");
+            last = d;
+        }
+        let inf = Mat4f::perspective_reverse_z(60.0, 1.5, near, f32::INFINITY);
+        for distance in [0.1, 1.0, 1.0e3, 1.0e6] {
+            let d = depth(&inf, distance);
+            assert!((d - near / distance).abs() <= f32::EPSILON * (near / distance), "{distance} -> {d}");
         }
     }
 }

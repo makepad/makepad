@@ -2,7 +2,9 @@
 //! tests/d3d11.rs: passes and draws into a texture and an offscreen window, exact readback, a
 //! sampled BGRA8 upload, the ledger of a closing session, resize, and the pick variant's ids.
 //! The fixtures follow the GLSL dialect's contract (shader_ir_glsl): packed geometry attributes,
-//! the clip-space Y flip under `mp_clip_y_flip`, `mp_pick` = (draw id, twin mask).
+//! the clip-space Y flip under `mp_clip_y_flip`, `mp_pick` = (draw id, twin mask), and clip z
+//! kept 0..w under `mp_clip_z_zero_to_one` (else moved to -w..w); a fixture without that
+//! uniform runs with GL's -w..w clip z.
 #![cfg(target_os = "linux")]
 
 use makepad_hal::glsl::{Attribute, GlslPipeline, Texture};
@@ -456,5 +458,127 @@ fn a_pass_a_pixel_larger_than_its_target_still_draws() {
     // the clear in the top corners, the triangle's base along the bottom
     for x in [0, 31] { assert_eq!(&image[x * 4..][..4], &[17, 34, 51, 255]); }
     for x in [6, 16, 26] { assert_eq!(&image[(29 * 32 + x) * 4..][..4], &[255; 4], "x {x}"); }
+    assert!(hal.close(sid));
+}
+
+/// The compiler's vertex epilogue: clip z kept 0..w when the host runs the program with
+/// ZERO_TO_ONE clip control, else moved to GL's -w..w.
+fn clip_z_vertex_glsl() -> String {
+    let z = makepad_hal::glsl::CLIP_Z_ZERO_TO_ONE_UNIFORM;
+    format!("#version 300 es
+precision highp float;
+in vec4 packed_geometry_0;
+uniform float mp_clip_y_flip;
+uniform float {z};
+void main() {{
+    vec4 p = packed_geometry_0;
+    gl_Position = vec4(p.x, mp_clip_y_flip > 0.5 ? -p.y : p.y, {z} > 0.5 ? p.z : 2.0 * p.z - p.w, p.w);
+}}
+")
+}
+
+/// A program of the -w..w convention without the uniform: it keeps NEGATIVE_ONE_TO_ONE.
+const MINUS_W_VERTEX_GLSL: &str = "#version 300 es
+precision highp float;
+in vec4 packed_geometry_0;
+uniform float mp_clip_y_flip;
+void main() {
+    vec4 p = packed_geometry_0;
+    gl_Position = vec4(p.x, mp_clip_y_flip > 0.5 ? -p.y : p.y, 2.0 * p.z - p.w, p.w);
+}
+";
+
+fn colour_glsl(rgb: [u8; 3]) -> String {
+    let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
+    format!("#version 300 es
+precision highp float;
+layout(location = 0) out vec4 color;
+void main() {{ color = vec4({r:.1}, {g:.1}, {b:.1}, 1.0); }}
+")
+}
+
+/// One frame of four depth-tested passes, each into its own colour and DEPTH32F pair: forward
+/// (clear 1, LEQUAL), reverse-Z (clear 0, GEQUAL) with the compiler's clip-z contract, reverse-Z
+/// with a -w..w program, forward again. Red, green, blue draw in that order: red and blue at
+/// the same depth, green nearer. Reverse-Z depths are 2^-30 / 2^-29: a true 0..1 float32 depth
+/// keeps them apart (green), while `2z - w` rounds both to -1, depth 0, and the last draw
+/// (blue) passes. The pass order switches clip control on, off and on, and the compare op
+/// back and forth.
+#[test]
+fn reverse_z_resolves_float32_depth_near_zero() {
+    assert_eq!(makepad_hal::glsl::CLIP_Z_ZERO_TO_ONE_UNIFORM, makepad_shader::shader_ir::MP_CLIP_Z_ZERO_TO_ONE,
+        "the host looks up the uniform the compiler emits");
+    let Some((hal, info)) = open() else { return };
+    let sid = info.session;
+    let clip_control = info.flags & info_flags::CLIP_Z_ZERO_TO_ONE != 0;
+    eprintln!("GLES clip control (GL_EXT_clip_control): {clip_control}");
+    let colours = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+    let (near, far) = (f32::exp2(-29.0), f32::exp2(-30.0));
+    let (vb, ib) = (Id::new(10, 1), Id::new(11, 1));
+    let mut w = CmdWriter::new(sid);
+    let mut vertices = Vec::new();
+    for z in [far, near, far, 0.75, 0.5, 0.75] {
+        vertices.extend([-1.0, -1.0, z, 1.0, 1.0, -1.0, z, 1.0, 0.0, 1.0, z, 1.0]);
+    }
+    let vertices = floats(&vertices);
+    w.buffer_create(vb, buffer_kind::VERTEX, vertices.len() as u64, Attr::default());
+    w.buffer_update(vb, 0, &vertices);
+    let indices: Vec<u8> = (0u16..18).flat_map(|i| i.to_le_bytes()).collect();
+    w.buffer_create(ib, buffer_kind::INDEX, indices.len() as u64, Attr::default());
+    w.buffer_update(ib, 0, &indices);
+    // pipelines 10..13: the compiler contract, 13..16: -w..w; red, green, blue
+    let contract = clip_z_vertex_glsl();
+    let mut waiting = Vec::new();
+    for (k, vertex) in [contract.as_str(), MINUS_W_VERTEX_GLSL].into_iter().enumerate() {
+        for (c, rgb) in colours.into_iter().enumerate() {
+            let id = Id::new(10 + 3 * k as u32 + c as u32, 1);
+            let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &payload(vertex, &colour_glsl(rgb), Vec::new(), false),
+                &[NONE, NONE, NONE, NONE, NONE, 0], &LAYOUT);
+            w.pipeline_create(id, dialect::GLSL, Attr::default(), &blob);
+            waiting.push(id);
+        }
+    }
+    for i in 0..4 {
+        w.texture_create(Id::new(10 + i, 1), usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 32, 32, [1, 1], Attr::default());
+        w.texture_create(Id::new(20 + i, 1), usage::RENDER_TARGET, format::DEPTH32F, 32, 32, [1, 1], Attr::default());
+    }
+    hal.submit(&w.buf());
+    until(&hal, sid, |e| {
+        if let HalEvent::PipelineReady { pipeline } = e { waiting.retain(|p| *p != pipeline) }
+        waiting.is_empty()
+    });
+    // (pipeline base, first vertex, clear depth, draw flags)
+    let passes = [(10, 9, 1.0, Draw::DEPTH_WRITE), (10, 0, 0.0, Draw::DEPTH_WRITE | Draw::REVERSE_Z),
+        (13, 0, 0.0, Draw::DEPTH_WRITE | Draw::REVERSE_Z), (10, 9, 1.0, Draw::DEPTH_WRITE)];
+    let before = hal.with_world(|w| w.session(sid).unwrap().stats);
+    w.clear();
+    w.frame_begin(1, FrameMeta::default());
+    for (i, (pipe, first, clear_depth, flags)) in passes.into_iter().enumerate() {
+        let mut p = pass(Id::new(10 + i as u32, 1), 32, 32, [0.0, 0.0, 0.0, 1.0]);
+        p.depth = Id::new(20 + i as u32, 1);
+        p.clear_depth = clear_depth;
+        w.pass(p);
+        for c in 0..3 {
+            w.draw(Draw { pipeline: Id::new(pipe + c, 1), vb, ib, index: [first + 3 * c, 3], inst: Inst::inline(Slice::EMPTY, 1),
+                scissor: [f32::NAN; 4], flags, ..Default::default() });
+        }
+    }
+    w.frame_end(Id::new(13, 1), target::TEXTURE);
+    hal.submit(&w.buf());
+    frame_done(&hal, sid, 1);
+    let after = hal.with_world(|w| w.session(sid).unwrap().stats);
+    assert_eq!(after.bad_args, 0);
+    assert_eq!((after.passes - before.passes, after.draws - before.draws), (4, 12));
+    assert_eq!(after.skipped_draws, before.skipped_draws, "every draw encoded (pipelines were ready)");
+    let (green, blue) = ([0, 255, 0, 255], [0, 0, 255, 255]);
+    let expect = [green, if clip_control { green } else { blue }, blue, green];
+    let names = ["forward", "reverse-Z, 0..w contract", "reverse-Z, -w..w program", "forward after reverse"];
+    for (i, want) in expect.into_iter().enumerate() {
+        w.clear();
+        w.texture_readback(Id::new(10 + i as u32, 1), 20 + i as u32, [0, 0, 32, 32]);
+        hal.submit(&w.buf());
+        let image = pixels(&hal, sid, 20 + i as u32);
+        assert_eq!(&image[(16 * 32 + 16) * 4..][..4], &want, "{} pass (clip control {clip_control})", names[i]);
+    }
     assert!(hal.close(sid));
 }

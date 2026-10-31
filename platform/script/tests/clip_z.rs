@@ -1,6 +1,8 @@
 //! One clip-z convention on every backend: clip z runs 0..w and a depth
-//! buffer holds ndc z (Metal, D3D, Vulkan, WebGPU natively); the OpenGL
-//! backend moves its -w..w clip z there in the vertex output.
+//! buffer holds ndc z (Metal, D3D, Vulkan, WebGPU natively). On OpenGL the
+//! vertex output keeps z when the host runs the program with ZERO_TO_ONE
+//! clip control (`mp_clip_z_zero_to_one` = 1.0) and otherwise moves it to
+//! GL's -w..w; a select, so the kept z never passes through `- w`.
 use makepad_script::*;
 
 fn compile(backend: &str) -> String {
@@ -23,8 +25,14 @@ fn compile(backend: &str) -> String {
 fn opengl_moves_clip_z_to_the_shared_convention() {
     let glsl = compile("glsl");
     assert!(glsl.contains("((2.0 * vtx_pos.z) - vtx_pos.w)"), "{glsl}");
+    assert!(glsl.contains("uniform float mp_clip_z_zero_to_one;"), "{glsl}");
+    assert!(
+        glsl.contains("((mp_clip_z_zero_to_one > 0.5) ? vtx_pos.z : ((2.0 * vtx_pos.z) - vtx_pos.w))"),
+        "{glsl}"
+    );
     for backend in ["metal", "hlsl", "wgsl"] {
         let src = compile(backend);
         assert!(!src.contains("2.0 * vtx_pos.z"), "{backend} keeps its native 0..w clip z:\n{src}");
+        assert!(!src.contains("mp_clip_z_zero_to_one"), "{backend} has no GL clip-z uniform:\n{src}");
     }
 }

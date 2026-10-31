@@ -127,7 +127,7 @@ impl D3d11 {
             msaa: 1,
             dpi: shell.map_or_else(win32::system_dpi, |s| s.dpi()),
             // offscreen too: a badge layer is composed into the retained image's copy either way
-            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES,
+            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES | info_flags::CLIP_Z_ZERO_TO_ONE,
             max_texture: 16384,
             max_window: [16384, 16384],
             max_buffer: (u32::MAX as u64) & !15,

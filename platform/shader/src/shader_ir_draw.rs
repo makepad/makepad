@@ -1173,6 +1173,7 @@ pub fn build_gl_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl c
     let vec4 = ir.vec_ty(4, IrScalar::F32);
     let vtx_pos = ir.global(IrGlobalKind::VertexPosition, id!(vertex_pos), vec4);
     let flip = ir.global(IrGlobalKind::ClipYFlip, id!(mp_clip_y_flip), TY_F32);
+    let clip_z = (!output.use_vulkan).then(|| ir.global(IrGlobalKind::ClipZZeroToOne, id!(mp_clip_z_zero_to_one), TY_F32));
 
     // Vertex.
     let mut inputs = Vec::new();
@@ -1307,8 +1308,10 @@ pub fn build_gl_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl c
             b.assign(dst, src);
         }
     }
-    // gl_Position: Y flipped for bottom-up targets; clip z from 0..w to
-    // GL's -w..w (not when Vulkan renders this source).
+    // gl_Position: Y flipped for bottom-up targets; clip z kept 0..w when the
+    // host set ZERO_TO_ONE clip control (`mp_clip_z_zero_to_one`), else moved
+    // to GL's -w..w (not when Vulkan renders this source). A select, never a
+    // mix: the kept z must not pass through `- w`.
     let p = b.glob(vtx_pos);
     let x = b.lane(p, 0);
     let p = b.glob(vtx_pos);
@@ -1324,14 +1327,21 @@ pub fn build_gl_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl c
     let z = b.lane(p, 2);
     let p = b.glob(vtx_pos);
     let w = b.lane(p, 3);
-    let z = if output.use_vulkan {
-        z
-    } else {
-        let two = b.f32(2.0);
-        let z2 = b.bin(BinOp::Mul, two, z, TY_F32);
-        let p = b.glob(vtx_pos);
-        let w2 = b.lane(p, 3);
-        b.bin(BinOp::Sub, z2, w2, TY_F32)
+    let z = match clip_z {
+        None => z,
+        Some(clip_z) => {
+            let two = b.f32(2.0);
+            let z2 = b.bin(BinOp::Mul, two, z, TY_F32);
+            let p = b.glob(vtx_pos);
+            let w2 = b.lane(p, 3);
+            let gl_z = b.bin(BinOp::Sub, z2, w2, TY_F32);
+            let p = b.glob(vtx_pos);
+            let z_keep = b.lane(p, 2);
+            let zo = b.glob(clip_z);
+            let half = b.f32(0.5);
+            let zero_to_one = b.bin(BinOp::Gt, zo, half, TY_BOOL);
+            b.e(ExprKind::Select(zero_to_one, z_keep, gl_z), TY_F32)
+        }
     };
     let pos = b.e(ExprKind::Construct(vec![x, y, z, w]), vec4);
     let out0 = b.e(ExprKind::EntryOut(0), vec4);

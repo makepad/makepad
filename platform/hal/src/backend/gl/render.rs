@@ -37,6 +37,8 @@ pub(super) struct Caps {
     pub max_ubo: usize,
     pub border_clamp: bool,
     pub float_blend: bool,
+    /// EXT_clip_control: programs that read `mp_clip_z_zero_to_one` run with clip-space z 0..w
+    pub clip_control: bool,
     pub renderer: String,
     /// a software rasterizer: the default selection prefers hardware Vulkan and GL to it
     pub software: bool,
@@ -194,6 +196,9 @@ pub(super) struct Renderer {
     pub uniform_arena: GLuint,
     pub instance_arena: GLuint,
     pub arena_words: (GLuint, u32),
+    /// the clip-space z range the context is set to (true: ZERO_TO_ONE), None before the
+    /// first draw; it follows the drawing program (`GlProgram::zero_to_one`)
+    pub clip_z: Option<bool>,
     pending: VecDeque<(GLsync, Then)>,
     pub mailbox: Mailbox,
     exit: bool,
@@ -244,6 +249,9 @@ impl Renderer {
             max_ubo: gl.integer(sys::MAX_UNIFORM_BLOCK_SIZE).max(16384) as usize,
             border_clamp: has("GL_EXT_texture_border_clamp") || has("GL_OES_texture_border_clamp"),
             float_blend: has("GL_EXT_float_blend"),
+            // the extension string, not just the pointer: EGL may hand out entry points the
+            // context does not support
+            clip_control: has("GL_EXT_clip_control") && gl.glClipControlEXT.is_some(),
             renderer: format!("{} ({version})", gl.string(sys::RENDERER)),
             software: ctx.software(),
             share: [ctx.share.display as u64, ctx.share.config as u64, ctx.share.context as u64],
@@ -263,11 +271,11 @@ impl Renderer {
         }
         let fallback = [0, 1, 2, 3, 4].map(|shape| fallback(gl, shape));
         if super::super::log_enabled() {
-            eprintln!("[hal-gl] context: {} ubo_align={} extensions={}", caps.renderer, caps.ubo_align, ext.len());
+            eprintln!("[hal-gl] context: {} ubo_align={} clip_control={} extensions={}", caps.renderer, caps.ubo_align, caps.clip_control, ext.len());
         }
         Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
             fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback,
-            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, exit: false })
+            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), clip_z: None, pending: VecDeque::new(), mailbox, exit: false })
     }
 
     pub fn exit(&mut self) {
