@@ -69,12 +69,46 @@ fn live_rect_area<'a>(
     ra: &RectArea,
     cx: &'a Cx,
 ) -> Option<(&'a crate::draw_list::CxDrawList, &'a crate::draw_list::CxRectArea)> {
+    live_rect_area_inner(ra, cx, false)
+}
+
+/// `ignore_redraw` reads a rect area a retained draw list still holds
+/// (see `clipped_rect_union_attached`); the bounds checks stay.
+fn live_rect_area_inner<'a>(
+    ra: &RectArea,
+    cx: &'a Cx,
+    ignore_redraw: bool,
+) -> Option<(&'a crate::draw_list::CxDrawList, &'a crate::draw_list::CxRectArea)> {
     let draw_list = cx.draw_lists.checked_index(ra.draw_list_id)?;
-    if draw_list.redraw_id != ra.redraw_id {
+    if !ignore_redraw && draw_list.redraw_id != ra.redraw_id {
         return None;
     }
     let rect_area = draw_list.rect_areas.get(ra.rect_id)?;
     Some((draw_list, rect_area))
+}
+
+/// The clipped rect of a rect area, through its draw list's clip and shift.
+fn rect_area_clipped(ra: &RectArea, cx: &Cx, ignore_redraw: bool) -> Rect {
+    let Some((draw_list, rect_area)) = live_rect_area_inner(ra, cx, ignore_redraw) else {
+        return Rect::default();
+    };
+    if draw_list.draw_list_has_clip {
+        let p3 = dvec2(
+            draw_list.draw_list_uniforms.view_clip.x as f64,
+            draw_list.draw_list_uniforms.view_clip.y as f64,
+        );
+        let p4 = dvec2(
+            draw_list.draw_list_uniforms.view_clip.z as f64,
+            draw_list.draw_list_uniforms.view_clip.w as f64,
+        );
+        let shift = dvec2(
+            draw_list.draw_list_uniforms.view_shift.x as f64,
+            draw_list.draw_list_uniforms.view_shift.y as f64,
+        );
+        rect_area.rect.clip(rect_area.draw_clip).translate(shift).clip((p3, p4))
+    } else {
+        rect_area.rect.clip(rect_area.draw_clip)
+    }
 }
 
 /// The draw call that an `Area::Instance` points at, or `None` if its draw list was recorded
@@ -110,6 +144,7 @@ impl Area {
         self.clone()
     }
 
+    #[track_caller]
     pub fn redraw(&self, cx: &mut Cx) {
         cx.redraw_area(*self);
     }
@@ -219,7 +254,9 @@ impl Area {
                 if draw_list.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
-                // ok now we have to patch x/y/w/h into it
+                // ok now we have to patch x/y/w/h into it. An area into a capture that was frozen
+                // or recycled, or whose draw list was recorded again within this redraw, can point
+                // at an item with no draw call or data: it has no rect.
                 let Some((mapping, buf)) = live_instance_data(inst, cx, draw_list) else {
                     return Rect::default();
                 };
@@ -271,30 +308,7 @@ impl Area {
                 // Clip this draw list too. Stale rect areas are common after a
                 // hide/rebuild; Instance already bails on redraw_id, Rect must
                 // too, and must bounds-check — Win32 WndProc cannot unwind.
-                let Some((draw_list, rect_area)) = live_rect_area(ra, cx) else {
-                    return Rect::default();
-                };
-                if draw_list.draw_list_has_clip {
-                    let p3 = dvec2(
-                        draw_list.draw_list_uniforms.view_clip.x as f64,
-                        draw_list.draw_list_uniforms.view_clip.y as f64,
-                    );
-                    let p4 = dvec2(
-                        draw_list.draw_list_uniforms.view_clip.z as f64,
-                        draw_list.draw_list_uniforms.view_clip.w as f64,
-                    );
-                    let shift = dvec2(
-                        draw_list.draw_list_uniforms.view_shift.x as f64,
-                        draw_list.draw_list_uniforms.view_shift.y as f64,
-                    );
-                    return rect_area
-                        .rect
-                        .clip(rect_area.draw_clip)
-                        .translate(shift)
-                        .clip((p3, p4));
-                } else {
-                    return rect_area.rect.clip(rect_area.draw_clip);
-                }
+                rect_area_clipped(ra, cx, false)
             }
             _ => Rect::default(),
         };
@@ -321,9 +335,28 @@ impl Area {
         self.clipped_rect_union_inner(cx, true)
     }
 
+    /// The bounds of EVERY instance in an instance area before any clip is
+    /// applied (the draw list's own shift still is): where a text run or a
+    /// batch of quads was laid out. Compare with [`Self::clipped_rect_union`]
+    /// to find what a clip cuts off.
+    pub fn rect_union(&self, cx: &Cx) -> Rect {
+        self.rect_union_inner(cx, false, false)
+    }
+
     fn clipped_rect_union_inner(&self, cx: &Cx, ignore_redraw: bool) -> Rect {
-        let Area::Instance(inst) = self else {
-            return self.clipped_rect(cx);
+        self.rect_union_inner(cx, ignore_redraw, true)
+    }
+
+    fn rect_union_inner(&self, cx: &Cx, ignore_redraw: bool, clip: bool) -> Rect {
+        let inst = match self {
+            Area::Instance(inst) => inst,
+            // A container without a background owns a rect area; attached
+            // means on screen for it exactly as for an instance, so a
+            // retained list that did not redraw this frame still answers.
+            Area::Rect(ra) => {
+                return if clip { rect_area_clipped(ra, cx, ignore_redraw) } else { self.rect(cx) };
+            }
+            _ => return if clip { self.clipped_rect(cx) } else { self.rect(cx) },
         };
         if inst.instance_count == 0 {
             // A probe, not a draw: an instance-less area is simply "nothing
@@ -342,11 +375,11 @@ impl Area {
         };
         let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
         let (Some(rect_pos), Some(rect_size)) = (sh.mapping.rect_pos, sh.mapping.rect_size) else {
-            return self.clipped_rect(cx);
+            return if clip { self.clipped_rect(cx) } else { self.rect(cx) };
         };
         let stride = sh.mapping.instances.total_slots;
         if stride == 0 {
-            return self.clipped_rect(cx);
+            return if clip { self.clipped_rect(cx) } else { self.rect(cx) };
         }
         let mut union: Option<Rect> = None;
         for i in 0..inst.instance_count {
@@ -358,7 +391,7 @@ impl Area {
                 pos: dvec2(buf[o + rect_pos] as f64, buf[o + rect_pos + 1] as f64),
                 size: dvec2(buf[o + rect_size] as f64, buf[o + rect_size + 1] as f64),
             };
-            if let Some(draw_clip) = sh.mapping.draw_clip {
+            if let (true, Some(draw_clip)) = (clip, sh.mapping.draw_clip) {
                 rect = rect.clip((
                     dvec2(buf[o + draw_clip] as f64, buf[o + draw_clip + 1] as f64),
                     dvec2(buf[o + draw_clip + 2] as f64, buf[o + draw_clip + 3] as f64),
@@ -366,12 +399,13 @@ impl Area {
             }
             if draw_list.draw_list_has_clip {
                 let u = &draw_list.draw_list_uniforms;
-                rect = rect
-                    .translate(dvec2(u.view_shift.x as f64, u.view_shift.y as f64))
-                    .clip((
+                rect = rect.translate(dvec2(u.view_shift.x as f64, u.view_shift.y as f64));
+                if clip {
+                    rect = rect.clip((
                         dvec2(u.view_clip.x as f64, u.view_clip.y as f64),
                         dvec2(u.view_clip.z as f64, u.view_clip.w as f64),
                     ));
+                }
             }
             if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
                 continue;
@@ -411,7 +445,9 @@ impl Area {
                 if draw_list.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
-                // ok now we have to patch x/y/w/h into it
+                // ok now we have to patch x/y/w/h into it. An area into a capture that was frozen
+                // or recycled, or whose draw list was recorded again within this redraw, can point
+                // at an item with no draw call or data: it has no rect.
                 let Some((mapping, buf)) = live_instance_data(inst, cx, draw_list) else {
                     return Rect::default();
                 };
@@ -437,41 +473,6 @@ impl Area {
         };
     }
 
-    pub fn abs_to_rel(&self, cx: &Cx, abs: Vec2d) -> Vec2d {
-        return match self {
-            Area::Instance(inst) => {
-                if inst.instance_count == 0 {
-                    error!("abs_to_rel_scroll called on instance_count ==0 area pointer, use mark/sweep correctly!");
-                    return abs;
-                }
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    return abs;
-                }
-                let Some((mapping, buf)) = live_instance_data(inst, cx, draw_list) else {
-                    return abs;
-                };
-                // ok now we have to patch x/y/w/h into it
-                if let Some(rect_pos) = mapping.rect_pos {
-                    let x = buf[inst.instance_offset + rect_pos + 0] as f64;
-                    let y = buf[inst.instance_offset + rect_pos + 1] as f64;
-                    return Vec2d {
-                        x: abs.x - x,
-                        y: abs.y - y,
-                    };
-                }
-                abs
-            }
-            Area::Rect(ra) => match live_rect_area(ra, cx) {
-                Some((_, rect_area)) => Vec2d {
-                    x: abs.x - rect_area.rect.pos.x,
-                    y: abs.y - rect_area.rect.pos.y,
-                },
-                None => abs,
-            },
-            _ => abs,
-        };
-    }
 
     pub fn set_rect(&self, cx: &mut Cx, rect: &Rect) {
         match self {
@@ -675,7 +676,6 @@ mod tests {
             assert_eq!(area.clipped_rect(&cx), Rect::default());
             assert_eq!(area.clipped_rect_union(&cx), Rect::default());
             assert_eq!(area.rect(&cx), Rect::default());
-            assert_eq!(area.abs_to_rel(&cx, dvec2(5.0, 5.0)), dvec2(5.0, 5.0));
             area.set_rect(&mut cx, &Rect { pos: dvec2(1.0, 1.0), size: dvec2(1.0, 1.0) });
         }
     }

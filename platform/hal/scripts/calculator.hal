@@ -1,0 +1,20 @@
+# Calculator through the HAL: 12 + 3 = 15 (headless, no window system).
+#   MAKEPAD_HAL_SCRIPT=platform/hal/scripts/calculator.hal ./makepad-app-calculator
+# Uses the native HAL build. One JSON line per step, a summary line last; a failing
+# step or budget makes the exit code non-zero. The app keeps its session between runs, so the
+# script clears first.
+wait_gpu
+wait_frame 2
+budget stale_ids == 0
+budget ledger_bytes <= 100000000
+click path=k_clear
+click path=k_1
+click path=k_2
+click path=k_add
+click path=k_3
+click path=k_eq
+wait_gpu
+wait_frame 2
+query ui path=display.result
+expect_text path=display.result "15"
+snapshot calculator_15

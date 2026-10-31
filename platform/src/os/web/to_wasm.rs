@@ -98,12 +98,24 @@ impl Into<XrCapabilities> for WXrCapabilities {
 
 #[derive(ToWasm)]
 pub struct ToWasmInit {
+    pub a11y_enabled: bool,
     pub gpu_info: WGpuInfo,
     pub cpu_cores: u32,
     pub wasm_memory_max_pages: u32,
     pub xr_capabilities: WXrCapabilities,
     pub browser_info: WBrowserInfo,
     pub window_info: WWindowInfo,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmA11yState {
+    pub enabled: bool,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmA11yAction {
+    pub window: u32,
+    pub bytes: WasmDataU8,
 }
 
 #[derive(ToWasm)]
@@ -156,12 +168,29 @@ pub struct ToWasmPaintDirty {}
 #[derive(ToWasm)]
 pub struct ToWasmRedrawAll {}
 
-/// `count` WebGL programs finished compiling (or failed) since the last
-/// report. Pairs with the compiles queued through `FromWasmCompileWebGLShader`
-/// so `Cx::draw_shaders_pending` can say whether draws are still being
-/// dropped for a program that has not linked yet.
+/// The browser restored a lost WebGL context: every object of the old one
+/// (programs, buffers, VAOs, textures, framebuffers) is gone and the page's
+/// tables of them are empty. The app rebuilds them from their CPU-side
+/// descriptions (`Cx::webgl_forget_gpu_resources`) and repaints.
+#[derive(ToWasm)]
+pub struct ToWasmGpuReset {}
+
+/// `count` WebGL programs are done since the last report: linked (and,
+/// with first draws spread, drawn for the first time) or failed. Pairs
+/// with the compiles queued through `FromWasmCompileWebGLShader` so
+/// `Cx::draw_shaders_pending` can say whether draws are still being
+/// dropped. `waited`: how many of them had waited for their first draw
+/// (`ToWasmWebGLShadersLinked`).
 #[derive(ToWasm)]
 pub struct ToWasmWebGLShadersDone {
+    pub count: usize,
+    pub waited: usize,
+}
+
+/// `count` WebGL programs linked and now wait for their first draw (first
+/// draws spread, `Cx::spread_first_draws`).
+#[derive(ToWasm)]
+pub struct ToWasmWebGLShadersLinked {
     pub count: usize,
 }
 
@@ -562,6 +591,28 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 
 #[derive(ToWasm)]
 pub struct ToWasmTextCopy {}
+
+/// Finished frames' GPU times (timer queries, read a few frames late):
+/// the frame's start (ms, the page clock) and its GPU time (ms).
+#[derive(ToWasm)]
+pub struct ToWasmGpuFrameTimes {
+    pub starts: Vec<f64>,
+    pub times: Vec<f64>,
+}
+
+/// The page asks for the GPU inventory (`makepad_gpu_inventory()`).
+#[derive(ToWasm)]
+pub struct ToWasmGpuInventory {
+    pub request_id: u32,
+}
+
+/// A link request's answer: the table slot of each export, or an error.
+#[derive(ToWasm)]
+pub struct ToWasmModuleLinked {
+    pub request_id: u32,
+    pub slots: Vec<u32>,
+    pub error: String,
+}
 
 #[derive(ToWasm)]
 pub struct ToWasmStorageResult {

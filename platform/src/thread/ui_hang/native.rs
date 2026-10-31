@@ -1,8 +1,9 @@
 use super::{phase_name, CURRENT};
+use crate::makepad_network::mpsc::{sync_channel, Receiver, SyncSender};
 use std::{
     cell::RefCell,
     collections::HashMap,
-    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, mpsc::{sync_channel, Receiver, SyncSender}, Arc},
+    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc},
     time::{Duration, Instant},
 };
 

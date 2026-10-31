@@ -41,18 +41,25 @@
 //! ```
 //!
 //! Frames can also be supplied pre-converted as NV12 (`push_frame_nv12`); the
-//! RGB entry points use the BT.709 converters in [`nv12`]. Audio may be pushed
+//! RGB entry points use the converters in [`nv12`] with the encoder's
+//! [`VideoColor`] (BT.709 limited range by default), which is also what the
+//! stream and container are tagged with. Audio may be pushed
 //! interleaved with video or in one block at the end for short clips.
 
 pub mod annex_b;
+pub mod color;
+pub mod hevc_config;
 pub mod mp4_first_frame;
 pub mod nv12;
 pub mod stream_debug;
 pub mod stream_decoder;
 pub mod stream_encoder;
+pub mod surface;
 
-pub use stream_decoder::{DecodedFrame, VideoStreamDecoder};
-pub use stream_encoder::{EncodedPacket, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+pub use color::{VideoColor, VideoColorUniforms, VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
+pub use stream_decoder::{DecodedFrame, DecodedPicture, PicturePlane, VideoStreamDecoder};
+pub use stream_encoder::{EncodeTimings, EncodedPacket, EncoderCaps, QpGrid, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+pub use surface::{completion_notified, CompletionSource, GpuCompletion, SurfaceFormat, SurfaceHandle, SurfaceKind, SyncFile};
 
 use std::fmt;
 
@@ -63,6 +70,10 @@ use std::fmt;
 pub enum VideoFileCodec {
     H265,
     H264,
+    /// H.265 with an alpha layer (a transparent overlay): BGRA pictures in,
+    /// premultiplied, the alpha kept. Only where the OS encoder writes it
+    /// (VideoToolbox); elsewhere opening the encoder says so.
+    H265Alpha,
 }
 
 /// Options for the optional AAC audio track, fed as 16-bit interleaved PCM.
@@ -101,6 +112,13 @@ pub struct VideoFileEncoderOptions {
     /// the file cheaply decodable at ANY frame in ANY order — reverse and
     /// bounce playback never forward-decode a GOP to reach a frame.
     pub keyframe_only: bool,
+    /// The colour the pushed RGB is converted to and the stream and
+    /// container are tagged with (pushed NV12 must already be in it).
+    /// The pictures are BT.709 SDR light; another primaries is converted on
+    /// the GPU before the frames are pushed (the RGB entry points only apply
+    /// the matrix and range, and refuse an HDR transfer: HDR frames are
+    /// pushed as NV12 already in the colour).
+    pub color: VideoColor,
 }
 
 impl Default for VideoFileEncoderOptions {
@@ -114,6 +132,7 @@ impl Default for VideoFileEncoderOptions {
             video_bitrate_bps: 8_000_000,
             audio: None,
             keyframe_only: false,
+            color: VideoColor::BT709,
         }
     }
 }
@@ -184,8 +203,14 @@ mod apple_decoder;
 mod apple_encoder;
 #[cfg(target_vendor = "apple")]
 mod apple_intra_frame;
-// Pure Rust and portable, but only the macOS still-writer uses it so far.
 #[cfg(target_vendor = "apple")]
+mod apple_texture_intake;
+#[cfg(target_vendor = "apple")]
+mod apple_bgra_reader;
+#[cfg(target_vendor = "apple")]
+pub use apple_bgra_reader::BgraFrameReader;
+// Pure Rust and portable: the still writers that get bitstreams, not files (Apple, Android).
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
 mod mp4_single_frame;
 #[cfg(target_vendor = "apple")]
 mod apple_stream_encoder;
@@ -208,12 +233,187 @@ mod linux_encoder;
 #[cfg(target_os = "linux")]
 mod linux_decoder;
 #[cfg(target_os = "linux")]
+mod linux_stream_decoder;
+#[cfg(target_os = "linux")]
 use linux_decoder::LinuxVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "linux")]
 use linux_encoder::LinuxVideoFileEncoder as OsVideoFileEncoder;
 
+// Linux's and Android's stream encoders are the HAL's (Vulkan Video; MediaCodec), one op set.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod hal_stream_encoder;
+#[cfg(target_os = "android")]
+mod hal_stream_decoder;
+
+// Android arm: NDK MediaExtractor + MediaCodec in the HAL host, reached through its ops.
+#[cfg(target_os = "android")]
+mod android_decoder;
+#[cfg(target_os = "android")]
+use android_decoder::AndroidVideoFileDecoder as OsVideoFileDecoder;
+
 #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
 const UNSUPPORTED: &str = "video file codec is not implemented on this platform yet";
+
+// ---------------------------------------------------------------------------
+// Pictures from shared GPU textures
+// ---------------------------------------------------------------------------
+
+#[cfg(target_vendor = "apple")]
+pub use apple_texture_intake::GpuPicture;
+
+/// A picture ready for the encoder, in GPU memory (see [`GpuPictureMaker`]).
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+pub struct GpuPicture {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Linux: a picture is the region read back from the shared texture once, as
+/// NV12 (the Linux encoder, x264, takes CPU memory anyway).
+#[cfg(target_os = "linux")]
+pub struct GpuPicture {
+    pub width: u32,
+    pub height: u32,
+    nv12: Vec<u8>,
+}
+
+/// Windows: a picture is the region copied on the GPU into a texture of its own (BGRA, on the
+/// HAL's shared-texture device); pushing it converts and scales it to the track's NV12 on the
+/// GPU (one D3D11 video-processor blit) for the encoder. No pixel crosses the CPU.
+#[cfg(target_os = "windows")]
+pub struct GpuPicture {
+    pub width: u32,
+    pub height: u32,
+    texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+}
+
+// SAFETY: a texture of a multithread-protected device; a recorder makes it on one worker and
+// encodes it on another, never both at once
+#[cfg(target_os = "windows")]
+unsafe impl Send for GpuPicture {}
+
+/// Makes encoder pictures from shared GPU textures: a region of the texture
+/// (the platform's shared-texture handle: an IOSurface id on macOS) copied
+/// and converted to the encoder's format on the GPU, no CPU copy. The
+/// texture may be written again as soon as `picture` returns; the picture
+/// is pushed with [`VideoFileEncoder::push_gpu_picture`] whenever the
+/// caller is ready (a recorder holding pictures for their sound).
+pub struct GpuPictureMaker {
+    #[cfg(target_vendor = "apple")]
+    intake: apple_texture_intake::TextureIntake,
+}
+
+impl GpuPictureMaker {
+    pub fn new() -> Result<GpuPictureMaker, VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return Ok(GpuPictureMaker { intake: apple_texture_intake::TextureIntake::new()? });
+        #[cfg(target_os = "windows")]
+        makepad_hal::shared_texture::prepare();
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        return Ok(GpuPictureMaker {});
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+        return Err(VideoFileError::new("GPU pictures are not implemented on this platform yet"));
+    }
+
+    /// Whether [`Self::nv12_picture`] and [`Self::bgra_picture`] work here.
+    pub const TAKES_PLANES: bool = cfg!(target_vendor = "apple");
+
+    /// A `width` x `height` NV12 picture whose planes the shared texture
+    /// `handle` holds, laid out as BGRA8 texels: `width.div_ceil(4)` texels
+    /// a row, each 4 bytes of a plane row in memory order, the `height` luma
+    /// rows and then the `height / 2` interleaved chroma rows (a GPU pass's
+    /// conversion of a picture). Copied on the GPU into the encoder's NV12
+    /// buffer, nothing converted; the planes are in `color`'s matrix and
+    /// range. Apple only ([`Self::TAKES_PLANES`]).
+    pub fn nv12_picture(&mut self, handle: u64, width: u32, height: u32, color: VideoColor) -> Result<GpuPicture, VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return unsafe { self.intake.nv12_picture(handle, 0, width, height, color.range == VideoRange::Full) };
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (handle, width, height, color);
+            return Err(VideoFileError::new("NV12 pictures from shared textures are not implemented on this platform yet"));
+        }
+    }
+
+    /// `region` of the shared texture as a BGRA picture, its alpha kept
+    /// (for [`VideoFileCodec::H265Alpha`]). Apple only ([`Self::TAKES_PLANES`]).
+    pub fn bgra_picture(&mut self, handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return unsafe { self.intake.bgra_picture(handle, region) };
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (handle, region);
+            return Err(VideoFileError::new("BGRA pictures from shared textures are not implemented on this platform yet"));
+        }
+    }
+
+    /// `region` is `x, y, width, height` of the texture; its sides even.
+    pub fn picture(&mut self, handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
+        if region[2] % 2 != 0 || region[3] % 2 != 0 {
+            return Err(VideoFileError::new(format!("a {}x{} picture cannot be NV12 (its sides must be even)", region[2], region[3])));
+        }
+        #[cfg(target_vendor = "apple")]
+        return unsafe { self.intake.picture(handle, region) };
+        #[cfg(target_os = "linux")]
+        return read_picture(handle, region);
+        #[cfg(target_os = "windows")]
+        return makepad_hal::shared_texture::picture(handle, region)
+            .map(|texture| GpuPicture { width: region[2], height: region[3], texture })
+            .map_err(|e| VideoFileError::new(format!("picture of shared texture {handle:#x}: {e}")));
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+        {
+            let _ = handle;
+            return Err(VideoFileError::new("GPU pictures are not implemented on this platform yet"));
+        }
+    }
+}
+
+/// The region's BGRA pixels of a shared texture. Linux: `handle` is a DMA-BUF
+/// registered with `makepad_hal::dmabuf::copy` (a frame ring's slot).
+#[cfg(target_os = "linux")]
+fn read_shared_bgra(handle: u64, region: [u32; 4], out: &mut [u8]) -> bool {
+    makepad_hal::dmabuf::hal_dmabuf_read(handle, &region, out) == out.len() as i64
+}
+
+/// A picture of a shared texture's region, read back once and made NV12.
+#[cfg(target_os = "linux")]
+fn read_picture(handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
+    let (width, height) = (region[2], region[3]);
+    let mut bgra = vec![0u8; width as usize * height as usize * 4];
+    if !read_shared_bgra(handle, region, &mut bgra) {
+        return Err(VideoFileError::new(format!("cannot read shared texture {handle} {region:?}")));
+    }
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let mut nv12 = Vec::new();
+    nv12::rgbx_to_nv12(&bgra, width, height, 4, VideoColor::BT709, &mut nv12);
+    Ok(GpuPicture { width, height, nv12 })
+}
+
+/// Nearest-sample an NV12 picture to `width` x `height` (both even).
+#[cfg(target_os = "linux")]
+fn nv12_resample(src: &[u8], sw: u32, sh: u32, width: u32, height: u32) -> Vec<u8> {
+    let (sw, sh, w, h) = (sw as usize, sh as usize, width as usize, height as usize);
+    let mut out = vec![0u8; nv12::nv12_frame_size(width, height)];
+    let (y_out, uv_out) = out.split_at_mut(w * h);
+    let (y_in, uv_in) = src.split_at(sw * sh);
+    for y in 0..h {
+        let sy = y * sh / h;
+        for x in 0..w {
+            y_out[y * w + x] = y_in[sy * sw + x * sw / w];
+        }
+    }
+    for y in 0..h / 2 {
+        let sy = y * (sh / 2) / (h / 2);
+        for x in 0..w / 2 {
+            let sx = x * (sw / 2) / (w / 2);
+            uv_out[y * w + x * 2] = uv_in[sy * sw + sx * 2];
+            uv_out[y * w + x * 2 + 1] = uv_in[sy * sw + sx * 2 + 1];
+        }
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Encoder facade
@@ -256,6 +456,9 @@ impl VideoFileEncoder {
         options: VideoFileEncoderOptions,
         fragment_interval_secs: Option<f64>,
     ) -> Result<Self, VideoFileError> {
+        // Windows: the device frames of shared textures are read on is made before the first one
+        #[cfg(target_os = "windows")]
+        makepad_hal::shared_texture::prepare();
         if options.width == 0
             || options.height == 0
             || options.width % 2 != 0
@@ -276,6 +479,11 @@ impl VideoFileEncoder {
                     audio.sample_rate, audio.channels
                 )));
             }
+        }
+        // Media Foundation and GStreamer have no encoder that writes HEVC's alpha layer.
+        #[cfg(not(target_vendor = "apple"))]
+        if options.codec == VideoFileCodec::H265Alpha {
+            return Err(VideoFileError::new("HEVC with alpha: this platform's video encoder cannot write an alpha layer"));
         }
         #[cfg(target_vendor = "apple")]
         {
@@ -330,7 +538,9 @@ impl VideoFileEncoder {
         }
     }
 
-    /// Push one frame of tightly packed RGBA (alpha ignored), `width*height*4` bytes.
+    /// Push one frame of tightly packed RGBA, `width*height*4` bytes: alpha
+    /// ignored, except by [`VideoFileCodec::H265Alpha`], which keeps it
+    /// (premultiplied).
     pub fn push_frame_rgba8(&mut self, rgba: &[u8], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
         let expected = self.options.width as usize * self.options.height as usize * 4;
         if rgba.len() != expected {
@@ -368,6 +578,120 @@ impl VideoFileEncoder {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
         }
+    }
+
+    /// Push a picture made by a [`GpuPictureMaker`] (any time after it was
+    /// made; it stays the caller's).
+    pub fn push_gpu_picture(&mut self, picture: &GpuPicture, pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return self.os.push_gpu_picture(picture, pts_100ns);
+        #[cfg(target_os = "windows")]
+        {
+            let device = makepad_hal::shared_texture::device().map_err(VideoFileError::new)?;
+            self.os.use_nv12_textures(&device)?;
+            let nv12 = makepad_hal::shared_texture::to_nv12(&picture.texture, self.options.width, self.options.height)
+                .map_err(|e| VideoFileError::new(format!("picture to NV12: {e}")))?;
+            return self.os.push_d3d11_texture(&nv12, pts_100ns);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let (w, h) = (self.options.width, self.options.height);
+            if picture.width == w && picture.height == h {
+                return self.os.push_frame_nv12(&picture.nv12, pts_100ns);
+            }
+            let scaled = nv12_resample(&picture.nv12, picture.width, picture.height, w, h);
+            return self.os.push_frame_nv12(&scaled, pts_100ns);
+        }
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+        {
+            let _ = (picture, pts_100ns);
+            return Err(VideoFileError::new("GPU pictures are not implemented on this platform yet"));
+        }
+    }
+
+    /// Push one frame straight from a shared GPU texture: `handle` is the
+    /// platform's shared-texture handle (an IOSurface id on macOS, what
+    /// `Cx::shared_texture_handle` and the hosted frame rings carry) and
+    /// `region` (`x, y, width, height`) the part of it that is the picture.
+    /// The region is copied and converted on the GPU (see
+    /// [`GpuPictureMaker`]) and scaled to the track's size by the encoder;
+    /// no pixel crosses the CPU. The texture may be written again as soon
+    /// as this returns.
+    pub fn push_frame_shared_texture(&mut self, handle: u64, region: [u32; 4], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return self.os.push_shared_texture(handle, region, pts_100ns);
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        {
+            let picture = GpuPictureMaker::new()?.picture(handle, region)?;
+            return self.push_gpu_picture(&picture, pts_100ns);
+        }
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+        {
+            let _ = (handle, region, pts_100ns);
+            return Err(VideoFileError::new("encoding from a shared texture is not implemented on this platform yet"));
+        }
+    }
+
+    /// Push one frame as a `CVPixelBuffer` (BGRA or NV12, IOSurface-backed
+    /// for a copy-free path; any size, VideoToolbox scales it to the
+    /// track's). Nothing is converted or copied on the CPU: the buffer goes
+    /// to the encoder as is, and the encoder retains it until it is encoded.
+    ///
+    /// # Safety
+    /// `pixel_buffer` must be a valid `CVPixelBufferRef` for the call.
+    #[cfg(target_vendor = "apple")]
+    pub unsafe fn push_frame_pixel_buffer(
+        &mut self,
+        pixel_buffer: makepad_apple_sys::CVPixelBufferRef,
+        pts_100ns: Option<i64>,
+    ) -> Result<(), VideoFileError> {
+        unsafe { self.os.push_pixel_buffer(pixel_buffer, pts_100ns) }
+    }
+
+    /// Windows: an encoder fed BGRA8 `ID3D11Texture2D`s of
+    /// `source_width` x `source_height` on `device`, scaled to the track's
+    /// size and converted on the GPU by Media Foundation (no CPU readback).
+    /// Frames go in with [`Self::push_frame_d3d11_texture`], or as RGBA bytes
+    /// of the source's size with [`Self::push_frame_d3d11_rgba8`].
+    #[cfg(target_os = "windows")]
+    pub fn new_d3d11(
+        path: &str,
+        options: VideoFileEncoderOptions,
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        source_width: u32,
+        source_height: u32,
+    ) -> Result<Self, VideoFileError> {
+        if options.width == 0 || options.height == 0 || options.width % 2 != 0 || options.height % 2 != 0 {
+            return Err(VideoFileError::new(format!(
+                "invalid encoder frame size {}x{} (must be nonzero and even)",
+                options.width, options.height
+            )));
+        }
+        if options.fps_num == 0 || options.fps_den == 0 {
+            return Err(VideoFileError::new("invalid encoder fps 0"));
+        }
+        let os = OsVideoFileEncoder::new_d3d11(path, &options, device, source_width, source_height)?;
+        Ok(Self { options, os })
+    }
+
+    /// Windows, an encoder from [`Self::new_d3d11`]: encode `texture` as the
+    /// next frame. Media Foundation holds a reference to the texture until
+    /// it has read it; do not write the texture while its reference count
+    /// says someone else still holds it.
+    #[cfg(target_os = "windows")]
+    pub fn push_frame_d3d11_texture(
+        &mut self,
+        texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+        pts_100ns: Option<i64>,
+    ) -> Result<(), VideoFileError> {
+        self.os.push_d3d11_texture(texture, pts_100ns)
+    }
+
+    /// Windows, an encoder from [`Self::new_d3d11`]: a frame of tightly
+    /// packed RGBA bytes at the source's size.
+    #[cfg(target_os = "windows")]
+    pub fn push_frame_d3d11_rgba8(&mut self, rgba: &[u8], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        self.os.push_d3d11_rgba8(rgba, pts_100ns)
     }
 
     /// Push interleaved 16-bit PCM for the audio track. Timestamps are derived
@@ -423,6 +747,9 @@ pub struct VideoFileInfo {
     pub has_audio: bool,
     pub audio_sample_rate: u32,
     pub audio_channels: u16,
+    /// What the stream says its colour is (the container, else the
+    /// bitstream), unspecified properties guessed from the size.
+    pub color: VideoColor,
 }
 
 /// One decoded video frame: tightly packed NV12, stride == width.
@@ -431,13 +758,16 @@ pub struct DecodedVideoFrame {
     pub width: u32,
     pub height: u32,
     pub nv12: Vec<u8>,
+    /// The colour of these bytes: the stream's, in the range the decoder
+    /// delivered.
+    pub color: VideoColor,
 }
 
 impl DecodedVideoFrame {
-    /// Convert to tightly packed RGB8 (BT.709).
+    /// Convert to tightly packed RGB8 (matrix and range; see [`nv12`]).
     pub fn to_rgb8(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        nv12::nv12_to_rgb8(&self.nv12, self.width, self.height, &mut out);
+        nv12::nv12_to_rgb8(&self.nv12, self.width, self.height, self.color, &mut out);
         out
     }
 }
@@ -472,14 +802,72 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
             width: frame.width,
             height: frame.height,
             nv12: frame.nv12,
+            // the stream decoder delivers the stream's own range
+            color: au.color,
         });
     }
-    #[cfg(not(any(target_os = "windows", target_vendor = "apple")))]
+    #[cfg(target_os = "android")]
+    {
+        let au = mp4_first_frame::first_access_unit(bytes)?;
+        if au.codec != stream_encoder::StreamVideoCodec::Hevc {
+            return Err(VideoFileError::new("first frame decode: the phone decodes HEVC stills only"));
+        }
+        let nv12 = android_hevc::decode(&au.annex_b, au.width, au.height)?;
+        return Ok(DecodedVideoFrame { pts_100ns: 0, width: au.width, height: au.height, nv12, color: au.color });
+    }
+    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "android")))]
     {
         let _ = bytes;
         Err(VideoFileError::new(
             "in-memory first frame decode is not implemented on this platform yet",
         ))
+    }
+}
+
+/// The first video frame of a file: what a still reader wants.
+pub fn decode_first_frame_from_file(path: &str) -> Result<DecodedVideoFrame, VideoFileError> {
+    let mut decoder = VideoFileDecoder::open(path)?;
+    decoder.next_frame()?.ok_or_else(|| VideoFileError::new(format!("no frame in {path}")))
+}
+
+/// The largest frame (width, height) this machine's HEVC encoder takes, where the platform
+/// caps it below what a still writer may ask for: a phone (the Pixel's stops at 3840x2176).
+/// `None` = no cap known (the desktops' encoders take any still size we write).
+pub fn hevc_encoder_max_size() -> Option<(u32, u32)> {
+    #[cfg(target_os = "android")]
+    {
+        let mut out = [0u8; 8];
+        if makepad_hal::hal_hevc_encoder_max(&mut out) == 8 {
+            let w = u32::from_le_bytes(out[..4].try_into().unwrap());
+            let h = u32::from_le_bytes(out[4..].try_into().unwrap());
+            return Some((w, h));
+        }
+        return Some((0, 0));
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
+/// The phone's HEVC codec through the HAL's `hal_hevc_*` ops (AMediaCodec in the host).
+#[cfg(target_os = "android")]
+mod android_hevc {
+    use crate::android_decoder::{next_id, take};
+    use crate::VideoFileError;
+
+    /// (parameter sets, frame), both Annex-B.
+    pub fn encode(nv12: &[u8], width: u32, height: u32, bitrate: u32) -> Result<(Vec<u8>, Vec<u8>), VideoFileError> {
+        let id = next_id();
+        let packed = take(id, makepad_hal::hal_hevc_encode(id, nv12, width, height, bitrate))?;
+        let config_len = packed.get(..4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).unwrap_or(usize::MAX);
+        if packed.len() < 4 + config_len {
+            return Err(VideoFileError::new("HEVC: a short encoder result"));
+        }
+        Ok((packed[4..4 + config_len].to_vec(), packed[4 + config_len..].to_vec()))
+    }
+
+    pub fn decode(annex_b: &[u8], width: u32, height: u32) -> Result<Vec<u8>, VideoFileError> {
+        let id = next_id();
+        take(id, makepad_hal::hal_hevc_decode(id, annex_b, width, height))
     }
 }
 
@@ -492,17 +880,17 @@ pub struct DecodedAudioChunk {
 }
 
 pub struct VideoFileDecoder {
-    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
     os: OsVideoFileDecoder,
     /// Where [`VideoFileDecoder::seek`]'s discard loop stopped: the frame and
     /// chunk it kept, handed to the next `next_frame`/`next_audio` call. Held
     /// here rather than in each backend so the "first at or after the target"
     /// rule is written once and cannot drift between platforms.
-    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
     pending_video: Option<DecodedVideoFrame>,
-    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
     pending_audio: Option<DecodedAudioChunk>,
-    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
     info: VideoFileInfo,
 }
 
@@ -511,7 +899,7 @@ impl VideoFileDecoder {
     /// opener here wants a picture and refuses a file with none; for a
     /// file that has only sound, see [`Self::open_audio`].
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             let os = OsVideoFileDecoder::open(path)?;
             return Ok(Self {
@@ -520,7 +908,7 @@ impl VideoFileDecoder {
                 pending_audio: None,
             });
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -540,7 +928,7 @@ impl VideoFileDecoder {
         // decoder is built for every Apple target, not macOS alone. Guarded
         // by `target_os = "macos"` this fell through to `UNSUPPORTED` on
         // iOS and tvOS, a constant those targets do not have.
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             let os = OsVideoFileDecoder::open_audio(path)?;
             return Ok(Self {
@@ -549,7 +937,7 @@ impl VideoFileDecoder {
                 pending_audio: None,
             });
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -571,35 +959,35 @@ impl VideoFileDecoder {
     }
 
     pub fn info(&self) -> &VideoFileInfo {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         return self.os.info();
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         return &self.info;
     }
 
     /// Pull the next decoded video frame; `Ok(None)` at end of stream.
     pub fn next_frame(&mut self) -> Result<Option<DecodedVideoFrame>, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             if let Some(frame) = self.pending_video.take() {
                 return Ok(Some(frame));
             }
             return self.os.next_frame();
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         return Err(VideoFileError::new(UNSUPPORTED));
     }
 
     /// Pull the next decoded PCM audio chunk; `Ok(None)` at end of stream.
     pub fn next_audio(&mut self) -> Result<Option<DecodedAudioChunk>, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             if let Some(chunk) = self.pending_audio.take() {
                 return Ok(Some(chunk));
             }
             return self.os.next_audio();
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         return Err(VideoFileError::new(UNSUPPORTED));
     }
 
@@ -622,7 +1010,7 @@ impl VideoFileDecoder {
     /// [`next_frame`]: VideoFileDecoder::next_frame
     /// [`next_audio`]: VideoFileDecoder::next_audio
     pub fn seek(&mut self, pts_100ns: i64) -> Result<(), VideoFileError> {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             let target = pts_100ns.max(0);
             // Anything held from a previous seek belongs to the old position.
@@ -657,7 +1045,7 @@ impl VideoFileDecoder {
             }
             return Ok(());
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -697,13 +1085,50 @@ pub fn encode_intra_frame_mp4(
     apple_intra_frame::encode_intra_frame_mp4(nv12, width, height, fps.max(1), bitrate_bps, codec)
 }
 
+/// The single-frame mp4 on a phone: MediaCodec gives the parameter sets and the frame as
+/// bitstreams; the `hvcC` record and the sample are made from them ([`hevc_config`]) and the
+/// boxes written by hand, as on Apple. HEVC only.
+#[cfg(target_os = "android")]
+pub fn encode_intra_frame_mp4(
+    nv12: &[u8],
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_bps: u32,
+    codec: VideoFileCodec,
+) -> Result<Vec<u8>, VideoFileError> {
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return Err(VideoFileError::new(format!(
+            "invalid frame size {width}x{height} (must be nonzero and even)"
+        )));
+    }
+    if !matches!(codec, VideoFileCodec::H265) {
+        return Err(VideoFileError::new("the phone writes HEVC stills only"));
+    }
+    let (config, frame) = android_hevc::encode(nv12, width, height, bitrate_bps)?;
+    // Some encoders put the parameter sets in band instead of a config buffer.
+    let sets = if config.is_empty() { &frame } else { &config };
+    let record = hevc_config::hvcc_from_annex_b(sets)
+        .ok_or_else(|| VideoFileError::new("HEVC: the encoder gave no sequence parameter set"))?;
+    let sample = hevc_config::sample_from_annex_b(&frame);
+    Ok(mp4_single_frame::write_single_frame_mp4(&mp4_single_frame::IntraSample {
+        data: &sample,
+        config: &record,
+        sample_entry: *b"hvc1",
+        config_atom: *b"hvcC",
+        width,
+        height,
+        fps: fps.max(1),
+    }))
+}
+
 /// The same single-frame mp4 on the other platforms, through the platform
 /// file encoder (Media Foundation sink writer on Windows, GStreamer on
 /// Linux): one keyframe-only stream, one frame, written to a scratch file
 /// and read back. It pays the container machinery the Apple path avoids,
 /// but the bytes mean the same thing to every decoder, which is what a
 /// tile tape needs — the tape format is not a platform's.
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(not(any(target_vendor = "apple", target_os = "android")))]
 pub fn encode_intra_frame_mp4(
     nv12: &[u8],
     width: u32,
@@ -726,6 +1151,7 @@ pub fn encode_intra_frame_mp4(
         video_bitrate_bps: bitrate_bps,
         audio: None,
         keyframe_only: true,
+        ..Default::default()
     };
     // A scratch path of our own: the sink writers want a file name, and the
     // caller wants bytes. Unique per process + call so parallel bakers never

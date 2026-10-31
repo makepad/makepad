@@ -1,0 +1,1597 @@
+//! Frame execution: one `Frame` command is one packet of passes and draws, encoded into the
+//! batch's command buffer. Moved from os/apple/metal.rs (`draw_pass`, `render_view`,
+//! `frame_buffer` / `end_pass` / `submit_frame`, `commit_command_buffer`): the walk over draw
+//! lists is the 0b builder's now, what stays is the encoding.
+
+use super::device::{Done, Loc};
+use super::pipeline::Select;
+use super::resources::*;
+use super::timing::*;
+use super::{window_row, Metal};
+use crate::buffers::{id_at, read_ids, read_pairs, CmdView};
+use crate::ledger::Kind;
+use crate::session::{LentRef, Session, TextureObj, HOST};
+use super::super::super::exec;
+use crate::types::*;
+use makepad_apple_sys::*;
+use crate::FastMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use crate::gpu_prof::{self, FrameKey, PassGpu};
+use makepad_gpu_trace::kind as pass_kind;
+
+/// heuristic: how long the CPU encodes into one command buffer before the next frame commits it
+/// and starts another, so the GPU never waits longer than this behind the encoder
+const ENCODE_SLICE: Duration = Duration::from_millis(2);
+
+/// An encoder the GPU profiler times: its group in the batch's samples, or (a split pass) the
+/// encoders of its shader runs in samples of their own.
+pub(super) struct ProfPass {
+    key: FrameKey,
+    pass: u16,
+    kind: u8,
+    sample: Option<usize>,
+    split: Option<SplitTimes>,
+}
+
+pub(super) struct SplitTimes {
+    samples: Arc<PassSamples>,
+    /// the runs' sample groups (and the baseline's: the empty encoder with the pass's attachments)
+    runs: gpu_prof::SplitRuns<usize>,
+}
+
+fn host_ns(t: f64) -> u64 {
+    (t.max(0.0) * 1e9) as u64
+}
+
+impl ProfPass {
+    fn timed(&self) -> bool {
+        self.sample.is_some() || self.split.is_some()
+    }
+
+    /// The encoder's GPU facts from the resolved samples.
+    fn result(&self, samples: Option<&PassSamples>, cb: ObjcId) -> PassGpu {
+        let mut g = PassGpu::default();
+        let ordered = |a: Option<f64>, b: Option<f64>| a.zip(b).filter(|(a, b)| b >= a).map(|(a, b)| (host_ns(a), host_ns(b)));
+        if let (Some(i), Some(x)) = (self.sample, samples) {
+            let raw = x.raw(cb, i);
+            if self.kind == pass_kind::RENDER {
+                if x.clock.stage {
+                    g.vs = ordered(raw[0], raw[1]).unwrap_or_default();
+                    g.fs = ordered(raw[2], raw[3]).unwrap_or_default();
+                }
+                if let Some((a, b)) = x.span(cb, i) {
+                    (g.start, g.end) = (host_ns(a), host_ns(b));
+                }
+            } else if let Some((a, b)) = ordered(raw[0], raw[1]) {
+                (g.start, g.end) = (a, b);
+            }
+        }
+        if let Some(sp) = &self.split {
+            sp.runs.result(&mut g, |i| sp.samples.span(cb, i).map(|(a, b)| (host_ns(a), host_ns(b))));
+        }
+        g
+    }
+}
+
+/// Short name of a pixel format and its bytes per pixel.
+fn format_name(f: MTLPixelFormat) -> (&'static str, u64) {
+    match f {
+        MTLPixelFormat::RGBA8Unorm => ("rgba8", 4),
+        MTLPixelFormat::BGRA8Unorm => ("bgra8", 4),
+        MTLPixelFormat::R8Unorm => ("r8", 1),
+        MTLPixelFormat::RG8Unorm => ("rg8", 2),
+        MTLPixelFormat::RGBA16Float => ("rgba16f", 8),
+        MTLPixelFormat::RGBA32Float => ("rgba32f", 16),
+        MTLPixelFormat::R32Float => ("r32f", 4),
+        MTLPixelFormat::RG16Float => ("rg16f", 4),
+        MTLPixelFormat::R16Float => ("r16f", 2),
+        MTLPixelFormat::R32Uint => ("r32u", 4),
+        MTLPixelFormat::Depth32Float => ("d32f", 4),
+        _ => ("?", 4),
+    }
+}
+
+/// A frame whose `FrameDone` waits for its command buffer.
+struct Ticket {
+    sid: u32,
+    target: Id,
+    frame: u64,
+    font_frames: Arc<crate::font::FrameProgress>,
+    time: PassTime,
+    /// the frame was a window's (it reached the screen when it completed)
+    window: bool,
+    /// the frame's target kind and flags, for `World::frame_done`
+    kind: u32,
+    /// draws were left out for a pipeline still being built (`FramePartial`)
+    partial: bool,
+    /// the GPU profiler's encoders of this frame, and the batch samples they are in
+    prof: Vec<ProfPass>,
+    prof_samples: Option<Arc<PassSamples>>,
+}
+
+/// The drawable a window frame renders into: held (with its texture) until the frame is encoded.
+pub(super) struct FrameDrawable {
+    sid: u32,
+    window: Id,
+    /// HOSTED frames name an imported texture and have no AppKit drawable.
+    drawable: Option<RcObjcId>,
+    texture: ObjcId,
+    w: u32,
+    h: u32,
+}
+
+/// Opaque rectangular composition uses GPU copies, not a second shader path.
+/// `base` never contains the panel, so repeated host frames cannot accumulate it.
+pub(super) struct Overlay {
+    rect: [f32; 4],
+    pub(super) base: Option<super::Win>,
+    image: Option<super::Win>,
+    ready: bool,
+    /// a window layer (`window_overlay` with a layer texture): the borrower's frames render into
+    /// `base`, session 0's frames into the window, after `base` was copied into this texture
+    layer: Id,
+    /// the layer texture holds the current `base` (a borrower frame clears it)
+    copied: bool,
+}
+
+/// The command buffer the batch's frames encode into.
+pub struct Batch {
+    pub buffer: RcObjcId,
+    pub seq: u64,
+    opened: Instant,
+    samples: Option<Arc<PassSamples>>,
+    tickets: Vec<Ticket>,
+    passes: Vec<(String, Vec<String>)>,
+    native_frames: Vec<super::super::media::layers::Frame>,
+}
+
+/// The state an encoder remembers, so a draw sets only what changed.
+struct Encoder {
+    id: ObjcId,
+    pso: ObjcId,
+    depth_state: ObjcId,
+    cull: u64,
+    /// MTLTriangleFillMode: 0 fill, 1 lines (`Draw::WIREFRAME`)
+    fill: u64,
+    scissor: Option<[u32; 4]>,
+    /// buffer and offset bound at each vertex / fragment buffer slot
+    buffers: [(ObjcId, u64); 32],
+    /// texture bound at each fragment/vertex texture slot (Metal's argument table: 31)
+    textures: [ObjcId; 31],
+    size: [u64; 2],
+}
+
+impl Encoder {
+    fn buffer(&mut self, buffer: ObjcId, offset: u64, index: u64) {
+        let slot = &mut self.buffers[(index as usize).min(31)];
+        if *slot == (buffer, offset) {
+            return;
+        }
+        *slot = (buffer, offset);
+        unsafe {
+            let _: () = msg_send![self.id, setVertexBuffer: buffer offset: offset atIndex: index];
+            let _: () = msg_send![self.id, setFragmentBuffer: buffer offset: offset atIndex: index];
+        }
+    }
+
+    fn texture(&mut self, texture: ObjcId, index: usize) {
+        // a slot past the remembered ones is always set (never aliased onto another slot)
+        if let Some(slot) = self.textures.get_mut(index) {
+            if *slot == texture {
+                return;
+            }
+            *slot = texture;
+        }
+        unsafe {
+            let _: () = msg_send![self.id, setVertexTexture: texture atIndex: index as u64];
+            let _: () = msg_send![self.id, setFragmentTexture: texture atIndex: index as u64];
+        }
+    }
+
+    /// A draw call's scissor, clamped to the target as Metal requires.
+    fn set_scissor(&mut self, rect: Option<[u32; 4]>) {
+        if self.scissor == rect {
+            return;
+        }
+        self.scissor = rect;
+        let [tw, th] = self.size;
+        let r = match rect {
+            Some([x, y, w, h]) => {
+                let (x, y) = ((x as u64).min(tw), (y as u64).min(th));
+                MTLScissorRect { x, y, width: (w as u64).min(tw - x), height: (h as u64).min(th - y) }
+            }
+            None => MTLScissorRect { x: 0, y: 0, width: tw, height: th },
+        };
+        unsafe {
+            let _: () = msg_send![self.id, setScissorRect: r];
+        }
+    }
+}
+
+fn load_action(load: u8) -> MTLLoadAction {
+    match load {
+        pass_load::LOAD => MTLLoadAction::Load,
+        pass_load::CLEAR => MTLLoadAction::Clear,
+        _ => MTLLoadAction::DontCare,
+    }
+}
+
+/// The storage of a texture a pass uses. A transient target whose storage was given back is made
+/// again (the app was told and produces its content).
+fn texture_obj(tex: &mut FastMap<(u32, u32), Tex>, device: ObjcId, s: &mut Session, id: Id, seq: u64) -> Option<ObjcId> {
+    let sid = s.id;
+    if let Some(t) = tex.get_mut(&(sid, id.index)).filter(|t| t.gen == id.gen) {
+        t.last_bound = seq;
+        return Some(t.obj.as_id());
+    }
+    let obj: TextureObj = s.textures.get(sid, id).ok()?.val.clone();
+    if let Some(l) = obj.lent {
+        // a surface another session renders into (an embedded window of a child): the storage
+        // is the child's; nothing is made until the child has drawn its first frame
+        let t = tex.get_mut(&(l.child, l.tex.index)).filter(|t| t.gen == l.tex.gen)?;
+        t.last_bound = seq;
+        return Some(t.obj.as_id());
+    }
+    if obj.imported {
+        return None;
+    }
+    let label = Metal::label(s, Metal::attr_of(s, Kind::Texture, id));
+    let mut made = create_texture(device, &obj, id.gen, &label).ok()?;
+    made.last_bound = seq;
+    let object = made.obj.as_id();
+    if let Some(l) = s.ledger.get_mut(Kind::Texture, id.index) {
+        l.bytes = allocated_size(object);
+    }
+    tex.insert((sid, id.index), made);
+    Some(object)
+}
+
+/// Sets the reused render pass descriptor for one encoder of `pass`. `first`: the pass's own
+/// load actions (else every attachment loads what the encoder before left); `last`: its own
+/// store actions (else every attachment is stored for the encoder after). `sample`: stage-boundary
+/// timestamps of this encoder, at (buffer, group start).
+/// `depth_kept`: the depth is stored at the end of the pass (else it is tile memory only).
+#[allow(clippy::too_many_arguments)]
+fn configure_pass(descriptor: ObjcId, pass: &Pass, colors: &[(usize, Id, ObjcId)], depth: Option<ObjcId>, depth_kept: bool, first: bool, last: bool, sample: Option<(ObjcId, usize)>) {
+    unsafe {
+        let attachments: ObjcId = msg_send![descriptor, colorAttachments];
+        for i in 0..4u64 {
+            let a: ObjcId = msg_send![attachments, objectAtIndexedSubscript: i];
+            let _: () = msg_send![a, setTexture: nil];
+            let _: () = msg_send![a, setLevel: 0u64];
+            let _: () = msg_send![a, setSlice: 0u64];
+            let _: () = msg_send![a, setLoadAction: MTLLoadAction::DontCare];
+            let _: () = msg_send![a, setStoreAction: MTLStoreAction::Store];
+        }
+        let d: ObjcId = msg_send![descriptor, depthAttachment];
+        let _: () = msg_send![d, setTexture: nil];
+        for (i, _, obj) in colors {
+            let a: ObjcId = msg_send![attachments, objectAtIndexedSubscript: *i as u64];
+            let _: () = msg_send![a, setTexture: *obj];
+            if pass.layer[*i] != 0 {
+                let _: () = msg_send![a, setSlice: pass.layer[*i] as u64];
+            }
+            let load = pass.load[*i];
+            let _: () = msg_send![a, setLoadAction: if first { load_action(load) } else { MTLLoadAction::Load }];
+            if first && load == pass_load::CLEAR {
+                let c = pass.clear[*i];
+                let _: () = msg_send![a, setClearColor: MTLClearColor { red: c[0] as f64, green: c[1] as f64, blue: c[2] as f64, alpha: c[3] as f64 }];
+            }
+            if last && load == pass_load::DONT_CARE {
+                // scratch colour: tile memory only
+                let _: () = msg_send![a, setStoreAction: MTLStoreAction::DontCare];
+            }
+        }
+        if let Some(obj) = depth {
+            let _: () = msg_send![d, setTexture: obj];
+            let _: () = msg_send![d, setStoreAction: if last && !depth_kept { MTLStoreAction::DontCare } else { MTLStoreAction::Store }];
+            let _: () = msg_send![d, setLoadAction: if first { load_action(pass.load[4]) } else { MTLLoadAction::Load }];
+            if first && pass.load[4] == pass_load::CLEAR {
+                let _: () = msg_send![d, setClearDepth: pass.clear_depth as f64];
+            }
+        }
+        // The descriptor is reused: never leave a previous buffer's samples attached.
+        let available: bool = msg_send![descriptor, respondsToSelector: sel!(sampleBufferAttachments)];
+        if available {
+            let attachments: ObjcId = msg_send![descriptor, sampleBufferAttachments];
+            let a: ObjcId = msg_send![attachments, objectAtIndexedSubscript: 0u64];
+            let _: () = msg_send![a, setSampleBuffer: nil];
+            if let Some((buffer, index)) = sample.filter(|(b, _)| *b != nil) {
+                let _: () = msg_send![a, setSampleBuffer: buffer];
+                let _: () = msg_send![a, setStartOfVertexSampleIndex: index as u64];
+                let _: () = msg_send![a, setEndOfVertexSampleIndex: (index + 1) as u64];
+                let _: () = msg_send![a, setStartOfFragmentSampleIndex: (index + 2) as u64];
+                let _: () = msg_send![a, setEndOfFragmentSampleIndex: (index + 3) as u64];
+            }
+        }
+    }
+}
+
+/// Whether a pass's depth must be stored: something can read it later. A depth texture that is
+/// not sampled (no `usage::SAMPLED`), that this pass clears (or does not care about) rather than
+/// loads, and that no later pass of the submit loads, is read by nobody: it stays in tile memory
+/// (store DontCare), the w x h x 4 bytes are never written out.
+fn depth_kept(s: &Session, sid: u32, pass: &Pass, view: &CmdView, depth: Id) -> bool {
+    let sampled = s.textures.get(sid, depth).map_or(true, |e| e.val.usage & usage::SAMPLED != 0);
+    if sampled || pass.load[4] == pass_load::LOAD {
+        return true;
+    }
+    let at = view.passes.iter().position(|p| std::ptr::eq(p, pass)).unwrap_or(0);
+    view.passes[at + 1..].iter().any(|p| p.depth == depth && p.load[4] == pass_load::LOAD)
+}
+
+/// A render encoder with the pass's viewport and winding. `sample`: encoder timestamps (devices
+/// without stage-boundary sampling), the first of the group's four.
+fn open_encoder(cb: ObjcId, descriptor: ObjcId, viewport: [f32; 4], sample: Option<(ObjcId, usize)>) -> Option<ObjcId> {
+    let id: ObjcId = unsafe { msg_send![cb, renderCommandEncoderWithDescriptor: descriptor] };
+    if id == nil {
+        return None;
+    }
+    unsafe {
+        let vp = MTLViewport { originX: viewport[0] as f64, originY: viewport[1] as f64, width: viewport[2].max(0.0) as f64, height: viewport[3].max(0.0) as f64, znear: 0.0, zfar: 1.0 };
+        let _: () = msg_send![id, setViewport: vp];
+        let _: () = msg_send![id, setFrontFacingWinding: 1u64]; // MTLWindingCounterClockwise
+        if let Some((buffer, index)) = sample.filter(|(b, _)| *b != nil) {
+            let _: () = msg_send![id, sampleCountersInBuffer: buffer atSampleIndex: index as u64 withBarrier: true];
+        }
+    }
+    Some(id)
+}
+
+/// Ends an encoder (its last encoder timestamp first, where sampled so).
+fn close_encoder(id: ObjcId, sample: Option<(ObjcId, usize)>) {
+    unsafe {
+        if let Some((buffer, index)) = sample.filter(|(b, _)| *b != nil) {
+            let _: () = msg_send![id, sampleCountersInBuffer: buffer atSampleIndex: (index + 3) as u64 withBarrier: true];
+        }
+        let _: () = msg_send![id, endEncoding];
+    }
+}
+
+/// A pass's attachments for the GPU profiler: "bgra8 clear/store, d32f load/store", and the
+/// bytes they load and store (tile memory in and out).
+#[allow(clippy::too_many_arguments)]
+fn describe_attachments(s: &Session, sid: u32, pass: &Pass, colors: &[(usize, Id, ObjcId)], formats: &[MTLPixelFormat], depth_kept: Option<bool>, depth_only: bool, pixels: u64) -> (String, u64) {
+    let load_name = |l: u8| match l { pass_load::LOAD => "load", pass_load::CLEAR => "clear", _ => "dontcare" };
+    let mut parts = Vec::new();
+    let mut bytes = 0u64;
+    for (k, (i, id, _)) in colors.iter().enumerate() {
+        let (name, bpp) = format_name(formats.get(k).copied().unwrap_or(MTLPixelFormat::BGRA8Unorm));
+        let load = pass.load[*i];
+        let store = load != pass_load::DONT_CARE;
+        bytes += pixels * bpp * ((load == pass_load::LOAD) as u64 + store as u64);
+        let mips = (!id.is_none()).then(|| s.textures.get(sid, *id).ok().map(|e| e.val.mips)).flatten().unwrap_or(1);
+        parts.push(format!("{name} {}/{}{}", load_name(load), if store { "store" } else { "dontcare" }, if mips > 1 { " +mips" } else { "" }));
+    }
+    if let Some(kept) = depth_kept {
+        let load = pass.load[4];
+        bytes += pixels * 4 * ((load == pass_load::LOAD) as u64 + kept as u64);
+        parts.push(format!("d32f {}/{}", load_name(load), if kept { "store" } else { "dontcare" }));
+    }
+    let mut out = parts.join(", ");
+    if depth_only {
+        out.push_str(" (depth-only)");
+    }
+    (out, bytes)
+}
+
+impl Metal {
+    fn overlay_storage(&mut self, slot: &mut Option<super::Win>, id: Id, w: u32, h: u32) -> Option<ObjcId> {
+        let (w, h) = (w.max(1), h.max(1));
+        if let Some(win) = slot.as_ref().filter(|win| win.gen == id.gen && win.w == w && win.h == h) {
+            return Some(win.tex.obj.as_id());
+        }
+        let obj = TextureObj { format: format::BGRA8, w, h, depth: 1, mips: 1,
+            usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None };
+        let tex = match create_texture(self.dev.device, &obj, id.gen, "host window layer") {
+            Ok(tex) => tex,
+            Err(e) => { eprintln!("[metal] overlay target {w}x{h}: {e}; retrying next frame"); return None; }
+        };
+        let object = tex.obj.as_id();
+        if let Some(old) = slot.replace(super::Win { gen: id.gen, tex, w, h }) {
+            self.dev.retire(Box::new(old.tex));
+        }
+        Some(object)
+    }
+
+    /// The texture a badge layer's composed frame of `window` is kept in (made at its size).
+    fn composed_storage(&mut self, window: Id, w: u32, h: u32) -> Option<ObjcId> {
+        let mut slot = self.badged.get_mut(&window.index)?.take();
+        let tex = self.overlay_storage(&mut slot, window, w, h);
+        self.badged.insert(window.index, slot);
+        tex
+    }
+
+    fn copy_layer(&mut self, src: ObjcId, dst: ObjcId, rect: [u32; 4]) {
+        if src == dst || rect[2] == 0 || rect[3] == 0 { return; }
+        let (cb, _) = self.ensure_batch();
+        unsafe {
+            let origin = MTLOrigin { x: rect[0] as u64, y: rect[1] as u64, z: 0 };
+            let size = MTLSize { width: rect[2] as u64, height: rect[3] as u64, depth: 1 };
+            let blit = self.blit_encoder(cb, "layer copy", rect[2], rect[3], rect[2] as u64 * rect[3] as u64 * 8);
+            let _: () = msg_send![blit, copyFromTexture: src sourceSlice: 0u64 sourceLevel: 0u64 sourceOrigin: origin sourceSize: size toTexture: dst destinationSlice: 0u64 destinationLevel: 0u64 destinationOrigin: origin];
+            let _: () = msg_send![blit, endEncoding];
+        }
+    }
+
+    pub(super) fn set_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64) {
+        if let Some(rect) = rect {
+            if let Some(overlay) = self.overlays.get_mut(&id) {
+                overlay.rect = rect;
+                overlay.ready = false;
+                overlay.copied &= overlay.layer == layer;
+                overlay.layer = layer;
+            } else {
+                // the app image so far: a pending restore, or the window's retained frame (none
+                // yet when a layer begins before the borrower's first frame)
+                let base = self.restores.remove(&id).or_else(|| self.win.remove(&(HOST, id.index)));
+                self.overlays.insert(id, Overlay { rect, base, image: None, ready: false, layer, copied: false });
+            }
+        } else if let Some(overlay) = self.overlays.remove(&id) {
+            if let Some(base) = overlay.base {
+                self.restores.insert(id, base);
+            }
+            if let Some(image) = overlay.image { self.dev.retire(Box::new(image.tex)); }
+            self.restore_overlays(s, now);
+        }
+    }
+
+    pub(super) fn restore_overlays(&mut self, s: &mut Session, now: u64) {
+        let ids: Vec<_> = self.restores.keys().copied().collect();
+        for id in ids {
+            let base = self.restores.remove(&id).expect("pending window restore");
+            let native = self.native_windows.composition((HOST, id), s.dpi);
+            self.native_sync = native.is_some();
+            if let Some(dst) = self.window_target(s, HOST, id, base.w, base.h, now) {
+                self.copy_layer(base.tex.obj.as_id(), dst, [0, 0, base.w, base.h]);
+                if let Some(mut native) = native {
+                    if let Some(drawable) = self.frame_drawable.as_ref().and_then(|fd| fd.drawable.clone()) { native.frame.drawables.push(drawable); }
+                    self.batch.as_mut().expect("batch").native_frames.push(native.frame);
+                }
+                self.finish_window_frame(s, now, true);
+                self.dev.retire(Box::new(base.tex));
+            } else {
+                self.restores.insert(id, base);
+            }
+            self.native_sync = false;
+        }
+    }
+
+    /// Every physical host window accounts for all of its layers, including the
+    /// pristine app image and a pending restore. App aliases do not own these bytes.
+    pub(super) fn account_host_layers(&self, world: &mut crate::session::World) {
+        let now = world.now();
+        let Some(s) = world.session_mut(HOST) else { return };
+        for id in s.windows.keys_of(HOST) {
+            let final_image = self.win.get(&(HOST, id.index)).filter(|w| w.gen == id.gen);
+            let overlay = self.overlays.get(&id);
+            let layers = final_image.into_iter()
+                .chain(overlay.and_then(|o| o.base.as_ref()))
+                .chain(overlay.and_then(|o| o.image.as_ref()))
+                .chain(self.restores.get(&id));
+            let mut size = None;
+            let mut bytes = 0;
+            for layer in layers {
+                size = Some((layer.w, layer.h));
+                bytes += allocated_size(layer.tex.obj.as_id());
+            }
+            if let Some((gen, w, h)) = self.layer_sizes.get(&(HOST, id.index)) {
+                if *gen == id.gen { bytes += *w as u64 * *h as u64 * 4 * 3; size = Some((*w, *h)); }
+            }
+            if let Some((w, h)) = size {
+                if let Some(row) = s.ledger.get_mut(Kind::Window, id.index).filter(|row| row.gen == id.gen) {
+                    row.bytes = bytes;
+                    row.width = w;
+                    row.height = h;
+                } else {
+                    s.ledger.add(window_row(id.index, id.gen, bytes, w, h, now, s.frame));
+                }
+            }
+        }
+    }
+
+    /// Release the layers when their physical window closes.
+    pub(super) fn drop_overlay(&mut self, id: Id) {
+        if let Some(base) = self.restores.remove(&id) { self.dev.retire(Box::new(base.tex)); }
+        if let Some(overlay) = self.overlays.remove(&id) {
+            if let Some(base) = overlay.base {
+                if let Some(old) = self.win.insert((HOST, id.index), base) {
+                    self.dev.retire(Box::new(old.tex));
+                }
+            }
+            if let Some(image) = overlay.image { self.dev.retire(Box::new(image.tex)); }
+        }
+    }
+
+    /// Called after all submitted passes and before capture/presentation. An app
+    /// updates the base; a host frame updates only the panel. Both present the
+    /// same back-to-front composition, on one command buffer and one drawable.
+    fn composite_overlay(&mut self, s: &mut Session, sid: u32, window: Id, now: u64) -> bool {
+        let (owner, physical) = self.window_key(sid, window);
+        if owner != HOST { return true; }
+        // A new base frame supersedes a dismissal waiting for a drawable.
+        if let Some(base) = self.restores.remove(&physical) { self.dev.retire(Box::new(base.tex)); }
+        // a window layer: the borrower drew into the app image, session 0 into the window
+        if self.overlays.get(&physical).is_some_and(|o| !o.layer.is_none()) { return true; }
+        let Some(mut overlay) = self.overlays.remove(&physical) else { return true };
+        let result = (|| {
+            let (w, h) = if sid == HOST {
+                overlay.base.as_ref()?;
+                let image = overlay.image.as_ref()?;
+                overlay.ready = true;
+                (image.w, image.h)
+            } else if let Some(fd) = self.frame_drawable.as_ref() {
+                (fd.w, fd.h)
+            } else {
+                let win = self.win.get(&(owner, physical.index))?;
+                (win.w, win.h)
+            };
+            let dst = self.window_target(s, sid, window, w, h, now)?;
+            if sid != HOST {
+                let base = self.overlay_storage(&mut overlay.base, physical, w, h)?;
+                self.copy_layer(dst, base, [0, 0, w, h]);
+            } else {
+                let base = overlay.base.as_ref()?;
+                // A parked app can retain its old size across an OS resize. Clear
+                // new pixels before copying the intersection; never read outside it.
+                if w > base.w || h > base.h { self.clear_layer(dst); }
+                self.copy_layer(base.tex.obj.as_id(), dst, [0, 0, w.min(base.w), h.min(base.h)]);
+            }
+            if let Some(image) = overlay.image.as_ref().filter(|_| overlay.ready) {
+                let dpi = s.dpi;
+                let x = (overlay.rect[0] * dpi).floor().max(0.0) as u32;
+                let y = (overlay.rect[1] * dpi).floor().max(0.0) as u32;
+                let right = ((overlay.rect[0] + overlay.rect[2]) * dpi).ceil().max(0.0) as u32;
+                let bottom = ((overlay.rect[1] + overlay.rect[3]) * dpi).ceil().max(0.0) as u32;
+                let right = right.min(w).min(image.w);
+                let bottom = bottom.min(h).min(image.h);
+                self.copy_layer(image.tex.obj.as_id(), dst,
+                    [x, y, right.saturating_sub(x), bottom.saturating_sub(y)]);
+            }
+            Some(())
+        })().is_some();
+        self.overlays.insert(physical, overlay);
+        result
+    }
+
+    /// A frame of session 0 under a window layer starts with the app image copied into the
+    /// layer's texture (the part both have; the rest keeps its last content), to be sampled.
+    fn copy_layer_image(&mut self, s: &mut Session, window: Id, seq: u64) {
+        // only a new app image is copied (the window layer's frames between app frames reuse it)
+        let Some(overlay) = self.overlays.get(&window).filter(|o| !o.layer.is_none() && !o.copied) else { return };
+        let layer = overlay.layer;
+        let Some((src, bw, bh)) = overlay.base.as_ref().map(|b| (b.tex.obj.as_id(), b.w, b.h)) else { return };
+        let Some((tw, th)) = s.textures.get(HOST, layer).ok().map(|t| (t.val.w, t.val.h)) else { return };
+        let Some(dst) = texture_obj(&mut self.tex, self.dev.device, s, layer, seq) else { return };
+        self.copy_layer(src, dst, [0, 0, bw.min(tw), bh.min(th)]);
+        if let Some(overlay) = self.overlays.get_mut(&window) {
+            overlay.copied = true;
+        }
+    }
+
+    fn clear_layer(&mut self, texture: ObjcId) {
+        let (cb, _) = self.ensure_batch();
+        unsafe {
+            let desc: ObjcId = msg_send![class!(MTLRenderPassDescriptor), renderPassDescriptor];
+            let colors: ObjcId = msg_send![desc, colorAttachments];
+            let color: ObjcId = msg_send![colors, objectAtIndexedSubscript: 0u64];
+            let _: () = msg_send![color, setTexture: texture];
+            let _: () = msg_send![color, setLoadAction: MTLLoadAction::Clear];
+            let _: () = msg_send![color, setStoreAction: MTLStoreAction::Store];
+            let _: () = msg_send![color, setClearColor: MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 }];
+            let encoder: ObjcId = msg_send![cb, renderCommandEncoderWithDescriptor: desc];
+            let _: () = msg_send![encoder, endEncoding];
+        }
+    }
+
+    /// A blit encoder on `cb`. While a frame is profiled it is timed as encoder `name` (`w`x`h`
+    /// texels, `bytes` read and written).
+    fn blit_encoder(&mut self, cb: ObjcId, name: &str, w: u32, h: u32, bytes: u64) -> ObjcId {
+        let samples = self.batch.as_ref().and_then(|b| b.samples.clone()).filter(|x| x.clock.stage);
+        let (Some(key), Some(x)) = (self.prof_key, samples) else {
+            return unsafe { msg_send![cb, blitCommandEncoder] };
+        };
+        let Some(index) = x.reserve() else {
+            gpu_prof::with_frame(key, |b| {
+                b.pass(name, pass_kind::BLIT, w, h, "", bytes);
+                b.untimed(1);
+            });
+            return unsafe { msg_send![cb, blitCommandEncoder] };
+        };
+        let encoder: ObjcId = unsafe {
+            let desc: ObjcId = msg_send![class!(MTLBlitPassDescriptor), blitPassDescriptor];
+            let attachments: ObjcId = msg_send![desc, sampleBufferAttachments];
+            let a: ObjcId = msg_send![attachments, objectAtIndexedSubscript: 0u64];
+            let _: () = msg_send![a, setSampleBuffer: x.buffer.as_ref().map_or(nil, |b| b.as_id())];
+            let _: () = msg_send![a, setStartOfEncoderSampleIndex: index as u64];
+            let _: () = msg_send![a, setEndOfEncoderSampleIndex: (index + 1) as u64];
+            msg_send![cb, blitCommandEncoderWithDescriptor: desc]
+        };
+        if let Some(pass) = gpu_prof::with_frame(key, |b| {
+            b.expect(1);
+            b.pass(name, pass_kind::BLIT, w, h, "", bytes)
+        }) {
+            self.prof.push(ProfPass { key, pass, kind: pass_kind::BLIT, sample: Some(index), split: None });
+        }
+        encoder
+    }
+
+    /// The open command buffer (a new one when none is), and its number.
+    pub(super) fn ensure_batch(&mut self) -> (ObjcId, u64) {
+        if self.batch.is_none() {
+            let (buffer, seq) = self.dev.new_command_buffer();
+            self.batch = Some(Batch { buffer, seq, opened: Instant::now(), samples: None, tickets: Vec::new(), passes: Vec::new(), native_frames: Vec::new() });
+        }
+        let b = self.batch.as_ref().expect("batch");
+        (b.buffer.as_id(), b.seq)
+    }
+
+    /// Encodes the pending texture uploads ahead of whatever encodes next.
+    pub(super) fn flush_uploads(&mut self) {
+        if self.uploads.is_empty() {
+            return;
+        }
+        let (cb, _) = self.ensure_batch();
+        encode_uploads(cb, &mut self.uploads);
+    }
+
+    /// Commits the open command buffer; the frames in it are answered when it completes.
+    pub(super) fn commit_batch(&mut self) {
+        self.flush_uploads();
+        let Some(batch) = self.batch.take() else { return };
+        let mailbox = self.dev.mailbox.clone();
+        let tickets = batch.tickets;
+        if !tickets.is_empty() {
+            let () = unsafe {
+                msg_send![batch.buffer.as_id(), addCompletedHandler: &objc_block!(move |cb: ObjcId| {
+                    let present_ns = crate::clock_ns();
+                    let status: u64 = unsafe { msg_send![cb, status] };
+                    for t in &tickets {
+                        for p in &t.prof {
+                            if p.timed() {
+                                gpu_prof::gpu_pass(p.key, p.pass, p.result(t.prof_samples.as_deref(), cb));
+                            }
+                        }
+                        t.font_frames.done(t.frame);
+                        let (gpu_ns, gpu_span) = t.time.span(cb).map_or((0, [0.0; 2]), |(busy, start, end)| {
+                            ((busy.max(0.0) * 1e9) as u64, [start, end])
+                        });
+                        mailbox.push(Done::Frame { sid: t.sid, target: t.target, frame: t.frame, gpu_ns, present_ns, gpu_span, failed: status == 5, partial: t.partial, window: t.window, kind: t.kind, incarnation: t.font_frames.clone() });
+                    }
+                })]
+            };
+        }
+        self.dev.commit(batch.buffer, InFlightCb { seq: batch.seq, committed_at: None, passes: batch.passes }, batch.native_frames);
+    }
+
+    /// The batch is over: its command buffer goes out and the arena forgets the caller's memory.
+    pub(super) fn end_batch(&mut self) {
+        self.commit_batch();
+        self.dev.arena_end_batch();
+    }
+
+    /// The offscreen target of a window, made (or made again at a new size) for a window pass.
+    fn offscreen_target(&mut self, s: &mut Session, sid: u32, window: Id, w: u32, h: u32, now: u64) -> Option<ObjcId> {
+        let (sid, window) = self.window_key(sid, window);
+        let (w, h) = (w.max(1), h.max(1));
+        if let Some(win) = self.win.get(&(sid, window.index)).filter(|win| win.gen == window.gen && win.w == w && win.h == h) {
+            return Some(win.tex.obj.as_id());
+        }
+        let obj = TextureObj { format: format::BGRA8, w, h, depth: 1, mips: 1, usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None };
+        let tex = match create_texture(self.dev.device, &obj, window.gen, "window") {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[metal] window target {w}x{h}: {e}");
+                return None;
+            }
+        };
+        let object = tex.obj.as_id();
+        if sid == s.id {
+            s.ledger.add(window_row(window.index, window.gen, allocated_size(object), w, h, now, s.frame));
+        }
+        if let Some(old) = self.win.insert((sid, window.index), super::Win { gen: window.gen, tex, w, h }) {
+            self.dev.retire(Box::new(old.tex));
+        }
+        Some(object)
+    }
+
+    /// The texture a window pass renders into. Offscreen mode: the window's target texture. A real
+    /// window: the next drawable of its layer, sized to the pass (the layer stretches the last
+    /// presented frame until the new size arrives), presented with the batch's command buffer.
+    /// `None` skips the pass: the layer does not exist yet, or no drawable came within the
+    /// layer's timeout (the app paints again on the next vsync).
+    fn window_target(&mut self, s: &mut Session, sid: u32, window: Id, w: u32, h: u32, now: u64) -> Option<ObjcId> {
+        if sid == HOST {
+            if let Some(mut overlay) = self.overlays.remove(&window) {
+                if overlay.layer.is_none() {
+                    let image = self.overlay_storage(&mut overlay.image, window, w, h);
+                    self.overlays.insert(window, overlay);
+                    return image;
+                }
+                self.overlays.insert(window, overlay);
+            }
+        } else {
+            // under a window layer the borrower's frame is the app image, not the window's
+            let (owner, physical) = self.window_key(sid, window);
+            if owner == HOST {
+                if let Some(mut overlay) = self.overlays.remove(&physical) {
+                    let base = (!overlay.layer.is_none()).then(|| self.overlay_storage(&mut overlay.base, physical, w, h));
+                    overlay.copied = false;
+                    self.overlays.insert(physical, overlay);
+                    if let Some(base) = base {
+                        return base;
+                    }
+                }
+            }
+        }
+        let Some(shell) = self.shell else {
+            return self.offscreen_target(s, sid, window, w, h, now);
+        };
+        // a window with a badge layer: its frames stay in the retained image, the layer's frame
+        // draws into the drawable over a copy of it
+        let (owner, physical) = self.window_key(sid, window);
+        if owner == HOST && self.badged.contains_key(&physical.index) && !self.composing {
+            return self.offscreen_target(s, sid, window, w, h, now);
+        }
+        let (w, h) = (w.max(1), h.max(1));
+        if let Some(fd) = self.frame_drawable.as_ref().filter(|fd| fd.sid == sid && fd.window == window) {
+            return Some(fd.texture);
+        }
+        let (owner, physical) = self.window_key(sid, window);
+        let layer = shell.layer(owner, physical)?;
+        let layer_id = layer.as_id();
+        let drawable: ObjcId = unsafe {
+            if self.native_sync { let () = msg_send![layer_id, setPresentsWithTransaction: YES]; }
+            let size: CGSize = msg_send![layer_id, drawableSize];
+            if size.width as u32 != w || size.height as u32 != h {
+                let () = msg_send![layer_id, setDrawableSize: CGSize { width: w as f64, height: h as f64 }];
+            }
+            let wait = gpu_prof::recording().then(crate::clock_ns);
+            let drawable: ObjcId = msg_send![layer_id, nextDrawable];
+            if let Some(key) = wait.and_then(|w| gpu_prof::current(sid).map(|k| (k, w))) {
+                let (key, w) = key;
+                let now = crate::clock_ns();
+                gpu_prof::with_frame(key, |b| {
+                    // a drawable comes back once the display let go of it: waiting here is
+                    // waiting for the GPU and the display
+                    b.cpu("gpu-wait", w, now);
+                    b.present(now);
+                });
+                if drawable != nil {
+                    let () = msg_send![drawable, addPresentedHandler: &objc_block!(move |d: ObjcId| {
+                        let t: f64 = unsafe { msg_send![d, presentedTime] };
+                        if t > 0.0 {
+                            gpu_prof::shown(key, host_ns(t));
+                        }
+                    })];
+                }
+            }
+            drawable
+        };
+        let Some(drawable) = NonNull::new(drawable) else {
+            s.stats.skipped_draws += 1;
+            return None;
+        };
+        let drawable = RcObjcId::from_unowned(drawable);
+        let texture: ObjcId = unsafe { msg_send![drawable.as_id(), texture] };
+        let (cb, _) = self.ensure_batch();
+        if !self.native_sync {
+            unsafe { let () = msg_send![cb, presentDrawable: drawable.as_id()]; }
+        }
+        // the ledger's row of the window: three drawables of this size
+        let now_size = (window.gen, w, h);
+        if self.layer_sizes.insert((owner, physical.index), now_size) != Some(now_size) {
+            if owner == s.id {
+                s.ledger.add(window_row(window.index, window.gen, w as u64 * h as u64 * 4 * 3, w, h, now, s.frame));
+            }
+        }
+        if self.composing {
+            if let Some((base, bw, bh)) = self.win.get(&(HOST, physical.index)).filter(|b| b.gen == physical.gen).map(|b| (b.tex.obj.as_id(), b.w, b.h)) {
+                if w > bw || h > bh { self.clear_layer(texture); }
+                self.copy_layer(base, texture, [0, 0, w.min(bw), h.min(bh)]);
+            }
+        }
+        self.frame_drawable = Some(FrameDrawable { sid, window, drawable: Some(drawable), texture, w, h });
+        Some(texture)
+    }
+
+    /// A recorder is due this window frame: the presented image is copied on the GPU into the next
+    /// free capture buffer, which goes to the app when the command buffer completes. No free
+    /// buffer, no copy: the frame is skipped, never waited for.
+    fn encode_capture(&mut self, s: &Session, sid: u32, window: Id, now: u64) {
+        let (owner, physical) = self.window_key(sid, window);
+        let (source, w, h) = match (&self.frame_drawable, self.win.get(&(owner, physical.index))) {
+            (Some(fd), _) if fd.sid == sid && fd.window == window => (fd.texture, fd.w, fd.h),
+            (_, Some(win)) if win.gen == physical.gen => (win.tex.obj.as_id(), win.w, win.h),
+            _ => return,
+        };
+        // even dimensions for a 4:2:0 encoder: the odd last column / row is dropped
+        let (width, height) = ((w & !1) as usize, (h & !1) as usize);
+        if width < 2 || height < 2 {
+            return;
+        }
+        let format: u64 = unsafe { msg_send![source, pixelFormat] };
+        if format != MTLPixelFormat::BGRA8Unorm as u64 {
+            return;
+        }
+        let device = self.dev.device;
+        if self.capture.as_ref().is_some_and(|p| p.device != device || p.size != (width, height)) {
+            self.capture = None;
+        }
+        if self.capture.is_none() {
+            self.capture = super::super::media::capture::Pool::new(device, width, height);
+        }
+        self.capture_ns = now;
+        let Some((pixel_buffer, cv_texture)) = self.capture.as_mut().and_then(|p| p.take()) else { return };
+        let (cb, _) = self.ensure_batch();
+        unsafe {
+            let destination = CVMetalTextureGetTexture(cv_texture);
+            let blit = self.blit_encoder(cb, "capture copy", width as u32, height as u32, width as u64 * height as u64 * 8);
+            let _: () = msg_send![
+                blit,
+                copyFromTexture: source
+                sourceSlice: 0u64
+                sourceLevel: 0u64
+                sourceOrigin: MTLOrigin { x: 0, y: 0, z: 0 }
+                sourceSize: MTLSize { width: width as u64, height: height as u64, depth: 1 }
+                toTexture: destination
+                destinationSlice: 0u64
+                destinationLevel: 0u64
+                destinationOrigin: MTLOrigin { x: 0, y: 0, z: 0 }
+            ];
+            let _: () = msg_send![blit, endEncoding];
+        }
+        // The Metal texture must outlive the GPU's write; the buffer goes to the app once the
+        // write is done. Taken once: a block may be copied.
+        let mailbox = self.dev.mailbox.clone();
+        let in_flight = std::sync::Mutex::new(Some((cv_texture as usize, pixel_buffer as usize)));
+        let incarnation = s.font_frames.clone();
+        unsafe {
+            let _: () = msg_send![cb, addCompletedHandler: &objc_block!(move |_cb: ObjcId| {
+                if let Some((cv_texture, pixel_buffer)) = in_flight.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    CFRelease(cv_texture as *const std::ffi::c_void);
+                    mailbox.push(Done::Surface { sid, incarnation: incarnation.clone(), window, w: width as u32, h: height as u32, buffer: pixel_buffer });
+                }
+            })];
+        }
+    }
+
+    /// The window frame is encoded: a window that keeps its frames copies the drawable's content.
+    fn finish_window_frame(&mut self, s: &mut Session, now: u64, snapshot: bool) {
+        let Some(fd) = self.frame_drawable.take() else { return };
+        if self.composing {
+            // the composed image is kept apart: the retained image never holds the layer
+            let (_, physical) = self.window_key(fd.sid, fd.window);
+            if let Some(dst) = self.composed_storage(physical, fd.w, fd.h) {
+                self.copy_layer(fd.texture, dst, [0, 0, fd.w, fd.h]);
+            }
+            drop(fd.drawable);
+            return;
+        }
+        let host_window = s.windows.get(s.id, fd.window).is_ok_and(|w| w.val.adoptable || w.val.alias_of.is_some());
+        if !self.retain && !snapshot && !host_window {
+            return;
+        }
+        let Some(dst) = self.offscreen_target(s, fd.sid, fd.window, fd.w, fd.h, now) else { return };
+        let (cb, seq) = self.ensure_batch();
+        let (owner, physical) = self.window_key(fd.sid, fd.window);
+        if let Some(w) = self.win.get_mut(&(owner, physical.index)) {
+            w.tex.last_bound = seq;
+        }
+        unsafe {
+            let origin = MTLOrigin { x: 0, y: 0, z: 0 };
+            let size = MTLSize { width: fd.w as u64, height: fd.h as u64, depth: 1 };
+            let blit = self.blit_encoder(cb, "window retain copy", fd.w, fd.h, fd.w as u64 * fd.h as u64 * 8);
+            let _: () = msg_send![blit, copyFromTexture: fd.texture sourceSlice: 0u64 sourceLevel: 0u64 sourceOrigin: origin sourceSize: size toTexture: dst destinationSlice: 0u64 destinationLevel: 0u64 destinationOrigin: origin];
+            let _: () = msg_send![blit, endEncoding];
+        }
+        drop(fd.drawable);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode_frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
+        let Some(p) = view.frames.get(packet as usize) else {
+            s.stats.bad_args += 1;
+            return None;
+        };
+        let slice = |r: Range, len: usize| {
+            let a = r.off as usize;
+            a.checked_add(r.len as usize).filter(|e| *e <= len).map(|e| a..e)
+        };
+        let (Some(passes), Some(_)) = (slice(p.passes, view.passes.len()), slice(p.draws, view.draws.len())) else {
+            s.stats.bad_args += 1;
+            return None;
+        };
+        let frame = p.frame;
+        s.frame = frame;
+        s.font_frames.submitted(frame);
+        s.stats.max_frame_ns = s.stats.max_frame_ns.max(p.meta.build_end_ns.saturating_sub(p.meta.build_start_ns));
+        // research (ios-interp): MAKEPAD_HAL_FRAME_LOG=1 prints each frame's Cx build time
+        static FRAME_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *FRAME_LOG.get_or_init(|| std::env::var_os("MAKEPAD_HAL_FRAME_LOG").is_some()) {
+            eprintln!("hal-frame {} build_us {:.1}", frame, p.meta.build_end_ns.saturating_sub(p.meta.build_start_ns) as f64 / 1e3);
+        }
+
+        // The batch's command buffer, or a new one when this frame must be timed alone (no
+        // counter sampling), the buffer's samples are full, or it has been encoding for a while.
+        let clock = self.dev.pass_clock();
+        let wanted = passes.len();
+        let full = self.batch.as_ref().and_then(|b| b.samples.as_ref()).is_some_and(|x| x.full() || x.reserve_room() < wanted);
+        let slow = self.batch.as_ref().is_some_and(|b| b.opened.elapsed() >= ENCODE_SLICE);
+        if clock.is_none() || full || slow {
+            self.commit_batch();
+        }
+        let (cb, seq) = self.ensure_batch();
+        if let Some(clock) = &clock {
+            let batch = self.batch.as_mut().expect("batch");
+            if batch.samples.is_none() {
+                batch.samples = PassSamples::new(clock.clone());
+            }
+        }
+        self.flush_uploads();
+
+        let samples = self.batch.as_ref().and_then(|b| b.samples.clone());
+        let prof_key = gpu_prof::current(sid);
+        self.prof_key = prof_key;
+        let mut indices = Vec::new();
+        // the surfaces of other sessions this frame samples (a parent compositing its children)
+        let mut deps: Vec<LentRef> = Vec::new();
+        let is_window = kind & !target::FLAGS == target::WINDOW;
+        let hosted = is_window && s.windows.get(sid, target).is_ok_and(|w| w.val.is_hosted());
+        let pick = kind & target::PICK != 0;
+        if let Some(key) = prof_key {
+            gpu_prof::with_frame(key, |b| b.packet(frame, is_window && !pick, &p.meta));
+        }
+        let mut window_encoded = false;
+        let mut partial = false;
+        let replay = kind & target::REPLAY != 0;
+        let (owner, physical) = self.window_key(sid, target);
+        let badges = is_window && !pick && kind & target::BADGES != 0 && owner == HOST && self.badged.contains_key(&physical.index);
+        if badges && !self.win.get(&(HOST, physical.index)).is_some_and(|b| b.gen == physical.gen) {
+            // nothing rendered yet to draw the layer over
+            if !replay {
+                if let Some(b) = self.batch.as_mut() {
+                    b.tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time: PassTime::Buffer, window: false, kind, partial: false, prof: Vec::new(), prof_samples: None });
+                }
+            }
+            return Some(exec::SubmittedFrame { deps, window: false });
+        }
+        self.composing = badges;
+        if sid == HOST && is_window && !pick && !badges {
+            self.copy_layer_image(s, target, seq);
+        }
+        let records = slice(p.layers, view.layers.len()).map(|r| &view.layers[r]).unwrap_or(&[]);
+        let native_frame = is_window && !pick && !badges && !replay
+            && (!records.is_empty() || self.native_windows.contains(sid, target));
+        let fallback = self.shell.is_none() || hosted || self.composing
+            || self.overlays.contains_key(&physical) || self.badged.contains_key(&physical.index)
+            || (owner, physical) != (sid, target)
+            || s.windows.get(sid, target).is_ok_and(|w| w.val.embedded.is_some() || w.val.adoptable)
+            || kind & (target::CAPTURE | target::SNAPSHOT) != 0;
+        let mut native = None;
+        if native_frame {
+            self.native_windows.discard_pending(sid, target);
+            if let Some(pass) = view.passes[passes.clone()].iter().find(|p| p.color.iter().all(|id| id.is_none())) {
+                let placement = self.media.native_frame(s, target, pass.dpi, records, view);
+                native = self.native_windows.prepare(s, target, (owner, physical), self.dev.device, pass, records, view, placement, fallback);
+                if native.is_none() {
+                    // A missing drawable must not commit new geometry against old pixels.
+                    // Complete the ticket as partial so the session retries, without waiting
+                    // for a main-thread closure or losing its frame-progress notification.
+                    s.stats.skipped_draws += 1;
+                    self.batch.as_mut().expect("batch").tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time: PassTime::Buffer, window: false, kind, partial: true, prof: Vec::new(), prof_samples: samples.clone() });
+                    self.composing = false;
+                    self.prof_key = None;
+                    self.commit_batch();
+                    return Some(exec::SubmittedFrame { deps, window: false });
+                }
+            }
+        }
+        if native.is_none() && is_window && !pick && !replay {
+            native = self.native_windows.composition((owner, physical), s.dpi);
+        }
+        self.native_sync = native.is_some();
+        let sync_frame = self.native_sync;
+        for pass in &view.passes[passes] {
+            let Some(dr) = slice(pass.draws, view.draws.len()) else {
+                s.stats.bad_args += 1;
+                continue;
+            };
+            let index = samples.as_ref().and_then(|x| x.reserve());
+            let name = s.string(pass.name).unwrap_or("").to_string();
+            let before = s.stats.skipped_draws;
+            let pending_before = self.pending_draws;
+            let missing_input = pick && view.draws[dr.clone()].iter().any(|draw| read_ids(view.arena, draw.pick_tex).any(|id| self.pick_pending.contains(&(sid, id))));
+            let split = native.as_ref().filter(|_| !fallback && pass.color.iter().all(|id| id.is_none()));
+            let shaders = if let Some(native) = split {
+                // seg0 keeps the original window viewport and target; each upper segment
+                // clears transparent colour and depth, with the same uniforms and zbias.
+                let base = records.first().filter(|g| g.kind == Layer::DRAWS).map_or(pass.draws, |g| g.draws);
+                let base_draws = slice(base, view.draws.len()).unwrap_or(dr.start..dr.start);
+                let mut pass = *pass;
+                pass.load[4] = pass_load::CLEAR;
+                let mut shaders = self.encode_pass(s, sid, target, is_window, pick, &pass, &view.draws[base_draws], view, cb, seq, index, &samples, frame, now, &mut deps, prof_key, None);
+                for segment in &native.segments {
+                    pass.clear[0] = [0.0; 4];
+                    pass.load[0] = pass_load::CLEAR;
+                    let Some(draws) = slice(segment.draws, view.draws.len()) else { continue };
+                    let segment_index = samples.as_ref().and_then(|x| x.reserve());
+                    let upper = self.encode_pass(s, sid, target, is_window, pick, &pass, &view.draws[draws], view, cb, seq, segment_index, &samples, frame, now, &mut deps, prof_key, Some(segment));
+                    if let Some(i) = segment_index { indices.push(i); }
+                    match (shaders.as_mut(), upper) {
+                        (Some(all), Some(upper)) => { all.extend(upper); s.stats.passes += 1; }
+                        _ => shaders = None,
+                    }
+                }
+                shaders
+            } else {
+                self.encode_pass(s, sid, target, is_window, pick, pass, &view.draws[dr], view, cb, seq, index, &samples, frame, now, &mut deps, prof_key, None)
+            };
+            partial |= !pick && self.pending_draws != pending_before;
+            if pick {
+                let incomplete = missing_input || shaders.is_none() || s.stats.skipped_draws != before;
+                for id in pass.color.iter().filter(|id| !id.is_none()) {
+                    if incomplete { self.pick_pending.insert((sid, *id)); }
+                    else { self.pick_pending.remove(&(sid, *id)); }
+                }
+            }
+            if let Some(shaders) = shaders {
+                window_encoded |= is_window && pass.color.iter().all(|id| id.is_none());
+                s.stats.passes += 1;
+                if let Some(i) = index {
+                    indices.push(i);
+                }
+                if let Some(b) = self.batch.as_mut() {
+                    b.passes.push((name, shaders));
+                }
+            }
+        }
+        let mut native_retained = false;
+        if window_encoded && native.is_some() && !fallback && self.retain {
+            // A retained window image must contain all Makepad segments, including transparent
+            // draws above native content. Upper layers are framebuffer-only: replay the existing
+            // draws into `win` rather than reading their drawables. Native pixels are unavailable.
+            if let Some(pass) = view.passes[slice(p.passes, view.passes.len())?].iter().find(|p| p.color.iter().all(|id| id.is_none())) {
+                let w = pass.viewport[2].max(1.0) as u32;
+                let h = pass.viewport[3].max(1.0) as u32;
+                if let (Some(texture), Some(drawable)) = (self.offscreen_target(s, sid, target, w, h, now), self.frame_drawable.as_ref().and_then(|f| f.drawable.clone())) {
+                    let retained = super::layers::Segment { draws: pass.draws, rect: [0.0, 0.0, w as f32, h as f32], drawable, texture, depth: None };
+                    let draws = slice(pass.draws, view.draws.len())?;
+                    let index = samples.as_ref().and_then(|x| x.reserve());
+                    let shaders = self.encode_pass(s, sid, target, is_window, false, pass, &view.draws[draws], view, cb, seq, index, &samples, frame, now, &mut deps, prof_key, Some(&retained));
+                    if let Some(i) = index { indices.push(i); }
+                    native_retained = shaders.is_some();
+                    window_encoded &= native_retained;
+                    if let Some(shaders) = shaders {
+                        s.stats.passes += 1;
+                        self.batch.as_mut().expect("batch").passes.push(("native retained image".into(), shaders));
+                    }
+                }
+            }
+        }
+        if window_encoded && !pick && !hosted && !badges {
+            window_encoded = self.composite_overlay(s, sid, target, now);
+        }
+        if let Some(key) = prof_key.filter(|_| window_encoded && !pick) {
+            // the window frame is handed on (to the display, or to the host compositing it)
+            gpu_prof::with_frame(key, |b| b.present(crate::clock_ns()));
+        }
+        let alone = clock.is_none();
+        let time = match (&samples, alone) {
+            (Some(x), false) => PassTime::Counters(x.clone(), indices),
+            _ => PassTime::Buffer,
+        };
+        if is_window {
+            if kind & target::CAPTURE != 0 && !pick {
+                self.encode_capture(s, sid, target, now);
+            }
+            if let Some(mut native) = native.take().filter(|_| window_encoded) {
+                native.frame.number = frame;
+                if let Some(drawable) = self.frame_drawable.as_ref().and_then(|fd| fd.drawable.clone()) {
+                    native.frame.drawables.push(drawable);
+                    native.frame.drawables.extend(native.segments.into_iter().map(|s| s.drawable));
+                }
+                // A lent/badged app can render into the host's retained image without owning
+                // a drawable. Still hide its upper surfaces; the host presents the composition.
+                self.batch.as_mut().expect("batch").native_frames.push(native.frame);
+            }
+            if native_retained { drop(self.frame_drawable.take()); }
+            else { self.finish_window_frame(s, now, kind & target::SNAPSHOT != 0); }
+            self.native_sync = false;
+        }
+        self.composing = false;
+        self.prof_key = None;
+        let prof = std::mem::take(&mut self.prof);
+        if let Some(b) = self.batch.as_mut().filter(|_| !replay) {
+            b.tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time, window: window_encoded && !pick && !hosted, kind, partial, prof, prof_samples: samples.clone() });
+        }
+        if alone || sync_frame {
+            // Do not hold several unpresented native frames in a batch: segment drawable
+            // pools must stay available even when the main thread has not run its closure.
+            self.commit_batch();
+        }
+        Some(exec::SubmittedFrame { deps, window: window_encoded && !pick && !hosted })
+    }
+
+    /// Whether a pass is drawn without its colour attachments. Scratch colour
+    /// (`pass_load::DONT_CARE`: tile memory, never loaded or stored) can be observed by nothing,
+    /// so a scratch-colour pass with a depth target (the shadow maps: receivers sample the
+    /// depth) is a depth-only pass: no colour tile memory, and pipelines that cannot discard run
+    /// no fragment stage at all. Only once every draw's depth-only state is ready (they are
+    /// queued here); until then the pass is drawn as declared, so no draw is ever left out.
+    fn depth_only(&mut self, sid: u32, is_window: bool, pick: bool, pass: &Pass, draws: &[Draw]) -> bool {
+        if is_window || pick || pass.depth.is_none() {
+            return false;
+        }
+        let mut any = false;
+        for (i, id) in pass.color.iter().enumerate() {
+            if id.is_none() {
+                continue;
+            }
+            if pass.load[i] != pass_load::DONT_CARE {
+                return false;
+            }
+            any = true;
+        }
+        if !any {
+            return false;
+        }
+        self.depth_only_seen.clear();
+        let mut ready = true;
+        for d in draws {
+            let key = (d.pipeline.index, d.flags & Draw::BLEND != 0);
+            if self.depth_only_seen.contains(&key) {
+                continue;
+            }
+            self.depth_only_seen.push(key);
+            let Some(pipe) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { continue };
+            // every state is asked for (queued) even after one is found missing
+            ready &= pipe.state.ready_for(&self.dev, &[], key.1);
+        }
+        ready
+    }
+
+    /// One pass into one render encoder. `None` when the pass could not be encoded (a missing
+    /// attachment); otherwise the names of the shaders it drew.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_pass(
+        &mut self,
+        s: &mut Session,
+        sid: u32,
+        target: Id,
+        is_window: bool,
+        pick: bool,
+        pass: &Pass,
+        draws: &[Draw],
+        view: &CmdView,
+        cb: ObjcId,
+        seq: u64,
+        sample_index: Option<usize>,
+        samples: &Option<Arc<PassSamples>>,
+        frame: u64,
+        now: u64,
+        deps: &mut Vec<LentRef>,
+        prof_key: Option<FrameKey>,
+        segment: Option<&super::layers::Segment>,
+    ) -> Option<Vec<String>> {
+        let mut viewport = pass.viewport;
+        if let Some(segment) = segment {
+            viewport[0] -= segment.rect[0];
+            viewport[1] -= segment.rect[1];
+        }
+        let (vw, vh) = segment.map_or((viewport[2].max(0.0), viewport[3].max(0.0)), |s| (s.rect[2], s.rect[3]));
+        // ---- attachments
+        let depth_only = self.depth_only(sid, is_window, pick, pass, draws);
+        let mut colors: Vec<(usize, Id, ObjcId)> = Vec::new();
+        if let Some(segment) = segment { colors.push((0, Id::NONE, segment.texture)); }
+        for (i, id) in pass.color.iter().enumerate() {
+            if id.is_none() || depth_only {
+                continue;
+            }
+            let Some(obj) = texture_obj(&mut self.tex, self.dev.device, s, *id, seq) else {
+                s.stale();
+                return None;
+            };
+            colors.push((i, *id, obj));
+        }
+        if is_window && s.windows.get(sid, target).is_ok_and(|w| w.val.is_hosted()) {
+            let (_, _, texture) = colors.iter().find(|(i, _, _)| *i == 0)?;
+            // Capture and explicit snapshots use the same source path as a drawable, with
+            // no extra copy during ordinary hosting and no call to AppKit presentation.
+            self.frame_drawable = Some(FrameDrawable {
+                sid, window: target, drawable: None, texture: *texture,
+                w: vw.round() as u32, h: vh.round() as u32,
+            });
+        }
+        if colors.is_empty() && !depth_only {
+            if !is_window {
+                return None;
+            }
+            // an embedded window (a child domain's) draws into its surface, lent to the parent
+            let embedded = s.windows.get(sid, target).ok().and_then(|w| w.val.embedded);
+            if let Some(em) = embedded {
+                let Some(obj) = texture_obj(&mut self.tex, self.dev.device, s, em.tex, seq) else {
+                    s.stale();
+                    return None;
+                };
+                colors.push((0, em.tex, obj));
+            } else {
+                let obj = self.window_target(s, sid, target, vw.round() as u32, vh.round() as u32, now)?;
+                let (owner, physical) = self.window_key(sid, target);
+                if let Some(w) = self.win.get_mut(&(owner, physical.index)) {
+                    w.tex.last_bound = seq;
+                }
+                colors.push((0, Id::NONE, obj));
+            }
+        }
+        let depth = if pass.depth.is_none() {
+            None
+        } else if let Some(depth) = segment.and_then(|s| s.depth) {
+            Some((pass.depth, depth))
+        } else {
+            match texture_obj(&mut self.tex, self.dev.device, s, pass.depth, seq) {
+                Some(obj) => Some((pass.depth, obj)),
+                None => {
+                    s.stale();
+                    return None;
+                }
+            }
+        };
+        // the formats every draw's pipeline state is built for (a pick draws into 8-bit twins)
+        let formats: Vec<MTLPixelFormat> = colors
+            .iter()
+            .map(|(_, id, _)| {
+                if pick || id.is_none() {
+                    MTLPixelFormat::BGRA8Unorm
+                } else {
+                    s.textures.get(sid, *id).ok().and_then(|e| mtl_format(e.val.format)).unwrap_or(MTLPixelFormat::BGRA8Unorm)
+                }
+            })
+            .collect();
+
+        // ---- the encoders. Normally one. A split frame of the GPU profiler cuts the pass into
+        // one encoder per run of draws of one pipeline, each timed alone, after an empty encoder
+        // with the same attachments (the baseline): those give each shader's share of the pass.
+        let descriptor = self.dev.descriptor.as_id();
+        let runs = gpu_prof::split_runs(prof_key, pick, draws, |d| d.pipeline);
+        let split = if runs.is_empty() { None } else { self.dev.pass_clock().and_then(PassSamples::new) };
+        let runs = if split.is_some() { runs } else { Vec::new() };
+        let stage = samples.as_ref().map_or(false, |x| x.clock.stage);
+        let depth_obj = depth.as_ref().map(|(_, o)| *o);
+        let depth_kept = depth.as_ref().is_some_and(|(id, _)| depth_kept(s, sid, pass, view, *id));
+        let buffer_of = |x: &Arc<PassSamples>| x.buffer.as_ref().map_or(nil, |b| b.as_id());
+        let mut split_runs = gpu_prof::SplitRuns::<usize>::default();
+        let first_sample: Option<(ObjcId, usize)> = match &split {
+            Some(sp) => {
+                if let Some(i) = sp.reserve() {
+                    configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, false, Some((buffer_of(sp), i)).filter(|_| stage));
+                    let e = open_encoder(cb, descriptor, viewport, Some((buffer_of(sp), i)).filter(|_| !stage))?;
+                    close_encoder(e, Some((buffer_of(sp), i)).filter(|_| !stage));
+                    split_runs.baseline = Some(i);
+                }
+                sp.reserve().map(|i| (buffer_of(sp), i))
+            }
+            None => samples.as_ref().zip(sample_index).map(|(x, i)| (buffer_of(x), i)),
+        };
+        let run_shader = |me: &Self, s: &Session, at: usize| me.pipe.get(&(sid, draws[at].pipeline.index)).map_or_else(|| "?".to_string(), |p| gpu_prof::shader_name(s, &p.desc));
+        if let (Some(_), Some((_, i))) = (&split, first_sample) {
+            split_runs.run(run_shader(self, s, 0), i, 0);
+        }
+        configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, true, runs.len() <= 1, first_sample.filter(|_| stage));
+        let Some(encoder_id) = open_encoder(cb, descriptor, viewport, first_sample.filter(|_| !stage)) else {
+            eprintln!("[metal] no render encoder for pass \"{}\"", s.string(pass.name).unwrap_or(""));
+            return None;
+        };
+        let mut cur_sample = first_sample;
+        let mut enc = Encoder { id: encoder_id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: [vw as u64, vh as u64] };
+        // the GPU profiler's draw records
+        let mut prof_draws: Vec<gpu_prof::DrawRecord> = Vec::new();
+        // an ablation frame of the GPU profiler leaves out one shader's draws
+        let ablate = prof_key.filter(|k| k.ablate && !pick).and_then(|_| gpu_prof::ablate_target());
+        let mut shaders: Vec<String> = Vec::new();
+        for (_, id, _) in &colors {
+            if !id.is_none() {
+                s.ledger.touch(Kind::Texture, id.index, id.gen, frame, now);
+            }
+        }
+        if let Some((id, _)) = &depth {
+            s.ledger.touch(Kind::Texture, id.index, id.gen, frame, now);
+        }
+
+        // ---- the draws
+        for (di, d) in draws.iter().enumerate() {
+            if let Some(g) = runs.iter().position(|r| *r == di).filter(|g| *g > 0) {
+                // the next run of a split pass: its own encoder, continuing the attachments
+                close_encoder(enc.id, cur_sample.filter(|_| !stage));
+                let sp = split.as_ref().expect("split samples");
+                cur_sample = sp.reserve().map(|i| (buffer_of(sp), i));
+                split_runs.close(prof_draws.len() as u32);
+                if let Some((_, i)) = cur_sample {
+                    split_runs.run(run_shader(self, s, di), i, prof_draws.len() as u32);
+                }
+                configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, g == runs.len() - 1, cur_sample.filter(|_| stage));
+                let Some(id) = open_encoder(cb, descriptor, viewport, cur_sample.filter(|_| !stage)) else { return None };
+                enc = Encoder { id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: [vw as u64, vh as u64] };
+            }
+            s.stats.draws += 1;
+            // a surface lent by a session that is gone (or relaunched) is never sampled
+            let mut dead_lent = false;
+            for id in read_ids(view.arena, d.tex).chain(read_ids(view.arena, d.pick_tex)) {
+                match exec::lent_state(s, sid, id) {
+                    exec::LentState::Own => {}
+                    exec::LentState::Lent(l) => {
+                        if !deps.contains(&l) {
+                            deps.push(l);
+                        }
+                    }
+                    exec::LentState::Dead => dead_lent = true,
+                }
+            }
+            if dead_lent {
+                s.stats.skipped_draws += 1;
+                s.stats.stale_lent_draws += 1;
+                s.stale();
+                continue;
+            }
+            let Some(pipe) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else {
+                s.stats.skipped_draws += 1;
+                s.stale();
+                continue;
+            };
+            if ablate.as_deref().is_some_and(|t| gpu_prof::ablates(s, &pipe.desc, d.owner, t)) {
+                continue;
+            }
+            let pso = match pipe.state.select(&self.dev, &formats, d.flags & Draw::BLEND != 0) {
+                Select::State(pso) => pso,
+                // still compiling or failed: the draw is left out, the app paints again when the
+                // pipeline is ready
+                Select::Pending => {
+                    s.stats.skipped_draws += 1;
+                    self.pending_draws += 1;
+                    continue;
+                }
+                Select::Failed => {
+                    s.stats.skipped_draws += 1;
+                    continue;
+                }
+            };
+            let vb = self.buf.get_mut(&(sid, d.vb.index)).filter(|b| b.gen == d.vb.gen).map(|b| {
+                b.last_bound = seq;
+                b.buffer.as_id()
+            });
+            let ib = self.buf.get_mut(&(sid, d.ib.index)).filter(|b| b.gen == d.ib.gen).map(|b| {
+                b.last_bound = seq;
+                b.buffer.as_id()
+            });
+            let (Some(vb), Some(ib)) = (vb, ib) else {
+                s.stats.skipped_draws += 1;
+                continue;
+            };
+            let stride = (pipe.desc.instance_stride.max(1) as u64) * 4;
+            let instances: Option<Loc> = match d.inst.kind {
+                Inst::BUFFER => self.buf.get_mut(&(sid, d.inst.id.index)).filter(|b| b.gen == d.inst.id.gen).map(|b| {
+                    b.last_bound = seq;
+                    Loc { buffer: b.buffer.as_id(), offset: d.inst.off as u64 * stride }
+                }),
+                _ => {
+                    // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
+                    let data = unsafe { d.inst.data.as_bytes() };
+                    self.dev.arena_put(data, seq)
+                }
+            };
+            let Some(instances) = instances else {
+                s.stats.skipped_draws += 1;
+                continue;
+            };
+            let index_count = d.index[1] as u64;
+            if index_count == 0 || d.inst.count == 0 {
+                continue;
+            }
+
+            // state
+            if enc.pso != pso {
+                enc.pso = pso;
+                unsafe {
+                    let _: () = msg_send![enc.id, setRenderPipelineState: pso];
+                }
+            }
+            if depth.is_some() {
+                let state = if d.flags & Draw::DEPTH_WRITE != 0 { self.dev.depth_write.as_id() } else { self.dev.depth_no_write.as_id() };
+                if enc.depth_state != state {
+                    enc.depth_state = state;
+                    unsafe {
+                        let _: () = msg_send![enc.id, setDepthStencilState: state];
+                    }
+                }
+            }
+            let fill = if d.flags & Draw::WIREFRAME != 0 { 1u64 } else { 0u64 };
+            if enc.fill != fill {
+                enc.fill = fill;
+                unsafe {
+                    let _: () = msg_send![enc.id, setTriangleFillMode: fill];
+                }
+            }
+            let cull = if d.flags & Draw::CULL != 0 { 2u64 } else { 0u64 }; // MTLCullModeBack / None
+            if enc.cull != cull {
+                enc.cull = cull;
+                unsafe {
+                    let _: () = msg_send![enc.id, setCullMode: cull];
+                }
+            }
+            let scissor = (!d.scissor.iter().any(|v| v.is_nan())).then(|| {
+                let mut r = d.scissor;
+                if let Some(segment) = segment {
+                    let x = r[0] - segment.rect[0];
+                    let y = r[1] - segment.rect[1];
+                    r = [x.max(0.0), y.max(0.0), (x + r[2] - x.max(0.0)).max(0.0), (y + r[3] - y.max(0.0)).max(0.0)];
+                }
+                r.map(|v| v.max(0.0) as u32)
+            });
+            enc.set_scissor(scissor);
+
+            // buffers: the geometry, the instances, then the uniform blocks
+            enc.buffer(vb, 0, 0);
+            enc.buffer(instances.buffer, instances.offset, 1);
+            let b = &pipe.bindings;
+            let slot = |i: usize| b.get(i).copied().filter(|v| *v != pipeline_binding::NONE);
+            let mut ok = true;
+            let blocks = [
+                (pipeline_binding::DRAW_CALL, d.uniforms[0]),
+                (pipeline_binding::PASS, pass.uniforms),
+                (pipeline_binding::DRAW_LIST, d.uniforms[1]),
+                (pipeline_binding::DYN, d.uniforms[2]),
+                (pipeline_binding::SCOPE, d.uniforms[3]),
+            ];
+            for (which, uniforms) in blocks {
+                let Some(index) = slot(which) else { continue };
+                // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
+                let data = unsafe { uniforms.as_bytes() };
+                if which == pipeline_binding::SCOPE && data.is_empty() {
+                    continue;
+                }
+                match self.dev.arena_put(data, seq) {
+                    Some(loc) => enc.buffer(loc.buffer, loc.offset, index as u64),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                s.stats.skipped_draws += 1;
+                eprintln!("[metal] the uniform arena could not take a draw's uniforms; the draw is skipped");
+                continue;
+            }
+            for i in 0..b.len().saturating_sub(pipeline_binding::BUFFERS).min(d.ubufs.len()) {
+                let index = b[pipeline_binding::BUFFERS + i] as u64;
+                let id = d.ubufs[i];
+                let buffer = if id.is_none() {
+                    None
+                } else {
+                    self.buf.get_mut(&(sid, id.index)).filter(|x| x.gen == id.gen).map(|x| {
+                        x.last_bound = seq;
+                        x.buffer.as_id()
+                    })
+                };
+                enc.buffer(buffer.unwrap_or(nil), 0, index);
+            }
+
+            // textures: what the shader samples, then (a pick) the id twins of those
+            let ntex = slot(pipeline_binding::TEXTURES).unwrap_or(0) as usize;
+            for i in 0..ntex {
+                let id = id_at(view.arena, d.tex, i);
+                let obj = if id.is_none() { None } else { texture_obj(&mut self.tex, self.dev.device, s, id, seq) };
+                if obj.is_some() {
+                    s.ledger.touch(Kind::Texture, id.index, id.gen, frame, now);
+                }
+                enc.texture(obj.unwrap_or(self.dev.fallback), i);
+            }
+            if pick {
+                let mut mask = 0u32;
+                for i in 0..ntex.min(32) {
+                    let twin = Some(id_at(view.arena, d.pick_tex, i)).filter(|t| !t.is_none());
+                    let obj = twin.and_then(|t| texture_obj(&mut self.tex, self.dev.device, s, t, seq));
+                    if obj.is_some() {
+                        mask |= 1 << i;
+                    }
+                    unsafe {
+                        let _: () = msg_send![enc.id, setFragmentTexture: obj.unwrap_or(self.dev.fallback) atIndex: (ntex + i) as u64];
+                    }
+                    // the twin slots are not the shared ones: forget what was bound there
+                    if let Some(slot) = enc.textures.get_mut(ntex + i) {
+                        *slot = nil;
+                    }
+                }
+                let pk: [u32; 4] = [d.pick, mask, 0, 0];
+                unsafe {
+                    let _: () = msg_send![enc.id, setFragmentBytes: pk.as_ptr() as *const std::ffi::c_void length: 16u64 atIndex: 30u64];
+                }
+            }
+
+            // touches: who was bound this frame (the ledger's last use)
+            s.ledger.touch(Kind::Pipeline, d.pipeline.index, d.pipeline.gen, frame, now);
+            for id in [d.vb, d.ib, d.inst.id].into_iter().chain(d.ubufs).filter(|i| !i.is_none()) {
+                s.ledger.touch(Kind::Buffer, id.index, id.gen, frame, now);
+            }
+            let name = s.string(pipe.desc.name).unwrap_or("");
+            if !name.is_empty() && !shaders.iter().any(|n| n == name) {
+                shaders.push(name.to_owned());
+            }
+            // the draw: the instance ranges (one draw each), or every instance
+            let (index_type, width) = if d.flags & Draw::INDEX_U32 != 0 { (MTLIndexType::UInt32, 4u64) } else { (MTLIndexType::UInt16, 2u64) };
+            let first = d.index[0] as u64 * width;
+            let whole = (read_pairs(view.arena, d.inst_ranges).next().is_none()).then_some([0u32, d.inst.count]);
+            if prof_key.is_some() {
+                let size = |id: Id| self.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen).map_or(0, |b| b.size);
+                prof_draws.push(gpu_prof::DrawRecord::new(s, d, view.arena, vw, vh, depth.is_some(), stride, size(d.vb) + size(d.ib), ntex));
+            }
+            for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
+                let start = start.min(d.inst.count) as u64;
+                let count = (count as u64).min(d.inst.count as u64 - start);
+                if count == 0 {
+                    continue;
+                }
+                unsafe {
+                    let _: () = msg_send![
+                        enc.id,
+                        drawIndexedPrimitives: MTLPrimitiveType::Triangle
+                        indexCount: index_count
+                        indexType: index_type
+                        indexBuffer: ib
+                        indexBufferOffset: first
+                        instanceCount: count
+                        baseVertex: 0u64
+                        baseInstance: start
+                    ];
+                }
+            }
+        }
+
+        // ---- the end of the pass
+        close_encoder(enc.id, cur_sample.filter(|_| !stage));
+        split_runs.close(prof_draws.len() as u32);
+        if let Some(key) = prof_key {
+            let (attach, bytes) = describe_attachments(s, sid, pass, &colors, &formats, depth.is_some().then_some(depth_kept), depth_only, vw as u64 * vh as u64);
+            let timed = first_sample.is_some();
+            let (pipes, session): (_, &Session) = (&self.pipe, s);
+            let pi = gpu_prof::record_pass(key, session, sid, pass.name, pick, vw as u32, vh as u32, &attach, bytes, &prof_draws, timed, |pipeline| {
+                pipes.get(&(sid, pipeline.index)).map(|p| gpu_prof::ShaderFacts { name: gpu_prof::shader_name(session, &p.desc), stats: Some(p.stats.clone()), source: p.source.clone() })
+            });
+            if let Some(pi) = pi.filter(|_| timed) {
+                let split = split.map(|samples| SplitTimes { samples, runs: split_runs });
+                let sample = if split.is_some() { None } else { sample_index };
+                self.prof.push(ProfPass { key, pass: pi, kind: pass_kind::RENDER, sample, split });
+            }
+        }
+        // render targets with a mip chain: the levels again from what this pass drew into
+        // level 0 (in order on this command buffer, so every later reader sees them)
+        if !pick {
+            for (_, id, obj) in &colors {
+                if id.is_none() || s.textures.get(sid, *id).map_or(true, |e| e.val.mips <= 1) {
+                    continue;
+                }
+                unsafe {
+                    // 8-bit pixels are display-encoded: the levels are averaged in light through
+                    // an sRGB view of the same storage
+                    let pixel: u64 = msg_send![*obj, pixelFormat];
+                    let view = (pixel == MTLPixelFormat::BGRA8Unorm as u64).then(|| {
+                        let v: ObjcId = msg_send![*obj, newTextureViewWithPixelFormat: MTLPixelFormat::BGRA8Unorm_sRGB];
+                        RcObjcId::from_owned(NonNull::new(v).expect("sRGB view"))
+                    });
+                    let target = view.as_ref().map_or(*obj, |v| v.as_id());
+                    let (tw, th): (u64, u64) = (msg_send![*obj, width], msg_send![*obj, height]);
+                    let blit = self.blit_encoder(cb, "mipmaps", tw as u32, th as u32, tw * th * 4 * 2 / 3 * 2);
+                    let _: () = msg_send![blit, generateMipmapsForTexture: target];
+                    let _: () = msg_send![blit, endEncoding];
+                }
+            }
+        }
+        if pick {
+            if let Some((_, id, _)) = colors.first() {
+                self.pick_ids.insert((sid, target.index), *id);
+            }
+        }
+        Some(shaders)
+    }
+}

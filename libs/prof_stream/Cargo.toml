@@ -1,0 +1,12 @@
+[package]
+name = "makepad-prof-stream"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "The profiler stream and .mkpf recordings: the binary record codec, the profile model built from a live stream or a file (lanes, spans, waits, frames, JIT tier events, GPU frames), and the queries and text views agents and Scope ask it"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+makepad-gpu-trace = { path = "../gpu_trace" }
+makepad-strict-json = { path = "../strict_json" }

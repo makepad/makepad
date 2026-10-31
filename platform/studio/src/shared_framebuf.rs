@@ -41,7 +41,7 @@ impl PresentableImageId {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct DrmFormat {
     pub fourcc: u32,
@@ -80,13 +80,13 @@ pub struct SharedSwapchain {
     pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct AuxChannedImageFd {
     pub _private: Option<u32>,
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct LinuxSharedImagePlane {
     pub dma_buf_fd: AuxChannedImageFd,
@@ -94,7 +94,7 @@ pub struct LinuxSharedImagePlane {
     pub stride: u32,
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct LinuxVulkanSharedImage {
     pub allocation_size: u64,
@@ -103,24 +103,27 @@ pub struct LinuxVulkanSharedImage {
     pub driver_uuid: [u8; 16],
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct LinuxSharedImage {
     pub drm_format: DrmFormat,
     pub plane: LinuxSharedImagePlane,
     /// OPAQUE_FD image memory and a second auxiliary timeline semaphore FD.
-    /// None retains the existing DMA-BUF / software-buffer protocol.
+    /// None selects DMA-BUF image memory.
     pub vulkan: Option<LinuxVulkanSharedImage>,
+    /// DMA-BUF memory followed by an OPAQUE_FD timeline semaphore on the auxiliary
+    /// channel. Separate from `vulkan`, whose image memory is OPAQUE_FD.
+    pub dma_buf_timeline: bool,
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedPresentableImage {
     pub id: PresentableImageId,
     pub image: LinuxSharedImage,
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedSwapchain {
     pub window_id: usize,
@@ -129,22 +132,14 @@ pub struct SharedSwapchain {
     pub presentable_images: [SharedPresentableImage; SWAPCHAIN_IMAGE_COUNT],
 }
 
-#[cfg(not(any(
-    all(target_os = "linux", not(target_env = "ohos")),
-    target_os = "macos",
-    target_os = "windows"
-)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedPresentableImage {
     pub id: PresentableImageId,
     pub _dummy: Option<u32>,
 }
 
-#[cfg(not(any(
-    all(target_os = "linux", not(target_env = "ohos")),
-    target_os = "macos",
-    target_os = "windows"
-)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[derive(Copy, Clone, Debug, PartialEq, SerBin, DeBin, SerJson, DeJson)]
 pub struct SharedSwapchain {
     pub window_id: usize,
@@ -166,3 +161,4 @@ pub struct PresentableDraw {
     /// transports without an explicit image lease.
     pub sequence: u64,
 }
+

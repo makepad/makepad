@@ -1,8 +1,12 @@
+pub mod app_open;
 pub mod cancel_scope;
+pub mod domain;
 pub mod drag_drop;
 pub mod event;
 pub mod finger;
 pub mod game_input;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod hal_intake;
 pub mod keyboard;
 pub mod location;
 pub mod network;
@@ -10,7 +14,9 @@ pub mod video_playback;
 pub mod window;
 pub mod xr;
 
+pub use app_open::*;
 pub use cancel_scope::*;
+pub use domain::*;
 pub use drag_drop::*;
 pub use event::*;
 pub use finger::*;

@@ -11,9 +11,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The connection: plain TCP, or pinned TLS shared by the reader and the
+/// writer thread (the reader holds the lock only for short timed reads).
+enum Conn {
+    Plain(TcpStream),
+    #[cfg(not(target_arch = "wasm32"))]
+    Tls(std::sync::Arc<std::sync::Mutex<crate::SocketStream>>),
+}
+
+impl Conn {
+    fn shutdown(&self) {
+        match self {
+            Conn::Plain(s) => {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Conn::Tls(s) => {
+                if let Ok(mut s) = s.lock() {
+                    s.shutdown();
+                }
+            }
+        }
+    }
+}
+
 pub struct PlainWebSocket {
     sender: Option<Sender<Outgoing>>,
-    stream: Option<TcpStream>,
+    stream: Option<Conn>,
 }
 
 enum Outgoing {
@@ -25,7 +49,7 @@ impl Drop for PlainWebSocket {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(stream) = self.stream.take() {
-            let _ = stream.shutdown(Shutdown::Both);
+            stream.shutdown();
         }
     }
 }
@@ -44,7 +68,7 @@ impl PlainWebSocket {
     pub fn close(&mut self) {
         self.sender.take();
         if let Some(stream) = self.stream.take() {
-            let _ = stream.shutdown(Shutdown::Both);
+            stream.shutdown();
         }
     }
 
@@ -56,15 +80,8 @@ impl PlainWebSocket {
         let split = request.split_url();
         match split.proto {
             "http" | "ws" => {}
-            "https" | "wss" => {
-                let _ = rx_sender.send(WebSocketMessage::Error(
-                    "TLS websocket is not supported by this client; use ws/http".to_string(),
-                ));
-                return PlainWebSocket {
-                    sender: None,
-                    stream: None,
-                };
-            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "https" | "wss" => return Self::open_pinned(request, rx_sender),
             _ => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
                     "unsupported websocket scheme: {}",
@@ -77,7 +94,7 @@ impl PlainWebSocket {
             }
         }
 
-        let mut stream = match TcpStream::connect(format!("{}:{}", split.host, split.port)) {
+        let mut stream = match split.port.parse::<u16>().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad port")).and_then(|port| crate::lan::connect_host("web socket", &split.host, port, None)) {
             Ok(stream) => stream,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
@@ -246,12 +263,123 @@ impl PlainWebSocket {
 
         PlainWebSocket {
             sender: Some(sender),
-            stream: Some(stream),
+            stream: Some(Conn::Plain(stream)),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// `wss://` to a fleet endpoint ([`crate::tls::mark_fleet_endpoint`]):
+    /// the server's certificate checked against the fleet root, with this
+    /// machine's proof bound to the certificate presented. Other
+    /// TLS endpoints are refused (no CA validation here).
+    fn open_pinned(request: HttpRequest, rx_sender: Sender<WebSocketMessage>) -> PlainWebSocket {
+        let failed = |rx: &Sender<WebSocketMessage>, msg: String| {
+            let _ = rx.send(WebSocketMessage::Error(msg));
+            PlainWebSocket { sender: None, stream: None }
+        };
+        let split = request.split_url();
+        let host_port = format!("{}:{}", split.host, split.port);
+        if !crate::tls::is_fleet_endpoint(&host_port) {
+            return failed(&rx_sender, format!("{host_port} is not a known fleet TLS endpoint"));
+        }
+        let (mut stream, authorization) = match crate::fleet::id::connect(split.host, split.port) {
+            Ok((stream, _server, authorization)) => (stream, Some(authorization)),
+            Err(err) => return failed(&rx_sender, format!("Error connecting websocket stream: {err}")),
+        };
+        let path = if split.file.is_empty() { "/".to_string() } else { format!("/{}", split.file) };
+        let mut head = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: SxJdXBRtW7Q4awLDhflO0Q==\r\n"
+        );
+        let headers = request.get_headers_string();
+        if !headers.to_ascii_lowercase().contains("authorization:") {
+            if let Some(value) = authorization {
+                head.push_str(&format!("Authorization: {value}\r\n"));
+            }
+        }
+        head.push_str(&headers);
+        head.push_str("\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+        if write_all_no_error(&mut stream, head.as_bytes()) {
+            return failed(&rx_sender, "Error writing request to websocket".into());
+        }
+        let leftover = match read_websocket_handshake_response(&mut stream) {
+            Ok(l) => l,
+            Err(err) => return failed(&rx_sender, err),
+        };
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(stream));
+        // The writer raises this while it wants the lock; the reader steps
+        // aside between reads so outgoing frames never starve.
+        let write_wanted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (sender, receiver) = channel();
+        let writer = shared.clone();
+        let wants = write_wanted.clone();
+        let writer_events = rx_sender.clone();
+        std::thread::spawn(move || {
+            while let Ok(message) = receiver.recv() {
+                wants.store(true, std::sync::atomic::Ordering::SeqCst);
+                let lock = writer.lock();
+                wants.store(false, std::sync::atomic::Ordering::SeqCst);
+                let mut s = match lock {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let failed = match message {
+                    Outgoing::Message(WebSocketMessage::Closed) => break,
+                    Outgoing::Message(message) => handle_outgoing_message(&mut *s, message),
+                    Outgoing::Pong => write_all_no_error(&mut *s, &SERVER_WEB_SOCKET_PONG_MESSAGE),
+                };
+                if failed {
+                    let _ = writer_events.send(WebSocketMessage::Error("Failed to send websocket data".into()));
+                    break;
+                }
+            }
+            if let Ok(mut s) = writer.lock() {
+                s.shutdown();
+            }
+        });
+        let reader = shared.clone();
+        let reply_sender = sender.clone();
+        std::thread::spawn(move || {
+            let mut web_socket = WebSocketParser::new();
+            let mut done = false;
+            if !leftover.is_empty() {
+                parse_incoming(&mut web_socket, &reply_sender, &rx_sender, &mut done, &leftover);
+            }
+            let mut buffer = vec![0u8; 65535];
+            while !done {
+                while write_wanted.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+                let result = match reader.lock() {
+                    Ok(mut s) => s.read(&mut buffer),
+                    Err(_) => break,
+                };
+                match result {
+                    Ok(0) => {
+                        let _ = rx_sender.send(WebSocketMessage::Closed);
+                        done = true;
+                    }
+                    Ok(n) => parse_incoming(&mut web_socket, &reply_sender, &rx_sender, &mut done, &buffer[..n]),
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {}
+                    Err(err) => {
+                        let _ = rx_sender.send(WebSocketMessage::Error(format!("Failed to receive data: {err}")));
+                        let _ = rx_sender.send(WebSocketMessage::Closed);
+                        done = true;
+                    }
+                }
+            }
+            let _ = reply_sender.send(Outgoing::Message(WebSocketMessage::Closed));
+        });
+        PlainWebSocket { sender: Some(sender), stream: Some(Conn::Tls(shared)) }
     }
 }
 
-fn handle_outgoing_message(stream: &mut TcpStream, msg: WebSocketMessage) -> bool {
+fn handle_outgoing_message(stream: &mut dyn Write, msg: WebSocketMessage) -> bool {
     match msg {
         WebSocketMessage::Binary(data) => {
             let header =
@@ -313,7 +441,7 @@ fn parse_incoming(
     });
 }
 
-fn read_websocket_handshake_response(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+fn read_websocket_handshake_response(stream: &mut dyn Read) -> Result<Vec<u8>, String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut data = Vec::with_capacity(4096);
     let mut buf = [0u8; 4096];
@@ -351,7 +479,7 @@ fn read_websocket_handshake_response(stream: &mut TcpStream) -> Result<Vec<u8>, 
     }
 }
 
-fn write_all_no_error(stream: &mut TcpStream, bytes: &[u8]) -> bool {
+fn write_all_no_error(stream: &mut dyn Write, bytes: &[u8]) -> bool {
     let mut offset = 0usize;
     while offset < bytes.len() {
         match stream.write(&bytes[offset..]) {

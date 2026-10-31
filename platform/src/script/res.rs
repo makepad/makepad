@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Read;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(test, target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -228,20 +228,12 @@ impl CxScriptResources {
 //       3. error
 // ---------------------------------------------------------------------------
 
-/// Try to load a resource from the packaged location on Apple platforms
-/// using NSBundle to resolve the app bundle's resource path.
-#[cfg(any(
-    target_os = "ios",
-    target_os = "tvos",
-    all(target_os = "macos", apple_bundle)
-))]
+/// Try to load a resource from the packaged location in an Apple app bundle (always on iOS and
+/// tvOS, on macOS for a bundled app).
+#[cfg(any(target_os = "ios", target_os = "tvos", all(target_os = "macos", apple_bundle)))]
 fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
-    let bundle_path = if let Some(root) = cx.package_root.as_deref() {
-        format!("{}/{}", root, dep_path)
-    } else {
-        dep_path.to_string()
-    };
-    cx.apple_bundle_load_file(&bundle_path).ok()
+    let path = cx.package_root.as_deref().map_or_else(|| dep_path.to_string(), |root| format!("{root}/{dep_path}"));
+    makepad_hal::bundle_resource(&path).map(Rc::new)
 }
 
 /// Try to load a resource from the packaged location on desktop.
@@ -274,6 +266,11 @@ fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
 
 #[cfg(target_arch = "wasm32")]
 fn web_resource_request_path(cx: &Cx, dep_path: &str) -> String {
+    // Embedded resources use crate-relative keys, not deployment URLs. Resolve
+    // that identity before adding the page directory for a network fallback.
+    if crate::os::web::web_embed::embedded().is_some_and(|embed| embed.get(dep_path).is_some()) {
+        return dep_path.to_string();
+    }
     let mut base_path = String::new();
     if let crate::cx::OsType::Web(params) = &cx.os_type {
         base_path = web_resource_base_path(&params.pathname);
@@ -308,7 +305,7 @@ fn web_resource_base_path(pathname: &str) -> String {
 /// The handle this heap already holds for a crate resource, if any.
 fn registered_crate_resource(vm: &mut ScriptVm, crate_part: &str, file_path: &str) -> Option<ScriptValue> {
     let (abs_path, _, _) = resolve_crate_resource_paths(vm, crate_part, file_path)?;
-    let heap_key = vm.bx.heap.heap_key();
+    let heap_key = vm.heap_key();
     vm.host.cx_mut().script_data.resources.get_handle_by_abs_path(heap_key, &abs_path).map(Into::into)
 }
 
@@ -323,7 +320,7 @@ fn register_crate_resource_parts(
     else {
         return NIL;
     };
-    let heap_key = vm.bx.heap.heap_key();
+    let heap_key = vm.heap_key();
     let cx = vm.host.cx_mut();
     if let Some(existing) = cx
         .script_data
@@ -339,7 +336,8 @@ fn register_crate_resource_parts(
         handle: ScriptHandle::ZERO,
         heap_key,
     };
-    let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+    let handle = vm.heap_mut().new_handle(res_type, Box::new(handle_gc));
+    let cx = vm.host.cx_mut();
 
     if cx
         .script_data
@@ -371,6 +369,14 @@ pub fn register_crate_resource_path(vm: &mut ScriptVm, logical_path: &str) -> Sc
     };
     let res_type = vm.handle_type(id_lut!(res));
     register_crate_resource_parts(vm, res_type, crate_part, file_path)
+}
+
+/// The absolute path a stable logical `crate_name/path` resolves to, as a
+/// `crate_resource("crate_name:path")` member would name it. Registers
+/// nothing: makepad-draw matches font family members with it.
+pub fn crate_resource_abs_path(vm: &mut ScriptVm, logical_path: &str) -> Option<String> {
+    let (crate_part, file_path) = logical_path.split_once('/')?;
+    resolve_crate_resource_paths(vm, crate_part, file_path).map(|(abs_path, _, _)| abs_path)
 }
 
 fn font_policy_declares_path(font_set: crate::FontSet, dependency_path: Option<&str>) -> bool {
@@ -499,37 +505,13 @@ impl Cx {
     /// Load a resource whose identity was resolved in its owning script heap.
     pub fn load_script_resource_by_path(&mut self, path: &str) {
         #[cfg(target_arch = "wasm32")]
-        let crate_manifests = self.script_data.crate_manifests.borrow().clone();
+        let crate_manifests = self.script_data.crate_manifests.snapshot();
 
         self.load_script_resource_impl(
             path,
             #[cfg(target_arch = "wasm32")]
             &crate_manifests,
         );
-    }
-
-    /// Start every resource declared by the selected application font set.
-    /// This changes timing only: it never adds resources beyond FontPolicy.
-    pub fn preload_font_set(&mut self) {
-        let policy = self.font_set().policy();
-        let paths = {
-            let resources = self.script_data.resources.resources.borrow();
-            policy
-                .assets
-                .iter()
-                .filter_map(|asset| {
-                    resources
-                        .iter()
-                        .find(|resource| {
-                            resource.dependency_path.as_deref() == Some(asset.resource_path)
-                        })
-                        .map(|resource| resource.abs_path.clone())
-                })
-                .collect::<Vec<_>>()
-        };
-        for path in paths {
-            self.load_script_resource_by_path(&path);
-        }
     }
 
     /// Load all script resources that are still pending.
@@ -549,7 +531,7 @@ impl Cx {
 
         // On wasm, resolve web_url for resources that don't have one yet.
         #[cfg(target_arch = "wasm32")]
-        let crate_manifests = self.script_data.crate_manifests.borrow().clone();
+        let crate_manifests = self.script_data.crate_manifests.snapshot();
 
         let font_set = self.font_set();
         let paths = {
@@ -597,6 +579,42 @@ impl Cx {
 #[cfg(test)]
 mod tests {
     use super::{font_policy_declares_path, web_resource_base_path};
+
+    #[test]
+    fn windows_built_manifest_paths_resolve_to_web_dependency_paths() {
+        use super::{normalize_manifest_join, resolve_dependency_path_from_manifests};
+        use std::collections::HashMap;
+        // A wasm app built on Windows: every manifest is a `\` path.
+        let widgets = r"C:\dev\makepad\widgets";
+        let mut manifests = HashMap::new();
+        manifests.insert("makepad_widgets".to_string(), widgets.to_string());
+        manifests.insert("makepad_draw".to_string(), r"C:\dev\makepad\draw".to_string());
+        manifests.insert("my_app".to_string(), r"C:\dev\app".to_string());
+
+        let abs = normalize_manifest_join(widgets, "resources/IBMPlexSans-Text.ttf").unwrap();
+        assert_eq!(abs, "C:/dev/makepad/widgets/resources/IBMPlexSans-Text.ttf");
+        assert_eq!(
+            resolve_dependency_path_from_manifests(&abs, Some("makepad_widgets"), Some(widgets), &manifests)
+                .as_deref(),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+
+        // `..` out of one crate lands in another; mixed separators still match.
+        let abs = normalize_manifest_join(r"C:\dev\makepad\widgets\core", "../../draw/resources/icons/back.svg").unwrap();
+        assert_eq!(
+            resolve_dependency_path_from_manifests(&abs, None, None, &manifests).as_deref(),
+            Some("makepad_draw/resources/icons/back.svg")
+        );
+
+        // Unix-built manifests behave as before.
+        let mut manifests = HashMap::new();
+        manifests.insert("my_app".to_string(), "/home/me/app".to_string());
+        let abs = normalize_manifest_join("/home/me/app", "resources/logo.svg").unwrap();
+        assert_eq!(
+            resolve_dependency_path_from_manifests(&abs, None, None, &manifests).as_deref(),
+            Some("my_app/resources/logo.svg")
+        );
+    }
 
     #[test]
     fn heap_local_resource_handles_do_not_alias_font_bytes_or_http_responses() {
@@ -776,10 +794,15 @@ fn normalize_dependency_file_path(path: &str) -> Option<String> {
     Some(stack.join("/"))
 }
 
-#[cfg(target_arch = "wasm32")]
-fn normalize_path(path: &Path) -> Option<PathBuf> {
+/// Manifest directories are the build host's `CARGO_MANIFEST_DIR`, so a wasm
+/// app built on Windows carries `C:\...` paths, and wasm32's `Path` splits
+/// only on `/`: a whole Windows directory would be one component and never a
+/// prefix of a resource path. Separators are unified before any component work.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn normalize_path(path: &str) -> Option<PathBuf> {
+    let path = path.replace('\\', "/");
     let mut out = PathBuf::new();
-    for comp in path.components() {
+    for comp in Path::new(&path).components() {
         match comp {
             std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
             std::path::Component::RootDir => out.push(comp.as_os_str()),
@@ -795,19 +818,29 @@ fn normalize_path(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(test, target_arch = "wasm32"))]
 fn normalize_manifest_relative_path(path: &Path) -> Option<String> {
-    normalize_dependency_file_path(&path.to_string_lossy().replace('\\', "/"))
+    normalize_dependency_file_path(&path.to_string_lossy())
 }
 
-#[cfg(target_arch = "wasm32")]
+/// Joins a manifest directory and a crate-relative file into a normalized
+/// `/`-separated path.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn normalize_manifest_join(manifest_path: &str, file_path: &str) -> Option<String> {
+    let joined = Path::new(manifest_path).join(file_path);
+    // A Windows host's PathBuf joins with `\` again; the dependency paths
+    // compared against this are `/`-separated wherever it runs.
+    normalize_path(&joined.to_string_lossy()).map(|path| path.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
 fn resolve_dependency_path_from_manifests(
     abs_path: &str,
     default_crate_name: Option<&str>,
     default_manifest_path: Option<&str>,
     manifests: &HashMap<String, String>,
 ) -> Option<String> {
-    let abs_norm = normalize_path(Path::new(abs_path))?;
+    let abs_norm = normalize_path(abs_path)?;
     let mut best: Option<(usize, String)> = None;
 
     let mut candidates = Vec::<(String, String)>::new();
@@ -819,7 +852,7 @@ fn resolve_dependency_path_from_manifests(
     }
 
     for (crate_name, manifest_path) in candidates {
-        let Some(manifest_norm) = normalize_path(Path::new(&manifest_path)) else {
+        let Some(manifest_norm) = normalize_path(&manifest_path) else {
             continue;
         };
         let Ok(rel) = abs_norm.strip_prefix(&manifest_norm) else {
@@ -852,25 +885,17 @@ fn resolve_crate_resource_paths(
     file_path: &str,
 ) -> Option<(String, Option<String>, Option<String>)> {
     let file_path = strip_crate_resource_leading_slashes(file_path);
-    let manifests = vm.bx.code.crate_manifests.borrow().clone();
+    let manifests = vm.crate_manifests();
     let (abs_path, default_crate_name, default_manifest_path) = if crate_part == "self" {
-        let bodies = vm.bx.code.bodies.borrow();
-        let body_id = vm.thread().trap.ip.body as usize;
-        let body = bodies.get(body_id)?;
-        let script_mod = match &body.source {
-            ScriptSource::Mod(script_mod) => script_mod,
-            _ => return None,
-        };
-        let abs_path = normalize_path(&Path::new(&script_mod.cargo_manifest_path).join(file_path))
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
+        let (cargo_manifest_path, module_path) = vm.body_module(vm.trap_ip().body)?;
+        let abs_path = normalize_manifest_join(&cargo_manifest_path, file_path)
             .unwrap_or_else(|| {
-                let mut fallback = script_mod.cargo_manifest_path.clone();
+                let mut fallback = cargo_manifest_path.clone();
                 fallback.push('/');
                 fallback.push_str(file_path);
                 fallback
             });
-        let crate_name = script_mod
-            .module_path
+        let crate_name = module_path
             .split("::")
             .next()
             .unwrap_or("")
@@ -878,13 +903,12 @@ fn resolve_crate_resource_paths(
         (
             abs_path,
             Some(crate_name),
-            Some(script_mod.cargo_manifest_path.clone()),
+            Some(cargo_manifest_path),
         )
     } else {
         let crate_name = crate_part.replace('-', "_");
         let manifest_path = manifests.get(&crate_name)?.clone();
-        let abs_path = normalize_path(&Path::new(&manifest_path).join(file_path))
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
+        let abs_path = normalize_manifest_join(&manifest_path, file_path)
             .unwrap_or_else(|| {
                 let mut fallback = manifest_path.clone();
                 fallback.push('/');
@@ -922,18 +946,11 @@ fn resolve_crate_resource_paths(
 ) -> Option<(String, Option<String>, Option<String>)> {
     let file_path = strip_crate_resource_leading_slashes(file_path);
     let (abs_path, crate_name) = if crate_part == "self" {
-        let bodies = vm.bx.code.bodies.borrow();
-        let body_id = vm.thread().trap.ip.body as usize;
-        let body = bodies.get(body_id)?;
-        let script_mod = match &body.source {
-            ScriptSource::Mod(script_mod) => script_mod,
-            _ => return None,
-        };
-        let mut abs_path = script_mod.cargo_manifest_path.clone();
+        let (cargo_manifest_path, module_path) = vm.body_module(vm.trap_ip().body)?;
+        let mut abs_path = cargo_manifest_path;
         abs_path.push('/');
         abs_path.push_str(file_path);
-        let crate_name = script_mod
-            .module_path
+        let crate_name = module_path
             .split("::")
             .next()
             .unwrap_or("")
@@ -941,8 +958,7 @@ fn resolve_crate_resource_paths(
         (abs_path, crate_name)
     } else {
         let crate_name = crate_part.replace('-', "_");
-        let manifests = vm.bx.code.crate_manifests.borrow();
-        let manifest_path = manifests.get(&crate_name)?.clone();
+        let manifest_path = vm.crate_manifest(&crate_name)?;
         let mut abs_path = manifest_path;
         abs_path.push('/');
         abs_path.push_str(file_path);
@@ -956,8 +972,8 @@ fn resolve_crate_resource_paths(
 
 fn script_value_to_u8_bytes(vm: &mut ScriptVm, value: ScriptValue) -> Option<Vec<u8>> {
     if let Some(array) = value.as_array() {
-        if let ScriptArrayStorage::U8(data) = vm.bx.heap.array_storage(array) {
-            return Some(data.clone());
+        if let Some(data) = vm.heap().array_u8(array) {
+            return Some(data.to_vec());
         }
     }
     None
@@ -970,7 +986,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     // Get the path of the resource
     vm.set_handle_getter(res_type, |vm, pself, prop| {
         if let Some(handle) = pself.as_handle() {
-            let heap_key = vm.bx.heap.heap_key();
+            let heap_key = vm.heap_key();
             let cx = vm.host.cx_mut();
             let resources = cx.script_data.resources.resources.borrow();
             if let Some(res) = resources.iter().find(|v| v.has_handle(heap_key, handle)) {
@@ -1006,7 +1022,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         if let CxScriptResourceData::Loaded(ref data) = res.data {
                             let data: Vec<u8> = (**data).clone();
                             drop(resources);
-                            return vm.bx.heap.new_array_from_vec_u8(data).into();
+                            return vm.heap_mut().new_array_from_vec_u8(data).into();
                         }
                         return NIL;
                     }
@@ -1049,7 +1065,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
 
             if let Some(abs_path) = vm.string_with(path, |_vm, s| s.to_string()) {
-                let heap_key = vm.bx.heap.heap_key();
+                let heap_key = vm.heap_key();
                 let cx = vm.host.cx_mut();
                 if let Some(existing) = cx
                     .script_data
@@ -1065,7 +1081,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     handle: ScriptHandle::ZERO,
                     heap_key,
                 };
-                let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+                let handle = vm.heap_mut().new_handle(res_type, Box::new(handle_gc));
+                let cx = vm.host.cx_mut();
 
                 // Another heap may already track this path — attach our local
                 // handle to the shared entry instead of duplicating it.
@@ -1149,7 +1166,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
 
             if let Some(url_string) = vm.string_with(url, |_vm, s| s.to_string()) {
-                let heap_key = vm.bx.heap.heap_key();
+                let heap_key = vm.heap_key();
                 let cx = vm.host.cx_mut();
                 if let Some(existing) = cx
                     .script_data
@@ -1164,7 +1181,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     handle: ScriptHandle::ZERO,
                     heap_key,
                 };
-                let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+                let handle = vm.heap_mut().new_handle(res_type, Box::new(handle_gc));
+                let cx = vm.host.cx_mut();
 
                 if cx
                     .script_data
@@ -1216,7 +1234,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 );
             };
 
-            let heap_key = vm.bx.heap.heap_key();
+            let heap_key = vm.heap_key();
             let cx = vm.host.cx_mut();
             let handle_gc = CxScriptResourceGc {
                 resources: cx.script_data.resources.resources.clone(),
@@ -1224,7 +1242,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 handle: ScriptHandle::ZERO,
                 heap_key,
             };
-            let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+            let handle = vm.heap_mut().new_handle(res_type, Box::new(handle_gc));
+            let cx = vm.host.cx_mut();
 
             cx.script_data.resources.insert_resource(
                 heap_key,

@@ -190,6 +190,7 @@ gst_fns! {
     gstapp.gst_app_src_end_of_stream: fn(*mut GstElement) -> c_int;
     gstapp.gst_app_sink_pull_sample: fn(*mut GstElement) -> *mut GstSample;
     gstapp.gst_app_sink_pull_preroll: fn(*mut GstElement) -> *mut GstSample;
+    gstapp.gst_app_sink_try_pull_sample: fn(*mut GstElement, u64) -> *mut GstSample;
     gstapp.gst_app_sink_is_eos: fn(*mut GstElement) -> c_int;
     glib.g_free: fn(*mut c_void);
     glib.g_error_free: fn(*mut GError);

@@ -284,12 +284,18 @@ impl ThreadCache {
             // `tls_unavailable_style_chunk_self_releases`.
             return unsafe { alloc_abandoned_block(class_index) };
         }
-        // SAFETY: only this owner thread reads or removes its local lists;
-        // remote writers publish through atomics. Exercised by
-        // `cross_thread_free_is_reused_by_owner`.
-        unsafe { self.drain_remote(class_index) };
-        if self.heads[class_index].is_null() && !self.refill(class_index) {
-            return null_mut();
+        // Blocks other threads freed are taken back only when the local list
+        // runs out: draining walks every chunk this thread owns in the class,
+        // and doing it on each allocation made every allocation cost the
+        // thread's whole heap (most of a film's frame on the UI thread).
+        if self.heads[class_index].is_null() {
+            // SAFETY: only this owner thread reads or removes its local
+            // lists; remote writers publish through atomics. Exercised by
+            // `cross_thread_free_is_reused_by_owner`.
+            unsafe { self.drain_remote(class_index) };
+            if self.heads[class_index].is_null() && !self.refill(class_index) {
+                return null_mut();
+            }
         }
 
         let block = self.heads[class_index];
@@ -868,12 +874,28 @@ mod tests {
             let ptr = unsafe { cache.alloc(class_index) };
             pointer_tx.send(ptr as usize).unwrap();
             freed_rx.recv().unwrap();
+            // The remote free is taken back once the local list runs out:
+            // allocate the rest of the chunk's blocks, then the next
+            // allocation drains and reuses it.
+            let data_offset = align_up(std::mem::size_of::<ChunkHeader>(), BLOCK_ALIGN);
+            let blocks_per_chunk = (CHUNK_SIZE - data_offset) / block_stride(class_index);
+            let mut rest = Vec::new();
+            for _ in 1..blocks_per_chunk {
+                // SAFETY: each block is retained and freed exactly once below.
+                let block = unsafe { cache.alloc(class_index) };
+                assert_ne!(block, ptr);
+                rest.push(block);
+            }
             // SAFETY: the remote free is complete, so draining and allocating
             // may exclusively reclaim that node.
             let reused = unsafe { cache.alloc(class_index) };
             assert_eq!(reused, ptr);
-            // SAFETY: reused is live and owned by this cache exactly once.
+            // SAFETY: reused and the rest are live and owned by this cache
+            // exactly once.
             assert!(unsafe { cache.dealloc(reused) });
+            for block in rest {
+                assert!(unsafe { cache.dealloc(block) });
+            }
         });
         let remote = std::thread::spawn(move || {
             let ptr = pointer_rx.recv().unwrap() as *mut u8;

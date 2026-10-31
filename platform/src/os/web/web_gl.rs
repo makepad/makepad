@@ -61,7 +61,8 @@ impl Cx {
         }
 
         self.draw_lists
-            .retire_free_items(&self.task_pool(), self.repaint_id, |os| {
+            .retire_free_items(&self.task_pool(), self.repaint_id, |item| {
+                let os = &mut item.os;
                 if let Some(id) = os.inst_vb_id {
                     array_buffer_ids.push(id);
                     os.inst_vb_generation = os.inst_vb_generation.wrapping_add(1);
@@ -102,7 +103,6 @@ impl Cx {
             pass.repaint_requested = false;
             pass.repaint_next = false;
             pass.time_owed = false;
-            pass.os.flipped_uniforms = None;
         }
 
         // Draw-list and pass cleanup above can release their final Texture Rc.
@@ -128,6 +128,74 @@ impl Cx {
             texture_ids,
             framebuffer_ids,
         });
+    }
+
+    /// After the browser restored a lost WebGL context: every object of the
+    /// old one is gone and the page's tables of them are empty. What the CPU
+    /// side keeps is marked to upload again on its next draw (vec textures
+    /// from their data, geometries, instance buffers, VAOs and their uniform
+    /// buffers), programs are compiled again when a pass first draws them,
+    /// render targets are allocated again by their next pass, and every pass
+    /// with a draw list repaints. The old context's frames are over, so every
+    /// submitted serial counts as complete (the upload budget frees what they
+    /// held). Buffer, VAO and texture ids keep their numbers: an upload to an
+    /// id the page no longer has creates its object anew.
+    pub(crate) fn webgl_forget_gpu_resources(&mut self) {
+        for slot in &mut self.textures.0.pool {
+            let texture = &mut slot.item;
+            if texture.format.is_vec() || texture.format.is_render() || texture.format.is_depth() {
+                texture.reset_allocation();
+            }
+            texture.os = Default::default();
+            texture.previous_platform_resource = None;
+        }
+        for slot in &mut self.geometries.0.pool {
+            let geometry = &mut slot.item;
+            geometry.dirty = true;
+            geometry.dirty_vertices = true;
+            geometry.dirty_indices = true;
+            geometry.os.vb_generation = geometry.os.vb_generation.wrapping_add(1);
+            geometry.os.ib_generation = geometry.os.ib_generation.wrapping_add(1);
+        }
+        for slot in &mut self.draw_lists.0.pool {
+            let draw_list = &mut slot.item;
+            for index in 0..draw_list.draw_items.len() {
+                let draw_item = &mut draw_list.draw_items[index];
+                if let Some(draw_call) = draw_item.kind.draw_call_mut() {
+                    draw_call.instance_dirty = true;
+                }
+                let os = &mut draw_item.os;
+                if let Some(vao) = &mut os.vao {
+                    vao.shader_id = None;
+                    vao.inst_vb_id = None;
+                    vao.geom_vb_id = None;
+                    vao.geom_ib_id = None;
+                }
+                os.uniforms_recording_gen = None;
+                os.draw_call_uniforms_gen = None;
+                os.user_uniforms_gen = None;
+                os.inst_capacity = 0;
+                os.retained_publication = None;
+                os.retained_failed = 0;
+                os.inst_charge = None;
+            }
+        }
+        for slot in &mut self.passes.0.pool {
+            let pass = &mut slot.item;
+            if pass.main_draw_list_id.is_some() {
+                pass.paint_dirty = true;
+            }
+        }
+        self.draw_shaders.os_shaders.clear();
+        for shader in &mut self.draw_shaders.shaders {
+            shader.pipeline_id = None;
+        }
+        self.os.webgl_shaders_pending = 0;
+        self.os.webgl_shaders_waiting = 0;
+        self.os.completion_pending = 0;
+        let submitted = self.frame_submission_serial();
+        self.textures.1.serials.complete(submitted);
+        self.textures.1.retired.clear();
     }
 
     pub fn render_view(
@@ -209,7 +277,7 @@ impl Cx {
                 };
 
                 let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
-                if sh.os_shader_id.is_none() {
+                if sh.pipeline_id.is_none() {
                     // shader didnt compile somehow
                     continue;
                 }
@@ -256,8 +324,20 @@ impl Cx {
                                 .filter(|_| draw_item.os.inst_capacity != 0)
                                 .map(|previous| publication.upload_plan(previous))
                         });
-                    let replaces = draw_item.retained_instances.is_none()
-                        || draw_item.os.inst_vb_id.is_none()
+                    // Plain instances update their buffer in place (the page
+                    // grows its storage to the next power of two and shrinks
+                    // it below a quarter, see upload_numeric_buffer): a new
+                    // charge only when that storage is re-specified, so an
+                    // animated item re-uploading every frame holds one
+                    // allocation, not one per frame until the GPU catches up.
+                    let plain_capacity = bytes.next_power_of_two().max(256);
+                    let replaces = if draw_item.retained_instances.is_none() {
+                        draw_item.os.inst_vb_id.is_none()
+                            || draw_item.os.inst_charge.is_none()
+                            || plain_capacity != draw_item.os.inst_capacity
+                                && (bytes > draw_item.os.inst_capacity || bytes.saturating_mul(4) < draw_item.os.inst_capacity)
+                    } else {
+                        draw_item.os.inst_vb_id.is_none()
                         || bytes > draw_item.os.inst_capacity
                         || plan.as_ref().is_none_or(|plan| {
                             !plan.can_update_in_place()
@@ -270,19 +350,15 @@ impl Cx {
                                             .unwrap()
                                             .float_len()
                                 })
-                        });
+                        })
+                    };
                     if replaces {
-                        let capacity = if draw_item.retained_instances.is_some() {
-                            bytes.next_power_of_two().max(256)
-                        } else {
-                            bytes
-                        };
-                        let Some(charge) = upload_budget.allocations.reserve(capacity) else {
-                            draw_item.instance_upload_pending = true;
-                            self.demo_time_repaint = true;
-                            self.passes[draw_pass_id].repaint_next = true;
-                            continue;
-                        };
+                        let capacity = plain_capacity;
+                        // Accounting only: the storage an item needs is
+                        // allocated (a refused upload drew nothing, and a
+                        // budget that stayed full drew nothing at all). Real
+                        // exhaustion shows as GL OUT_OF_MEMORY on the page.
+                        let charge = upload_budget.allocations.reserve_visible(capacity);
                         draw_item.os.inst_capacity = capacity;
                         draw_item.os.inst_charge = Some(charge);
                     }
@@ -366,6 +442,14 @@ impl Cx {
                     } else {
                         continue;
                     };
+                    if crate::os::cx_shared::samples_incomplete_target(
+                        &self.passes,
+                        &self.textures,
+                        texture_id,
+                        draw_pass_id,
+                    ) {
+                        self.passes[draw_pass_id].paint_dirty = true;
+                    }
 
                     let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.format.is_vec() {
@@ -433,6 +517,31 @@ impl Cx {
                                         width: *width,
                                         height: *height,
                                         data: WasmPtrF32::new(match data {
+                                            Some(data) => data,
+                                            None => continue,
+                                        }),
+                                    });
+                                }
+                                // Level 0 only, as VecMipBGRAu8_32 above: the layers'
+                                // level 0s must be contiguous (no mip chain in the data).
+                                TextureFormat::VecArrayMipBGRAu8_32 {
+                                    width,
+                                    height,
+                                    layers,
+                                    data,
+                                    max_level,
+                                    ..
+                                } => {
+                                    if max_level.unwrap_or(0) > 0 {
+                                        crate::error!("web: a 2D-array texture with mips is not uploaded (give max_level 0)");
+                                        continue;
+                                    }
+                                    self.os.from_wasm(FromWasmAllocTextureArray_BGRAu8_32 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        layers: *layers,
+                                        data: WasmPtrU32::new(match data {
                                             Some(data) => data,
                                             None => continue,
                                         }),
@@ -571,12 +680,12 @@ impl Cx {
                 if vao.inst_vb_id != draw_item.os.inst_vb_id
                     || vao.geom_vb_id != geometry.os.vb_id
                     || vao.geom_ib_id != geometry.os.ib_id
-                    || vao.shader_id != sh.os_shader_id
+                    || vao.shader_id != sh.pipeline_id
                     || vao.inst_vb_generation != draw_item.os.inst_vb_generation
                     || vao.geom_vb_generation != geometry.os.vb_generation
                     || vao.geom_ib_generation != geometry.os.ib_generation
                 {
-                    vao.shader_id = sh.os_shader_id.clone();
+                    vao.shader_id = sh.pipeline_id.clone();
                     vao.inst_vb_id = draw_item.os.inst_vb_id;
                     vao.geom_vb_id = geometry.os.vb_id;
                     vao.geom_ib_id = geometry.os.ib_id;
@@ -596,12 +705,7 @@ impl Cx {
                     draw_item.os.user_uniforms_gen = None;
                 }
 
-                // A custom-camera texture pass uploads its Y-flipped copy
-                // (see `setup_render_pass`); everything else its own.
-                let pass_uniforms: &[f32] = match &self.passes[draw_pass_id].os.flipped_uniforms {
-                    Some(flipped) => flipped.as_slice(),
-                    None => self.passes[draw_pass_id].pass_uniforms.as_slice(),
-                };
+                let pass_uniforms: &[f32] = self.passes[draw_pass_id].pass_uniforms.as_slice();
                 let instances = if sh.mapping.instances.total_slots == 0 {
                     0
                 } else if draw_item.retained_instances.is_some() {
@@ -689,11 +793,12 @@ impl Cx {
                             }
                         })
                         .collect(),
-                    shader_id: sh.os_shader_id.unwrap(),
+                    shader_id: sh.pipeline_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
                     alpha_blend: draw_call.options.alpha_blend,
+                    blend_max: sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max,
                     backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms),
                     pass_uniforms_gen_lo: pass_uniforms_gen as u32,
@@ -768,51 +873,24 @@ impl Cx {
         let ortho_uniforms_gen = self.next_uniform_gen();
         let pass = &mut self.passes[draw_pass_id];
         pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
-        // WebGL render-to-texture coordinates are vertically inverted relative
-        // to onscreen canvas rendering: an FBO's rows are stored bottom-up.
-        // Every offscreen pass therefore renders with its projection's Y
-        // inverted, so the texels land in the same top-left row order Metal
-        // and D3D produce and every consumer plain-samples. The JS side pairs
-        // this with a clockwise front face for texture passes (the flip
-        // reverses triangle winding), so backface culling keeps culling the
-        // same faces it culls on the canvas.
-        pass.os.flipped_uniforms = None;
-        if to_texture {
-            if pass.keep_camera_matrix {
-                // A custom camera (3D scenes, VJ effects, mesh views): the
-                // pass owns its matrices. Overwriting them with the 2D ortho
-                // — what this branch did before — drew every 3D scene with a
-                // pixel-space projection, which is how the web effect
-                // thumbnails came out as their clear colour. Keep the
-                // caller's uniforms untouched (the retained draw list
-                // re-executes on repaints without the app re-setting the
-                // camera, so the flip must never accumulate) and upload a
-                // flipped copy instead.
-                let mut flipped = pass.pass_uniforms.clone();
-                flip_projection_y(&mut flipped.camera_projection);
-                flip_projection_y(&mut flipped.camera_projection_r);
-                pass.os.flipped_uniforms = Some(flipped.as_slice().to_vec());
-                pass.mark_pass_uniforms_dirty(changed_uniforms_gen);
-            } else {
-                // The 2D camera is built in ONE place, `set_ortho_matrix`,
-                // on every backend — it is also where the exploded view's
-                // `camera_view` comes from (`crate::sploded`). Building the
-                // ortho by hand here, with the identity for `camera_view`,
-                // dropped that camera for the exploded BODY pass, which
-                // renders through a texture: its draw calls sit at
-                // `nesting_depth * SPLODED_DEPTH_UNIT` in z, which without
-                // the explode camera's z scale lies far outside the ortho's
-                // clip range, so every one of them was clipped away and the
-                // web showed a bare window where Metal drew the stack. Same
-                // matrix as the canvas, then the Y inversion for the
-                // bottom-up target, as the custom-camera branch above.
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, changed_uniforms_gen);
-                flip_projection_y(&mut pass.pass_uniforms.camera_projection);
-            }
-        } else {
-            if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
-            }
+        // The same camera as every other backend: a custom camera (3D
+        // scenes, VJ effects, mesh views) is the pass's own, a 2D pass gets
+        // the ortho built in ONE place, `set_ortho_matrix` (also where the
+        // exploded view's `camera_view` comes from, `crate::sploded`). A
+        // framebuffer's rows are stored bottom-up; the inversion that answers
+        // that is applied to every vertex shader's clip position in texture
+        // passes (the GLSL `mp_clip_y_flip`, set by the JS draw for
+        // `FromWasmBeginRenderTexture` passes, with a clockwise front face),
+        // not to the projection: shaders that write clip space themselves
+        // (fullscreen graph passes, line renderers, light-map bakes) never
+        // read the projection, and inverting it alone stored their pictures
+        // upside down.
+        if !pass.keep_camera_matrix {
+            pass.set_ortho_matrix(
+                pass_rect.pos,
+                pass_rect.size,
+                if to_texture { changed_uniforms_gen } else { ortho_uniforms_gen },
+            );
         }
         pass_rect.size
     }
@@ -890,10 +968,10 @@ impl Cx {
             height: (pass_size.y * dpi_factor) as usize
         });*/
 
-        let mut color_targets = [WColorTarget::default()];
+        let mut color_targets: Vec<WColorTarget> = Vec::new();
         let mut depth_target = WDepthTarget::default();
 
-        for (index, color_texture) in self.passes[draw_pass_id].color_textures.iter().enumerate() {
+        for color_texture in self.passes[draw_pass_id].color_textures.iter() {
             let size = pass_size * dpi_factor;
             self.textures[color_texture.texture.texture_id()]
                 .alloc_render(size.x as usize, size.y as usize);
@@ -903,24 +981,26 @@ impl Cx {
                 TextureFormat::RenderRf32 { .. } => 1,
                 TextureFormat::RenderRGBAf32 { .. } => 2,
                 TextureFormat::RenderRGBAf16 { .. } => 3,
+                TextureFormat::RenderRf16 { .. } => 4,
+                TextureFormat::RenderRu8 { .. } => 5,
                 _ => 0,
             };
             match color_texture.clear_color {
                 DrawPassClearColor::InitWith(clear_color) => {
-                    color_targets[index] = WColorTarget {
+                    color_targets.push(WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: true,
                         clear_color: clear_color.into(),
                         format,
-                    };
+                    });
                 }
                 DrawPassClearColor::ClearWith(clear_color) => {
-                    color_targets[index] = WColorTarget {
+                    color_targets.push(WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: false,
                         clear_color: clear_color.into(),
                         format,
-                    };
+                    });
                 }
             }
         }
@@ -1004,7 +1084,7 @@ impl Cx {
 
         for draw_shader_id in draw_shader_ids {
             if self.draw_shaders.shaders[draw_shader_id]
-                .os_shader_id
+                .pipeline_id
                 .is_some()
             {
                 self.draw_shaders.compile_set.remove(&draw_shader_id);
@@ -1064,17 +1144,17 @@ impl Cx {
                 crate::log!("{}\n{}", vertex, pixel);
             }
 
-            let mut os_shader_id = self.draw_shaders.shaders[draw_shader_id].os_shader_id;
-            if os_shader_id.is_none() {
+            let mut pipeline_id = self.draw_shaders.shaders[draw_shader_id].pipeline_id;
+            if pipeline_id.is_none() {
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
                     if ds.in_vertex == vertex && ds.in_pixel == pixel {
-                        os_shader_id = Some(index);
+                        pipeline_id = Some(index);
                         break;
                     }
                 }
             }
 
-            if os_shader_id.is_none() {
+            if pipeline_id.is_none() {
                 let shp = CxOsDrawShader::new(vertex, pixel);
                 let shader_id = self.draw_shaders.os_shaders.len();
                 self.os.from_wasm(FromWasmCompileWebGLShader {
@@ -1089,10 +1169,10 @@ impl Cx {
                 });
                 self.draw_shaders.os_shaders.push(shp);
                 self.os.webgl_shaders_pending += 1;
-                os_shader_id = Some(shader_id);
+                pipeline_id = Some(shader_id);
             }
 
-            self.draw_shaders.shaders[draw_shader_id].os_shader_id = os_shader_id;
+            self.draw_shaders.shaders[draw_shader_id].pipeline_id = pipeline_id;
             self.draw_shaders.compile_set.remove(&draw_shader_id);
         }
     }
@@ -1137,10 +1217,8 @@ precision highp int;
 precision highp sampler2DShadow;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
-vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){{return textureLod(sampler, dir, lod);}}
-vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_vertex
@@ -1154,10 +1232,8 @@ precision highp int;
 precision highp sampler2DShadow;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
-vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){{return textureLod(sampler, dir, lod);}}
-vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_pixel
@@ -1172,25 +1248,8 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
     }
 }
 
-/// WebGL renders a texture pass into a bottom-up target: negate the
-/// projection's Y row so the texels land in the top-left row order Metal and
-/// D3D produce (see `Cx::setup_render_pass`).
-fn flip_projection_y(m: &mut Mat4f) {
-    m.v[1] = -m.v[1];
-    m.v[5] = -m.v[5];
-    m.v[9] = -m.v[9];
-    m.v[13] = -m.v[13];
-}
-
 #[derive(Default, Clone, Debug)]
-pub struct CxOsPass {
-    /// The pass uniforms a custom-camera (`keep_camera_matrix`) texture pass
-    /// actually uploads: the caller's matrices with the projection's Y
-    /// inverted for WebGL's bottom-up render targets. `None` for canvas
-    /// passes and for 2D texture passes, whose ortho is built flipped. Kept
-    /// as the upload slice (`DrawPassUniforms::as_slice`).
-    pub flipped_uniforms: Option<Vec<f32>>,
-}
+pub struct CxOsPass {}
 
 #[derive(Clone, Default)]
 pub struct CxOsDrawList {}
@@ -1221,14 +1280,6 @@ pub struct CxOsDrawCall {
     pub uniforms_recording_gen: Option<u64>,
     pub draw_call_uniforms_gen: Option<u64>,
     pub user_uniforms_gen: Option<u64>,
-}
-
-impl CxOsDrawCall {
-    /// This backend keeps no per-publication backing lease on a draw item
-    /// (contract §10): nothing to release when the item's lease clears.
-    pub(crate) fn take_backing(&mut self) -> Option<u64> {
-        None
-    }
 }
 
 #[derive(Clone)]

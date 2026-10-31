@@ -14,8 +14,19 @@
 //! off it; do not block, and do not call `add_screen_capture` /
 //! `remove_screen_capture` from inside a sink (the registry lock is held).
 //!
-//! Backend coverage: macOS/Metal, Windows/D3D11, Linux/OpenGL + Vulkan —
-//! the same places that can already answer a `/g` grab.
+//! Backend coverage: every backend that answers a `/g` grab. Under the HAL
+//! the frame builder asks for the same window copy a grab uses while a sink
+//! is owed a frame (`os/hal/readback.rs`), so Metal, Vulkan (X11, Wayland,
+//! KMS, Android) and D3D11 all serve it from one place.
+//!
+//! A recorder uses the second kind of sink, [`add_screen_capture_surface`],
+//! where the backend supports it ([`surfaces_supported`]: Metal, D3D11, the
+//! windowed Vulkan path). It gets the frame as a [`ScreenCaptureSurface`]
+//! instead of bytes: the window pass copies its drawable on the GPU into the
+//! next free buffer of a small ring, in the work that presents it, and the
+//! render thread never waits for or touches the pixels. A frame is skipped
+//! rather than waited for when every buffer is still in use. The backend
+//! halves live in the HAL's Apple, Windows and Linux backends.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -58,14 +69,241 @@ impl Default for ScreenCaptureOptions {
     }
 }
 
+/// A presented frame as a GPU-side surface, `width` x `height` device pixels
+/// (the drawable cropped to even dimensions, which is what a 4:2:0 encoder
+/// wants), top-down. What it holds is per backend:
+///
+/// - Apple: an IOSurface-backed BGRA8 `CVPixelBuffer` ([`Self::pixel_buffer`]).
+/// - Windows: a BGRA8 `ID3D11Texture2D` on the app's device
+///   ([`Self::d3d11_texture`]), which Media Foundation encodes from directly.
+/// - Linux (Vulkan): a persistently mapped host-visible buffer the frame's
+///   command buffer copied into; the bytes are read by the consumer's thread.
+///
+/// Cloning shares the surface; dropping the last handle gives the buffer back
+/// to the backend's small capture ring, so a sink that holds on to surfaces
+/// holds capture buffers (hold the newest only). With none free the backend
+/// skips frames rather than waiting.
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+#[derive(Clone)]
+pub struct ScreenCaptureSurface {
+    pub(crate) inner: SurfaceInner,
+    pub width: u32,
+    pub height: u32,
+    /// Same clock as [`ScreenCaptureFrame::time_ns`].
+    pub time_ns: u64,
+}
+
+#[cfg(target_vendor = "apple")]
+pub(crate) struct SurfaceInner(pub(crate) makepad_apple_sys::CVPixelBufferRef);
+
+// A CVPixelBuffer is a thread-safe CF object; the handle only retains it.
+#[cfg(target_vendor = "apple")]
+unsafe impl Send for SurfaceInner {}
+#[cfg(target_vendor = "apple")]
+unsafe impl Sync for SurfaceInner {}
+
+#[cfg(target_vendor = "apple")]
+impl Clone for SurfaceInner {
+    fn clone(&self) -> Self {
+        unsafe { makepad_apple_sys::CVPixelBufferRetain(self.0) };
+        Self(self.0)
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl Drop for SurfaceInner {
+    fn drop(&mut self) {
+        unsafe { makepad_apple_sys::CVPixelBufferRelease(self.0) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+pub(crate) struct SurfaceInner {
+    pub(crate) texture: crate::windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    pub(crate) device: crate::windows::Win32::Graphics::Direct3D11::ID3D11Device,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct SurfaceInner(pub(crate) std::sync::Arc<dyn MappedCapture>);
+
+/// A Linux capture buffer, mapped for reading while any handle lives.
+#[cfg(target_os = "linux")]
+pub(crate) trait MappedCapture: Send + Sync {
+    /// Rows of `stride()` bytes, top row first.
+    fn bytes(&self) -> &[u8];
+    fn stride(&self) -> usize;
+    /// BGRA (true) or RGBA (false).
+    fn bgra(&self) -> bool;
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+impl ScreenCaptureSurface {
+    /// The `CVPixelBufferRef`, valid while `self` lives.
+    #[cfg(target_vendor = "apple")]
+    pub fn pixel_buffer(&self) -> makepad_apple_sys::CVPixelBufferRef {
+        self.inner.0
+    }
+
+    /// The texture holding the frame (BGRA8, exactly `width` x `height`).
+    #[cfg(target_os = "windows")]
+    pub fn d3d11_texture(&self) -> &crate::windows::Win32::Graphics::Direct3D11::ID3D11Texture2D {
+        &self.inner.texture
+    }
+
+    /// The device the texture lives on, for an encoder that reads it there.
+    #[cfg(target_os = "windows")]
+    pub fn d3d11_device(&self) -> &crate::windows::Win32::Graphics::Direct3D11::ID3D11Device {
+        &self.inner.device
+    }
+
+    /// Copy the pixels out as tightly packed opaque RGBA8, on the caller's
+    /// thread. On Apple and Linux the surface is CPU-visible memory (the GPU
+    /// finished writing it before it was delivered); on Windows this is a
+    /// staging copy on the device and waits for it, so keep it off the UI
+    /// thread and out of the per-frame path.
+    pub fn read_rgba(&self, out: &mut Vec<u8>) -> bool {
+        let (width, height) = (self.width as usize, self.height as usize);
+        out.clear();
+        out.resize(width * height * 4, 0);
+        #[cfg(target_vendor = "apple")]
+        unsafe {
+            use makepad_apple_sys::*;
+            // kCVPixelBufferLock_ReadOnly
+            if CVPixelBufferLockBaseAddress(self.inner.0, 1) != 0 {
+                return false;
+            }
+            let base = CVPixelBufferGetBaseAddress(self.inner.0) as *const u8;
+            let stride = CVPixelBufferGetBytesPerRow(self.inner.0);
+            let ok = !base.is_null() && stride >= width * 4;
+            if ok {
+                for (y, row) in out.chunks_exact_mut(width * 4).enumerate() {
+                    let src = std::slice::from_raw_parts(base.add(y * stride), width * 4);
+                    swizzle_opaque(row, src, true);
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(self.inner.0, 1);
+            ok
+        }
+        #[cfg(target_os = "windows")]
+        {
+            read_d3d11_rgba(self, out)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let (bytes, stride) = (self.inner.0.bytes(), self.inner.0.stride());
+            if stride < width * 4 || bytes.len() < stride * height {
+                return false;
+            }
+            for (y, row) in out.chunks_exact_mut(width * 4).enumerate() {
+                swizzle_opaque(row, &bytes[y * stride..y * stride + width * 4], self.inner.0.bgra());
+            }
+            true
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+/// [`ScreenCaptureSurface::read_rgba`] on D3D11: a staging copy on the
+/// surface's device, mapped (waits for the copy) on the caller's thread.
+fn read_d3d11_rgba(surface: &ScreenCaptureSurface, out: &mut Vec<u8>) -> bool {
+    use crate::windows::Win32::Graphics::{
+        Direct3D11::{ID3D11Resource, ID3D11Texture2D, D3D11_MAP, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE},
+        Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+    };
+    let SurfaceInner { texture, device } = &surface.inner;
+    let (width, height) = (surface.width, surface.height);
+    unsafe {
+        let Ok(context) = device.GetImmediateContext() else {
+            return false;
+        };
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE(3), // D3D11_USAGE_STAGING
+            BindFlags: 0,
+            CPUAccessFlags: 0x20000, // D3D11_CPU_ACCESS_READ
+            MiscFlags: 0,
+        };
+        let mut staging: Option<ID3D11Texture2D> = None;
+        if device.CreateTexture2D(&desc, None, Some(&mut staging)).is_err() {
+            return false;
+        }
+        let (Some(Ok(staging)), Ok(source)) = (staging.map(|s| ID3D11Resource::query(s.as_raw())), ID3D11Resource::query(texture.as_raw())) else {
+            return false;
+        };
+        context.CopyResource(&staging, &source);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        if context.Map(&staging, 0, D3D11_MAP(1), 0, Some(&mut mapped)).is_err() {
+            return false;
+        }
+        let row_bytes = width as usize * 4;
+        for (y, row) in out.chunks_exact_mut(row_bytes).enumerate().take(height as usize) {
+            let src = std::slice::from_raw_parts(
+                (mapped.pData as *const u8).add(y * mapped.RowPitch as usize),
+                row_bytes,
+            );
+            swizzle_opaque(row, src, true);
+        }
+        context.Unmap(&staging, 0);
+        true
+    }
+}
+
+/// `src` pixels to opaque RGBA in `dst`, swapping red and blue when `bgra`.
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+pub(crate) fn swizzle_opaque(dst: &mut [u8], src: &[u8], bgra: bool) {
+    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        if bgra {
+            d.copy_from_slice(&[s[2], s[1], s[0], 255]);
+        } else {
+            d.copy_from_slice(&[s[0], s[1], s[2], 255]);
+        }
+    }
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+pub type ScreenCaptureSurfaceFn = Box<dyn FnMut(&ScreenCaptureSurface) + Send + 'static>;
+
+/// Set by a backend that delivers surfaces ([`add_screen_capture_surface`]);
+/// a recorder falls back to byte frames where none does (a GL window, the
+/// DRM direct path).
+static SURFACES_SUPPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process's renderer delivers capture surfaces.
+pub fn surfaces_supported() -> bool {
+    // Metal and D3D11 are the only renderers there; Linux has several.
+    cfg!(any(target_vendor = "apple", target_os = "windows"))
+        || SURFACES_SUPPORTED.load(Ordering::Acquire)
+}
+
+#[allow(dead_code)] // set by the backends that deliver surfaces
+pub(crate) fn set_surfaces_supported() {
+    SURFACES_SUPPORTED.store(true, Ordering::Release);
+}
+
+enum SinkFn {
+    Bytes(ScreenCaptureFn),
+    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+    Surface(ScreenCaptureSurfaceFn),
+}
+
 struct Sink {
     window_id: Option<usize>,
     min_interval_ns: u64,
     last_ns: Option<u64>,
-    f: ScreenCaptureFn,
+    f: SinkFn,
 }
 
 impl Sink {
+    fn is_bytes(&self) -> bool {
+        matches!(self.f, SinkFn::Bytes(_))
+    }
     fn matches(&self, window_id: Option<usize>) -> bool {
         match self.window_id {
             None => true,
@@ -111,6 +349,20 @@ where
 }
 
 pub fn add_screen_capture_box(options: ScreenCaptureOptions, f: ScreenCaptureFn) -> u64 {
+    add_sink(options, SinkFn::Bytes(f))
+}
+
+/// Install a surface sink (see the module docs): every due presented frame of
+/// the window, as a GPU surface, on the backend's frame-completion thread.
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+pub fn add_screen_capture_surface<F>(options: ScreenCaptureOptions, f: F) -> u64
+where
+    F: FnMut(&ScreenCaptureSurface) + Send + 'static,
+{
+    add_sink(options, SinkFn::Surface(Box::new(f)))
+}
+
+fn add_sink(options: ScreenCaptureOptions, f: SinkFn) -> u64 {
     let min_interval_ns = if options.max_fps > 0.0 {
         (1_000_000_000.0 / options.max_fps) as u64
     } else {
@@ -154,7 +406,45 @@ pub fn capture_wants_window(window_id: Option<usize>) -> bool {
     let now = now_ns();
     sinks
         .values()
-        .any(|sink| sink.matches(window_id) && sink.due(now))
+        .any(|sink| sink.is_bytes() && sink.matches(window_id) && sink.due(now))
+}
+
+/// Should this pass blit its drawable into a capture surface?
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+pub fn capture_wants_surface(window_id: Option<usize>) -> bool {
+    if !ACTIVE.load(Ordering::Acquire) {
+        return false;
+    }
+    let Ok(sinks) = sinks().lock() else {
+        return false;
+    };
+    let now = now_ns();
+    sinks
+        .values()
+        .any(|sink| !sink.is_bytes() && sink.matches(window_id) && sink.due(now))
+}
+
+/// Hand a captured surface to every surface sink that wants it. Called from
+/// the backend's frame-completion path; `surface.time_ns` is set here.
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+pub(crate) fn deliver_capture_surface(window_id: Option<usize>, mut surface: ScreenCaptureSurface) {
+    if !ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let Ok(mut sinks) = sinks().lock() else {
+        return;
+    };
+    let now = now_ns();
+    surface.time_ns = now;
+    for sink in sinks.values_mut() {
+        if !sink.matches(window_id) || !sink.due(now) {
+            continue;
+        }
+        if let SinkFn::Surface(f) = &mut sink.f {
+            sink.last_ns = Some(now);
+            f(&surface);
+        }
+    }
 }
 
 /// Hand the presented frame's RGBA to every sink that wants it. Called from
@@ -181,7 +471,11 @@ pub fn deliver_capture_frame(window_id: Option<usize>, width: u32, height: u32, 
         if !sink.matches(window_id) || !sink.due(now) {
             continue;
         }
-        sink.last_ns = Some(now);
-        (sink.f)(&frame);
+        // Irrefutable where the platform has no surface sinks.
+        #[allow(irrefutable_let_patterns)]
+        if let SinkFn::Bytes(f) = &mut sink.f {
+            sink.last_ns = Some(now);
+            f(&frame);
+        }
     }
 }

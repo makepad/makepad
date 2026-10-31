@@ -176,27 +176,6 @@ impl WebSocketParser {
         }
     }
 
-    pub fn message_to_frame(msg: WebSocketMessage) -> Vec<u8> {
-        match &msg {
-            WebSocketMessage::Text(data) => {
-                let header = WebSocketMessageHeader::from_len(
-                    data.len(),
-                    WebSocketMessageFormat::Text,
-                    false,
-                );
-                WebSocketParser::build_message(header, &data.to_string().into_bytes())
-            }
-            WebSocketMessage::Binary(data) => {
-                let header = WebSocketMessageHeader::from_len(
-                    data.len(),
-                    WebSocketMessageFormat::Binary,
-                    false,
-                );
-                WebSocketParser::build_message(header, &data)
-            }
-            _ => panic!(),
-        }
-    }
 
     pub fn create_upgrade_response(key: &str) -> String {
         let to_hash = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);

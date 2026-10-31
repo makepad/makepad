@@ -80,8 +80,13 @@ class AudioWorklet extends AudioWorkletProcessor {
         for (const imp of WebAssembly.Module.imports(thread_info.module)) {
             if (imp.module !== "env" || imp.kind !== "function" || env[imp.name] !== undefined) continue;
             const name = imp.name;
-            if (name === "js_time_now" || name === "js_monotonic_now") {
+            if (name === "js_time_now") {
                 env[name] = () => Date.now() / 1000.0;
+            } else if (name === "js_monotonic_now") {
+                // The UI thread's clock (performance.now(), from the page's time
+                // origin): a worklet has no performance clock of its own.
+                const origin = options.processorOptions.time_origin || 0;
+                env[name] = () => (Date.now() - origin) / 1000.0;
             } else if (name === "js_wake_ui") {
                 env[name] = () => this.port.postMessage({ message_type: "wake_ui" });
             } else {
@@ -93,6 +98,11 @@ class AudioWorklet extends AudioWorkletProcessor {
 
             wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
             wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+            // A worklet may not block: its waits spin (the optimiser's
+            // `waits` pass).
+            if (wasm.exports.__makepad_cannot_block instanceof WebAssembly.Global) {
+                wasm.exports.__makepad_cannot_block.value = 1;
+            }
 
             this._context = {
                 exports: wasm.exports,
@@ -131,11 +141,15 @@ class AudioWorklet extends AudioWorkletProcessor {
             let frames = outputs[0][0].length;
             let channels = outputs[0].length;
 
+            // The block's first frame (the context's frame counter); when it is heard is
+            // unknown here (NaN: no time): a worklet has no clock of the page's.
             let output_ptr = context.exports.wasm_audio_output_entrypoint(
                 context.context_ptr,
                 frames,
                 channels,
                 sampleRate,
+                currentFrame,
+                NaN,
             );
 
             if (!this._callback_started) {

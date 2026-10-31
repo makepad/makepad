@@ -5,6 +5,8 @@ use {
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static REQUESTED: AtomicBool = AtomicBool::new(false);
+/// A termination was asked for at some point (never cleared).
+static SEEN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn install() {
     if INSTALLED.swap(true, Ordering::AcqRel) {
@@ -16,8 +18,31 @@ pub(crate) fn install() {
 }
 
 fn request() {
+    SEEN.store(true, Ordering::Release);
     REQUESTED.store(true, Ordering::Release);
+    relax_quit_requested();
     SignalToUI::set_internal_signal();
+}
+
+/// Optional loader notification (like relax_first_present in cx.rs): under Relax, the disk
+/// cache is written now, while the app shuts down, so a harness or a user that stops the app
+/// with SIGTERM/Ctrl+C and kills it soon after still leaves a warm cache behind. A rustc build
+/// has no such symbol. Called on the termination worker thread, not in signal context.
+#[cfg(any(unix, windows))]
+fn relax_quit_requested() {
+    let hook = crate::cx::relax_host_symbol(c"relax_quit_requested");
+    if !hook.is_null() {
+        let hook = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(hook) };
+        hook();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn relax_quit_requested() {}
+
+/// Whether SIGTERM/SIGINT/SIGHUP (or the console's close) ever arrived.
+pub(crate) fn seen() -> bool {
+    SEEN.load(Ordering::Acquire)
 }
 
 pub(crate) fn take_requested() -> bool {
@@ -34,12 +59,27 @@ mod native {
         sync::{atomic::AtomicI32, OnceLock},
     };
 
+    #[cfg(target_os = "linux")]
+    use std::sync::atomic::AtomicU64;
+
     // Both endpoints live for the process lifetime, including on partial setup
     // failure. An in-flight signal must never write to a closed/reused fd.
     static WAKE: OnceLock<(UnixStream, UnixStream)> = OnceLock::new();
     static WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+    /// CLOCK_MONOTONIC ns of the first signal (0: none yet). A second signal forces the exit,
+    /// unless it comes within SAME_REQUEST_NS: that is one request delivered twice -- GNU
+    /// timeout (and so every x64run/CI wrapper) sends SIGTERM to its child and then to its
+    /// process group, and the child's _exit then cut off Relax's quit write of the cache.
     #[cfg(target_os = "linux")]
-    static SIGNAL_SEEN: AtomicBool = AtomicBool::new(false);
+    static FIRST_SIGNAL_NS: AtomicU64 = AtomicU64::new(0);
+    #[cfg(target_os = "linux")]
+    const SAME_REQUEST_NS: u64 = 250_000_000;
+    #[cfg(target_os = "linux")]
+    #[repr(C)]
+    struct Timespec {
+        sec: i64,
+        nsec: i64,
+    }
     const SIGNALS: [c_int; 3] = [2, 15, 1]; // SIGINT, SIGTERM, SIGHUP
 
     extern "C" {
@@ -53,14 +93,23 @@ mod native {
         fn errno_location() -> *mut c_int;
         #[cfg(target_os = "linux")]
         fn _exit(status: c_int) -> !;
+        #[cfg(target_os = "linux")]
+        fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
     }
 
     extern "C" fn handle(_: c_int) {
         // Only lock-free atomics and async-signal-safe C calls here. In
         // particular, the UI waker may lock or enter AppKit, so a worker runs it.
         #[cfg(target_os = "linux")]
-        if SIGNAL_SEEN.swap(true, Ordering::AcqRel) {
-            unsafe { _exit(130) };
+        {
+            let mut ts = Timespec { sec: 0, nsec: 0 };
+            unsafe { clock_gettime(1, &mut ts) }; // CLOCK_MONOTONIC; async-signal-safe
+            let now = (ts.sec as u64).wrapping_mul(1_000_000_000).wrapping_add(ts.nsec as u64).max(1);
+            if let Err(first) = FIRST_SIGNAL_NS.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire) {
+                if now.saturating_sub(first) >= SAME_REQUEST_NS {
+                    unsafe { _exit(130) };
+                }
+            }
         }
         unsafe {
             let errno = errno_location();
@@ -174,5 +223,18 @@ mod native {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_request_is_seen_for_good_and_taken_once() {
+        assert!(!super::seen());
+        super::request();
+        assert!(super::seen());
+        assert!(super::take_requested());
+        assert!(!super::take_requested());
+        assert!(super::seen(), "taking the request does not forget it");
     }
 }

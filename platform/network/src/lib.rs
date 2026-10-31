@@ -3,14 +3,54 @@ pub mod backend;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod blocking_http;
 pub mod digest;
+// Fleet credentials, the TLS front and the LAN bind rule (tools/fleet-identity.md).
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod fleet;
 // The embedded TCP server is native-only; browsers cannot listen on sockets.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod http_server;
+// May this process touch the local network (macOS Local Network privacy): the one rule.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod lan;
+// MAKEPAD_NET_AUDIT=1: every socket this process holds, logged (lan.rs).
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod socket_audit;
+// In-flight requests and the unread queue for `makepad inspect <pid> net` (std clock: native only).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod ledger;
+#[cfg(target_arch = "wasm32")]
+pub mod ledger {
+    use crate::types::{HttpRequest, NetworkResponse};
+    use makepad_live_id::LiveId;
+    use std::sync::Arc;
+    pub struct Ledger;
+    impl Ledger {
+        pub(crate) fn new() -> Arc<Self> { Arc::new(Ledger) }
+        pub(crate) fn http_started(&self, _id: LiveId, _request: &HttpRequest) {}
+        pub(crate) fn emitted(&self, _event: &NetworkResponse) {}
+        pub(crate) fn polled(&self, _event: Option<&NetworkResponse>) {}
+        pub(crate) fn ended(&self, _id: LiveId, _what: &str) {}
+    }
+    pub fn report() -> String { "net: not recorded on the web\n".to_string() }
+}
+// `recv_timeout` reads the std clock, as std's does (callers are linted).
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod mpsc;
 // The blocking TCP websocket is native-only; wasm uses backend::web.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod plain_web_socket;
 pub mod runtime;
+pub mod runtime_handle;
 pub mod socket_stream;
+// TLS server and pinned identities on each OS's own TLS stack (native only).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod tls;
+// The remote tunnel's protocol and authentication.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod tunnel;
 pub mod types;
 pub mod ui_signal;
 // TCP parsing helpers expose native socket deadlines alongside pure parsers.
@@ -22,10 +62,11 @@ pub const HTTP_BODY_LIMIT_ERROR: &str = "response body exceeds configured limit"
 
 pub use crate::backend::{EventSink, NetworkBackend, UnsupportedBackend};
 pub use crate::http_server::{
-    start_http_server, HttpServer, HttpServerRequest, HttpServerResponse,
+    start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, HttpServerThread,
     HttpServerResponseSender,
 };
 pub use crate::runtime::{NetworkConfig, NetworkRuntime};
+pub use crate::runtime_handle::NetworkRuntimeHandle;
 pub use crate::socket_stream::SocketStream;
 pub use crate::types::{
     HttpError, HttpMethod, HttpProgress, HttpRequest, HttpResponse, NetworkError, NetworkResponse,
@@ -47,12 +88,12 @@ pub use makepad_error_log;
 
 #[cfg(target_os = "android")]
 pub use crate::backend::{
-    clear_platform_backend as clear_android_backend_shim,
     clear_platform_socket_factory as clear_android_socket_stream_factory_shim,
-    register_platform_backend as register_android_backend_shim,
     register_platform_socket_factory as register_android_socket_stream_factory_shim,
     PlatformSocketFactory as AndroidSocketStreamFactory,
     PlatformSocketStream as AndroidSocketStream,
+    register_platform_crypto as register_android_crypto, PlatformCrypto as AndroidCrypto,
+    PlatformTlsServer as AndroidTlsServer, PlatformTlsSession as AndroidTlsSession,
 };
 
 #[cfg(target_arch = "wasm32")]

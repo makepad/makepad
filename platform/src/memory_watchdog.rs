@@ -100,17 +100,40 @@ fn gb(bytes: u64) -> f64 {
 fn orphaned_stdin_app() -> bool {
     #[cfg(unix)]
     {
-        if !crate::app_main::should_run_stdin_loop_from_env() {
+        if !crate::app_main::launched_by_host() {
             return false;
         }
         extern "C" {
             fn getppid() -> i32;
         }
-        unsafe { getppid() == 1 }
+        // The host this child started under: any other parent means it is gone. Init is not
+        // the only reaper -- under a user session manager an orphan is adopted by a
+        // subreaper (`systemd --user`) and its parent is never 1.
+        static HOST: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+        let now = unsafe { getppid() };
+        host_gone(now, *HOST.get_or_init(|| now))
     }
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+/// Whether a child that started under `started_under` and now has parent `parent` lost its host.
+#[cfg(unix)]
+fn host_gone(parent: i32, started_under: i32) -> bool {
+    parent == 1 || parent != started_under
+}
+
+#[cfg(all(test, unix))]
+mod host_tests {
+    use super::host_gone;
+
+    #[test]
+    fn a_child_is_orphaned_when_its_parent_changes() {
+        assert!(!host_gone(4242, 4242));
+        assert!(host_gone(1, 4242), "adopted by init");
+        assert!(host_gone(977, 4242), "adopted by a subreaper (systemd --user)");
     }
 }
 
@@ -128,12 +151,14 @@ fn orphaned_stdin_app() -> bool {
 // Browser workers are never stdin-loop child processes.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start_stdin_orphan_watchdog() {
-    if !crate::app_main::should_run_stdin_loop_from_env() {
+    if !crate::app_main::launched_by_host() {
         return;
     }
     if ORPHAN_WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
+    // Records the host's pid now, while it is still the parent.
+    orphaned_stdin_app();
     std::thread::Builder::new()
         .name("stdin-orphan-watchdog".into())
         .spawn(|| loop {

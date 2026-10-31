@@ -570,6 +570,12 @@ impl XrHand {
         Some((max_bend_angle_degrees, straightness, extension_ratio))
     }
 
+    /// The index finger's (max bend in degrees, straightness, extension ratio) that
+    /// [`Self::grab_intent`] judges a grasp by (`None`: its joints are not valid).
+    pub fn index_release_metrics(&self) -> Option<(f32, f32, f32)> {
+        self.index_grab_release_metrics()
+    }
+
     pub fn grab_intent(&self) -> bool {
         if !self.grabbing() {
             return false;
@@ -973,6 +979,15 @@ pub struct XrSyncAnchor {
     pub anchor: XrAnchor,
 }
 
+/// A controller buzz an XR app asked for (`Cx::xr_haptic`): which hand (0 left, 1 right), how
+/// strong (0..1) and how long.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrHapticPulse {
+    pub hand: u8,
+    pub amplitude: f32,
+    pub seconds: f32,
+}
+
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrState {
     pub time: f64,
@@ -1188,6 +1203,19 @@ impl XrLocalEvent {
     where
         F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     {
+        self.hits_with_options_and_test_dyn(cx, area, options, &hit_test)
+    }
+
+    /// The body of [`Self::hits_with_options_and_test`], compiled once rather
+    /// than once per hit-test closure.
+    #[inline(never)]
+    pub fn hits_with_options_and_test_dyn(
+        &self,
+        cx: &mut Cx,
+        area: Area,
+        options: HitOptions,
+        hit_test: &dyn Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
+    ) -> Hit {
         if cx.fingers.test_sweep_lock(options.sweep_area) {
             return Hit::Nothing;
         }

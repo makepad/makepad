@@ -39,7 +39,7 @@ use {
                 AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
             },
             mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
-            Arc, Condvar, Mutex, MutexGuard, OnceLock,
+            Arc, Condvar, Mutex, OnceLock,
         },
         thread::ThreadId,
         time::Duration,
@@ -52,52 +52,17 @@ pub use makepad_network::{
     UiWaker,
 };
 
-fn lock_without_wasm_wait<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Browser UI and AudioWorklet threads cannot use the futex wait that a
-    // contended wasm Mutex::lock performs.
-    #[cfg(target_arch = "wasm32")]
-    loop {
-        match mutex.try_lock() {
-            Ok(guard) => return guard,
-            Err(std::sync::TryLockError::Poisoned(error)) => return error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => std::hint::spin_loop(),
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    mutex.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-pub fn lock_from_ui<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    lock_without_wasm_wait(mutex)
-}
-
-/// Lock from a realtime audio callback without entering `Atomics.wait` on
-/// wasm. Native targets retain the ordinary blocking mutex behaviour.
-pub fn lock_from_audio<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    lock_without_wasm_wait(mutex)
-}
-
 pub(crate) fn wake_ui_event_loop() {
-    #[cfg(all(not(gpusim), target_os = "macos"))]
-    crate::os::apple::macos::macos_app::wake_event_loop();
-
-    #[cfg(all(not(gpusim), target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     unsafe {
         js_wake_ui();
     }
 
-    #[cfg(any(
-        gpusim,
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "windows",
-        target_os = "linux",
-        target_os = "android"
-    ))]
+    #[cfg(not(target_arch = "wasm32"))]
     crate::os::wake_ui_event_loop();
 }
 
-#[cfg(all(not(gpusim), target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn js_wake_ui();
@@ -451,6 +416,107 @@ impl<T> TaskHandle<T> {
             priority_status: priority_state(PriorityStatus::BestEffortUnsupported),
             #[cfg(not(target_arch = "wasm32"))]
             native_join: None,
+        }
+    }
+}
+
+// The page profile without threads (wasm32 without atomics): no worker
+// exists, so a [`FrameJob`] runs on the UI thread, one per display frame.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+std::thread_local! {
+    static FRAME_JOB_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A display frame starts: the next deferred [`FrameJob`] may run. The web
+/// platform calls this at every animation frame; with threads it does nothing.
+pub fn frame_jobs_new_frame() {
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+    FRAME_JOB_RAN.with(|ran| ran.set(false));
+}
+
+/// A job on the pool ([`TaskPool::submit_frame_job`]), with
+/// [`TaskHandle`]'s polling. Natively and in a threaded web build it is a
+/// pool task. Without workers (a single-threaded web build) it runs on the
+/// UI thread when its result is first asked for (`try_take`,
+/// `is_finished`), one job per display frame ([`frame_jobs_new_frame`]):
+/// a page that loads many keeps drawing between them. Poll it from a
+/// frame-driven path, since a deferred job only runs when polled.
+#[must_use = "dropping a frame job cancels or detaches it"]
+pub struct FrameJob<T> {
+    inner: FrameJobInner<T>,
+}
+
+enum FrameJobInner<T> {
+    /// A pool task (natively and in a threaded web build).
+    #[cfg_attr(all(target_arch = "wasm32", not(target_feature = "atomics")), allow(dead_code))]
+    Task(TaskHandle<T>),
+    /// Not run yet, or run and not taken (the page without threads).
+    #[cfg_attr(not(all(target_arch = "wasm32", not(target_feature = "atomics"))), allow(dead_code))]
+    Later {
+        job: Option<Box<dyn FnOnce() -> T + Send>>,
+        result: Option<Result<T, TaskError>>,
+        token: CancellationToken,
+    },
+}
+
+impl<T> fmt::Debug for FrameJob<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.inner {
+            FrameJobInner::Task(task) => task.fmt(f),
+            FrameJobInner::Later { job, .. } => f.debug_struct("FrameJob").field("ran", &job.is_none()).finish(),
+        }
+    }
+}
+
+impl<T> FrameJob<T> {
+    /// Run a deferred job here when this frame's turn is free.
+    fn run_due(&mut self) {
+        let FrameJobInner::Later { job, result, token } = &mut self.inner else { return };
+        if job.is_none() {
+            return;
+        }
+        if token.is_cancelled() {
+            *job = None;
+            *result = Some(Err(TaskError::Cancelled));
+            return;
+        }
+        #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+        if FRAME_JOB_RAN.with(|ran| ran.replace(true)) {
+            return;
+        }
+        let f = job.take().unwrap();
+        *result = Some(catch_unwind(AssertUnwindSafe(f)).map_err(|payload| TaskError::Panicked(panic_report(payload))));
+    }
+
+    /// Whether the result is there (a deferred job runs here if it may).
+    pub fn is_finished(&mut self) -> bool {
+        self.run_due();
+        match &self.inner {
+            FrameJobInner::Task(task) => task.is_finished(),
+            FrameJobInner::Later { job, .. } => job.is_none(),
+        }
+    }
+
+    /// The result once it is there, taken once (as [`TaskHandle::try_take`]).
+    pub fn try_take(&mut self) -> Option<Result<T, TaskError>> {
+        self.run_due();
+        match &mut self.inner {
+            FrameJobInner::Task(task) => task.try_take(),
+            FrameJobInner::Later { result, .. } => result.take(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        match &self.inner {
+            FrameJobInner::Task(task) => task.cancel(),
+            FrameJobInner::Later { token, .. } => token.cancel(),
+        }
+    }
+
+    pub fn token(&self) -> CancellationToken {
+        match &self.inner {
+            FrameJobInner::Task(task) => task.token(),
+            FrameJobInner::Later { token, .. } => token.clone(),
         }
     }
 }
@@ -1305,7 +1371,16 @@ impl PoolInner {
         queue.wait_max_us.fetch_max(wait_us, Ordering::Relaxed);
         let lane = job.lane;
         let label = job.label;
+        // makepad inspect's timeline: the job is a span of work on this worker
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        let traced = ui_hang::relax_timeline::hooks().inspect(|h| (h.begin)(label.as_ptr(), label.len())).is_some();
         job.run(status);
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        if traced {
+            if let Some(h) = ui_hang::relax_timeline::hooks() {
+                (h.end)(label.as_ptr(), label.len());
+            }
+        }
         let run_us = ((Cx::monotonic_now() - started).max(0.0) * 1_000_000.0) as u64;
         queue.run_total_us.fetch_add(run_us, Ordering::Relaxed);
         queue.run_max_us.fetch_max(run_us, Ordering::Relaxed);
@@ -1793,6 +1868,24 @@ impl TaskPool {
     {
         self.try_submit_named(lane, label, f)
             .map_err(|refused| refused.error)
+    }
+
+    /// [`submit`](Self::submit) as a [`FrameJob`]: the same pool task where
+    /// there are workers; without them (a single-threaded web build) the job
+    /// waits to run on the UI thread, one per display frame, when its result
+    /// is first asked for.
+    pub fn submit_frame_job<F, T>(&self, lane: Lane, f: F) -> Result<FrameJob<T>, SubmitError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+        {
+            let _ = lane;
+            Ok(FrameJob { inner: FrameJobInner::Later { job: Some(Box::new(f)), result: None, token: CancellationToken::new() } })
+        }
+        #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
+        self.submit(lane, f).map(|task| FrameJob { inner: FrameJobInner::Task(task) })
     }
 
     /// [`submit`](Self::submit) for one of makepad's own jobs, whose result the
@@ -2462,7 +2555,7 @@ impl Scheduler {
         }
         let id = self.state.next_id.fetch_add(1, Ordering::Relaxed).max(1) as u64;
         let handle_token = CancellationToken::new();
-        lock_from_ui(&self.state.inner).entries.push(TimerEntry {
+        self.state.inner.lock().unwrap_or_else(|e| e.into_inner()).entries.push(TimerEntry {
             deadline,
             period,
             missed,
@@ -2488,7 +2581,7 @@ fn wake_scheduler_ui() {
 fn run_scheduler_due(state: &Arc<SchedulerState>, now: f64) {
     let mut due = Vec::new();
     {
-        let mut inner = lock_from_ui(&state.inner);
+        let mut inner = state.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.entries.retain(|entry| {
             !entry.external_token.is_cancelled() && !entry.handle_token.is_cancelled()
         });
@@ -2530,7 +2623,7 @@ fn run_scheduler_due(state: &Arc<SchedulerState>, now: f64) {
                         }
                     }
                 };
-                lock_from_ui(&state.inner).entries.push(entry);
+                state.inner.lock().unwrap_or_else(|e| e.into_inner()).entries.push(entry);
             }
         }
     }
@@ -2544,7 +2637,7 @@ pub(crate) fn service_scheduler(cx: &mut Cx, event: &Event) {
         return;
     };
     if matches!(event, Event::Shutdown) {
-        let mut inner = lock_from_ui(&state.inner);
+        let mut inner = state.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((timer, _)) = inner.armed.take() {
             cx.stop_timer(timer);
         }
@@ -2557,7 +2650,7 @@ pub(crate) fn service_scheduler(cx: &mut Cx, event: &Event) {
         _ => None,
     };
     {
-        let mut inner = lock_from_ui(&state.inner);
+        let mut inner = state.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.armed.is_some_and(|(timer, _)| Some(timer.0) == fired) {
             inner.armed = None;
         }
@@ -2566,7 +2659,7 @@ pub(crate) fn service_scheduler(cx: &mut Cx, event: &Event) {
     let now = Cx::monotonic_now();
     run_scheduler_due(&state, now);
 
-    let mut inner = lock_from_ui(&state.inner);
+    let mut inner = state.inner.lock().unwrap_or_else(|e| e.into_inner());
     inner
         .entries
         .retain(|entry| !entry.external_token.is_cancelled() && !entry.handle_token.is_cancelled());
@@ -2685,7 +2778,7 @@ fn spawn_web_task<T: Send + 'static>(
     let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1);
     let closure: WebClosure = Box::new(run);
     let context_ptr = Box::into_raw(Box::new(closure)) as u32;
-    lock_from_ui(web_requests()).insert(
+    web_requests().lock().unwrap_or_else(|e| e.into_inner()).insert(
         request_id,
         WebRequest {
             context_ptr,
@@ -2705,7 +2798,7 @@ fn spawn_web_task<T: Send + 'static>(
         )
     };
     if accepted == 0 {
-        if let Some(request) = lock_from_ui(web_requests()).remove(&request_id) {
+        if let Some(request) = web_requests().lock().unwrap_or_else(|e| e.into_inner()).remove(&request_id) {
             unsafe { drop(Box::from_raw(request.context_ptr as *mut WebClosure)) };
         }
         return Err(SpawnError::Unsupported);
@@ -2744,7 +2837,7 @@ pub unsafe extern "C" fn wasm_thread_entrypoint(_request_id: u32, closure_ptr: u
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_started"]
 pub extern "C" fn wasm_thread_started(request_id: u32) {
-    if let Some(request) = lock_from_ui(web_requests()).get_mut(&request_id) {
+    if let Some(request) = web_requests().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&request_id) {
         request.stage = WebWorkerStage::Started;
     }
 }
@@ -2752,7 +2845,7 @@ pub extern "C" fn wasm_thread_started(request_id: u32) {
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_failed_to_start"]
 pub unsafe extern "C" fn wasm_thread_failed_to_start(request_id: u32) {
-    if let Some(request) = lock_from_ui(web_requests()).remove(&request_id) {
+    if let Some(request) = web_requests().lock().unwrap_or_else(|e| e.into_inner()).remove(&request_id) {
         drop(Box::from_raw(request.context_ptr as *mut WebClosure));
         request
             .completion
@@ -2765,7 +2858,7 @@ pub unsafe extern "C" fn wasm_thread_failed_to_start(request_id: u32) {
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_worker_lost"]
 pub extern "C" fn wasm_thread_worker_lost(request_id: u32) {
-    if let Some(request) = lock_from_ui(web_requests()).remove(&request_id) {
+    if let Some(request) = web_requests().lock().unwrap_or_else(|e| e.into_inner()).remove(&request_id) {
         request.completion.complete_error(TaskError::WorkerLost);
     }
 }
@@ -2773,7 +2866,7 @@ pub extern "C" fn wasm_thread_worker_lost(request_id: u32) {
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_finished"]
 pub extern "C" fn wasm_thread_finished(request_id: u32) {
-    lock_from_ui(web_requests()).remove(&request_id);
+    web_requests().lock().unwrap_or_else(|e| e.into_inner()).remove(&request_id);
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
@@ -2839,25 +2932,6 @@ mod tests {
             started.send(()).unwrap();
             release.recv().unwrap_or(0)
         }
-    }
-
-    #[test]
-    fn lock_from_ui_returns_uncontended_and_contended_guards() {
-        let mutex = Mutex::new(1_u32);
-        *lock_from_ui(&mutex) += 1;
-        assert_eq!(*mutex.lock().unwrap(), 2);
-
-        let mutex = Arc::new(Mutex::new(7_u32));
-        let worker_mutex = mutex.clone();
-        let (held_tx, held_rx) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let _guard = worker_mutex.lock().unwrap();
-            held_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(10));
-        });
-        held_rx.recv().unwrap();
-        assert_eq!(*lock_from_ui(&mutex), 7);
-        worker.join().unwrap();
     }
 
     #[test]

@@ -16,7 +16,7 @@
 use {
     crate::apple_decoder::{nserror_to_video_error, AutoreleasePool},
     crate::{
-        nv12, VideoFileCodec, VideoFileEncoderOptions, VideoFileError, VideoTransformInfo,
+        nv12, VideoColor, VideoFileCodec, VideoFileEncoderOptions, VideoFileError, VideoRange, VideoTransformInfo,
     },
     makepad_apple_sys::*,
     std::ffi::c_void,
@@ -95,19 +95,42 @@ unsafe fn probe_hardware_encoder(
 }
 
 /// Poll an AVAssetWriterInput until it accepts more media data. Offline
-/// writes drain quickly; the timeout only guards against a wedged writer.
+/// writes drain quickly (the input is usually ready again within tens of microseconds, so the
+/// poll is fine-grained: a 1 ms sleep per frame capped a long movie at a few hundred frames a
+/// second); the timeout (20 s) only guards against a wedged writer.
 unsafe fn wait_for_input_ready(input: ObjcId, context: &str) -> Result<(), VideoFileError> {
-    for _ in 0..20_000u32 {
+    for _ in 0..400_000u32 {
         let ready: BOOL = msg_send![input, isReadyForMoreMediaData];
         if ready == YES {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_micros(50));
     }
     Err(VideoFileError::new(format!(
         "{}: AVAssetWriterInput never became ready",
         context
     )))
+}
+
+/// The NV12 pixel format of a colour's range.
+fn nv12_format(color: VideoColor) -> u32 {
+    match color.range {
+        VideoRange::Full => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        VideoRange::Limited => kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    }
+}
+
+/// CoreVideo's strings for a colour's primaries, transfer and matrix
+/// (process-lifetime constants).
+fn color_strings(color: VideoColor) -> [CFStringRef; 3] {
+    let (p, t, m, _) = color.h273();
+    unsafe {
+        [
+            CVColorPrimariesGetStringForIntegerCodePoint(p as i32),
+            CVTransferFunctionGetStringForIntegerCodePoint(t as i32),
+            CVYCbCrMatrixGetStringForIntegerCodePoint(m as i32),
+        ]
+    }
 }
 
 pub struct MacosVideoFileEncoder {
@@ -127,6 +150,14 @@ pub struct MacosVideoFileEncoder {
     audio_frames_pushed: u64,
     finalized: bool,
     nv12_scratch: Vec<u8>,
+    /// HEVC with alpha: pictures go in as BGRA.
+    alpha: bool,
+    /// What pushed RGB becomes and the stream is tagged with.
+    color: VideoColor,
+    /// The colour strings of `color`, attached to every NV12 buffer pushed.
+    color_strings: [CFStringRef; 3],
+    /// Made on the first frame pushed as a shared texture.
+    intake: Option<crate::apple_texture_intake::TextureIntake>,
 }
 
 // Driven from one thread at a time; the wrapped AVFoundation objects are not
@@ -149,11 +180,18 @@ impl MacosVideoFileEncoder {
         unsafe {
             let ns_path = str_to_nsstring(path);
             let url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: ns_path];
+            // The container by the file's extension: `.mov` a QuickTime
+            // movie (the container HEVC with alpha needs), else MPEG-4.
+            let mov = std::path::Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mov"));
+            let file_type = if mov { str_to_nsstring("com.apple.quicktime-movie") } else { AVFileTypeMPEG4 };
+            if options.codec == VideoFileCodec::H265Alpha && !mov {
+                return Err(VideoFileError::new("HEVC with alpha is written into a QuickTime movie (a .mov file)"));
+            }
             let mut error: ObjcId = nil;
             let writer: ObjcId = msg_send![
                 class!(AVAssetWriter),
                 assetWriterWithURL: url
-                fileType: AVFileTypeMPEG4
+                fileType: file_type
                 error: &mut error
             ];
             if writer == nil {
@@ -168,9 +206,12 @@ impl MacosVideoFileEncoder {
                 let _: () = msg_send![writer, setMovieFragmentInterval: interval];
             }
 
+            let alpha = options.codec == VideoFileCodec::H265Alpha;
             let (codec_type, codec_fourcc, codec_name) = match options.codec {
                 VideoFileCodec::H265 => (AVVideoCodecTypeHEVC, kCMVideoCodecType_HEVC, "HEVC"),
                 VideoFileCodec::H264 => (AVVideoCodecTypeH264, kCMVideoCodecType_H264, "H.264"),
+                // AVVideoCodecTypeHEVCWithAlpha
+                VideoFileCodec::H265Alpha => (str_to_nsstring("muxa"), u32::from_be_bytes(*b"muxa"), "HEVC with alpha"),
             };
 
             // --- Video input: codec + size + bitrate. ---
@@ -184,33 +225,50 @@ impl MacosVideoFileEncoder {
             ];
             let fps = (options.fps_num as f64 / options.fps_den as f64).round().max(1.0);
             let fps_number: ObjcId = msg_send![class!(NSNumber), numberWithDouble: fps];
-            let compression = if options.keyframe_only {
+            let mut compression_keys = vec![AVVideoAverageBitRateKey, AVVideoExpectedSourceFrameRateKey];
+            let mut compression_values = vec![bitrate_number, fps_number];
+            if options.keyframe_only {
                 // Max key-frame interval 1: all-intra, so the file decodes
                 // at any frame in any order (bounce loops play backwards
                 // without forward-decoding a GOP).
                 let one: ObjcId = msg_send![class!(NSNumber), numberWithInt: 1];
-                ns_dictionary(
-                    &[
-                        AVVideoAverageBitRateKey,
-                        AVVideoExpectedSourceFrameRateKey,
-                        AVVideoMaxKeyFrameIntervalKey,
-                    ],
-                    &[bitrate_number, fps_number, one],
-                )
-            } else {
-                ns_dictionary(
-                    &[AVVideoAverageBitRateKey, AVVideoExpectedSourceFrameRateKey],
-                    &[bitrate_number, fps_number],
-                )
-            };
+                compression_keys.push(AVVideoMaxKeyFrameIntervalKey);
+                compression_values.push(one);
+            }
+            if alpha {
+                // The alpha layer at full quality (kVTCompressionPropertyKey_
+                // TargetQualityForAlpha), and the pictures' colour is
+                // premultiplied by it (kVTCompressionPropertyKey_AlphaChannelMode).
+                let full: ObjcId = msg_send![class!(NSNumber), numberWithDouble: 1.0f64];
+                compression_keys.push(str_to_nsstring("TargetQualityForAlpha"));
+                compression_values.push(full);
+                compression_keys.push(str_to_nsstring("AlphaChannelMode"));
+                compression_values.push(str_to_nsstring("PremultipliedAlpha"));
+            }
+            let compression = ns_dictionary(&compression_keys, &compression_values);
+            // A pushed pixel buffer of another size (a recorder scaling a
+            // window, or a window resized mid-recording) is fitted into the
+            // track keeping its aspect, black bars around it, by
+            // VideoToolbox; frames of the track's size are untouched.
+            let scaling_key = str_to_nsstring("AVVideoScalingModeKey");
+            let resize_aspect = str_to_nsstring("AVVideoScalingModeResizeAspect");
+            // The colour the stream's VUI and the container's `colr` say
+            // (the range follows the source buffers' pixel format).
+            let color_strings = color_strings(options.color);
+            let color_properties = ns_dictionary(
+                &[AVVideoColorPrimariesKey, AVVideoTransferFunctionKey, AVVideoYCbCrMatrixKey],
+                &[color_strings[0] as ObjcId, color_strings[1] as ObjcId, color_strings[2] as ObjcId],
+            );
             let video_settings = ns_dictionary(
                 &[
                     AVVideoCodecKey,
                     AVVideoWidthKey,
                     AVVideoHeightKey,
                     AVVideoCompressionPropertiesKey,
+                    scaling_key,
+                    AVVideoColorPropertiesKey,
                 ],
-                &[codec_type, width_number, height_number, compression],
+                &[codec_type, width_number, height_number, compression, resize_aspect, color_properties],
             );
             let video_input: ObjcId = msg_send![
                 class!(AVAssetWriterInput),
@@ -221,6 +279,12 @@ impl MacosVideoFileEncoder {
                 return Err(VideoFileError::new("AVAssetWriterInput(video) init failed"));
             }
             let _: () = msg_send![video_input, setExpectsMediaDataInRealTime: YES];
+            // The track's timescale is the frame rate's numerator, so every
+            // frame time is a whole number of ticks (the default, 600, puts
+            // 90, 144 and the NTSC rates 24000/1001 … on a jittered grid).
+            if options.fps_den > 0 && options.fps_num > 0 && options.fps_num <= i32::MAX as u32 {
+                let _: () = msg_send![video_input, setMediaTimeScale: options.fps_num as i32];
+            }
             let can_add: BOOL = msg_send![writer, canAddInput: video_input];
             if can_add == NO {
                 let error: ObjcId = msg_send![writer, error];
@@ -231,10 +295,11 @@ impl MacosVideoFileEncoder {
             }
             let _: () = msg_send![writer, addInput: video_input];
 
-            // NV12 source buffers, matching the facade's frame format.
+            // NV12 source buffers, matching the facade's frame format; BGRA
+            // for an alpha layer.
             let nv12_number: ObjcId = msg_send![
                 class!(NSNumber),
-                numberWithUnsignedInt: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                numberWithUnsignedInt: if alpha { kCVPixelFormatType_32BGRA } else { nv12_format(options.color) }
             ];
             let source_attrs = ns_dictionary(
                 &[
@@ -388,6 +453,10 @@ impl MacosVideoFileEncoder {
                 audio_frames_pushed: 0,
                 finalized: false,
                 nv12_scratch: Vec::new(),
+                alpha,
+                color: options.color,
+                color_strings,
+                intake: None,
             })
         }
     }
@@ -406,11 +475,105 @@ impl MacosVideoFileEncoder {
         pixel_stride: usize,
         pts_100ns: Option<i64>,
     ) -> Result<(), VideoFileError> {
+        if self.alpha {
+            return self.push_frame_rgba_alpha(rgb, pixel_stride, pts_100ns);
+        }
+        if self.color.is_hdr() {
+            return Err(VideoFileError::new("RGB frames cannot be converted to HDR; push NV12 already in the stream's colour"));
+        }
         let mut scratch = std::mem::take(&mut self.nv12_scratch);
-        nv12::rgbx_to_nv12(rgb, self.width, self.height, pixel_stride, &mut scratch);
+        nv12::rgbx_to_nv12(rgb, self.width, self.height, pixel_stride, self.color, &mut scratch);
         let result = self.push_frame_nv12(&scratch, pts_100ns);
         self.nv12_scratch = scratch;
         result
+    }
+
+    /// HEVC with alpha: RGBA (premultiplied) as a BGRA pixel buffer.
+    fn push_frame_rgba_alpha(&mut self, rgba: &[u8], pixel_stride: usize, pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        if pixel_stride != 4 {
+            return Err(VideoFileError::new("HEVC with alpha takes RGBA pictures"));
+        }
+        let (width, height) = (self.width as usize, self.height as usize);
+        unsafe {
+            let mut pixel_buffer: CVPixelBufferRef = std::ptr::null_mut();
+            let status = CVPixelBufferCreate(std::ptr::null(), width, height, kCVPixelFormatType_32BGRA, std::ptr::null(), &mut pixel_buffer);
+            if status != 0 || pixel_buffer.is_null() {
+                return Err(VideoFileError::with_code("CVPixelBufferCreate(bgra)", status));
+            }
+            CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+            let base = CVPixelBufferGetBaseAddress(pixel_buffer) as *mut u8;
+            let stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
+            if base.is_null() {
+                CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+                CVPixelBufferRelease(pixel_buffer);
+                return Err(VideoFileError::new("CVPixelBuffer has no storage"));
+            }
+            for row in 0..height {
+                let dst = std::slice::from_raw_parts_mut(base.add(row * stride), width * 4);
+                for (d, s) in dst.chunks_exact_mut(4).zip(rgba[row * width * 4..(row + 1) * width * 4].chunks_exact(4)) {
+                    d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+            let result = self.push_pixel_buffer(pixel_buffer, pts_100ns);
+            CVPixelBufferRelease(pixel_buffer);
+            result
+        }
+    }
+
+    /// Append a caller's pixel buffer (see `VideoFileEncoder::push_frame_pixel_buffer`).
+    pub unsafe fn push_pixel_buffer(
+        &mut self,
+        pixel_buffer: CVPixelBufferRef,
+        pts_100ns: Option<i64>,
+    ) -> Result<(), VideoFileError> {
+        if self.finalized {
+            return Err(VideoFileError::new("encoder already finalized"));
+        }
+        let pts = pts_100ns.unwrap_or_else(|| self.frame_pts(self.frame_index));
+        let _pool = AutoreleasePool::new();
+        unsafe {
+            wait_for_input_ready(self.video_input.as_id(), "push_pixel_buffer")?;
+            let appended: BOOL = msg_send![
+                self.pixel_adaptor.as_id(),
+                appendPixelBuffer: pixel_buffer
+                withPresentationTime: hns_time(pts)
+            ];
+            if appended == NO {
+                let error: ObjcId = msg_send![self.writer.as_id(), error];
+                return Err(nserror_to_video_error("appendPixelBuffer", error));
+            }
+        }
+        self.frame_index += 1;
+        Ok(())
+    }
+
+    /// Append a region of a shared GPU texture (an IOSurface id), copied on
+    /// the GPU (see `VideoFileEncoder::push_frame_shared_texture`).
+    pub fn push_shared_texture(&mut self, handle: u64, region: [u32; 4], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        if self.finalized {
+            return Err(VideoFileError::new("encoder already finalized"));
+        }
+        if self.intake.is_none() {
+            self.intake = Some(crate::apple_texture_intake::TextureIntake::new()?);
+        }
+        let _pool = AutoreleasePool::new();
+        let picture = unsafe { self.intake.as_mut().unwrap().picture(handle, region)? };
+        self.push_gpu_picture(&picture, pts_100ns)
+    }
+
+    /// Append a picture made earlier (see `VideoFileEncoder::push_gpu_picture`).
+    pub fn push_gpu_picture(&mut self, picture: &crate::apple_texture_intake::GpuPicture, pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        unsafe {
+            // An NV12 picture's planes are already in the stream's colour
+            // (made so on the GPU): say so, as for pushed NV12 bytes.
+            if CVPixelBufferGetPixelFormatType(picture.buffer) != kCVPixelFormatType_32BGRA {
+                for (key, value) in [kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey].into_iter().zip(self.color_strings) {
+                    CVBufferSetAttachment(picture.buffer, key, value as *const c_void, 1);
+                }
+            }
+            self.push_pixel_buffer(picture.buffer, pts_100ns)
+        }
     }
 
     pub fn push_frame_nv12(
@@ -434,12 +597,17 @@ impl MacosVideoFileEncoder {
                 std::ptr::null(),
                 width,
                 height,
-                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                nv12_format(self.color),
                 std::ptr::null(),
                 &mut pixel_buffer,
             );
             if status != 0 || pixel_buffer.is_null() {
                 return Err(VideoFileError::with_code("CVPixelBufferCreate(nv12)", status));
+            }
+            // The bytes are already in the stream's colour: say so, so
+            // nothing between here and the encoder converts them.
+            for (key, value) in [kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey].into_iter().zip(self.color_strings) {
+                CVBufferSetAttachment(pixel_buffer, key, value as *const c_void, 1);
             }
             CVPixelBufferLockBaseAddress(pixel_buffer, 0);
             let y_ptr = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0) as *mut u8;

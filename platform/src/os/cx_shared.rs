@@ -14,8 +14,7 @@ use {
     },
     makepad_studio_protocol::{
         hub_protocol::FrameCodec, AppToStudio, EventSample, RunViewFrameData, RunViewFrameRequest,
-        RunViewKeyFocusRect, ScreenshotResponse, StudioToApp, WidgetQueryResponse, WidgetSnapshot,
-        WidgetSnapshotResponse, WidgetTreeDumpResponse,
+        RunViewKeyFocusRect, ScreenshotResponse, StudioToApp,
     },
     std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
@@ -64,8 +63,12 @@ impl Cx {
 
     #[allow(unused)]
     pub(crate) fn any_passes_dirty(&self) -> bool {
+        // windows drawn only for a remote headset's frames keep their recordings dirty without
+        // asking for a frame: their own next cause paints them
+        let held = self.xr_offscreen() && !self.window_redrawn && self.screenshot_requests.is_empty() && self.run_view_frame_requests.is_empty();
         for draw_pass_id in self.passes.id_iter() {
-            if self.passes[draw_pass_id].paint_dirty {
+            let pass = &self.passes[draw_pass_id];
+            if pass.paint_dirty && !(held && !pass.repaint_requested && self.pass_root_window(draw_pass_id).is_some()) {
                 return true;
             }
         }
@@ -142,6 +145,26 @@ impl Cx {
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
 
+        // A pass whose last handle was dropped lets go of its attachments
+        // and its place in the tree now, on every backend: its slot is only
+        // reset when it is reused, and until then it kept its colour and
+        // depth textures (full-frame targets) alive.
+        for draw_pass_id in self.passes.id_iter() {
+            if self.passes.0.is_free(draw_pass_id.0) {
+                let pass = &mut self.passes[draw_pass_id];
+                if !pass.color_textures.is_empty() || pass.depth_texture.is_some() {
+                    pass.color_textures.clear();
+                    pass.depth_texture = None;
+                    pass.main_draw_list_id = None;
+                    pass.parent = crate::draw_pass::CxDrawPassParent::None;
+                    pass.attached_by = None;
+                    pass.paint_dirty = false;
+                    pass.incomplete = false;
+                    pass.kept_recording = false;
+                }
+            }
+        }
+
         // Resolve attachment liveness through the whole consumer chain before
         // propagating dirtiness. A descendant's own attachment can still be
         // current inside an orphaned capture; it must not revive that capture.
@@ -158,7 +181,7 @@ impl Cx {
                 }
                 live[walk.0] = Some(false);
                 path.push(walk);
-                if self.pass_attachment_is_stale(walk) {
+                if self.pass_attachment_is_stale(walk) && !self.passes[walk].kept_recording {
                     break false;
                 }
                 match self.passes[walk].parent {
@@ -182,6 +205,8 @@ impl Cx {
             let requested = self.passes[draw_pass_id].repaint_requested;
             if !requested && live[draw_pass_id.0] != Some(true) {
                 self.passes[draw_pass_id].paint_dirty = false;
+                // an orphan's picture is final as it stands: nothing it was drawing waits on it
+                self.passes[draw_pass_id].incomplete = false;
             }
             let repaint_next = std::mem::take(&mut self.passes[draw_pass_id].repaint_next);
             let pass = &self.passes[draw_pass_id];
@@ -259,13 +284,34 @@ impl Cx {
         // hit exactly this). Parentless passes keep their old "run first"
         // contract via the depth bias.
         const ROOT_NONE_BIAS: u64 = 1 << 32;
+        // An offscreen XR pass (`info_flags::XR_OFFSCREEN`) produces textures the app hands on
+        // (packs, mirrors them): it runs before everything else, its own producers before it.
+        let xr_offscreen = self.xr_offscreen();
+        // a window pass asked to paint explicitly (a remote grab, `repaint_pass`)
+        let mut window_requested = false;
         for draw_pass_id in self.passes.id_iter() {
             let requested = std::mem::take(&mut self.passes[draw_pass_id].repaint_requested);
             if self.passes[draw_pass_id].paint_dirty
                 && (live[draw_pass_id.0] == Some(true) || requested)
             {
                 passes_todo.push(draw_pass_id);
+                window_requested |= requested && self.pass_root_window(draw_pass_id).is_some();
             }
+        }
+        // an offscreen XR display (a remote headset): what is drawn for its frames alone paints no
+        // window; the windows paint for everything else of theirs (input, data, animations), at once
+        if self.xr_offscreen() {
+            // a screenshot or a studio/inspect frame grab waits for a painted window: it paints
+            let grab = window_requested || !self.screenshot_requests.is_empty() || !self.run_view_frame_requests.is_empty();
+            if !std::mem::take(&mut self.window_redrawn) && !grab {
+                let passes = &*self;
+                passes_todo.retain(|id| passes.pass_root_window(*id).is_none());
+            }
+        } else {
+            self.window_redrawn = false;
+        }
+        if passes_todo.iter().any(|id| self.pass_root_window(*id).is_some()) {
+            self.window_paints += 1;
         }
         let depth_of = |start: DrawPassId| -> u64 {
             let mut depth = 0u64;
@@ -282,6 +328,7 @@ impl Cx {
                         }
                     }
                     CxDrawPassParent::None => return depth + ROOT_NONE_BIAS,
+                    CxDrawPassParent::Xr if xr_offscreen => return depth + 2 * ROOT_NONE_BIAS,
                     _ => return depth,
                 }
             }
@@ -289,6 +336,123 @@ impl Cx {
         passes_todo.sort_by_key(|id| std::cmp::Reverse(depth_of(*id)));
         self.pass_time_rebase = !time_owed;
         self.demo_time_repaint = false;
+    }
+
+    /// Whether a pass's own list was recorded by the current drawing (any of
+    /// its draw contexts).
+    fn recorded_by_this_drawing(&self, id: DrawPassId) -> bool {
+        self.passes[id].main_draw_list_id.is_some_and(|l| !self.draw_lists.is_id_freed(l) && self.draw_lists[l].redraw_id > self.drawing_start)
+    }
+
+    /// The frame is drawn again before it painted (the glyph wait, a first
+    /// frame waiting for its pipelines): what the last draw event recorded
+    /// and attached and has not painted is taken, each pass with the redraw
+    /// its list was recorded in, for the next drawing to keep what it does not
+    /// record again ([`Cx::keep_unrepeated_recordings`]). The draw event's own
+    /// redraws are used, not the current drawing's: a draw context made
+    /// outside a draw event since (while the wait pumps events) is a drawing
+    /// of its own and would hide them.
+    #[allow(dead_code)]
+    pub(crate) fn frame_drawn_again(&mut self) {
+        let (start, end) = self.redraw_keep.drawn;
+        let drawn = |cx: &Self, id: DrawPassId| {
+            cx.passes[id].main_draw_list_id.is_some_and(|l| !cx.draw_lists.is_id_freed(l) && cx.draw_lists[l].redraw_id > start && cx.draw_lists[l].redraw_id <= end)
+        };
+        let taken: Vec<(DrawPassId, u64)> = self
+            .passes
+            .id_iter()
+            .filter(|id| !self.passes.0.is_free(id.0) && drawn(self, *id))
+            .filter_map(|id| {
+                let pass = &self.passes[id];
+                let attached = pass.attached_by.is_some() && !self.pass_attachment_is_stale(id);
+                (pass.paint_dirty && attached).then(|| (id, self.draw_lists[pass.main_draw_list_id.unwrap()].redraw_id))
+            })
+            .collect();
+        self.redraw_keep.taken = taken;
+    }
+
+    /// After a drawing (`call_draw_event`): a pass an earlier drawing of this
+    /// frame recorded and attached (taken by [`Cx::frame_drawn_again`]), or
+    /// one kept before and not yet painted whole, which this drawing neither
+    /// recorded nor attached again, stays attached (`kept_recording`) and
+    /// paints what was recorded. The native backends painted every drawing;
+    /// a pass recorded only on some frames (a tile written into a ring when
+    /// one is due, a cache drawn now and then) was dropped unpainted when the
+    /// frame was drawn again, and what it wrote never came. Not kept: a pass
+    /// this drawing recorded again (it is its own), and one whose colour
+    /// target a pass this drawing recorded writes (the newer recording owns
+    /// that picture). A depth target does not count: it is the drawing's
+    /// scratch, often one buffer shared by passes that do not share a picture.
+    pub(crate) fn keep_unrepeated_recordings(&mut self) {
+        self.redraw_keep.drawn = (self.drawing_start, self.redraw_id);
+        let taken = std::mem::take(&mut self.redraw_keep.taken);
+        let carried = std::mem::take(&mut self.redraw_keep.kept);
+        let targets_of = |pass: &crate::draw_pass::CxDrawPass| -> Vec<crate::texture::TextureId> {
+            pass.color_textures.iter().map(|a| a.texture.texture_id()).collect()
+        };
+        for kept in &carried {
+            if !self.passes.0.is_free(kept.pass.0) {
+                self.passes[kept.pass].kept_recording = false;
+            }
+        }
+        let fresh: Vec<KeptRecording> = taken.into_iter().filter(|(pass, _)| !self.passes.0.is_free(pass.0)).map(|(pass, redraw)| KeptRecording { pass, redraw, painted: self.passes[pass].painted_serial }).collect();
+        let candidates: Vec<KeptRecording> = carried.into_iter().chain(fresh).collect();
+        let mut kept: Vec<KeptRecording> = Vec::new();
+        for candidate in candidates {
+            let id = candidate.pass;
+            if self.passes.0.is_free(id.0) || kept.iter().any(|k| k.pass == id) {
+                continue;
+            }
+            let Some(list) = self.passes[id].main_draw_list_id else { continue };
+            if self.draw_lists.is_id_freed(list) || self.draw_lists[list].redraw_id != candidate.redraw || !self.pass_attachment_is_stale(id) {
+                continue;
+            }
+            let targets = targets_of(&self.passes[id]);
+            let newer = self.passes.id_iter().any(|other| {
+                other != id && !self.passes.0.is_free(other.0) && self.recorded_by_this_drawing(other) && targets_of(&self.passes[other]).iter().any(|t| targets.contains(t))
+            });
+            if !newer {
+                self.passes[id].kept_recording = true;
+                kept.push(candidate);
+            }
+        }
+        self.redraw_keep.kept = kept;
+    }
+
+    /// After a build: a kept pass that has painted whole since it was kept
+    /// is an orphan again; one that has not (a window that could not take a
+    /// frame, a pipeline still compiling) stays kept.
+    #[allow(dead_code)]
+    pub(crate) fn release_painted_recordings(&mut self) {
+        let kept = std::mem::take(&mut self.redraw_keep.kept);
+        for k in kept {
+            if self.passes.0.is_free(k.pass.0) {
+                continue;
+            }
+            if self.passes[k.pass].painted_serial > k.painted {
+                self.passes[k.pass].kept_recording = false;
+            } else {
+                self.redraw_keep.kept.push(k);
+            }
+        }
+    }
+
+    /// The passes other than `consumer` that render into `texture` and can
+    /// paint: they have a draw list (a withdrawn or frozen one has none) and
+    /// are still attached (an orphan, its attaching list recorded again
+    /// without it, does not paint unless it is kept).
+    #[allow(dead_code)]
+    pub(crate) fn producers_that_paint(&self, texture: crate::texture::TextureId, consumer: DrawPassId) -> Vec<DrawPassId> {
+        self.passes
+            .id_iter()
+            .filter(|p| {
+                let pass = &self.passes[*p];
+                *p != consumer
+                    && pass.main_draw_list_id.is_some()
+                    && (!self.pass_attachment_is_stale(*p) || pass.kept_recording)
+                    && pass.color_textures.iter().any(|a| a.texture.texture_id() == texture)
+            })
+            .collect()
     }
 
     /// The `draw_pass.time` for a repaint stamped `now`. Its origin only moves while
@@ -363,9 +527,7 @@ impl Cx {
                 NetworkResponse::WsOpened { .. }
                 | NetworkResponse::WsMessage { .. }
                 | NetworkResponse::WsClosed { .. }
-                | NetworkResponse::WsError { .. } => {
-                    self.handle_script_web_socket_event(response.clone())
-                }
+                | NetworkResponse::WsError { .. } => self.handle_script_web_socket_event(&response),
                 NetworkResponse::HttpResponse { .. }
                 | NetworkResponse::HttpStreamChunk { .. }
                 | NetworkResponse::HttpStreamComplete { .. }
@@ -385,8 +547,6 @@ impl Cx {
     /// repaint, so the caller should poll for the file to appear. Piggybacks on
     /// the studio screenshot pipeline: ids above `SCREENSHOT_FILE_ID_BASE` are
     /// routed to `SCREENSHOT_FILE_SINKS` instead of the studio connection.
-    /// (Gpusim builds write frames to files on their own; this is for the
-    /// live GPU-rendered app.)
     /// Returns the capture's request id, so the caller can later
     /// [`cancel_frame_capture`](Self::cancel_frame_capture) it.
     pub fn capture_next_frame_to_file(&mut self, path: std::path::PathBuf) -> u64 {
@@ -421,11 +581,6 @@ impl Cx {
         } else if sinks.contains_key(&request_id) {
             sinks.insert(request_id, std::path::PathBuf::new());
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
-        self.take_studio_screenshot_request_ids_for_window(kind_id, None)
     }
 
     /// Drain the pending screenshot requests this pass can answer.
@@ -625,38 +780,6 @@ impl Cx {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn send_studio_widget_tree_dump_response(&mut self, request_id: u64) {
-        self.widget_tree_dump_requests.push(request_id);
-        if self.in_draw_event {
-            return;
-        }
-        self.try_send_studio_widget_tree_dump_responses();
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn send_studio_widget_query_response(&self, request_id: u64, query: String) {
-        let rects = if let Some(callback) = self.widget_query_callback {
-            callback(self, &query)
-        } else {
-            Vec::new()
-        };
-        Cx::send_studio_message(AppToStudio::WidgetQuery(WidgetQueryResponse {
-            request_id,
-            query,
-            rects,
-        }));
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn send_studio_widget_snapshot_response(&mut self, request_id: u64) {
-        self.widget_snapshot_requests.push(request_id);
-        if self.in_draw_event {
-            return;
-        }
-        self.try_send_studio_widget_snapshot_responses();
-    }
-
     fn studio_key_focus_rect_response(&self) -> RunViewKeyFocusRect {
         let area = self.key_focus();
         if !area.is_valid(self) {
@@ -680,89 +803,6 @@ impl Cx {
         ));
     }
 
-    fn widget_tree_dump_ready(dump: &str) -> bool {
-        for line in dump.lines() {
-            let mut parts = line.split_whitespace();
-            let Some(first) = parts.next() else {
-                continue;
-            };
-            if first.starts_with('W') {
-                continue;
-            }
-            let tokens: Vec<&str> = line.split_whitespace().collect();
-            if tokens.len() < 2 {
-                continue;
-            }
-            let Some(h) = tokens.last().and_then(|v| v.parse::<i64>().ok()) else {
-                continue;
-            };
-            let Some(w) = tokens
-                .get(tokens.len().saturating_sub(2))
-                .and_then(|v| v.parse::<i64>().ok())
-            else {
-                continue;
-            };
-            if w > 0 && h > 0 {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn widget_snapshot_ready(widgets: &[WidgetSnapshot]) -> bool {
-        widgets
-            .iter()
-            .any(|widget| widget.visible && widget.width > 0 && widget.height > 0)
-    }
-
-    pub(crate) fn try_send_studio_widget_tree_dump_responses(&mut self) {
-        if self.widget_tree_dump_requests.is_empty() {
-            return;
-        }
-        if self.in_draw_event {
-            return;
-        }
-        let dump = if let Some(callback) = self.widget_tree_dump_callback {
-            callback(self)
-        } else {
-            "W1 0\n".to_string()
-        };
-        if !Self::widget_tree_dump_ready(&dump) {
-            return;
-        }
-        let request_ids: Vec<u64> = self.widget_tree_dump_requests.drain(..).collect();
-        for request_id in request_ids {
-            Cx::send_studio_message(AppToStudio::WidgetTreeDump(WidgetTreeDumpResponse {
-                request_id,
-                dump: dump.clone(),
-            }));
-        }
-    }
-
-    pub(crate) fn try_send_studio_widget_snapshot_responses(&mut self) {
-        if self.widget_snapshot_requests.is_empty() {
-            return;
-        }
-        if self.in_draw_event {
-            return;
-        }
-        let widgets = if let Some(callback) = self.widget_snapshot_callback {
-            callback(self)
-        } else {
-            Vec::new()
-        };
-        if !Self::widget_snapshot_ready(&widgets) {
-            return;
-        }
-        let request_ids: Vec<u64> = self.widget_snapshot_requests.drain(..).collect();
-        for request_id in request_ids {
-            Cx::send_studio_message(AppToStudio::WidgetSnapshot(WidgetSnapshotResponse {
-                request_id,
-                widgets: widgets.clone(),
-            }));
-        }
-    }
-
     /// Hardware-faithful synthetic mouse move (remote `/m?hw=1`): the event
     /// takes the SAME pointer-lock/pin transform hardware takes
     /// (`locked_mouse_transform`), so a pinned scrub behaves identically
@@ -778,18 +818,11 @@ impl Cx {
         modifiers: crate::event::KeyModifiers,
         time: f64,
     ) {
-        // `os::apple` does not exist in a gpusim build (see os/mod.rs), so
-        // the pointer-lock transform has to be gated on the module's own cfg,
-        // not on the target alone.
-        #[cfg(all(target_os = "macos", not(gpusim)))]
-        let (abs, lock_delta) = crate::os::apple::macos::macos_app::with_macos_app(|app| {
-            app.locked_mouse_transform(raw, delta, seed)
-        });
-        #[cfg(not(all(target_os = "macos", not(gpusim))))]
-        let (abs, lock_delta) = {
-            let _ = (delta, seed);
-            (raw, crate::makepad_math::DVec2::default())
-        };
+        // Remote coordinates already integrate the injected deltas. Pinned captures retain
+        // that virtual position; the HAL applies the actual OS pointer lock separately.
+        let _ = seed;
+        let abs = raw;
+        let lock_delta = if self.fingers.has_pinned_capture() { delta } else { crate::makepad_math::DVec2::default() };
         self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
             abs,
             lock_delta,
@@ -806,16 +839,13 @@ impl Cx {
     /// scrub pin at the platform layer first — exactly what
     /// macos_window::send_mouse_up does for a physical up.
     pub fn dispatch_hw_pin_release(&mut self) {
-        #[cfg(all(target_os = "macos", not(gpusim)))]
-        crate::os::apple::macos::macos_app::with_macos_app(|app| {
-            if app.pointer_pin_mode {
-                app.set_pointer_pin(false);
-            }
-        });
+        if self.fingers.has_pinned_capture() {
+            self.push_unique_platform_op(crate::cx_api::CxOsOp::PinMousePointer(false));
+        }
     }
 
     /// A remote touch at a layout point, delivered the way a touch screen's are.
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn dispatch_remote_touch(
         &mut self,
         window_id: crate::window::WindowId,
@@ -889,27 +919,6 @@ impl Cx {
         }
     }
 
-    /// A remote scroll; `phase` is a trackpad gesture's phase, or `None` for a wheel.
-    pub(crate) fn dispatch_scroll_msg(
-        &mut self,
-        e: makepad_studio_protocol::RemoteScroll,
-        phase: crate::event::ScrollPhase,
-        window_id: crate::window::WindowId,
-        pos: crate::makepad_math::DVec2,
-    ) {
-        self.call_event_handler(&Event::Scroll(crate::event::ScrollEvent {
-            abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
-            scroll: crate::makepad_math::dvec2(e.sx, e.sy),
-            window_id,
-            modifiers: e.modifiers.into_key_modifiers(),
-            handled_x: Cell::new(false),
-            handled_y: Cell::new(false),
-            is_mouse: e.is_mouse,
-            time: e.time,
-            phase,
-        }));
-    }
-
     /// Dispatch a StudioToApp message as an event. Handles input, clipboard,
     /// screenshot, widget dump, and kill. Returns true on Kill (caller should
     /// shut down). Callers handle stdin-specific variants (Swapchain,
@@ -954,67 +963,6 @@ impl Cx {
         self.fingers.cycle_hover_area(live_id!(mouse).into());
     }
 
-    /// A hosted child on a touch device (an Android child process): the
-    /// host's pointer is a finger, so its press, moves and release arrive as
-    /// one touch, dispatched the way the Activity build dispatches
-    /// `FromJavaMessage::Touch` — lists and scroll views drag-scroll, and a
-    /// press a scroller takes away is cancelled. As mouse events, a press on
-    /// a row captured the mouse and the list refused to scroll under it.
-    /// `state: None` is the host's cancellation (`MouseCancel`).
-    #[cfg(target_os = "android")]
-    pub(crate) fn dispatch_hosted_touch(
-        &mut self,
-        state: Option<crate::event::finger::TouchState>,
-        at: crate::makepad_math::DVec2,
-        time: f64,
-        window_id: crate::window::WindowId,
-        pos: crate::makepad_math::DVec2,
-    ) {
-        use crate::event::finger::{TouchPoint, TouchState};
-        let abs = self.stdin_pointer_abs(at, pos, window_id);
-        let touch = |state| TouchPoint {
-            state,
-            abs,
-            time,
-            uid: 0,
-            rotation_angle: 0.0,
-            force: 0.0,
-            radius: crate::makepad_math::dvec2(1.0, 1.0),
-            handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
-        };
-        let Some(state) = state else {
-            self.dispatch_touch_cancel(crate::event::TouchUpdateEvent {
-                time,
-                window_id,
-                touches: vec![touch(TouchState::Cancel)],
-                modifiers: Default::default(),
-            }, false);
-            self.update_pointer_capture_pacing();
-            self.send_studio_key_focus_rect_response();
-            return;
-        };
-        if state == TouchState::Start {
-            self.activate_window_on_pointer_down(window_id);
-        }
-        let touches = vec![touch(state)];
-        self.fingers.process_touch_update_start(time, &touches);
-        let e = Event::TouchUpdate(crate::event::TouchUpdateEvent {
-            time,
-            window_id,
-            touches,
-            modifiers: Default::default(),
-        });
-        self.call_event_handler(&e);
-        if let Event::TouchUpdate(e) = e {
-            self.fingers.process_touch_update_end(&e.touches);
-        }
-        self.update_pointer_capture_pacing();
-        if state == TouchState::Stop {
-            self.send_studio_key_focus_rect_response();
-        }
-    }
-
     pub fn dispatch_studio_msg(
         &mut self,
         msg: StudioToApp,
@@ -1022,6 +970,18 @@ impl Cx {
         pos: crate::makepad_math::DVec2,
     ) -> bool {
         match msg {
+            StudioToApp::WindowFocus { window_id, focused } => {
+                let window = self.windows.id_iter().find(|w| w.id() == window_id && self.windows[*w].is_created);
+                if let Some(window) = window {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if focused { self.hal.focused = Some(window); }
+                    self.call_event_handler(&if focused {
+                        Event::WindowGotFocus(window)
+                    } else {
+                        Event::WindowLostFocus(window)
+                    });
+                }
+            }
             StudioToApp::MouseDown(e) => {
                 // Synthetic input must take the same activation path as a
                 // native click. In particular, an unfocused macOS window
@@ -1073,7 +1033,17 @@ impl Cx {
                 self.send_studio_key_focus_rect_response();
             }
             StudioToApp::Scroll(e) => {
-                self.dispatch_scroll_msg(e, crate::event::ScrollPhase::None, window_id, pos);
+                self.call_event_handler(&Event::Scroll(crate::event::ScrollEvent {
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
+                    scroll: crate::makepad_math::dvec2(e.sx, e.sy),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    handled_x: Cell::new(false),
+                    handled_y: Cell::new(false),
+                    is_mouse: e.is_mouse,
+                    time: e.time,
+                    phase: e.phase,
+                }));
             }
             StudioToApp::Pinch(e) => {
                 self.call_event_handler(&Event::Pinch(crate::event::PinchEvent {
@@ -1099,9 +1069,31 @@ impl Cx {
                 self.call_event_handler(&Event::KeyUp(e));
             }
             StudioToApp::TextInput(e) => {
-                #[cfg(all(target_vendor = "apple", not(gpusim)))]
-                crate::os::apple::metal::note_input_event();
                 self.call_event_handler(&Event::TextInput(e));
+            }
+            StudioToApp::DropFiles(e) => {
+                let abs = self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id);
+                let modifiers = e.modifiers.into_key_modifiers();
+                let items = std::sync::Arc::new(
+                    e.paths
+                        .into_iter()
+                        .map(|path| crate::event::DragItem::FilePath { path, internal_id: None })
+                        .collect::<Vec<_>>(),
+                );
+                self.call_event_handler(&Event::Drag(crate::event::DragEvent {
+                    modifiers,
+                    handled: std::sync::Arc::new(std::sync::Mutex::new(false)),
+                    abs,
+                    items: items.clone(),
+                    response: std::sync::Arc::new(std::sync::Mutex::new(crate::event::DragResponse::None)),
+                }));
+                self.call_event_handler(&Event::Drop(crate::event::DropEvent {
+                    modifiers,
+                    handled: std::sync::Arc::new(std::sync::Mutex::new(false)),
+                    abs,
+                    items,
+                }));
+                self.call_event_handler(&Event::DragEnd);
             }
             StudioToApp::TextCopy => {
                 let response = Rc::new(RefCell::new(None));
@@ -1109,7 +1101,8 @@ impl Cx {
                     response: response.clone(),
                 }));
                 let text = response.borrow().clone();
-                if let Some(text) = text {
+                // a copy or cut of nothing leaves the host's clipboard as it is
+                if let Some(text) = text.filter(|t| !t.is_empty()) {
                     Cx::send_studio_message(AppToStudio::SetClipboard(text));
                 }
             }
@@ -1119,7 +1112,8 @@ impl Cx {
                     response: response.clone(),
                 }));
                 let text = response.borrow().clone();
-                if let Some(text) = text {
+                // a copy or cut of nothing leaves the host's clipboard as it is
+                if let Some(text) = text.filter(|t| !t.is_empty()) {
                     Cx::send_studio_message(AppToStudio::SetClipboard(text));
                 }
             }
@@ -1130,38 +1124,126 @@ impl Cx {
             StudioToApp::RunViewFrameRequest(request) => {
                 self.queue_studio_run_view_frame_request(request);
             }
-            StudioToApp::WidgetTreeDump(request) => {
-                self.send_studio_widget_tree_dump_response(request.request_id);
+            StudioToApp::A11yState { consumers } => {
+                let first = self.a11y_host_consumers == 0 && consumers != 0;
+                self.a11y_host_consumers = consumers;
+                if self.a11y.set_consumers(consumers | self.a11y_native_consumers) || first {
+                    self.a11y.request_full();
+                    self.redraw_all();
+                }
             }
-            StudioToApp::WidgetQuery(request) => {
-                self.send_studio_widget_query_response(request.request_id, request.query);
+            StudioToApp::A11yRead { req, window, present } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if present {
+                    let target = self.windows.id_iter().find(|id| id.id() == window);
+                    if let Some(id) = target {
+                        let hal_id = crate::event::hal_intake::hal_window_id(id);
+                        self.hal.a11y_host_waiters.push((req, hal_id, self.hal.frames.window_submission(hal_id)));
+                        self.request_remote_window_present(id);
+                    }
+                } else {
+                    Self::send_studio_message(AppToStudio::A11yReadDone { req, user_seq: self.remote_activity.user_seq() });
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = (req, window, present);
             }
-            StudioToApp::WidgetSnapshot(request) => {
-                self.send_studio_widget_snapshot_response(request.request_id);
+            StudioToApp::A11yAction { bytes } => {
+                match makepad_a11y::wire::decode_action(&bytes) {
+                    Ok(action) => {
+                        let target = self.a11y.node_window(action.node).unwrap_or(window_id);
+                        self.dispatch_a11y_action(target, action);
+                    }
+                    Err(error) => crate::error!("{error}"),
+                }
             }
+            StudioToApp::A11yType { text } => self.a11y_type_fallback(text),
             StudioToApp::Kill => {
                 self.call_event_handler(&Event::Shutdown);
                 return true;
-            }
-            StudioToApp::Gpu(command) => {
-                // Supporting hosted backends intercept this before generic
-                // input dispatch. Other backends must reject the transition
-                // explicitly so a host never waits for a silent no-op.
-                Self::send_studio_message(AppToStudio::Gpu(
-                    makepad_studio_protocol::AppToHostGpu::Failed {
-                        transition: command.transition(),
-                        message: "this backend does not support hosted GPU migration".into(),
-                    },
-                ));
             }
             StudioToApp::Custom(data) => {
                 if crate::ime::HostedBack::parse(&data).is_some_and(|back| back.handled.is_none()) {
                     let event = Event::BackPressed { handled: std::cell::Cell::new(false) };
                     self.call_event_handler(&event);
                     let Event::BackPressed { handled } = event else { unreachable!() };
-                    Self::send_studio_message(AppToStudio::Custom(crate::ime::HostedBack {
-                        handled: Some(handled.get()),
-                    }.to_json()));
+                    let reply = crate::ime::HostedBack { handled: Some(handled.get()) }.to_json();
+                    // a domain answers its parent (the WM) over the HAL; a hosted process over its socket
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let sent = self.hal_send_parent_message(&reply);
+                    #[cfg(target_arch = "wasm32")]
+                    let sent = false;
+                    if !sent {
+                        Self::send_studio_message(AppToStudio::Custom(reply));
+                    }
+                } else if let Some(shown) = makepad_studio_protocol::HostedVisible::parse(&data) {
+                    let hidden = !shown.visible;
+                    if self.hosted_hidden != hidden {
+                        self.hosted_hidden = hidden;
+                        if !hidden {
+                            // What the host could not show meanwhile is stale.
+                            self.redraw_all();
+                        }
+                    }
+                } else if let Some(dropdown) = makepad_studio_protocol::HostedDropdown::parse(&data) {
+                    // The host turned away from this app's tray dropdown: a popup dismissed.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if dropdown.op == makepad_studio_protocol::dropdown_op::DISMISS {
+                        self.hal_hosted_popup_dismissed(dropdown.window_id);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = dropdown;
+                } else if let Some(window) = crate::ime::HostedWindow::parse(&data) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if window.op == crate::ime::hosted_window_op::CLOSE_REQUEST {
+                        self.hal_hosted_close_request(window.window_id);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = window;
+                } else if let Some(fullscreen) = crate::ime::HostedFullscreen::parse(&data) {
+                    // A fullscreen window draws no caption (widgets `Window`), and its geometry
+                    // says it is fullscreen (`WindowHandle::is_fullscreen`), as a native one's does.
+                    let window_id = self.windows.id_iter().find(|w| w.id() == fullscreen.window_id);
+                    if let Some(window_id) = window_id {
+                        if self.windows[window_id].hosted_fullscreen != fullscreen.on {
+                            self.windows[window_id].hosted_fullscreen = fullscreen.on;
+                            let old_geom = self.windows[window_id].window_geom.clone();
+                            self.windows[window_id].window_geom.is_fullscreen = fullscreen.on;
+                            let new_geom = self.windows[window_id].window_geom.clone();
+                            self.call_event_handler(&Event::WindowGeomChange(crate::event::WindowGeomChangeEvent { window_id, old_geom, new_geom }));
+                            self.redraw_all();
+                        }
+                    }
+                } else if let Some(query) = makepad_studio_protocol::HostedDragQuery::parse(&data) {
+                    // The host asks the app's window drag query (the one a
+                    // native backend asks for a borderless window).
+                    use crate::event::WindowDragQueryResponse as R;
+                    let response = std::rc::Rc::new(std::cell::Cell::new(R::NoAnswer));
+                    // The window the point is in (a multi-window app's later windows sit at
+                    // their own origins in the child's window space), in its own points.
+                    let host = crate::makepad_math::dvec2(query.x, query.y);
+                    let (window_id, pos) = if self.windows.len() == 0 {
+                        (crate::window::CxWindowPool::id_zero(), crate::makepad_math::dvec2(0.0, 0.0))
+                    } else {
+                        self.windows.window_id_contains(host)
+                    };
+                    let abs = if self.windows.len() == 0 { host } else { self.stdin_pointer_abs(host, pos, window_id) };
+                    self.call_event_handler(&Event::WindowDragQuery(crate::event::WindowDragQueryEvent {
+                        window_id,
+                        abs,
+                        response: response.clone(),
+                    }));
+                    let answer = match response.get() {
+                        R::NoAnswer => makepad_studio_protocol::drag_answer::NO_ANSWER,
+                        R::Client => makepad_studio_protocol::drag_answer::CLIENT,
+                        R::Caption => makepad_studio_protocol::drag_answer::CAPTION,
+                        R::SysMenu => makepad_studio_protocol::drag_answer::SYS_MENU,
+                    };
+                    // What a double click there does: the window's own declaration.
+                    let fullscreen = self.windows.len() != 0 && self.windows.is_valid(window_id) && self.windows[window_id].double_click_fullscreen;
+                    let double_click = if fullscreen { makepad_studio_protocol::drag_double::FULLSCREEN } else { makepad_studio_protocol::drag_double::MAXIMISE };
+                    Self::send_studio_message(AppToStudio::Custom(
+                        makepad_studio_protocol::HostedDragAnswer { id: query.id, response: answer, double_click }.to_json(),
+                    ));
                 } else {
                     self.call_event_handler(&Event::Custom(data));
                 }
@@ -1179,9 +1261,43 @@ impl Cx {
             StudioToApp::Tick
             | StudioToApp::Swapchain(_)
             | StudioToApp::WindowGeomChange { .. }
+            | StudioToApp::NativeApp(_)
             | StudioToApp::TweakRay(_) => {}
         }
         false
+    }
+
+    /// Wake and redraw after an installed compiler patch, including while idle.
+    #[cfg(relax)]
+    fn poll_live_patch(&mut self) {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        static INSTALLED: AtomicBool = AtomicBool::new(false);
+        static CHANGED: AtomicBool = AtomicBool::new(false);
+        // the patch count the designs were last re-run for (std::relax::patched_files)
+        static SEEN: AtomicU64 = AtomicU64::new(0);
+        extern "C" fn wake() {
+            CHANGED.store(true, Ordering::Release);
+            crate::thread::SignalToUI::set_internal_signal();
+        }
+        if !INSTALLED.swap(true, Ordering::Relaxed) {
+            std::relax::on_patch(wake);
+            // patches before this run's first look built nothing of this run: skip them
+            let mut seen = 0;
+            std::relax::patched_files(&mut seen);
+            SEEN.store(seen, Ordering::Relaxed);
+        }
+        if CHANGED.swap(false, Ordering::AcqRel) {
+            // a design (script_mod!) is evaluated from its fn once: a patched file's designs
+            // run again, from the patched code
+            let mut seen = SEEN.load(Ordering::Relaxed);
+            for file in std::relax::patched_files(&mut seen) {
+                self.live_code_patched(&file);
+            }
+            SEEN.store(seen, Ordering::Relaxed);
+            self.redraw_all();
+            // the wake may be a restart request (std::relax::restart_requested)
+            crate::restart::poll_requested();
+        }
     }
 
     /// Drain the global control channel and dispatch each message as an event.
@@ -1189,10 +1305,14 @@ impl Cx {
     /// Also services the `--remote` HTTP control surface, which every backend
     /// therefore gets by calling this one function.
     pub fn poll_control_channel(&mut self) {
+        #[cfg(relax)]
+        self.poll_live_patch();
         use crate::makepad_math::dvec2;
         use crate::web_socket::CONTROL_CHANNEL;
         use crate::window::CxWindowPool;
         crate::remote::poll(self);
+        // makepad inspect's queries for a VM of this thread that is idle now (`src`, `vm get`)
+        crate::makepad_script::inspect_query::serve_idle();
         let msgs: Vec<StudioToApp> = {
             let lock = CONTROL_CHANNEL.lock().unwrap();
             if let Some(rx) = lock.as_ref() {
@@ -1292,8 +1412,6 @@ impl Cx {
         }
     }
 
-    // Same logic as gpusim::raster::encode_png_rgba which is behind
-    // cfg(gpusim) and unavailable to the windowed backend.
     #[allow(dead_code)]
     pub fn encode_rgba_as_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
         use makepad_zune_png::{
@@ -1405,9 +1523,12 @@ impl Cx {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.collect.is_some() {
+            self.collect_after_draw();
+        }
+
         if Cx::has_studio_web_socket() {
-            self.try_send_studio_widget_tree_dump_responses();
-            self.try_send_studio_widget_snapshot_responses();
         }
 
         // Reset widget query invalidation after all views have processed it.
@@ -1421,7 +1542,26 @@ impl Cx {
         }
     }
 
-    fn inner_key_focus_change(&mut self) {
+    /// Deliver everything the last event or draw left queued (actions
+    /// posted from other threads and from handlers, triggers, a key-focus
+    /// change requested while drawing, window geometry changes, a cleared
+    /// hover) now, at the current time. The virtual clock does this before
+    /// it advances a frame: otherwise such work ran with whatever event came
+    /// next, before or after the advance depending on the machine's load,
+    /// and a timer it started (a caret blink) landed a frame apart from run
+    /// to run.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(target_os = "android", allow(dead_code))] // only the remote bridge settles events, and Android has none
+    pub(crate) fn settle_deferred_events(&mut self) {
+        self.handle_action_receiver();
+        self.handle_triggers();
+        self.handle_actions();
+        self.inner_key_focus_change();
+        self.handle_pending_window_geom_changes();
+        self.handle_pending_clear_hover();
+    }
+
+    pub(crate) fn inner_key_focus_change(&mut self) {
         if let Some((prev, focus)) = self.keyboard.cycle_key_focus_changed() {
             self.inner_call_event_handler(&Event::KeyFocus(KeyFocusEvent { prev, focus }));
         }
@@ -1499,12 +1639,55 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(event, Event::Shutdown) {
+            self.splash_trace_exit();
+        }
+        // Under `makepad run` with an agent watching (makepad inspect), the dispatch is a retry
+        // boundary: a panic in it parks for the agent, and when the agent resumes it with
+        // `retry` (after a hot patch) the event is dispatched again with the patched code.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some(r) = relax_retry::hooks() {
+            let name = event.name();
+            loop {
+                (r.enter)(name.as_ptr(), name.len());
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call_event_handler_once(event)));
+                (r.leave)();
+                match res {
+                    Ok(()) => return,
+                    Err(p) => {
+                        if !(r.take)() {
+                            std::panic::resume_unwind(p);
+                        }
+                    }
+                }
+            }
+        }
+        self.call_event_handler_once(event)
+    }
+
+    fn call_event_handler_once(&mut self, event: &Event) {
         let _phase = crate::thread::ui_event_phase(event);
         if self.event_dispatch_is_reentrant(event) {
             return;
         }
         crate::remote::note_user_event(self, event);
-        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
+        match event {
+            Event::Signal => crate::frame_sources::signal(),
+            Event::Timer(t) => crate::frame_sources::timer_fired(t.timer_id),
+            _ => {}
+        }
+        if let Event::Signal = event {
+            for hook in self.signal_hooks.clone() {
+                hook(self);
+            }
+        }
+        if let Event::Shutdown = event {
+            // every quit path ends here (a window close, a lost session): the shutdown starts
+            crate::cx::relax_quit_started();
+            // An open `/cap/start` file is finished before the app goes.
+            crate::remote::finish_capture_on_shutdown(self);
+        }
         if let Some(drag) = self.drag_drop.internal_drag_event(event) {
             // The pointer event goes out first and the drag one is appended, the
             // way every other backend orders it: a widget that ends its gesture on
@@ -1520,6 +1703,10 @@ impl Cx {
                 crate::event::InternalDragEvent::Drop(event) => {
                     self.call_event_handler(&Event::Drop(event));
                     self.drag_drop.cycle_drag();
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+                crate::event::InternalDragEvent::End => {
                     self.call_event_handler(&Event::DragEnd);
                     self.drag_drop.cycle_drag();
                 }
@@ -1637,6 +1824,13 @@ impl Cx {
     #[allow(dead_code)]
     pub(crate) fn recover_after_caught_panic(&mut self) {
         self.in_draw_event = false;
+        // contained at the turn: no dispatch is running any more. An unwind that skipped the
+        // dispatch guard (a fault turned into a panic in code without a landing pad for it) left
+        // the flag set, and every later event -- NextFrame, Draw, QuitRequested, Shutdown -- was
+        // rejected as re-entrant: the app looked alive but never drew again nor shut down (its
+        // pool threads leaked, so `session relaunch` was refused)
+        self.event_handler_dispatch_active.set(false);
+        self.perf_monitor.event_depth.set(0);
         if self.script_vm.is_none() {
             crate::error!(
                 "the script VM did not survive an unwound event handler: every later script entry will be refused as re-entrant"
@@ -1668,27 +1862,38 @@ impl Cx {
     }*/
 
     pub(crate) fn call_draw_event(&mut self, time: f64) {
+        let time = crate::remote::app_clock::now().unwrap_or(time);
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         draw_event.time = time;
+        if self.a11y.on { self.a11y.begin_frame(); }
+        // one drawing, however many draw contexts the handler makes
+        self.drawing_id += 1;
+        self.drawing_start = self.redraw_id;
         self.in_draw_event = true;
+        crate::frame_trace::note_drawn();
         // The flag comes down whether the draw returned or unwound: a
         // platform that catches the panic and goes on must not have every
         // later `redraw` refused as "already drawing".
+        self.pass_load.draw_begin();
         let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.call_event_handler(&Event::Draw(draw_event))
         }));
+        self.pass_load.draw_end();
         self.in_draw_event = false;
         if let Err(payload) = drawn {
             std::panic::resume_unwind(payload);
         }
         self.validate_scoped_sweep_locks_after_draw();
+        self.keep_unrepeated_recordings();
         if let Some(mut hook) = self.post_draw_hook.take() {
             hook(self);
             if self.post_draw_hook.is_none() {
                 self.post_draw_hook = Some(hook);
             }
         }
+
+        self.a11y_finish_frame();
 
         // The frame's recording boundary: every draw list has finished
         // recording. The geometries dropped since the last redraw are freed
@@ -1700,12 +1905,18 @@ impl Cx {
         }
 
         if Cx::has_studio_web_socket() {
-            self.try_send_studio_widget_tree_dump_responses();
-            self.try_send_studio_widget_snapshot_responses();
         }
     }
 
     pub(crate) fn call_next_frame_event(&mut self, time: f64) {
+        #[cfg(target_arch = "wasm32")]
+        self.dispatch_clipboard_reads();
+        // Under the virtual clock a NextFrame is a frame of `/step`, never
+        // of the backend's paint beat; the pending set waits for one.
+        if crate::remote::app_clock::enabled() && !self.app_clock.dispatching_frame {
+            return;
+        }
+        let time = crate::remote::app_clock::now().unwrap_or(time);
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
 
@@ -1714,16 +1925,485 @@ impl Cx {
         self.call_event_handler(&Event::NextFrame(NextFrameEvent {
             set,
             time: time,
-            frame: self.repaint_id,
+            frame: if crate::remote::app_clock::enabled() {
+                crate::remote::app_clock::frame()
+            } else {
+                self.repaint_id
+            },
         }));
     }
+}
+
+/// Does the pass `consumer` sample the colour target of another pass that
+/// has yet to paint, or painted with draws left out (still dirty)?
+///
+/// The repaint order only knows the parent chain (a parent is painted after
+/// its children), but a pass can sample any other pass's target: siblings
+/// under one host (a compositor's source and output passes), or a target a
+/// later pass in the order renders. Such a consumer records pixels that are
+/// about to change, so the backends keep it dirty and paint it again after
+/// its source, as they do for their own skipped draws. Without this a
+/// consumer painted before its source (or while a pipeline of the source
+/// was still compiling, which only showed under load) came out clean with
+/// a black or stale sample, and a host waiting for a clean paint read it.
+/// Cheap: only render-target textures are looked up, against the passes.
+#[allow(dead_code)]
+pub(crate) fn samples_incomplete_target(
+    passes: &crate::draw_pass::CxDrawPassPool,
+    textures: &crate::texture::CxTexturePool,
+    texture: crate::texture::TextureId,
+    consumer: DrawPassId,
+) -> bool {
+    sampled_picture(passes, textures, texture, consumer).to_paint
+}
+
+/// The picture a pass samples from other passes' colour target.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct SampledPicture {
+    /// A producer still has to paint it ([`samples_incomplete_target`]): the
+    /// consumer paints again after it.
+    pub(crate) to_paint: bool,
+    /// A producer's picture is unfinished (`CxDrawPass::incomplete`: painted
+    /// with a draw left out, or keeping an older picture, while a pipeline
+    /// compiles), dirty or not: the consumer's paint is not whole. Nothing is
+    /// owed a repaint for it (the pipeline's answer repaints every pass).
+    pub(crate) unfinished: bool,
+}
+
+/// What `consumer` samples in `texture`, in one look over the passes.
+#[allow(dead_code)]
+pub(crate) fn sampled_picture(
+    passes: &crate::draw_pass::CxDrawPassPool,
+    textures: &crate::texture::CxTexturePool,
+    texture: crate::texture::TextureId,
+    consumer: DrawPassId,
+) -> SampledPicture {
+    let mut picture = SampledPicture::default();
+    if !textures[texture].format.is_render() {
+        return picture;
+    }
+    for producer in passes.id_iter() {
+        let pass = &passes[producer];
+        if producer == consumer || !(pass.paint_dirty || pass.incomplete) {
+            continue;
+        }
+        if pass.color_textures.iter().any(|attachment| attachment.texture.texture_id() == texture) {
+            picture.to_paint |= pass.paint_dirty;
+            picture.unfinished |= pass.incomplete;
+        }
+    }
+    picture
+}
+
+/// A drawing kept for a frame drawn again (`Cx::keep_unrepeated_recordings`):
+/// the pass, the redraw its list was recorded in, and its `painted_serial`
+/// when it was kept.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct KeptRecording {
+    pub(crate) pass: DrawPassId,
+    pub(crate) redraw: u64,
+    pub(crate) painted: u64,
+}
+
+/// What [`Cx::frame_drawn_again`] took and what is kept.
+#[derive(Default)]
+pub(crate) struct RedrawKeep {
+    pub(crate) taken: Vec<(DrawPassId, u64)>,
+    pub(crate) kept: Vec<KeptRecording>,
+    /// The redraws the last draw event's draw contexts took: after the first,
+    /// up to the second.
+    pub(crate) drawn: (u64, u64),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{draw_list::DrawList, draw_pass::DrawPass};
+    use crate::{draw_list::{DrawList, DrawListId}, draw_pass::DrawPass};
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn a_pass_sampling_a_target_still_to_paint_is_incomplete() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        // A compositor's shape: two sibling passes, the consumer samples the
+        // producer's target. The consumer is painted first among equals; if
+        // the producer is still dirty then (not painted yet, or it left draws
+        // out while a pipeline compiled), the consumer's sample is not final.
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let target = |cx: &mut Cx| {
+            Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Fixed { width: 4, height: 4 },
+                initial: true,
+            })
+        };
+        let consumer = DrawPass::new(&mut cx);
+        let producer = DrawPass::new(&mut cx);
+        let (consumer_target, producer_target) = (target(&mut cx), target(&mut cx));
+        consumer.add_color_texture(&mut cx, &consumer_target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        producer.add_color_texture(&mut cx, &producer_target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        let (c, p) = (consumer.draw_pass_id(), producer.draw_pass_id());
+        let sampled = producer_target.texture_id();
+
+        cx.passes[p].paint_dirty = true;
+        assert!(samples_incomplete_target(&cx.passes, &cx.textures, sampled, c));
+        // painted: the sample is final
+        cx.passes[p].paint_dirty = false;
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, sampled, c));
+        // a pass reading its own target (ping-pong) is not waiting on itself
+        cx.passes[c].paint_dirty = true;
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, consumer_target.texture_id(), c));
+        // only render targets have a producer
+        let image = Texture::new_with_format(&mut cx, TextureFormat::VecBGRAu8_32 {
+            width: 1, height: 1, data: Some(vec![0]), updated: crate::texture::TextureUpdated::Full,
+        });
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, image.texture_id(), c));
+    }
+
+    #[test]
+    fn a_pass_sampling_an_unfinished_picture_is_not_whole() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        // The producer painted with a draw left out (or kept an older
+        // picture) while its pipeline compiled: what it shows is not what it
+        // recorded, dirty or not.
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let consumer = DrawPass::new(&mut cx);
+        let producer = DrawPass::new(&mut cx);
+        let target = Texture::new_with_format(&mut cx, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width: 4, height: 4 },
+            initial: true,
+        });
+        producer.add_color_texture(&mut cx, &target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        let (c, p) = (consumer.draw_pass_id(), producer.draw_pass_id());
+        let sampled = |cx: &Cx, by| sampled_picture(&cx.passes, &cx.textures, target.texture_id(), by);
+        let picture = |to_paint, unfinished| SampledPicture { to_paint, unfinished };
+        cx.passes[p].hold_picture();
+        assert_eq!(sampled(&cx, c), picture(false, true));
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, target.texture_id(), c), "nothing to repaint for it");
+        assert_eq!(sampled(&cx, p), picture(false, false), "not waiting on itself");
+        // dirty as well (to paint after the consumer, or held for a queued
+        // shader): the consumer paints again and is not whole either
+        cx.passes[p].paint_dirty = true;
+        assert_eq!(sampled(&cx, c), picture(true, true));
+        // painted whole: the sample is final
+        cx.passes[p].painted(true, 3);
+        cx.passes[p].paint_dirty = false;
+        assert_eq!(sampled(&cx, c), picture(false, false));
+        // withdrawn after a partial paint: nothing draws from it until it records again
+        cx.passes[p].painted(false, 4);
+        assert_eq!(sampled(&cx, c), picture(false, true));
+        producer.withdraw(&mut cx);
+        assert_eq!(sampled(&cx, c), picture(false, false));
+        // orphaned (nothing attaches it any more): its picture is final as it stands
+        let list = DrawList::new(&mut cx);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[list.id()].clear_draw_items(1, recording_gen, uniforms_gen);
+        cx.attach_child_pass(p, c, Some(list.id()));
+        cx.passes[p].painted(false, 5);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[list.id()].clear_draw_items(2, recording_gen, uniforms_gen);
+        cx.compute_pass_repaint_order(&mut Vec::new());
+        assert_eq!(sampled(&cx, c), picture(false, false));
+    }
+
+    #[test]
+    fn only_a_producer_with_a_draw_list_can_paint_a_given_back_target() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let consumer = DrawPass::new(&mut cx);
+        let (producer, _list) = pass_with_current_list(&mut cx);
+        let target = Texture::new_with_format(&mut cx, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width: 4, height: 4 },
+            initial: true,
+        });
+        producer.add_color_texture(&mut cx, &target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        let (c, p) = (consumer.draw_pass_id(), producer.draw_pass_id());
+        assert_eq!(cx.producers_that_paint(target.texture_id(), c), vec![p]);
+        assert!(cx.producers_that_paint(target.texture_id(), p).is_empty(), "not its own producer");
+        // orphaned (its attaching list recorded again without it): it does
+        // not paint either, unless it is kept
+        let host = DrawList::new(&mut cx);
+        let record = |cx: &mut Cx, redraw: u64| {
+            let recording_gen = cx.next_uniform_gen();
+            let uniforms_gen = cx.next_uniform_gen();
+            cx.draw_lists[host.id()].clear_draw_items(redraw, recording_gen, uniforms_gen);
+        };
+        record(&mut cx, 5);
+        cx.attach_child_pass(p, c, Some(host.id()));
+        assert_eq!(cx.producers_that_paint(target.texture_id(), c), vec![p]);
+        record(&mut cx, 6);
+        assert!(cx.producers_that_paint(target.texture_id(), c).is_empty());
+        cx.passes[p].kept_recording = true;
+        assert_eq!(cx.producers_that_paint(target.texture_id(), c), vec![p]);
+        cx.passes[p].kept_recording = false;
+        // withdrawn (its attachments stay): it cannot paint, so nothing is owed
+        producer.withdraw(&mut cx);
+        assert!(cx.producers_that_paint(target.texture_id(), c).is_empty());
+    }
+
+    #[test]
+    fn a_paint_moves_painted_serial_only_when_whole() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let pass = DrawPass::new(&mut cx);
+        let p = pass.draw_pass_id();
+        // a draw left out: the serial stays, the picture is unfinished
+        cx.passes[p].painted(false, 7);
+        assert_eq!(cx.passes[p].painted_serial, 0);
+        assert!(cx.passes[p].incomplete);
+        // whole: the serial moves and the picture is final
+        cx.passes[p].painted(true, 8);
+        assert_eq!(cx.passes[p].painted_serial, 8);
+        assert!(!cx.passes[p].incomplete);
+        // kept its older picture for a compiling pipeline: nothing to paint
+        // until the answer, and unfinished for whoever samples it
+        cx.passes[p].paint_dirty = true;
+        cx.passes[p].hold_picture();
+        assert!(!cx.passes[p].paint_dirty);
+        assert!(cx.passes[p].incomplete);
+        assert_eq!(cx.passes[p].painted_serial, 8);
+    }
+
+    #[test]
+    fn a_drawing_is_one_draw_event_however_many_draw_contexts_it_makes() {
+        let mut cx = Cx::new(Box::new(|cx, event| {
+            if let Event::Draw(_) = event {
+                // a main window's draw context, then a second window's
+                cx.begin_draw_context();
+                cx.begin_draw_context();
+            }
+        }));
+        let first = cx.drawing_id();
+        cx.call_draw_event(0.0);
+        assert_eq!(cx.drawing_id(), first + 1);
+        assert_eq!(cx.redraw_id, cx.drawing_start + 2, "both draw contexts belong to it");
+        // a draw context made outside a draw event (an offscreen bake) is a drawing of its own
+        cx.begin_draw_context();
+        assert_eq!(cx.drawing_id(), first + 2);
+        cx.begin_draw_context();
+        assert_eq!(cx.drawing_id(), first + 3);
+    }
+
+    /// The scripted drawing of the redraw tests: a main window's draw context
+    /// records the UI, then a second window's (an output window) records a
+    /// host list that attaches a history pass every drawing and a ring's
+    /// tile write when a tile is due. `tile_in_first_context` records the
+    /// tile under the first context instead.
+    struct RedrawScript {
+        ui: DrawListId,
+        host_list: DrawListId,
+        host: DrawPassId,
+        ring: (DrawPassId, DrawListId),
+        history: (DrawPassId, DrawListId),
+        newer: Option<(DrawPassId, DrawListId)>,
+        tile_due: bool,
+        tile_in_first_context: bool,
+    }
+
+    fn scripted_cx() -> (Cx, Rc<std::cell::RefCell<Option<RedrawScript>>>) {
+        let script: Rc<std::cell::RefCell<Option<RedrawScript>>> = Rc::new(std::cell::RefCell::new(None));
+        let s = script.clone();
+        let cx = Cx::new(Box::new(move |cx, event| {
+            if !matches!(event, Event::Draw(_)) {
+                return;
+            }
+            let s = s.borrow();
+            let Some(s) = s.as_ref() else { return };
+            let record = |cx: &mut Cx, list: DrawListId| {
+                let recording_gen = cx.next_uniform_gen();
+                let uniforms_gen = cx.next_uniform_gen();
+                let redraw = cx.redraw_id;
+                cx.draw_lists[list].clear_draw_items(redraw, recording_gen, uniforms_gen);
+            };
+            let tile = |cx: &mut Cx| {
+                record(cx, s.ring.1);
+                cx.passes[s.ring.0].paint_dirty = true;
+            };
+            cx.begin_draw_context();
+            record(cx, s.ui);
+            if s.tile_due && s.tile_in_first_context {
+                tile(cx);
+            }
+            cx.begin_draw_context();
+            record(cx, s.host_list);
+            record(cx, s.history.1);
+            cx.passes[s.history.0].paint_dirty = true;
+            cx.attach_child_pass(s.history.0, s.host, Some(s.host_list));
+            if s.tile_due {
+                if !s.tile_in_first_context {
+                    tile(cx);
+                }
+                cx.attach_child_pass(s.ring.0, s.host, Some(s.host_list));
+            }
+            if let Some((newer, list)) = s.newer {
+                record(cx, list);
+                cx.passes[newer].paint_dirty = true;
+                cx.attach_child_pass(newer, s.host, Some(s.host_list));
+            }
+        }));
+        (cx, script)
+    }
+
+    #[test]
+    fn a_frame_drawn_again_paints_what_an_earlier_drawing_of_it_recorded() {
+        let (mut cx, script) = scripted_cx();
+        let host = DrawPass::new(&mut cx);
+        let (ui, host_list) = (DrawList::new(&mut cx), DrawList::new(&mut cx));
+        let (ring, ring_list) = pass_with_current_list(&mut cx);
+        let (history, history_list) = pass_with_current_list(&mut cx);
+        let (ring_id, history_id) = (ring.draw_pass_id(), history.draw_pass_id());
+        *script.borrow_mut() = Some(RedrawScript {
+            ui: ui.id(), host_list: host_list.id(), host: host.draw_pass_id(),
+            ring: (ring_id, ring_list.id()), history: (history_id, history_list.id()),
+            newer: None, tile_due: true, tile_in_first_context: true,
+        });
+        let set = |f: &dyn Fn(&mut RedrawScript)| f(script.borrow_mut().as_mut().unwrap());
+        let mut todo = Vec::new();
+
+        // The first drawing records the tile, under the first of its two
+        // draw contexts; its glyphs are not there yet.
+        cx.call_draw_event(0.0);
+        cx.frame_drawn_again();
+        set(&|s| s.tile_due = false);
+        // Drawn again (no tile due) and still waiting for glyphs: drawn a
+        // third time.
+        cx.call_draw_event(0.0);
+        assert!(cx.pass_attachment_is_stale(ring_id), "the later drawing dropped the tile");
+        cx.frame_drawn_again();
+        cx.call_draw_event(0.0);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&ring_id), "the tile the first drawing recorded paints");
+        assert!(todo.contains(&history_id));
+        assert!(cx.pass_attachment_is_stale(ring_id), "kept, its attachment stamp as it was recorded");
+
+        // A build that could not paint it (a window that took no frame):
+        // kept through the next frame, which records no tile either.
+        cx.release_painted_recordings();
+        cx.call_draw_event(0.0);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&ring_id), "kept until it paints whole");
+        // Painted whole: an orphan again, as any pass a frame does not record.
+        cx.repaint_id += 1;
+        let repaint = cx.repaint_id;
+        cx.passes[ring_id].painted(true, repaint);
+        cx.passes[ring_id].paint_dirty = false;
+        cx.release_painted_recordings();
+        cx.call_draw_event(0.0);
+        cx.passes[ring_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&ring_id));
+        assert!(!cx.passes[ring_id].kept_recording);
+
+        // A pass the later drawing records again is its own.
+        set(&|s| s.tile_due = true);
+        cx.call_draw_event(0.0);
+        cx.frame_drawn_again();
+        cx.call_draw_event(0.0);
+        assert!(!cx.passes[ring_id].kept_recording);
+    }
+
+    #[test]
+    fn a_draw_context_made_while_the_wait_pumps_does_not_hide_the_drawing_taken() {
+        let (mut cx, script) = scripted_cx();
+        let host = DrawPass::new(&mut cx);
+        let (ui, host_list) = (DrawList::new(&mut cx), DrawList::new(&mut cx));
+        let (ring, ring_list) = pass_with_current_list(&mut cx);
+        let (history, history_list) = pass_with_current_list(&mut cx);
+        let ring_id = ring.draw_pass_id();
+        *script.borrow_mut() = Some(RedrawScript {
+            ui: ui.id(), host_list: host_list.id(), host: host.draw_pass_id(),
+            ring: (ring_id, ring_list.id()), history: (history.draw_pass_id(), history_list.id()),
+            newer: None, tile_due: true, tile_in_first_context: false,
+        });
+        cx.call_draw_event(0.0);
+        // the glyph wait pumps events, and something makes a draw context
+        // outside a draw event (a drawing of its own) before the take
+        cx.begin_draw_context();
+        cx.frame_drawn_again();
+        script.borrow_mut().as_mut().unwrap().tile_due = false;
+        cx.call_draw_event(0.0);
+        assert!(cx.passes[ring_id].kept_recording, "the tile the first drawing recorded is kept");
+    }
+
+    #[test]
+    fn a_frame_drawn_again_keeps_a_pass_whose_depth_buffer_a_newer_pass_shares() {
+        use crate::draw_pass::{DrawPassClearColor, DrawPassClearDepth};
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        let (mut cx, script) = scripted_cx();
+        let host = DrawPass::new(&mut cx);
+        let (ui, host_list) = (DrawList::new(&mut cx), DrawList::new(&mut cx));
+        let (ring, ring_list) = pass_with_current_list(&mut cx);
+        let (history, history_list) = pass_with_current_list(&mut cx);
+        let (newer, newer_list) = pass_with_current_list(&mut cx);
+        let size = TextureSize::Fixed { width: 4, height: 4 };
+        let colour = |cx: &mut Cx| Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: size.clone(), initial: true });
+        let (ring_target, newer_target) = (colour(&mut cx), colour(&mut cx));
+        let depth = Texture::new_with_format(&mut cx, TextureFormat::DepthD32 { size: size.clone(), initial: true });
+        let clear = DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0));
+        ring.set_color_texture(&mut cx, &ring_target, clear.clone());
+        newer.set_color_texture(&mut cx, &newer_target, clear);
+        ring.set_depth_texture(&mut cx, &depth, DrawPassClearDepth::ClearWith(1.0));
+        newer.set_depth_texture(&mut cx, &depth, DrawPassClearDepth::ClearWith(1.0));
+        let ring_id = ring.draw_pass_id();
+        *script.borrow_mut() = Some(RedrawScript {
+            ui: ui.id(), host_list: host_list.id(), host: host.draw_pass_id(),
+            ring: (ring_id, ring_list.id()), history: (history.draw_pass_id(), history_list.id()),
+            newer: None, tile_due: true, tile_in_first_context: false,
+        });
+        cx.call_draw_event(0.0);
+        cx.frame_drawn_again();
+        {
+            let mut s = script.borrow_mut();
+            let s = s.as_mut().unwrap();
+            s.tile_due = false;
+            s.newer = Some((newer.draw_pass_id(), newer_list.id()));
+        }
+        cx.call_draw_event(0.0);
+        assert!(cx.passes[ring_id].kept_recording, "a shared depth buffer is scratch, not a contested picture");
+    }
+
+    #[test]
+    fn a_frame_drawn_again_does_not_keep_a_pass_over_a_newer_recording_of_its_target() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        let (mut cx, script) = scripted_cx();
+        let host = DrawPass::new(&mut cx);
+        let (ui, host_list) = (DrawList::new(&mut cx), DrawList::new(&mut cx));
+        let (ring, ring_list) = pass_with_current_list(&mut cx);
+        let (history, history_list) = pass_with_current_list(&mut cx);
+        let (newer, newer_list) = pass_with_current_list(&mut cx);
+        let target = Texture::new_with_format(&mut cx, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width: 4, height: 4 },
+            initial: true,
+        });
+        let clear = DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0));
+        ring.set_color_texture(&mut cx, &target, clear.clone());
+        newer.set_color_texture(&mut cx, &target, clear);
+        let ring_id = ring.draw_pass_id();
+        *script.borrow_mut() = Some(RedrawScript {
+            ui: ui.id(), host_list: host_list.id(), host: host.draw_pass_id(),
+            ring: (ring_id, ring_list.id()), history: (history.draw_pass_id(), history_list.id()),
+            newer: None, tile_due: true, tile_in_first_context: false,
+        });
+        cx.call_draw_event(0.0);
+        cx.frame_drawn_again();
+        {
+            let mut s = script.borrow_mut();
+            let s = s.as_mut().unwrap();
+            s.tile_due = false;
+            s.newer = Some((newer.draw_pass_id(), newer_list.id()));
+        }
+        cx.call_draw_event(0.0);
+        assert!(!cx.passes[ring_id].kept_recording, "the newer recording owns the target");
+    }
 
     #[test]
     fn orphaned_child_pass_is_not_repainted_until_reattached() {
@@ -1789,6 +2469,51 @@ mod tests {
         cx.draw_lists[list.id()].clear_draw_items(redraw_id, recording_gen, uniforms_gen);
         cx.passes[pass.draw_pass_id()].main_draw_list_id = Some(list.id());
         (pass, list)
+    }
+
+    /// With a remote headset's offscreen XR display, what is drawn for its frames alone paints no
+    /// window (the desktop does not render continuously for the headset), while every other
+    /// cause of the window (input, data, an animation, a popover) paints it at once, and a
+    /// screenshot or remote grab (and an explicit repaint) paints it too.
+    #[test]
+    fn a_headset_frame_paints_no_window_but_the_window_stays_live() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.hal.info = Some(makepad_hal::HalInfo { flags: makepad_hal::info_flags::XR_OFFSCREEN, ..Default::default() });
+        assert!(cx.xr_offscreen());
+        let window = crate::window::WindowHandle::new(&mut cx).window_id();
+        cx.windows[window].is_created = true;
+        let (pass, _list) = pass_with_current_list(&mut cx);
+        let pass = pass.draw_pass_id();
+        cx.passes[pass].parent = CxDrawPassParent::Window(window);
+        cx.windows[window].main_pass_id = Some(pass);
+        let mut todo = Vec::new();
+        // the headset's frame redrew the window's list: not painted, no frame asked for it
+        cx.window_redrawn = false;
+        cx.in_xr_update = true;
+        cx.note_window_redraw();
+        cx.in_xr_update = false;
+        cx.passes[pass].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&pass), "a headset frame alone paints no window");
+        assert!(!cx.any_passes_dirty(), "and asks for no frame");
+        // the window's own cause: painted at once
+        cx.note_window_redraw();
+        assert!(cx.any_passes_dirty(), "the window's own change asks for a frame");
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&pass), "the window's own change paints it");
+        // a grab: painted at once
+        cx.passes[pass].paint_dirty = true;
+        cx.screenshot_requests.push(makepad_studio_protocol::ScreenshotRequest { request_id: 7, kind_id: 0 });
+        assert!(cx.any_passes_dirty(), "a grab wakes the loop");
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&pass), "a grab paints the window");
+        cx.screenshot_requests.clear();
+        // a remote present request (repaint_pass) likewise
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&pass));
+        cx.request_remote_window_present(window);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&pass), "an explicit repaint paints the window");
     }
 
     #[test]
@@ -1938,6 +2663,83 @@ mod tests {
     }
 }
 
+/// Hosted-child frame demand, shared by every `--stdin-loop` backend. The
+/// host ticks a child only while the child says it has something to do:
+/// after a Tick it announces a frame (`RequestAnimationFrame`) or the
+/// delay of its next timer (`WakeIn`), and a worker thread that raises a
+/// UI signal wakes its loop to service the new work. An idle child needs no periodic Tick.
+#[cfg(not(target_arch = "wasm32"))]
+mod hosted_demand {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A wake request is on its way to the host and no Tick has answered it.
+    static WAKE_SENT: AtomicBool = AtomicBool::new(false);
+
+    pub fn request_frame() {
+        if !WAKE_SENT.swap(true, Ordering::AcqRel) {
+            super::Cx::send_studio_message(super::AppToStudio::RequestAnimationFrame);
+        }
+    }
+
+    pub fn wake_from_thread() {
+        // A HAL client services signals in its own pump, then announces visible work.
+        // Its host socket also wakes that pump: asking the host for a frame here would
+        // turn each incoming Tick into another frame request, even while idle or hidden.
+        crate::thread::wake_ui_event_loop();
+    }
+
+    pub fn tick_began() {
+        WAKE_SENT.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Cx {
+    /// Wake a hosted child on worker signals. Socket-read loops ask the host for a
+    /// Tick; the HAL wakes its event pump and announces demand after servicing signals.
+    pub(crate) fn stdin_install_wake(&mut self) {
+        // Each host message used to raise the UI signal too: a full-app
+        // `Event::Signal` per Tick (a hosted Stage pumped 100+ times a second idle).
+        self.studio_socket_wakes_loop_only();
+        hosted_demand::tick_began();
+        crate::makepad_network::install_ui_waker(Some(crate::makepad_network::UiWaker::new(
+            hosted_demand::wake_from_thread,
+        )));
+    }
+
+    /// A Tick is being consumed: wakes raised from now on are new ones.
+    pub(crate) fn stdin_tick_began(&mut self) {
+        hosted_demand::tick_began();
+    }
+
+    /// A hidden hosted child keeps its frame work (next-frame callbacks, draws) until the
+    /// shared HostedVisible dispatch shows it again -- except while a remote request needs a
+    /// frame (a grab, a step, input that waits for its frame): the remote is never starved.
+    pub(crate) fn hosted_frames_held(&self) -> bool {
+        self.hosted_hidden && !crate::remote::needs_ticks()
+    }
+
+    /// At most one frame request until the host answers with a Tick, none while frames are held.
+    pub(crate) fn stdin_request_frame(&self) {
+        if !self.hosted_frames_held() {
+            hosted_demand::request_frame();
+        }
+    }
+
+    /// End of a Tick: tell the host what this child still needs. A pending
+    /// frame (next-frame callbacks, a redraw) asks for the next Tick; else
+    /// the earliest timer says in how long. Nothing pending says nothing.
+    pub(crate) fn stdin_announce_demand(&self, timers: &crate::os::shared_framebuf::PollTimers) {
+        // As in call_next_frame_event, a virtual clock advances callbacks only on /step.
+        let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
+        if !self.hosted_frames_held() && (next_frames_due || self.need_redrawing()) {
+            self.stdin_request_frame();
+        } else if let Some(delay) = timers.next_due_in() {
+            Self::send_studio_message(AppToStudio::WakeIn(delay));
+        }
+    }
+}
+
 /// Hosted-child input pacing, shared by every `--stdin-loop` backend.
 impl Cx {
     /// Collapse one drained host batch before dispatch: every `Tick` but
@@ -1946,14 +2748,7 @@ impl Cx {
     /// is replaced by it (a frame can only show the pointer's latest
     /// position). Everything else keeps its order, so a Down/Up/Scroll
     /// still sees the move that preceded it.
-    #[cfg(any(
-        gpusim,
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android",
-        all(target_os = "linux", not(target_env = "ohos")),
-    ))]
-    #[cfg(any(not(linux_direct), use_vulkan))]
+    #[cfg(not(target_arch = "wasm32"))]
     /// Only the Ticks of a batch fold into its last; every pointer sample
     /// stays (a touch child's velocity tracker needs each one).
     #[allow(dead_code)]
@@ -2014,16 +2809,7 @@ impl Cx {
     /// child that fell behind sees its whole backlog at once and can
     /// coalesce it. Returns true when the socket closed or failed; the
     /// caller dispatches what it has and then leaves its loop.
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android",
-        all(target_os = "linux", not(target_env = "ohos")),
-    ))]
-    #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
-    // The direct Vulkan loop drains inline (it also polls its GPU inbox
-    // between batches); every blocking hosted loop uses this.
-    #[cfg(not(all(target_os = "linux", linux_direct, use_vulkan)))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn stdin_drain_host_batches(&mut self, into: &mut Vec<StudioToApp>) -> bool {
         use crate::makepad_micro_serde::*;
         use crate::web_socket::WebSocketMessage;
@@ -2031,8 +2817,13 @@ impl Cx {
         loop {
             match self.try_recv_studio_websocket_message() {
                 Some(WebSocketMessage::Binary(data)) => {
-                    match StudioToAppVec::deserialize_bin(&data) {
-                        Ok(msgs) => into.extend(msgs.0),
+                    match StudioToAppVec::decode_bin(&data) {
+                        Ok((msgs, errors)) => {
+                            for error in errors {
+                                crate::error!("{error}");
+                            }
+                            into.extend(msgs.0)
+                        }
                         Err(err) => crate::error!(
                             "Cant parse studio websocket binary payload in --stdin-loop: {:?}",
                             err
@@ -2059,5 +2850,49 @@ impl Cx {
                 None => return false,
             }
         }
+    }
+}
+
+/// makepad inspect's retry boundary hooks (dlsym'd once; absent in a rustc build): set while an
+/// agent watches the app.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod relax_retry {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+
+    pub struct Hooks {
+        on: &'static AtomicBool,
+        pub enter: extern "C" fn(*const u8, usize),
+        pub leave: extern "C" fn(),
+        pub take: extern "C" fn() -> bool,
+    }
+
+    pub fn hooks() -> Option<&'static Hooks> {
+        static H: OnceLock<Option<Hooks>> = OnceLock::new();
+        H.get_or_init(|| {
+            extern "C" {
+                fn dlsym(handle: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+            }
+
+            #[cfg(target_os = "macos")]
+            let default = -2isize as *mut std::ffi::c_void;
+            #[cfg(not(target_os = "macos"))]
+            let default = std::ptr::null_mut();
+            let get = |n: &std::ffi::CStr| unsafe { dlsym(default, n.as_ptr()) };
+            let (on, enter, leave, take) = (get(c"relax_retry_on"), get(c"relax_retry_enter"), get(c"relax_retry_leave"), get(c"relax_retry_take"));
+            if on.is_null() || enter.is_null() || leave.is_null() || take.is_null() {
+                return None;
+            }
+            Some(unsafe {
+                Hooks {
+                    on: &*(on as *const AtomicBool),
+                    enter: std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn(*const u8, usize)>(enter),
+                    leave: std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(leave),
+                    take: std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn() -> bool>(take),
+                }
+            })
+        })
+        .as_ref()
+        .filter(|h| h.on.load(Ordering::Relaxed))
     }
 }

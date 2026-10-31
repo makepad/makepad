@@ -1,3 +1,4 @@
+use makepad_relax::relax;
 use crate::{
     audio::{AudioBuffer, AudioDeviceId, AudioInfo, AudioInputFn, AudioInputOptions, AudioOutputFn},
     midi::*,
@@ -46,15 +47,20 @@ pub trait CxMediaApi {
     /// in the app's closure costs that closure and its buffer, not the
     /// device thread it was called from. The taps are fed either way, so a
     /// recording keeps its place through a fault rather than ending at it.
+    #[relax(O3, always)]
     fn audio_output_box(&mut self, index: usize, f: AudioOutputFn) {
         let mut fenced = crate::audio_output_fence::FencedOutput::new(index, f);
-        self.audio_output_box_os(
-            index,
-            Box::new(move |info, buffer| {
-                fenced.call(info, buffer);
-                crate::audio_output_tap::feed_audio_output_tap(info, buffer);
-            }),
-        )
+        let mut meter = crate::audio_deadline::DeadlineMeter::new("output");
+        let seam = move |info: AudioInfo, buffer: &mut AudioBuffer| {
+            let t0 = crate::monotonic_seconds();
+            fenced.call(info, buffer);
+            crate::audio_output_tap::feed_audio_output_tap(index, info, buffer);
+            if crate::audio_output_tap::program_output_silenced(index) {
+                buffer.zero();
+            }
+            meter.block(buffer.frame_count(), info.sample_rate, t0, crate::monotonic_seconds() - t0);
+        };
+        self.audio_output_box_os(index, Box::new(seam))
     }
 
     /// Backend-implemented half of [`Self::audio_output_box`]. Apps call the
@@ -159,6 +165,31 @@ pub trait CxMediaApi {
     }
 
     fn use_video_input(&mut self, devices: &[(VideoInputId, VideoFormatId)]);
+
+    /// The cameras the platform has listed so far (None: not listed yet). The list also arrives as
+    /// `Event::VideoInputs`, once when capture is first used and again when it changes; a reader that
+    /// starts later (a deck opened a second time) asks here instead of waiting for an event that
+    /// does not come again.
+    fn video_inputs(&self) -> Option<Vec<VideoInputDesc>> {
+        None
+    }
+
+    /// Open the camera `input` in `index` at `format` without streaming it:
+    /// the device is held (and its format fixed) but captures nothing and
+    /// its light stays off. Returns the format the device agreed to. Unlike
+    /// `use_video_input`, other slots are left alone.
+    fn video_input_open(&mut self, _index: usize, _input: VideoInputId, _format: VideoFormatId) -> Result<VideoFormat, String> {
+        Err("camera slots are not supported on this platform".into())
+    }
+
+    /// Start or stop streaming the camera open in `index`. When this
+    /// returns with `on == false`, no more frames are delivered.
+    fn video_input_stream(&mut self, _index: usize, _on: bool) -> Result<(), String> {
+        Err("camera slots are not supported on this platform".into())
+    }
+
+    /// Close the camera open in `index`.
+    fn video_input_close(&mut self, _index: usize) {}
 }
 
 /// The seam where an app's output closure is wrapped: the fence, then the
@@ -339,10 +370,12 @@ mod tests {
     /// with it, so a recorder loses that buffer and every one after.
     /// Fenced, it is handed the silence and goes on being handed buffers.
     ///
-    /// Taps receive every output, so distinguish this test's device from
-    /// the callbacks other tests can feed concurrently.
+    /// Taps hear output 0, which other tests' callbacks feed too, so this
+    /// test's device is told apart from theirs; and the registry is one per
+    /// process, so it takes the registry's turn.
     #[test]
     fn the_taps_are_handed_the_silence_too_so_a_recording_keeps_its_place() {
+        let _turn = crate::audio_output_tap::serial();
         let tap_info = AudioInfo { device_id: AudioDeviceId(LiveId(12)), ..info() };
         let fed = Arc::new(AtomicUsize::new(0));
         let quiet = Arc::new(AtomicUsize::new(0));
@@ -355,7 +388,8 @@ mod tests {
             if buffer.data.iter().all(|sample| *sample == 0.0) {
                 was_quiet.fetch_add(1, Ordering::SeqCst);
             }
-        });
+        })
+        .expect("a slot for one tap");
         let mut call = seam(0, |_info, buffer| {
             for sample in buffer.data.iter_mut() {
                 *sample = 1.0;
