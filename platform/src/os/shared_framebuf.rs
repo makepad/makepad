@@ -840,6 +840,11 @@ impl PollTimer {
             step: 0,
         }
     }
+
+    /// How long until this timer fires next, which is negative once it's due.
+    pub fn time_until_due(&self, now: f64) -> f64 {
+        self.interval * (self.step + 1) as f64 - (now - self.start_time)
+    }
 }
 
 pub struct PollTimers {
@@ -867,10 +872,7 @@ impl PollTimers {
         let now = Cx::monotonic_now();
         let time = self.time_now();
         for (id, timer) in self.timers.iter_mut() {
-            let elapsed_time = now - timer.start_time;
-            let next_due_time = timer.interval * (timer.step + 1) as f64;
-
-            if elapsed_time > next_due_time {
+            if timer.time_until_due(now) < 0.0 {
                 to_be_dispatched.push(TimerEvent {
                     timer_id: *id,
                     time: Some(time),
