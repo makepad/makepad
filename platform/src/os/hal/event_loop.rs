@@ -534,6 +534,7 @@ impl Cx {
             if self.hal.direct_display.window.is_some() { crate::linux_input::flush(&mut self.hal.frames.w); }
         }
         if self.hal.frames.w.is_empty() {
+            self.fb_after_submit();
             return;
         }
         let has_frames = self.hal.frames.w.buf().frames.len != 0;
@@ -547,6 +548,7 @@ impl Cx {
         hal_submit(&buf);
         self.hal.glyph_wait.presented.extend(self.hal.frames.window_frames.drain(..));
         self.hal.frames.submitted();
+        self.fb_after_submit();
         // the HAL no longer calls the audio entries this batch replaced
         self.hal.retired_ctx.clear();
         if let Some(hosted) = self.hal.hosted.as_mut() {

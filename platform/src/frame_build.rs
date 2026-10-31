@@ -163,6 +163,12 @@ pub(crate) struct FrameBuilder {
     pipe_by_hash: HashMap<u64, Vec<usize>>,
     /// repacked partial uploads, alive until the submit
     staging: Vec<Vec<u8>>,
+    /// `Vec*` textures opting into `discard_cpu_after_upload` whose upload went into this batch.
+    pub(crate) post_submit_discard_textures: Vec<TextureId>,
+    /// Retired pool slots whose CPU items are cleared once `hal_submit` has read any pending slices.
+    pub(crate) post_submit_retired_textures: Vec<usize>,
+    pub(crate) post_submit_retired_geometries: Vec<usize>,
+    pub(crate) post_submit_retired_ubufs: Vec<usize>,
     ranges: Vec<[u32; 2]>,
     /// the sampled texture ids of the draw being encoded (reused)
     tex_ids: Vec<Id>,
@@ -688,7 +694,16 @@ impl Cx {
         };
         let (layers, mips) = match (&alloc.category, &self.textures[id].format) {
             (TextureCategory::VecCube, _) => (6, 1),
-            (TextureCategory::VecArray(layers), format) => ((*layers).max(1), vec_image(format).map_or(1, |image| image.levels())),
+            (TextureCategory::VecArray(layers), format) => {
+                let fallback_mips = match format {
+                    TextureFormat::VecArrayMipBGRAu8_32 { max_level, .. }
+                    | TextureFormat::VecArrayMipCompressed { max_level, .. } => {
+                        max_level.map_or(1, |l| l + 1)
+                    }
+                    _ => 1,
+                };
+                ((*layers).max(1), vec_image(format).map_or(fallback_mips, |image| image.levels()))
+            }
             // Only the levels the data holds: the HAL generates no mips for a sampled vec
             // texture, so a level without data would sample as zeros (a minified image drawn
             // transparent).
@@ -801,6 +816,12 @@ impl Cx {
             }
         }
         fb.stats.bytes_uploaded += uploaded;
+        if uploaded > 0
+            && self.textures[id].discard_cpu_after_upload
+            && self.textures[id].updated().is_empty()
+        {
+            fb.post_submit_discard_textures.push(id);
+        }
         hal_id
     }
 
@@ -1935,14 +1956,17 @@ impl Cx {
         while let Some(slot) = self.textures.0.take_free_retirement() {
             fb.texture_destroy(slot);
             self.pick.twins.retain(|source, _| source.0 != slot);
+            fb.post_submit_retired_textures.push(slot);
         }
         while let Some(slot) = self.geometries.0.take_free_retirement() {
             fb.geometry_destroy(slot);
+            fb.post_submit_retired_geometries.push(slot);
         }
         while let Some(slot) = self.uniform_buffers.0.take_free_retirement() {
             if let Some(rec) = fb.ubuf.remove(&slot) {
                 fb.buffer_destroy(rec.id);
             }
+            fb.post_submit_retired_ubufs.push(slot);
         }
         // shared blocks: dropped ones free their buffer once every reader completed
         let mut drained = Vec::new();
@@ -1959,6 +1983,39 @@ impl Cx {
             false
         });
         fb.retiring = retiring;
+    }
+
+    /// Release CPU `Vec` backing of `discard_cpu_after_upload` textures and retired pool slots
+    /// once `hal_submit` has consumed any slices encoded in `fb.w`.
+    pub(crate) fn fb_after_submit(&mut self) {
+        let discard = std::mem::take(&mut self.hal.frames.post_submit_discard_textures);
+        for id in discard {
+            if self.textures.0.is_live_generation(id.0, id.generation()) {
+                let tex = &mut self.textures[id];
+                if tex.discard_cpu_after_upload && tex.updated().is_empty() {
+                    tex.format.discard_cpu_data();
+                }
+            }
+        }
+        let retired_tex = std::mem::take(&mut self.hal.frames.post_submit_retired_textures);
+        for slot in retired_tex {
+            if self.textures.0.is_free(slot) {
+                self.textures.0.pool[slot].item = crate::texture::CxTexture::default();
+            }
+        }
+        let retired_geo = std::mem::take(&mut self.hal.frames.post_submit_retired_geometries);
+        for slot in retired_geo {
+            if self.geometries.0.is_free(slot) {
+                self.geometries.0.pool[slot].item = crate::geometry::CxGeometry::default();
+            }
+        }
+        let retired_ubuf = std::mem::take(&mut self.hal.frames.post_submit_retired_ubufs);
+        for slot in retired_ubuf {
+            if self.uniform_buffers.0.is_free(slot) {
+                self.uniform_buffers.0.pool[slot].item =
+                    crate::uniform_buffer::CxUniformBuffer::default();
+            }
+        }
     }
 }
 
