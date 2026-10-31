@@ -85,19 +85,25 @@ pub fn derive_animator_impl(input: TokenStream) -> TokenStream {
 
             tb.add("    fn animator_handle_event_scoped(&mut self, cx: &mut Cx, event: &Event, scope:&mut Scope)->AnimatorAction{");
             tb.add("         let mut act = AnimatorAction::None;");
-            // Replay any cut/play that was deferred while the VM was held (the VM
-            // is free during event handling). A no-op when nothing is queued.
-            tb.add("         let __vm_id = self.")
+            // Replay any cut/play deferred while the VM was held (it's free during event handling).
+            tb.add("         if self.")
+                .ident(&animator_field.name)
+                .add(".has_deferred(){");
+            tb.add("             let __vm_id = self.")
                 .ident(&animator_field.name)
                 .add(".vm_id();");
-            tb.add("         for value in self.")
+            tb.add("             for value in self.")
                 .ident(&animator_field.name)
                 .add(".flush_deferred(cx){");
-            tb.add("             Animator::apply_value(cx, __vm_id, self, scope, value);");
+            tb.add("                 Animator::apply_value(cx, __vm_id, self, scope, value);");
+            tb.add("             }");
             tb.add("         }");
             tb.add("         if let Some(value) = self.")
                 .ident(&animator_field.name)
                 .add(".handle_event(cx, event, &mut act){");
+            tb.add("             let __vm_id = self.")
+                .ident(&animator_field.name)
+                .add(".vm_id();");
             tb.add("             Animator::apply_value(cx, __vm_id, self, scope, value);");
             tb.add("         }");
             tb.add("         act");
