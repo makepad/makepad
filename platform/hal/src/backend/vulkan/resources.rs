@@ -350,11 +350,72 @@ pub(crate) struct Buffer {
 
 impl Buffer {
     /// A zeroed buffer: a retained buffer is read where the app has not written yet.
+    /// Prefers `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` (ReBAR / heap 0), falling back to
+    /// host-visible memory with a diagnostic log naming the memory type obtained, and unmaps
+    /// immediately after initialization and after each [`Self::write`].
     pub fn new(dev: Arc<Device>, size: u64, usage: vk::BufferUsageFlags) -> Result<Arc<Self>, String> {
-        let out = Self::scratch(dev, size, usage)?;
-        unsafe { std::ptr::write_bytes(out.mapped as *mut u8, 0, out.size.max(16) as usize); }
-        out.flush()?;
-        Ok(out)
+        let logical_size = size;
+        let alloc_size = size.max(16);
+        let buffer = unsafe { dev.raw.create_buffer(&vk::BufferCreateInfo::default().size(alloc_size).usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE), None) }.map_err(error)?;
+        let req = unsafe { dev.raw.get_buffer_memory_requirements(buffer) };
+        let preferred = vk::MemoryPropertyFlags::DEVICE_LOCAL
+            | vk::MemoryPropertyFlags::HOST_VISIBLE
+            | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let result = (|| {
+            match dev.memory_type(req.memory_type_bits, preferred) {
+                Ok(ty) => match unsafe {
+                    dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None)
+                }.map_err(error) {
+                    Ok(memory) => return Ok::<_, String>((memory, ty)),
+                    Err(why) => {
+                        let fb_ty = dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+                            .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))?;
+                        let memory = unsafe {
+                            dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(fb_ty), None)
+                        }.map_err(error)?;
+                        if !dev.rebar_fallback_logged.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                            let mt = dev.memory.memory_types[fb_ty as usize];
+                            eprintln!(
+                                "[hal-vulkan] Buffer::new ({logical_size} B): DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT alloc failed ({why}); fell back to memory_type={fb_ty} (heap={}, flags={:?}) (further fallbacks on this device suppressed)",
+                                mt.heap_index,
+                                mt.property_flags,
+                            );
+                        }
+                        return Ok((memory, fb_ty));
+                    }
+                },
+                Err(why) => {
+                    let fb_ty = dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+                        .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))?;
+                    let memory = unsafe {
+                        dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(fb_ty), None)
+                    }.map_err(error)?;
+                    if !dev.rebar_fallback_logged.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                        let mt = dev.memory.memory_types[fb_ty as usize];
+                        eprintln!(
+                            "[hal-vulkan] Buffer::new ({logical_size} B): DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT unavailable ({why}); fell back to memory_type={fb_ty} (heap={}, flags={:?}) (further fallbacks on this device suppressed)",
+                            mt.heap_index,
+                            mt.property_flags,
+                        );
+                    }
+                    return Ok((memory, fb_ty));
+                }
+            }
+        })();
+        let (memory, ty) = match result { Ok(v) => v, Err(e) => { unsafe { dev.raw.destroy_buffer(buffer, None); } return Err(e); } };
+        dev.charge(req.size);
+        let coherent = dev.memory.memory_types[ty as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT);
+        let out = Self { dev, buffer, memory, size: logical_size, bytes: req.size, mapped: 0, coherent };
+        unsafe {
+            out.dev.raw.bind_buffer_memory(buffer, memory, 0).map_err(error)?;
+            let ptr = out.dev.raw.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).map_err(error)? as *mut u8;
+            std::ptr::write_bytes(ptr, 0, out.size.max(16) as usize);
+            let res = out.flush();
+            out.dev.raw.unmap_memory(memory);
+            res?;
+        }
+        Ok(Arc::new(out))
     }
 
     /// A buffer whose bytes are undefined until written: upload arenas and readback staging,
@@ -393,11 +454,21 @@ impl Buffer {
 
     /// Only the HAL encoder writes, to fresh storage or an unleased retained buffer.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), String> {
-        self.write_unflushed(offset, data)?;
-        self.flush()
+        if self.mapped != 0 {
+            self.write_unflushed(offset, data)?;
+            return self.flush();
+        }
+        if offset.checked_add(data.len() as u64).is_none_or(|end| end > self.size) { return Err("buffer write exceeds storage".into()); }
+        if data.is_empty() { return Ok(()); }
+        let ptr = unsafe { self.dev.raw.map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }.map_err(error)? as *mut u8;
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), data.len()); }
+        let res = self.flush();
+        unsafe { self.dev.raw.unmap_memory(self.memory); }
+        res
     }
 
     pub(super) fn write_unflushed(&self, offset: u64, data: &[u8]) -> Result<(), String> {
+        if self.mapped == 0 { return Err("cannot write_unflushed to unmapped buffer".into()); }
         if offset.checked_add(data.len() as u64).is_none_or(|end| end > self.size) { return Err("buffer write exceeds storage".into()); }
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), (self.mapped as *mut u8).add(offset as usize), data.len()); }
         Ok(())
@@ -410,16 +481,35 @@ impl Buffer {
         Ok(())
     }
 
+    /// Reads `length` bytes from the buffer. When `self.mapped == 0` (`Buffer::new`), this
+    /// temporarily maps and unmaps `self.memory`; callers must not invoke `write` or `read`
+    /// concurrently on the same unmapped `Buffer` (all `Buffer::new` callers run on the single
+    /// `&mut Vulkan` backend thread).
     pub fn read(&self, length: usize) -> Result<Vec<u8>, String> {
         if length as u64 > self.size { return Err("read exceeds staging buffer".into()); }
-        if !self.coherent {
-            unsafe { self.dev.raw.invalidate_mapped_memory_ranges(&[vk::MappedMemoryRange::default().memory(self.memory).size(vk::WHOLE_SIZE)]) }.map_err(error)?;
+        if self.mapped != 0 {
+            if !self.coherent {
+                unsafe { self.dev.raw.invalidate_mapped_memory_ranges(&[vk::MappedMemoryRange::default().memory(self.memory).size(vk::WHOLE_SIZE)]) }.map_err(error)?;
+            }
+            return Ok(unsafe { std::slice::from_raw_parts(self.mapped as *const u8, length) }.to_vec());
         }
-        Ok(unsafe { std::slice::from_raw_parts(self.mapped as *const u8, length) }.to_vec())
+        let ptr = unsafe { self.dev.raw.map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }.map_err(error)? as *const u8;
+        if !self.coherent {
+            if let Err(e) = unsafe { self.dev.raw.invalidate_mapped_memory_ranges(&[vk::MappedMemoryRange::default().memory(self.memory).size(vk::WHOLE_SIZE)]) }.map_err(error) {
+                unsafe { self.dev.raw.unmap_memory(self.memory); }
+                return Err(e);
+            }
+        }
+        let out = unsafe { std::slice::from_raw_parts(ptr, length) }.to_vec();
+        unsafe { self.dev.raw.unmap_memory(self.memory); }
+        Ok(out)
     }
 
     #[cfg(target_os = "linux")]
     pub(super) fn invalidate(&self) -> Result<(), String> {
+        if self.mapped == 0 {
+            return Err("cannot invalidate unmapped buffer; use Buffer::scratch for persistently mapped readback".into());
+        }
         if !self.coherent {
             unsafe { self.dev.raw.invalidate_mapped_memory_ranges(&[vk::MappedMemoryRange::default().memory(self.memory).size(vk::WHOLE_SIZE)]) }.map_err(error)?;
         }
@@ -429,6 +519,11 @@ impl Buffer {
     /// Caller holds the completed allocation exclusively against writers for the slice's life.
     #[cfg(target_os = "linux")]
     pub(super) unsafe fn completed_bytes(&self, length: usize) -> &[u8] {
+        assert!(
+            self.mapped != 0,
+            "[hal-vulkan] completed_bytes called on unmapped Buffer ({} B); use Buffer::scratch for persistently mapped readback",
+            self.size,
+        );
         std::slice::from_raw_parts(self.mapped as *const u8, length.min(self.size as usize))
     }
 }

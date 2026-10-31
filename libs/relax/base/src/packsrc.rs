@@ -203,7 +203,7 @@ pub fn run(opts: Options) -> Result<(), String> {
         cmd.arg(pkg).args(flags).current_dir(&root);
         cmd.env("MAKEPAD_RUN_CACHE_DIR", work.join("cache"));
         cmd.env("MAKEPAD_RUN_READ_LOG", &log);
-        cmd.env_remove("MAKEPAD_RUN_VFS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_EDITS").env_remove("MAKEPAD_RUN_CHECK_TARGET");
+        cmd.env_remove("MAKEPAD_RUN_VFS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_EDITS").env_remove("MAKEPAD_RUN_OVERLAY").env_remove("MAKEPAD_RUN_CHECK_TARGET");
         cmd.env("MAKEPAD_RUN_OFFLINE", "1").env("MAKEPAD_CEF_OFFLINE", "1");
         if let Some(t) = &opts.target {
             cmd.env("MAKEPAD_RUN_CHECK_TARGET", t);

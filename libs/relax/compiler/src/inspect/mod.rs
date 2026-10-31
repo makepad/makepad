@@ -1294,7 +1294,10 @@ static PROVIDERS: relax_session::sync::Mutex<Vec<(String, ProgramQuery, crate::d
 /// registration from the same domain replaces its earlier one. Every domain of the process
 /// registers the same commands: the process answers with its first domain's (the root: the window
 /// manager hosting app domains, or the one app), never with whichever domain started last.
-pub extern "C" fn relax_register_inspect(name: *const u8, len: usize, query: ProgramQuery) {
+///
+/// # Safety
+/// `name` must be valid for `len` readable bytes.
+pub unsafe extern "C" fn relax_register_inspect(name: *const u8, len: usize, query: ProgramQuery) {
     let Some(scope) = crate::domain::callback() else { return };
     let name = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned() };
     let mut p = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1478,7 +1481,10 @@ fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, versio
 /// The program registers the service `name` (makepad-platform: `frames`): the host serves it on
 /// its endpoint, each channel a producer the program runs. The same mechanism as
 /// [`relax_register_inspect`], for streams.
-pub extern "C" fn relax_register_remote_service(name: *const u8, len: usize, version: u32, open: ServiceOpen, close: ServiceClose) {
+///
+/// # Safety
+/// `name` must be valid for `len` readable bytes.
+pub unsafe extern "C" fn relax_register_remote_service(name: *const u8, len: usize, version: u32, open: ServiceOpen, close: ServiceClose) {
     let Some(scope) = crate::domain::callback() else { return };
     let name = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned() };
     let mut services = SERVICES.lock().unwrap_or_else(|e| e.into_inner());

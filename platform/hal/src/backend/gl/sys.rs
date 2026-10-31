@@ -172,6 +172,7 @@ pub const DEPTH_TEST: GLenum = 0x0B71;
 pub const BLEND: GLenum = 0x0BE2;
 pub const SCISSOR_TEST: GLenum = 0x0C11;
 pub const LEQUAL: GLenum = 0x0203;
+pub const GEQUAL: GLenum = 0x0206;
 pub const ONE: GLenum = 1;
 pub const ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
 pub const FUNC_ADD: GLenum = 0x8006;

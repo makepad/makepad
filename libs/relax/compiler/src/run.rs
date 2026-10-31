@@ -159,7 +159,7 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         !sess.runtime.boot_only && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()
             && !args.iter().take_while(|a| a.as_str() != "--").any(|a| matches!(a.as_str(), "--check" | "--watch" | "--entry" | "--exports" | "--harness" | "--plain-test"))
     }).filter(|_| hosted_program(sess, args));
-    let code = if let Some(host) = host {
+    let mut code = if let Some(host) = host {
         HOSTED_RUN.store(true, Ordering::Release);
         let sess = sess.clone();
         let args = args.to_vec();
@@ -167,6 +167,12 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     } else {
         cmd_run_inner(sess, args, None)
     };
+    if code == 0 && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none() {
+        if let Err(e) = crate::vfs::check_overlay_used() {
+            eprintln!("makepad-run: {e}");
+            code = 2;
+        }
+    }
     crate::tui::exit_code(code);
     if let Some(exit) = EXIT_SUMMARY.get() {
         // atexit runs after application TLS destructors. Do not quiesce earlier:
@@ -846,7 +852,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         verbose!("makepad-run: package {} ({}), std {}", package, if cargo_flags.is_empty() { "default features".to_string() } else { cargo_flags.join(" ") }, std_dir);
     }
 
-    let Resolved { units, g, order, cfgs, live_inputs } = match resolve_package(sess, &workspace, &package, &cargo_flags, &units_json, &target_dir, &std_dir, ResolveFor::Boot, check) {
+    let build_dir = crate::dirs::build_dir().display().to_string();
+    let Resolved { units, g, order, cfgs, live_inputs } = match resolve_package(sess, &workspace, &package, &cargo_flags, &units_json, &build_dir, &std_dir, ResolveFor::Boot, check) {
         Ok(r) => r,
         Err(e) => {
             if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&e, "resolve")); }
@@ -2894,6 +2901,26 @@ fn finish_run(why: &'static str, code: Option<i32>) {
         }
         if now >= deadline { break; }
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    if code.is_none()
+        && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()
+        && ERRORS_SEEN.load(Ordering::Relaxed) == 0
+        && RUN_PANIC.get().is_none()
+    {
+        if let Err(e) = crate::vfs::check_overlay_used() {
+            eprintln!("makepad-run: {e}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+            #[cfg(unix)]
+            {
+                extern "C" {
+                    fn _exit(status: i32) -> !;
+                }
+                unsafe {
+                    _exit(2);
+                }
+            }
+        }
     }
 }
 

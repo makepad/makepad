@@ -37,7 +37,11 @@ impl NormalizationFolder<'_, '_, '_> {
     fn normalize_alias_term(&mut self, alias: AliasTerm) -> Result<(Term, bool), NoSolutionOrRerunNonErased> {
         let term = self.ecx.next_term_infer_of_alias_kind(&alias);
         let goal = Goal { param_env: self.env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: alias, term }))) };
-        let evaluation = self.ecx.evaluate_goal(self.normalization_goal_source, goal.clone())?;
+        let evaluation = if self.ecx.search_graph.is_empty() {
+            self.ecx.delegate.evaluate_root_goal(self.ecx.solver.prog, goal.clone(), None).map_err(NoSolutionOrRerunNonErased::from)?
+        } else {
+            self.ecx.evaluate_goal(self.normalization_goal_source, goal.clone())?
+        };
         if !evaluation.certainty.is_yes() { self.ecx.nested_goals.push((self.normalization_goal_source, goal, evaluation.stalled_on)); }
         let mut resolver = crate::infer::resolve::DeepResolverIgnoringRegions::new(self.ecx.delegate);
         let term = match term { Term::Ty(t) => Term::Ty(resolver.fold_ty(&self.ecx.delegate.tcx.tys, t, 0)), Term::Const(c) => Term::Const(resolver.fold_const(&self.ecx.delegate.tcx.tys, c, 0)) };

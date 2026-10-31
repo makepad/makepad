@@ -1397,7 +1397,12 @@ impl Metal {
                 }
             }
             if depth.is_some() {
-                let state = if d.flags & Draw::DEPTH_WRITE != 0 { self.dev.depth_write.as_id() } else { self.dev.depth_no_write.as_id() };
+                let state = match (d.flags & Draw::REVERSE_Z != 0, d.flags & Draw::DEPTH_WRITE != 0) {
+                    (false, true) => self.dev.depth_write.as_id(),
+                    (false, false) => self.dev.depth_no_write.as_id(),
+                    (true, true) => self.dev.depth_write_rev.as_id(),
+                    (true, false) => self.dev.depth_no_write_rev.as_id(),
+                };
                 if enc.depth_state != state {
                     enc.depth_state = state;
                     unsafe {

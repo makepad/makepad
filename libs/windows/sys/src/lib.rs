@@ -1460,6 +1460,7 @@ impl ::core::ops::BitXor for D3D11_COMPARISON_FUNC { type Output = Self; fn bitx
 impl ::core::ops::Not for D3D11_COMPARISON_FUNC { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const D3D11_COMPARISON_LESS: crate::Win32::Graphics::Direct3D11::D3D11_COMPARISON_FUNC = crate::Win32::Graphics::Direct3D11::D3D11_COMPARISON_FUNC(2i64 as _);
 pub const D3D11_COMPARISON_LESS_EQUAL: crate::Win32::Graphics::Direct3D11::D3D11_COMPARISON_FUNC = crate::Win32::Graphics::Direct3D11::D3D11_COMPARISON_FUNC(4i64 as _);
+pub const D3D11_COMPARISON_GREATER_EQUAL: crate::Win32::Graphics::Direct3D11::D3D11_COMPARISON_FUNC = crate::Win32::Graphics::Direct3D11::D3D11_COMPARISON_FUNC(7i64 as _);
 pub const D3D11_COMPARISON_NEVER: crate::Win32::Graphics::Direct3D11::D3D11_COMPARISON_FUNC = crate::Win32::Graphics::Direct3D11::D3D11_COMPARISON_FUNC(1i64 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy)]

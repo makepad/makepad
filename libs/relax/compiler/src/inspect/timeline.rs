@@ -158,7 +158,10 @@ pub fn push(kind: Kind, label: &'static str, a: u64, b: u64) {
 
 /// makepad's UI phases (platform thread/ui_hang.rs, found by dlsym): a phase begins / ends;
 /// `name` is a static string of the program.
-pub extern "C" fn relax_span_begin(name: *const u8, len: usize) {
+///
+/// # Safety
+/// `name` must point to `len` static valid UTF-8 bytes.
+pub unsafe extern "C" fn relax_span_begin(name: *const u8, len: usize) {
     let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) };
     if recording() {
         push(Kind::SpanBegin, name, 0, 0);
@@ -168,7 +171,9 @@ pub extern "C" fn relax_span_begin(name: *const u8, len: usize) {
     }
 }
 
-pub extern "C" fn relax_span_end(name: *const u8, len: usize) {
+/// # Safety
+/// `name` must point to `len` static valid UTF-8 bytes.
+pub unsafe extern "C" fn relax_span_end(name: *const u8, len: usize) {
     let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) };
     if recording() {
         push(Kind::SpanEnd, name, 0, 0);
@@ -679,7 +684,10 @@ fn raw_now_ns() -> u64 {
 
 /// makepad's GPU backends: a pass (`name`, static) ran on the GPU from `begin` to `end` (raw
 /// monotonic ns). Recorded only while the timeline records.
-pub extern "C" fn relax_gpu_span(name: *const u8, len: usize, begin: u64, end: u64) {
+///
+/// # Safety
+/// `name` must point to `len` static valid UTF-8 bytes.
+pub unsafe extern "C" fn relax_gpu_span(name: *const u8, len: usize, begin: u64, end: u64) {
     if !recording() || end < begin {
         return;
     }

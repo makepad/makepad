@@ -219,12 +219,18 @@ mod tests {
         send_sync::<crate::program::ParseSnapshot>();
         let mut table = crate::macros::MacroTable::default();
         table.s2_fmt = true;
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = format!(
+            "/tmp/relax-parse-reuse-{}-{}.rs",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let mut s = crate::program::ParseSnapshot {
-            old: 0, path: "/tmp/relax-parse-reuse.rs".into(), edition: 2021,
+            old: 0, path: path.clone(), edition: 2021,
             kname: "test".into(), mod_path: "test".into(),
             cfg: crate::cfg::CfgSet::host(sess, &[]), macros: std::sync::Arc::new(table),
             reuse: Default::default(), previous: None,
-            context: crate::source_context::Context::new("/tmp/relax-parse-reuse.rs", Default::default(), sess),
+            context: crate::source_context::Context::new(&path, Default::default(), sess),
         };
         let initial = "#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)] struct S { x: u32 }\nmacro_rules! m { ($x:literal) => { $x + 1 }; }\nfn f() -> u32 { m!(2) }\nfn g() -> u32 { 0 }";
         for text in [initial.to_string(), initial.replace("{ 0 }", "{ 1 }"),

@@ -265,6 +265,24 @@ fn badge_moved(world: &mut World, id: Id, geom: Option<[f32; 4]>) {
     }
 }
 
+/// Retires a frame command that the executor or backend drops before GPU submission so the
+/// session's completion serial (`last_frame_done` and `HalEvent::FrameDone`) always advances
+/// without recording a presentation or notifying a parent of a `ChildFrame`. If an earlier
+/// submitted frame on the session is still in flight on the GPU (`s.last_frame_done < s.frame`),
+/// the `FrameDone` is held until that frame completes so completion serials never advance
+/// out of order ahead of in-flight GPU work.
+fn drop_frame(world: &mut World, sid: u32, target: Id, packet: u32, view: &CmdView, now: u64) {
+    let Some(frame) = view.frames.get(packet as usize).map(|p| p.frame).filter(|&f| f != 0) else { return };
+    if let Some(s) = world.session_mut(sid) {
+        if s.last_frame_done < s.frame {
+            s.dropped_frames.push((s.frame, target, frame, now));
+            return;
+        }
+        s.last_frame_done = s.last_frame_done.max(frame);
+    }
+    world.to_session(sid, |q| q.frame_done(target, frame, 0, now, 0.0, 0.0));
+}
+
 /// Session 0's badge layer frame for its window `window`: kept on the window (one without draws
 /// ends the layer), then composed over the window's retained image and presented.
 #[allow(clippy::too_many_arguments)]
@@ -273,11 +291,19 @@ fn badge_frame(gpu: &mut dyn Gpu, world: &mut World, sid: u32, window: Id, kind:
     let own = s.windows.get(sid, window).is_ok_and(|w| w.val.kind & 0xff != window_kind::BADGE && !w.val.is_hosted() && w.val.embedded.is_none());
     if sid != HOST || !gpu.badges() || kind & !target::FLAGS != target::WINDOW || kind & (target::PICK | target::CAPTURE) != 0 || !own {
         s.bad();
+        drop_frame(world, sid, window, packet, view, now);
         return;
     }
-    let Some(kept) = KeptFrame::keep(view, packet) else { s.bad(); return };
+    let Some(kept) = KeptFrame::keep(view, packet) else {
+        s.bad();
+        drop_frame(world, sid, window, packet, view, now);
+        return;
+    };
     let kept = std::sync::Arc::new(kept);
-    let Ok(w) = s.windows.get_mut(HOST, window) else { return };
+    let Ok(w) = s.windows.get_mut(HOST, window) else {
+        drop_frame(world, sid, window, packet, view, now);
+        return;
+    };
     let ends = !kept.draws();
     // under a composed panel the badges are kept for later but not drawn: the panel covers the
     // window, and a badge frame presenting would show the app's retained frame between its frames
@@ -286,15 +312,19 @@ fn badge_frame(gpu: &mut dyn Gpu, world: &mut World, sid: u32, window: Id, kind:
     sync_layer(gpu, world, window);
     let Some(s) = world.session_mut(HOST) else { return };
     let serial = kept.view().frames[0].frame;
+    let prev_frame = s.frame;
     // a last frame without draws shows the window without its layer, then the layer goes
-    if !covered {
-        let _ = gpu.frame(s, HOST, window, kind, 0, &kept.view(), now);
+    let submitted = !covered && gpu.frame(s, HOST, window, kind, 0, &kept.view(), now).is_some();
+    if !submitted {
+        s.frame = prev_frame;
     }
     if ends {
         if let Ok(w) = s.windows.get_mut(HOST, window) { w.val.badges = None; }
         sync_layer(gpu, world, window);
     }
-    if covered || gpu.completes_inline() {
+    if covered || !submitted {
+        drop_frame(world, HOST, window, 0, &kept.view(), now);
+    } else if gpu.completes_inline() {
         world.frame_done(HOST, window, kind, serial, 0, now, [0.0; 2]);
     }
 }
@@ -506,10 +536,21 @@ pub fn device_reset(b: &mut dyn DeviceReset, world: &mut World) -> bool {
     world.device_generation += 1;
     let generation = world.device_generation;
     for sid in world.session_ids() {
+        let mut pending = Vec::new();
         if let Some(s) = world.session_mut(sid) {
             s.device_generation = generation;
+            s.last_frame_done = s.last_frame_done.max(s.frame);
+            for (_, d_target, d_frame, d_now) in s.dropped_frames.drain(..) {
+                s.last_frame_done = s.last_frame_done.max(d_frame);
+                pending.push((d_target, d_frame, d_now));
+            }
         }
-        world.to_session(sid, |q| q.device_reset(generation));
+        world.to_session(sid, |q| {
+            for (d_target, d_frame, d_now) in pending {
+                q.frame_done(d_target, d_frame, 0, d_now, 0.0, 0.0);
+            }
+            q.device_reset(generation);
+        });
     }
     true
 }
@@ -832,7 +873,11 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 .is_some_and(|w| w.val.overlay.as_ref().is_some_and(|o| o.composed)));
             let Some(s) = world.session_mut(sid) else { return };
             // Only the executor selects this target: clients cannot bypass lending.
-            if kind & (target::OVERLAY | target::REPLAY) != 0 { s.bad(); return; }
+            if kind & (target::OVERLAY | target::REPLAY) != 0 {
+                s.bad();
+                drop_frame(world, sid, target, packet, view, now);
+                return;
+            }
             if kind & target::BADGES != 0 {
                 badge_frame(gpu, world, sid, target, kind, packet, view, now);
                 return;
@@ -840,6 +885,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             // a badge has no frames (its pixels are its window's badge layer)
             if kind & !target::FLAGS == target::WINDOW && s.windows.get(sid, target).is_ok_and(|w| w.val.kind & 0xff == window_kind::BADGE) {
                 s.bad();
+                drop_frame(world, sid, target, packet, view, now);
                 return;
             }
             let overlay = sid == HOST && kind & !target::FLAGS == target::WINDOW
@@ -854,6 +900,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             // a window frame, only it may replace that image. Uploads remain valid.
             if sid == HOST && kind & !target::FLAGS == target::WINDOW
                 && s.windows.get(sid, target).is_ok_and(|w| w.lent_to != 0 && w.val.borrower_frame && w.val.overlay.is_none()) {
+                drop_frame(world, sid, target, packet, view, now);
                 return;
             }
             let live = match kind & !target::FLAGS {
@@ -863,6 +910,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             };
             if !live {
                 s.stale();
+                drop_frame(world, sid, target, packet, view, now);
                 return;
             }
             if kind & !target::FLAGS == target::WINDOW && s.windows.get(sid, target).is_ok_and(|w| w.val.is_hosted()) {
@@ -883,6 +931,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 }));
                 if !valid {
                     s.bad();
+                    drop_frame(world, sid, target, packet, view, now);
                     return;
                 }
             }
@@ -904,7 +953,12 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             if crate::framecap::armed() {
                 crate::framecap::on_frame(gpu, s, sid, target, kind, packet, view, now);
             }
-            let Some(submitted) = gpu.frame(s, sid, target, kind, packet, view, now) else { return };
+            let prev_frame = s.frame;
+            let Some(submitted) = gpu.frame(s, sid, target, kind, packet, view, now) else {
+                s.frame = prev_frame;
+                drop_frame(world, sid, target, packet, view, now);
+                return;
+            };
             let host = submitted.window.then(||
                 s.windows.get(sid, target).ok().and_then(|w| w.val.alias_of)).flatten();
             let frame = s.frame;

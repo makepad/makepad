@@ -67,6 +67,19 @@ pub fn relax_dir() -> PathBuf {
     DEFAULT.get_or_init(|| crate::zone_alloc::kept_with(|| relax_dir_for(&workspace_dir()))).clone()
 }
 
+/// Where build script units (`build-scripts/`), their `OUT_DIR`s (`build/<crate>-<hash>/out`),
+/// and `--allow-c` native artifacts (`native/`) live: the workspace's default relax dir
+/// (`<cargo target dir>/makepad-run`), even when the store/cache dir is redirected by
+/// `MAKEPAD_RUN_CACHE_DIR` or a child's `--run-dir`. When `MAKEPAD_RUN_READ_LOG` is set
+/// (`pack-src`'s cold source-collection check), returns `relax_dir()` so build scripts run
+/// against the scratch folder rather than reusing a warm workspace `build/`.
+pub fn build_dir() -> PathBuf {
+    if std::env::var_os("MAKEPAD_RUN_READ_LOG").is_some_and(|v| !v.is_empty()) {
+        return relax_dir();
+    }
+    DEFAULT.get_or_init(|| crate::zone_alloc::kept_with(|| relax_dir_for(&workspace_dir()))).clone()
+}
+
 /// MAKEPAD_RUN_CACHE_DIR when set (tests and measurement).
 pub fn override_dir() -> Option<PathBuf> {
     std::env::var_os("MAKEPAD_RUN_CACHE_DIR").filter(|d| !d.is_empty()).map(PathBuf::from)
@@ -89,7 +102,27 @@ pub fn relax_dir_for(start: &str) -> PathBuf {
     Path::new(&target).join("makepad-run")
 }
 
-/// The store files' folder: `<relax dir>/cache`.
+/// The store files' folder inside `root`: `<root>/cache`, or `root` itself when `root`
+/// already holds store files directly (`.rcs` / `.rci` / `.rcf` / `.rcg` and no `cache/`
+/// subfolder, e.g. `MAKEPAD_RUN_CACHE_DIR` pointed directly at a cloned `cache/` folder).
+pub fn cache_dir_in(root: &Path) -> PathBuf {
+    let sub = root.join("cache");
+    if sub.exists() {
+        return sub;
+    }
+    if std::fs::read_dir(root).ok().is_some_and(|mut rd| {
+        rd.any(|e| {
+            e.ok().and_then(|e| e.file_name().into_string().ok()).is_some_and(|n| {
+                n.ends_with(".rcs") || n.ends_with(".rci") || n.ends_with(".rcf") || n.ends_with(".rcg")
+            })
+        })
+    }) {
+        return root.to_path_buf();
+    }
+    sub
+}
+
+/// The store files' folder: `<relax dir>/cache` (or `<relax dir>` when it is already a store folder).
 pub fn cache_dir() -> PathBuf {
-    relax_dir().join("cache")
+    cache_dir_in(&relax_dir())
 }

@@ -954,7 +954,13 @@ impl D3d11 {
             }
         }
         let blend = self.dev.blend_state(modes, program.desc.blend & pipeline_blend::MAX != 0);
-        let depth_state = if depth.is_none() { 0 } else if d.flags & Draw::DEPTH_WRITE != 0 { 1 } else { 2 };
+        let depth_state = match (depth.is_some(), d.flags & Draw::REVERSE_Z != 0, d.flags & Draw::DEPTH_WRITE != 0) {
+            (false, _, _) => 0,
+            (true, false, true) => 1,
+            (true, false, false) => 2,
+            (true, true, true) => 3,
+            (true, true, false) => 4,
+        };
         let cull = if d.flags & Draw::CULL != 0 { 1 } else { 0 };
         let scissor = if d.scissor.iter().any(|n| n.is_nan()) {
             RECT { left: 0, top: 0, right: target_size[0] as i32, bottom: target_size[1] as i32 }

@@ -3,13 +3,32 @@ use super::*;
 use crate::infer::{InferCtxt, opaque_types::{OpaqueTypeStorageEntries, ProvisionalHiddenType}};
 use crate::infer::relate::{TypeRelation, relate_args, solver_relating::SolverRelating};
 use crate::infer::region_constraints::ConstraintKind;
-use crate::types::{UniverseIndex, variance::V};
+use crate::types::{TyKind, UniverseIndex, variance::V};
 use crate::next_solver::search_graph::{SearchGraph, SearchGraphConfig, PathKind, LowerAvailableDepth};
 use super::search_graph::SolverDelegate;
 use super::canonical::*;
 mod probe;
 pub mod fast_path;
 pub use probe::ProbeCtxt;
+
+std::thread_local! {
+    static CODEGEN_CAUSE: std::cell::Cell<(crate::program::DefId, u32)> = const { std::cell::Cell::new((crate::program::NO_DEF, 0)) };
+}
+
+pub struct CodegenCauseGuard {
+    prev: (crate::program::DefId, u32),
+}
+
+impl Drop for CodegenCauseGuard {
+    fn drop(&mut self) {
+        CODEGEN_CAUSE.with(|c| c.set(self.prev));
+    }
+}
+
+pub fn enter_codegen_cause(def: crate::program::DefId, span: u32) -> CodegenCauseGuard {
+    let prev = CODEGEN_CAUSE.with(|c| c.replace((def, span)));
+    CodegenCauseGuard { prev }
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum CurrentGoalKind { Misc, CoinductiveTrait, NormalizesTo }
@@ -63,9 +82,264 @@ impl InferCtxt<'_> {
         if stalled_on.is_some() {
             if let Some(result) = fast_path::compute_goal_fast_path(self, prog, &goal) { return Ok(result); }
         }
+        let limit = self.recursion_limit(prog);
         let evaluate = |ecx: &mut EvalCtxt<'_, '_>| ecx.evaluate_goal_raw(GoalSource::Misc, goal.clone()).map(|(nested, result)| { assert!(nested.is_empty()); result });
-        let result = self.enter_root(prog, evaluate);
-        result.map_err(NoSolutionOrRerunNonErased::assert_no_rerun)
+        let result = self.enter_root_with_depth(prog, limit, evaluate).map_err(NoSolutionOrRerunNonErased::assert_no_rerun);
+        if !self.typing_mode.get().is_coherence() && result.as_ref().is_ok_and(|r| r.certainty.is_overflow()) {
+            let snapshot = self.start_snapshot();
+            let retry = self.enter_root_with_depth(prog, limit.saturating_mul(2), evaluate).map_err(NoSolutionOrRerunNonErased::assert_no_rerun);
+            if let Ok(eval) = retry {
+                if eval.certainty == Certainty::Yes {
+                    self.commit_from(snapshot);
+                    self.emit_next_solver_overflow_fcw(prog, &goal, limit);
+                    return Ok(eval);
+                }
+            }
+            self.rollback_to(snapshot);
+        }
+        result
+    }
+    pub(crate) fn emit_next_solver_overflow_fcw(&self, prog: &crate::program::Program, goal: &Goal, limit: usize) {
+        let ty_str = |t: TyId| crate::typeck::ty_to_string(false, prog, self.tcx, self.deeply_resolve_ignoring_regions(t));
+        let pred = match &goal.predicate.kind {
+            PredicateKind::Clause(ClauseKind::Trait(p)) => {
+                let mut args = Vec::new();
+                for arg in &p.trait_ref.args {
+                    args.push(match arg {
+                        crate::consts::GenericArg::Type(t) => ty_str(*t),
+                        crate::consts::GenericArg::Const(c) => self.tcx.tys.const_to_string(*c),
+                        crate::consts::GenericArg::Lifetime(r) => format!("{r:?}"),
+                    });
+                }
+                let name = prog.name(p.trait_ref.def_id).to_string();
+                let self_ty = args.first().cloned().unwrap_or_default();
+                let tr = if args.len() > 1 { format!("{}<{}>", name, args[1..].join(", ")) } else { name };
+                format!("{self_ty}: {tr}")
+            }
+            PredicateKind::Clause(ClauseKind::Projection(p)) => match (&p.projection_term, &p.term) {
+                (AliasTerm::Ty(a), Term::Ty(t)) => format!("{} == {}", ty_str(*a), ty_str(*t)),
+                _ => format!("{:?}", goal.predicate),
+            },
+            PredicateKind::NormalizesTo(p) => match (&p.alias, &p.term) {
+                (AliasTerm::Ty(a), Term::Ty(t)) => format!("{} == {}", ty_str(*a), ty_str(*t)),
+                _ => format!("{:?}", goal.predicate),
+            },
+            PredicateKind::Clause(ClauseKind::WellFormed(Term::Ty(t))) => {
+                let resolved = self.deeply_resolve_ignoring_regions(*t);
+                let s = match self.tcx.tys.kind(resolved) {
+                    TyKind::FnDef(d, args, _) => {
+                        let args_list = self.tcx.tys.list(*args);
+                        let mut name = prog.name(*d).to_string();
+                        if !args_list.is_empty() {
+                            let rendered: Vec<String> = args_list.iter().map(|&a| ty_str(a)).collect();
+                            name.push_str(&format!("::<{}>", rendered.join(", ")));
+                        }
+                        if let Some(sig) = self.tcx.fn_sig(prog, *d) {
+                            let params: Vec<String> = sig.params.iter().map(|&p| ty_str(self.tcx.tys.subst(p, args_list))).collect();
+                            let ret = self.tcx.tys.subst(sig.ret, args_list);
+                            if ret == self.tcx.tys.unit {
+                                format!("fn({}) {{{name}}}", params.join(", "))
+                            } else {
+                                format!("fn({}) -> {} {{{name}}}", params.join(", "), ty_str(ret))
+                            }
+                        } else {
+                            format!("fn() {{{name}}}")
+                        }
+                    }
+                    _ => ty_str(*t),
+                };
+                format!("{s} well-formed")
+            }
+            _ => format!("{:?}", goal.predicate),
+        };
+        let (def, file, span) = if self.cause.body_id != crate::program::NO_DEF && (self.cause.body_id.0 as usize) < prog.defs.len() {
+            let d = prog.def(self.cause.body_id);
+            let span = if self.origin_span.get() != 0 { self.origin_span.get() } else { self.cause.span };
+            (self.cause.body_id, d.file, span)
+        } else if let Some(site) = self.goal_codegen_site(prog, goal) {
+            site
+        } else if !prog.crates.is_empty() {
+            let krate = (crate::layout::root_crate() as usize).min(prog.crates.len() - 1);
+            let m = &prog.mods[prog.crates[krate].root_mod as usize];
+            (m.def, m.file, 0)
+        } else {
+            return;
+        };
+        let krate = prog.file_crate.get(file as usize).copied().unwrap_or_else(crate::layout::root_crate) as usize;
+        let krate = krate.min(prog.crates.len().saturating_sub(1));
+        let crate_root_def = prog.mods[prog.crates[krate].root_mod as usize].def;
+        let limit_krate = if self.cause.body_id != crate::program::NO_DEF && (self.cause.body_id.0 as usize) < prog.defs.len() {
+            prog.def(self.cause.body_id).krate as usize
+        } else {
+            crate::layout::root_crate() as usize
+        }.min(prog.crates.len().saturating_sub(1));
+        let crate_name = prog.syms.str(prog.crates[limit_krate].name);
+        let next = limit.saturating_mul(2);
+        let msg = format!(
+            "overflow evaluating the requirement `{pred}`\n  = help: consider increasing the recursion limit by adding a `#![recursion_limit = \"{next}\"]` attribute to your crate (`{crate_name}`)\n  = help: or consider adding a manual `impl` of auto traits like `Send` for intermediate types, if auto traits are involved\n  = note: this lint is attached to the whole crate and can't be disabled on a per-function basis\n  = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!\n  = note: for more information, see issue #159228 <https://github.com/rust-lang/rust/issues/159228>"
+        );
+        let _ = def;
+        if crate::lint::enabled() {
+            crate::lint::emit(prog, crate_root_def, &crate::lint::RECURSION_DEPTH_EXCEEDING_LIMIT, file, span, &msg);
+        } else {
+            let mut spec = crate::lint::resolve_in(prog, crate_root_def, file, &[], &crate::lint::RECURSION_DEPTH_EXCEEDING_LIMIT, None);
+            let root_krate = (crate::layout::root_crate() as usize).min(prog.crates.len().saturating_sub(1));
+            if spec.level == crate::lint::Level::Warn && root_krate != krate {
+                let root_def = prog.mods[prog.crates[root_krate].root_mod as usize].def;
+                let root_spec = crate::lint::resolve_in(prog, root_def, prog.mods[prog.crates[root_krate].root_mod as usize].file, &[], &crate::lint::RECURSION_DEPTH_EXCEEDING_LIMIT, None);
+                if root_spec.level != crate::lint::Level::Warn {
+                    spec = root_spec;
+                }
+            }
+            if spec.level >= crate::lint::Level::Deny {
+                self.errors.report(self.cause, format!("{} [{}]", msg, crate::lint::RECURSION_DEPTH_EXCEEDING_LIMIT.name));
+            } else if spec.level == crate::lint::Level::Warn {
+                let (l, c) = prog.files[file as usize].line_col(span);
+                let line = match msg.split_once('\n') {
+                    Some((head, tail)) => format!("{}:{}:{}: warning: {} [{}]\n{}", prog.file_paths[file as usize], l, c, head, crate::lint::RECURSION_DEPTH_EXCEEDING_LIMIT.name, tail),
+                    None => format!("{}:{}:{}: warning: {} [{}]", prog.file_paths[file as usize], l, c, msg, crate::lint::RECURSION_DEPTH_EXCEEDING_LIMIT.name),
+                };
+                static EMITTED: relax_session::sync::Mutex<Option<std::collections::HashSet<String>>> = relax_session::sync::Mutex::new(None);
+                let _k = crate::zone_alloc::kept();
+                if EMITTED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(line.clone()) {
+                    eprintln!("{line}");
+                }
+            }
+        }
+    }
+
+    fn goal_codegen_site(&self, prog: &crate::program::Program, goal: &Goal) -> Option<(crate::program::DefId, u32, u32)> {
+        let mut visited = std::collections::HashSet::new();
+        let mut fallback = None;
+        let mut roots = Vec::new();
+        match &goal.predicate.kind {
+            PredicateKind::Clause(ClauseKind::Trait(p)) => {
+                for arg in &p.trait_ref.args {
+                    if let crate::consts::GenericArg::Type(t) = arg { roots.push(*t); }
+                }
+            }
+            PredicateKind::Clause(ClauseKind::Projection(p)) => {
+                if let AliasTerm::Ty(a) = p.projection_term { roots.push(a); }
+                if let Term::Ty(t) = p.term { roots.push(t); }
+            }
+            PredicateKind::NormalizesTo(p) => {
+                if let AliasTerm::Ty(a) = p.alias { roots.push(a); }
+                if let Term::Ty(t) = p.term { roots.push(t); }
+            }
+            PredicateKind::Clause(ClauseKind::WellFormed(Term::Ty(t))) | PredicateKind::Clause(ClauseKind::ConstArgHasType(_, t)) => {
+                roots.push(*t);
+            }
+            PredicateKind::Subtype(p) => { roots.push(p.a); roots.push(p.b); }
+            PredicateKind::Coerce(p) => { roots.push(p.a); roots.push(p.b); }
+            _ => {}
+        }
+        for root in roots {
+            if let Some(hit) = self.closure_site_in_ty(prog, root, &mut visited, &mut fallback) {
+                return Some(hit);
+            }
+        }
+        if fallback.is_some() {
+            return fallback;
+        }
+        let (c_def, c_span) = CODEGEN_CAUSE.with(|c| c.get());
+        if c_def != crate::program::NO_DEF && (c_def.0 as usize) < prog.defs.len() {
+            let d = prog.def(c_def);
+            return Some((c_def, d.file, c_span));
+        }
+        None
+    }
+
+    fn closure_site_in_ty(
+        &self,
+        prog: &crate::program::Program,
+        ty: TyId,
+        visited: &mut std::collections::HashSet<TyId>,
+        fallback: &mut Option<(crate::program::DefId, u32, u32)>,
+    ) -> Option<(crate::program::DefId, u32, u32)> {
+        let ty = self.deeply_resolve_ignoring_regions(ty);
+        if !visited.insert(ty) {
+            return None;
+        }
+        match self.tcx.tys.kind(ty) {
+            TyKind::Closure(file, expr, args) => {
+                for child in [args.tupled_upvars_ty, args.parent_args, args.closure_sig_as_fn_ptr_ty] {
+                    if let Some(hit) = self.closure_site_in_ty(prog, child, visited, fallback) {
+                        return Some(hit);
+                    }
+                }
+                let node = crate::def_collector::NodeId::Closure(crate::ast::ExprId(*expr & !crate::tcx::ASYNC_FN_BODY));
+                let def = prog.node_id_to_def_id.get(&(*file, node)).copied().or_else(|| {
+                    match self.tcx.tys.kind(args.parent_args) {
+                        TyKind::FnDef(d, _, _) => Some(*d),
+                        _ => None,
+                    }
+                })?;
+                if (def.0 as usize) >= prog.defs.len() {
+                    return None;
+                }
+                let mut top = def;
+                while top != crate::program::NO_DEF && matches!(prog.def(top).kind, crate::program::DefKind::Closure | crate::program::DefKind::AnonConst) {
+                    top = prog.def(top).parent;
+                }
+                let body_loaded = top != crate::program::NO_DEF
+                    && prog.def(top).file == *file
+                    && prog.def(top).item.0 != u32::MAX
+                    && prog.fn_body(*file, prog.def(top).item).is_ok();
+                let span = if *expr & crate::tcx::ASYNC_FN_BODY != 0 {
+                    if top != crate::program::NO_DEF && prog.def(top).file == *file && prog.def(top).item.0 != u32::MAX {
+                        prog.files[*file as usize].ast.item(prog.def(top).item).lo
+                    } else {
+                        0
+                    }
+                } else if body_loaded {
+                    prog.files[*file as usize].ast.expr(crate::ast::ExprId(*expr)).lo
+                } else {
+                    0
+                };
+                let krate = prog.def(def).krate;
+                let site = (def, *file, span);
+                if (krate as usize) < prog.crates.len() && (crate::borrowck::event::app_crate(prog, krate) || prog.crates[krate as usize].validate) {
+                    return Some(site);
+                }
+                if fallback.is_none() {
+                    *fallback = Some(site);
+                }
+                None
+            }
+            TyKind::Adt(_, args, _) | TyKind::FnDef(_, args, _) => {
+                for &arg in self.tcx.tys.list(*args) {
+                    if let Some(hit) = self.closure_site_in_ty(prog, arg, visited, fallback) {
+                        return Some(hit);
+                    }
+                }
+                None
+            }
+            TyKind::Tuple(tys) | TyKind::FnPtr(tys, _, _, _) => {
+                for &arg in self.tcx.tys.list(*tys) {
+                    if let Some(hit) = self.closure_site_in_ty(prog, arg, visited, fallback) {
+                        return Some(hit);
+                    }
+                }
+                if let TyKind::FnPtr(_, ret, _, _) = self.tcx.tys.kind(ty) {
+                    if let Some(hit) = self.closure_site_in_ty(prog, *ret, visited, fallback) {
+                        return Some(hit);
+                    }
+                }
+                None
+            }
+            TyKind::Ref(_, inner, _) | TyKind::Ptr(_, inner) | TyKind::Slice(inner) | TyKind::Array(inner, _) => {
+                self.closure_site_in_ty(prog, *inner, visited, fallback)
+            }
+            TyKind::Alias(_, alias) => {
+                for &arg in self.tcx.tys.list(alias.args) {
+                    if let Some(hit) = self.closure_site_in_ty(prog, arg, visited, fallback) {
+                        return Some(hit);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
     /// rustc_next_trait_solver/src/solve/eval_ctxt/mod.rs:283-300.
     pub fn root_goal_may_hold_opaque_types_jank(&self, prog: &crate::program::Program, goal: Goal) -> bool {
@@ -312,7 +586,18 @@ impl EvalCtxt<'_, '_> {
 impl InferCtxt<'_> {
     pub fn evaluate_root_goal_for_proof_tree(&self, prog: &crate::program::Program, goal: Goal) -> super::inspect::GoalEvaluation {
         let depth = self.recursion_limit(prog);
-        self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, depth, true)
+        let eval = self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal.clone(), depth, true);
+        if !self.typing_mode.get().is_coherence() && eval.result.as_ref().is_ok_and(|r| r.value.certainty.is_overflow()) {
+            let snapshot = self.start_snapshot();
+            let retry = self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal.clone(), depth.saturating_mul(2), true);
+            if retry.result.as_ref().is_ok_and(|r| r.value.certainty == Certainty::Yes) {
+                self.commit_from(snapshot);
+                self.emit_next_solver_overflow_fcw(prog, &goal, depth);
+                return retry;
+            }
+            self.rollback_to(snapshot);
+        }
+        eval
     }
     /// rustc_trait_selection/src/solve/inspect/analyse.rs: diagnostics inspect failed candidates too.
     /// Keep their nested goals for this report only; the selection cache prunes them.

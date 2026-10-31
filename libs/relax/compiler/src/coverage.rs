@@ -105,7 +105,7 @@ pub fn on() -> bool {
 
 /// Instrument the source blocks, sharing bits when a slot is lowered again.
 /// Storage grows with the traced program; no table capacity can discard hits.
-pub fn instrument(up: *const Unit, slot: u32, f: &mut Func) {
+pub(crate) fn instrument(up: *const Unit, slot: u32, f: &mut Func) {
     if f.blocks.is_empty() || !runtime_function(unsafe { &*up }, slot) {
         return;
     }

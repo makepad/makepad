@@ -691,3 +691,108 @@ fn draw_texture_ids_have_no_slot_limit() {
     assert_eq!(id_at(w.arena(), r, 12), Id::new(12, 13));
     assert_eq!(id_at(w.arena(), r, 13), Id::NONE);
 }
+
+#[test]
+fn dropped_frames_retire_their_serials_so_in_flight_never_stalls() {
+    use makepad_hal::session::HOST;
+    let hal = Hal::new();
+    let req = OpenReq {
+        backend: backend_id::HEADLESS,
+        app_key: 0,
+        flags: open_flags::RETAIN_WINDOWS,
+        dpi_hint: 2.0,
+        parent: 0,
+    };
+    assert_eq!(hal.open_host(&req).backend, backend_id::HEADLESS);
+    const HOST_WINDOW: Id = Id::new(3, 1);
+    const APP_WINDOW: Id = Id::new(7, 1);
+    const BADGE: Id = Id::new(9, 1);
+    let mut host = CmdWriter::new(HOST);
+    host.window_create(HOST_WINDOW, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 1000.0, 700.0], false);
+    host.window_create(BADGE, window_kind::BADGE, HOST_WINDOW, [960.0, 2.0, 24.0, 24.0], false);
+    hal.submit(&host.buf());
+    let sid = hal.open(&OpenReq { app_key: 99, ..req }).session;
+    let mut app = CmdWriter::new(sid);
+    app.window_create(APP_WINDOW, window_kind::NORMAL, Id::NONE, [0.0; 4], true);
+    hal.submit(&app.buf());
+    hal.with_world(|w| w.trace_exec = true);
+
+    let submit_frame = |sid: u32, window: Id, serial: u64, kind: u32| {
+        let mut cmd = CmdWriter::new(sid);
+        cmd.frame_begin(serial, FrameMeta::default());
+        cmd.pass(Pass {
+            viewport: [0.0, 0.0, 2000.0, 1400.0],
+            load: [pass_load::CLEAR; 5],
+            ..Default::default()
+        });
+        cmd.frame_end(window, kind);
+        hal.submit(&cmd.buf());
+    };
+    let pump_done = |store: &mut EventStore| -> Vec<u64> {
+        let mut buf = store.buf();
+        let n = hal.pump(0, &mut buf);
+        store
+            .reader(n, buf.arena_len)
+            .filter_map(|(_, ev)| match ev {
+                HalEvent::FrameDone { frame, .. } => Some(frame),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut host_store = EventStore::new(HOST, 32, 512);
+    let mut app_store = EventStore::new(sid, 32, 512);
+
+    // Borrower presents frame 11 so `borrower_frame` is true on `HOST_WINDOW`.
+    submit_frame(sid, APP_WINDOW, 11, target::WINDOW);
+    let _ = pump_done(&mut host_store);
+    let _ = pump_done(&mut app_store);
+    let exec_before = hal.with_world(|w| w.exec_log.len());
+
+    // 1. Lent-window adoption race: HOST submits 3 consecutive frames to HOST_WINDOW while
+    //    `sid` owns the loan and `overlay` is off, followed by a badge target and stale targets.
+    for serial in 201..=203 {
+        submit_frame(HOST, HOST_WINDOW, serial, target::WINDOW);
+    }
+    submit_frame(HOST, BADGE, 204, target::WINDOW);
+    submit_frame(HOST, Id::new(99, 1), 205, target::WINDOW);
+    submit_frame(HOST, Id::new(99, 1), 206, target::TEXTURE);
+    assert_eq!(hal.with_world(|w| w.exec_log.len()), exec_before);
+    let host_done = pump_done(&mut host_store);
+    assert_eq!(host_done, vec![201, 202, 203, 204, 205, 206]);
+    assert_eq!(hal.with_world(|w| w.session(HOST).unwrap().last_frame_done), 206);
+
+    // 2. Stale targets and bad flags on `sid`: more than FRAMES_IN_FLIGHT (2) consecutive
+    //    dropped frames all emit FrameDone, then the next valid beat succeeds.
+    submit_frame(sid, Id::new(77, 1), 21, target::WINDOW);
+    submit_frame(sid, Id::new(77, 1), 22, target::TEXTURE);
+    submit_frame(sid, APP_WINDOW, 23, target::WINDOW | target::OVERLAY);
+    submit_frame(sid, APP_WINDOW, 24, target::WINDOW | target::REPLAY);
+    submit_frame(sid, APP_WINDOW, 25, target::WINDOW | target::BADGES);
+    assert_eq!(hal.with_world(|w| w.exec_log.len()), exec_before);
+    let app_done = pump_done(&mut app_store);
+    assert_eq!(app_done, vec![21, 22, 23, 24, 25]);
+    assert_eq!(hal.with_world(|w| w.session(sid).unwrap().last_frame_done), 25);
+
+    // 3. Subsequent valid frame on `sid` executes and completes normally:
+    submit_frame(sid, APP_WINDOW, 26, target::WINDOW);
+    assert_eq!(hal.with_world(|w| w.exec_log.last().unwrap().frame), 26);
+    assert_eq!(hal.with_world(|w| w.session(sid).unwrap().last_frame_done), 26);
+    let _ = pump_done(&mut app_store);
+
+    // 4. Out-of-order guard: while an earlier submitted frame (30) is still in flight on the GPU
+    //    (`s.last_frame_done < s.frame`), dropped frames (31, 32) hold their `FrameDone` until
+    //    frame 30 completes, then retire in order `[30, 31, 32]`.
+    hal.with_world(|w| {
+        w.session_mut(sid).unwrap().frame = 30;
+    });
+    submit_frame(sid, Id::new(77, 1), 31, target::WINDOW);
+    submit_frame(sid, Id::new(77, 1), 32, target::TEXTURE);
+    assert_eq!(pump_done(&mut app_store), Vec::<u64>::new());
+    assert_eq!(hal.with_world(|w| w.session(sid).unwrap().last_frame_done), 26);
+
+    hal.with_world(|w| {
+        w.frame_done(sid, APP_WINDOW, target::WINDOW, 30, 1000, 2000, [0.0; 2]);
+    });
+    assert_eq!(pump_done(&mut app_store), vec![30, 31, 32]);
+    assert_eq!(hal.with_world(|w| w.session(sid).unwrap().last_frame_done), 32);
+}

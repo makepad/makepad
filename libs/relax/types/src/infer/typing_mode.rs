@@ -39,8 +39,13 @@ impl TypingMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash)]
+#[derive(Clone, Copy, Debug)]
 pub struct TypingModeEqWrapper(pub TypingMode);
+impl std::hash::Hash for TypingModeEqWrapper {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 impl PartialEq for TypingModeEqWrapper {
     fn eq(&self, other: &Self) -> bool {
         match (self.0, other.0) {

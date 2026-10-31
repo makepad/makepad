@@ -288,7 +288,10 @@ thread_local! {
 }
 
 /// makepad: a retry boundary begins (`name`: what re-runs, e.g. the event's name).
-pub extern "C" fn relax_retry_enter(name: *const u8, len: usize) {
+///
+/// # Safety
+/// `name` must point to `len` valid UTF-8 bytes.
+pub unsafe extern "C" fn relax_retry_enter(name: *const u8, len: usize) {
     let n = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) }.to_string();
     let _ = BOUNDARIES.try_with(|b| b.borrow_mut().push(n));
 }
@@ -339,7 +342,7 @@ pub fn release_domain(domain: crate::domain::DomainId) {
     RESUME.notify_all();
 }
 
-pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
+pub(crate) fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let unwinds = !regs.is_null();
     let _k = crate::zone_alloc::kept();
     if !super::STARTED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {

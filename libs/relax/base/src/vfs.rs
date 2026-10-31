@@ -272,6 +272,185 @@ pub fn set_edits(dir: Option<std::path::PathBuf>) {
     *EDITS.write().unwrap() = dir;
 }
 
+// ---- the overlay (MAKEPAD_RUN_OVERLAY=<file> of lines `<path>\t<replacement>`): a disk file whose
+// bytes are read in place of another disk file's, the tree left untouched (mutation testing reads
+// a mutant without writing it). Content only: probes and listings stay the disk's. An overlaid
+// path has no stat (file_stat None), so a cache that recorded the original's stat hashes it.
+static OVERLAY_ANY: AtomicBool = AtomicBool::new(false);
+static OVERLAY: RwLock<BTreeMap<String, (std::path::PathBuf, Arc<AtomicBool>)>> = RwLock::new(BTreeMap::new());
+static OVERLAY_ENTRIES: RwLock<Vec<(String, Arc<AtomicBool>)>> = RwLock::new(Vec::new());
+
+fn note_overlay_used(key: &str) {
+    if let Ok(path) = std::env::var("MAKEPAD_RUN_OVERLAY_USED") {
+        if !path.is_empty() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{key}");
+            }
+        }
+    }
+}
+
+/// The file read in place of `path`, when one is overlaid on it.
+fn overlaid(path: &str) -> Option<std::path::PathBuf> {
+    if !OVERLAY_ANY.load(Ordering::Acquire) {
+        return None;
+    }
+    let key = if std::path::Path::new(path).is_absolute() {
+        normalize_path(path)
+    } else if let Ok(cwd) = std::env::current_dir() {
+        normalize_path(&cwd.join(path).to_string_lossy())
+    } else {
+        normalize_path(path)
+    };
+    let m = OVERLAY.read().unwrap();
+    let (repl, used) = m.get(&key)?;
+    if !used.swap(true, Ordering::Relaxed) {
+        note_overlay_used(&key);
+    }
+    Some(repl.clone())
+}
+
+/// FNV-1a digest of any active `MAKEPAD_RUN_OVERLAY` entries matching `path` or a file inside
+/// `path/`. `None` when no overlay touches `path`.
+pub fn overlay_digest_for(path: &str) -> Option<u64> {
+    if !OVERLAY_ANY.load(Ordering::Acquire) {
+        return None;
+    }
+    let norm = if std::path::Path::new(path).is_absolute() {
+        normalize_path(path)
+    } else if let Ok(cwd) = std::env::current_dir() {
+        normalize_path(&cwd.join(path).to_string_lossy())
+    } else {
+        normalize_path(path)
+    };
+    let canon = std::fs::canonicalize(path).ok().map(|p| normalize_path(&p.to_string_lossy()));
+    let m = OVERLAY.read().unwrap();
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut matched = false;
+    for (k, (repl, used)) in m.iter() {
+        let exact = k == &norm || canon.as_ref().is_some_and(|c| k == c);
+        let hit = exact
+            || k.strip_prefix(&norm).is_some_and(|r| r.starts_with('/'))
+            || canon.as_ref().is_some_and(|c| k.strip_prefix(c).is_some_and(|r| r.starts_with('/')));
+        if hit {
+            if exact && !used.swap(true, Ordering::Relaxed) {
+                note_overlay_used(k);
+            }
+            matched = true;
+            for &b in k.as_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            if let Ok(bytes) = std::fs::read(repl) {
+                for &b in &bytes {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+    }
+    matched.then_some(h)
+}
+
+/// FNV-1a digest across all active `MAKEPAD_RUN_OVERLAY` entries, or `None` when no overlay is set.
+pub fn overlay_any_digest() -> Option<u64> {
+    if !OVERLAY_ANY.load(Ordering::Acquire) {
+        return None;
+    }
+    let m = OVERLAY.read().unwrap();
+    if m.is_empty() {
+        return None;
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for (k, (repl, _)) in m.iter() {
+        for &b in k.as_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        if let Ok(bytes) = std::fs::read(repl) {
+            for &b in &bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    Some(h)
+}
+
+/// Marks overlay keys recorded by a child build script as used in this process.
+pub fn mark_overlay_used(lines: &str) {
+    if !OVERLAY_ANY.load(Ordering::Acquire) {
+        return;
+    }
+    let m = OVERLAY.read().unwrap();
+    for line in lines.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some((_, used)) = m.get(line) {
+            if !used.swap(true, Ordering::Relaxed) {
+                note_overlay_used(line);
+            }
+        }
+    }
+}
+
+/// Verifies that every entry in `MAKEPAD_RUN_OVERLAY` was read at least once during the run.
+pub fn check_overlay_used() -> Result<(), String> {
+    if !OVERLAY_ANY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let entries = OVERLAY_ENTRIES.read().unwrap();
+    for (path, used) in entries.iter() {
+        if !used.load(Ordering::Relaxed) {
+            return Err(format!("MAKEPAD_RUN_OVERLAY: {path}: overlaid target was never read"));
+        }
+    }
+    Ok(())
+}
+
+/// Replaces the overlay: each (path, replacement) reads the replacement's bytes for the path.
+pub fn set_overlay(pairs: Vec<(String, std::path::PathBuf)>) {
+    // process state: built in the kept heap
+    let _k = crate::zone_alloc::kept();
+    let mut m = OVERLAY.write().unwrap();
+    let mut entries = OVERLAY_ENTRIES.write().unwrap();
+    m.clear();
+    entries.clear();
+    for (p, r) in pairs {
+        let used = Arc::new(AtomicBool::new(false));
+        if let Ok(canon) = std::fs::canonicalize(&p) {
+            m.insert(normalize_path(&canon.to_string_lossy()), (r.clone(), used.clone()));
+        }
+        m.insert(normalize_path(&p), (r, used.clone()));
+        entries.push((p, used));
+    }
+    OVERLAY_ANY.store(!m.is_empty(), Ordering::Release);
+}
+
+/// The overlay from MAKEPAD_RUN_OVERLAY (the loader calls this at start, next to MAKEPAD_RUN_VFS).
+pub fn overlay_from_env() -> Result<(), String> {
+    let Some(list) = std::env::var_os("MAKEPAD_RUN_OVERLAY").filter(|p| !p.is_empty()) else { return Ok(()) };
+    let text = std::fs::read_to_string(&list).map_err(|e| format!("MAKEPAD_RUN_OVERLAY {}: {e}", list.to_string_lossy()))?;
+    let mut pairs = Vec::new();
+    for line in text.lines().filter(|l| !l.is_empty()) {
+        let (path, with) = line.split_once('\t').ok_or_else(|| format!("MAKEPAD_RUN_OVERLAY: bad line {line}"))?;
+        if !std::path::Path::new(path).is_absolute() {
+            return Err(format!("MAKEPAD_RUN_OVERLAY: {path}: target path must be absolute"));
+        }
+        if !is_file(path) {
+            return Err(format!("MAKEPAD_RUN_OVERLAY: {path}: target is not an existing file"));
+        }
+        // a replacement that is missing would read as the file being gone: say so instead, and
+        // canonicalize so child processes that change working directory still open it
+        let with_canon = std::fs::canonicalize(with).map_err(|_| format!("MAKEPAD_RUN_OVERLAY: {with}: no such file"))?;
+        if !with_canon.is_file() {
+            return Err(format!("MAKEPAD_RUN_OVERLAY: {with}: no such file"));
+        }
+        pairs.push((path.to_string(), with_canon));
+    }
+    set_overlay(pairs);
+    Ok(())
+}
+
 impl Mount {
     fn file(&self, rel: &str) -> Option<&Entry> {
         self.files.binary_search_by(|e| e.path.as_str().cmp(rel)).ok().map(|i| &self.files[i])
@@ -443,6 +622,9 @@ fn read_uncached(path: &std::path::Path, entry: Option<&ReadEntry>) -> io::Resul
 }
 
 fn read_uncached_inner(path: &std::path::Path, entry: Option<&ReadEntry>) -> io::Result<Vec<u8>> {
+    if let Some(o) = overlaid(&path.to_string_lossy()) {
+        return read_disk(&o, entry);
+    }
     if !ANY.load(Ordering::Acquire) {
         return read_disk(path, entry);
     }
@@ -489,6 +671,9 @@ pub fn metadata(path: impl AsRef<std::path::Path>) -> io::Result<Metadata> {
 
 fn metadata_inner(path: &std::path::Path) -> io::Result<Metadata> {
     let s = path.to_string_lossy();
+    if let Some(o) = overlaid(&s) {
+        return metadata(o);
+    }
     if let Some((mount, rel)) = ANY.load(Ordering::Acquire).then(|| find(&s)).flatten() {
         if let Some(edited) = edited_file(&s) { return metadata(edited); }
         let is_dir = mount.is_dir(&rel);
@@ -718,9 +903,10 @@ pub struct FileStat {
 }
 pub const STAT_RACY_NS: u64 = 2_000_000_000;
 
-/// The stat of an on-disk path (None: virtual (a mounted store or an edits overlay), missing).
+/// The stat of an on-disk path (None: virtual (a mounted store or an edits overlay), overlaid
+/// (MAKEPAD_RUN_OVERLAY: its stat is the original's, not what is read), missing).
 pub fn file_stat(path: &str) -> Option<FileStat> {
-    if ANY.load(Ordering::Acquire) && find(path).is_some() {
+    if (ANY.load(Ordering::Acquire) && find(path).is_some()) || overlaid(path).is_some() {
         return None;
     }
     let m = std::fs::metadata(path).ok()?;
@@ -738,6 +924,9 @@ pub fn file_stat(path: &str) -> Option<FileStat> {
 /// When the file last changed (a git file: never, None; the caller treats it as unchanged).
 pub fn modified(path: impl AsRef<std::path::Path>) -> Option<std::time::SystemTime> {
     let path = path.as_ref();
+    if let Some(o) = overlaid(&path.to_string_lossy()) {
+        return std::fs::metadata(o).and_then(|m| m.modified()).ok();
+    }
     if ANY.load(Ordering::Acquire) && find(&path.to_string_lossy()).is_some() {
         // an edited file changes on disk; the store's never does
         return edited_file(&path.to_string_lossy()).and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
@@ -755,9 +944,13 @@ pub fn identity(path: &str) -> Option<String> {
     if edited_file(path).is_some() {
         return None;
     }
-    Some(match m.store.range {
+    let base = match m.store.range {
         Some((offset, len)) => format!("{}@{offset}+{len}@{}", m.store.path.display(), store::hex(&m.commit)),
         None => format!("{}@{}", m.store.path.display(), store::hex(&m.commit)),
+    };
+    Some(match overlay_digest_for(path) {
+        Some(d) => format!("{base}#overlay:{d:016x}"),
+        None => base,
     })
 }
 
@@ -809,6 +1002,7 @@ pub fn mount_from_env() -> Result<(), String> {
     // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     record_from_env()?;
+    overlay_from_env()?;
     if let Some(d) = std::env::var_os("MAKEPAD_RUN_EDITS").filter(|d| !d.is_empty()) {
         set_edits(Some(d.into()));
     }
@@ -843,11 +1037,21 @@ fn hold(data: Vec<u8>, out: *mut *const u8, out_len: *mut usize) -> u64 {
 
 /// 0: not a virtual path (the disk), 1: a file (`*size` its length), 2: a folder, -1: virtual but
 /// missing.
-pub extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32 {
-    if !ANY.load(Ordering::Acquire) {
+///
+/// # Safety
+/// `p` must be valid for `n` bytes (when `n > 0`) and `size` must point to a writable `u64`.
+pub unsafe extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32 {
+    if !ANY.load(Ordering::Acquire) && !OVERLAY_ANY.load(Ordering::Acquire) {
         return 0;
     }
     let path = unsafe { path_arg(p, n) };
+    if let Some(f) = overlaid(path) {
+        unsafe { *size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0) };
+        return 1;
+    }
+    if !ANY.load(Ordering::Acquire) {
+        return 0;
+    }
     let Some((m, rel)) = find(path) else { return 0 };
     if let Some(f) = edited_file(path) {
         unsafe { *size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0) };
@@ -865,7 +1069,10 @@ pub extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32 
 }
 
 /// A virtual file's bytes, held until `relax_vfs_release`; 0 when it cannot be read.
-pub extern "C" fn relax_vfs_read(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `p` must be valid for `n` bytes (when `n > 0`), and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_vfs_read(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let path = unsafe { path_arg(p, n) };
     match read(path) {
         Ok(d) => hold(d, out, out_len),
@@ -874,7 +1081,10 @@ pub extern "C" fn relax_vfs_read(p: *const u8, n: usize, out: *mut *const u8, ou
 }
 
 /// A virtual folder's entries as lines `d <name>` / `f <name>`, held until `relax_vfs_release`.
-pub extern "C" fn relax_vfs_list(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `p` must be valid for `n` bytes (when `n > 0`), and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_vfs_list(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let path = unsafe { path_arg(p, n) };
     match read_dir(path) {
         Ok(v) => hold(v.iter().map(|(name, d)| format!("{} {name}\n", if *d { 'd' } else { 'f' })).collect::<String>().into_bytes(), out, out_len),
@@ -883,13 +1093,19 @@ pub extern "C" fn relax_vfs_list(p: *const u8, n: usize, out: *mut *const u8, ou
 }
 
 /// The mount table (`mounts_text`), held until `relax_vfs_release`.
-pub extern "C" fn relax_vfs_mounts(out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `out` and `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_vfs_mounts(out: *mut *const u8, out_len: *mut usize) -> u64 {
     hold(mounts_text().into_bytes(), out, out_len)
 }
 
 /// std::relax::store_file: one file of a repository's store at a commit (`url`, 40-hex `commit`,
 /// `path` in the repository), held until `relax_vfs_release`; 0 when it is not there.
-pub extern "C" fn relax_store_file(u: *const u8, un: usize, c: *const u8, cn: usize, p: *const u8, pn: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `u`, `c`, and `p` must be valid for `un`, `cn`, and `pn` bytes respectively, and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_store_file(u: *const u8, un: usize, c: *const u8, cn: usize, p: *const u8, pn: usize, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let (url, commit, path) = unsafe { (path_arg(u, un), path_arg(c, cn), path_arg(p, pn)) };
     let Some(oid) = store::from_hex(commit) else { return 0 };
     match store::store_file(url, &oid, path) {
@@ -1182,7 +1398,10 @@ fn reconcile_seeded(dir: &std::path::Path) {
 /// std's write into a virtual path (fs_vfs.rs): mode 0 the edited file or folder if any, 1 a
 /// write keeping the content, 2 a write replacing it, 3 a folder. The disk path, held until
 /// `relax_vfs_release`; 0 when the path cannot be written.
-pub extern "C" fn relax_vfs_edit(p: *const u8, n: usize, mode: u32, out: *mut *const u8, out_len: *mut usize) -> u64 {
+///
+/// # Safety
+/// `p` must be valid for `n` bytes (when `n > 0`), and `out` / `out_len` must be valid writable pointers.
+pub unsafe extern "C" fn relax_vfs_edit(p: *const u8, n: usize, mode: u32, out: *mut *const u8, out_len: *mut usize) -> u64 {
     let path = unsafe { path_arg(p, n) };
     let r = match mode {
         0 => edited_disk_path(path).ok_or_else(|| not_found(path)),
@@ -1335,13 +1554,15 @@ mod tests {
             assert_eq!(canonicalize(&missing).unwrap_err().kind(), io::ErrorKind::NotFound);
             assert_eq!(canonicalize(format!("{root}/../outside")).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
             let mut len = 0;
-            assert_eq!(relax_vfs_stat(path.as_ptr(), path.len(), &mut len), 1);
+            assert_eq!(unsafe { relax_vfs_stat(path.as_ptr(), path.len(), &mut len) }, 1);
             assert_eq!(len, bytes.len() as u64);
-            assert_eq!(relax_vfs_stat(missing.as_ptr(), missing.len(), &mut len), -1);
+            assert_eq!(unsafe { relax_vfs_stat(missing.as_ptr(), missing.len(), &mut len) }, -1);
             for (path, list) in [(&path, false), (&dir, true)] {
                 let (mut data, mut len) = (std::ptr::null(), 0);
-                let id = if list { relax_vfs_list(path.as_ptr(), path.len(), &mut data, &mut len) }
-                    else { relax_vfs_read(path.as_ptr(), path.len(), &mut data, &mut len) };
+                let id = unsafe {
+                    if list { relax_vfs_list(path.as_ptr(), path.len(), &mut data, &mut len) }
+                    else { relax_vfs_read(path.as_ptr(), path.len(), &mut data, &mut len) }
+                };
                 assert_ne!(id, 0);
                 assert_eq!(unsafe { std::slice::from_raw_parts(data, len) }, if list { &b"f counter.rs\n"[..] } else { bytes });
                 relax_vfs_release(id);

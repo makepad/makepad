@@ -85,6 +85,7 @@ pub const UNSAFE_CODE: Lint = lint("unsafe_code");
 pub const MISSING_UNSAFE_ON_EXTERN: Lint = lint("missing_unsafe_on_extern");
 pub const DEPRECATED_SAFE_2024: Lint = lint("deprecated_safe_2024");
 pub const UNSAFE_ATTR_OUTSIDE_UNSAFE: Lint = lint("unsafe_attr_outside_unsafe");
+pub const RECURSION_DEPTH_EXCEEDING_LIMIT: Lint = lint("recursion_depth_exceeding_limit");
 
 const LEVEL_ATTRS: &[(&[u8], Level, bool)] = &[
     (b"allow", Level::Allow, false), (b"expect", Level::Allow, true), (b"warn", Level::Warn, false),
@@ -247,7 +248,11 @@ pub fn resolve_in(prog: &Program, def: DefId, inner_file: u32, inner: &[Attr], l
     if !inner.is_empty() && def != NO_DEF {
         scopes.insert(0, (inner_file, inner.to_vec()));
     }
-    let edition = prog.files[prog.def(def).file as usize].edition;
+    let edition = if def == NO_DEF {
+        prog.files.get(inner_file as usize).map_or(2021, |f| f.edition)
+    } else {
+        prog.files[prog.def(def).file as usize].edition
+    };
     let mut spec = Resolved { level: if edition >= 2024 { lint.default_2024 } else { lint.default }, expect: None, forbid_from_group: false, source: None };
     let mut warnings: Option<Level> = None;
     let mut forbid_warnings = false;
@@ -346,6 +351,9 @@ fn cmdline_levels() -> &'static [(Level, String)] {
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static SINK: Mutex<Vec<(Level, String)>> = Mutex::new(Vec::new());
+std::thread_local! {
+    static THREAD_SINK: std::cell::RefCell<Vec<(Level, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// `makepad check` collects lints (nothing else does).
 pub fn enable() { ENABLED.store(true, Ordering::Relaxed); }
@@ -377,9 +385,26 @@ pub fn emit_in(prog: &Program, def: DefId, inner: &[Attr], lint: &Lint, file: u3
     }
     let (l, c) = prog.files[file as usize].line_col(pos);
     let kind = if level >= Level::Deny { "error" } else { "warning" };
-    let line = format!("{}:{}:{}: {}: {} [{}]", prog.file_paths[file as usize], l, c, kind, msg, lint.name);
+    let line = match msg.split_once('\n') {
+        Some((head, tail)) => format!("{}:{}:{}: {}: {} [{}]\n{}", prog.file_paths[file as usize], l, c, kind, head, lint.name, tail),
+        None => format!("{}:{}:{}: {}: {} [{}]", prog.file_paths[file as usize], l, c, kind, msg, lint.name),
+    };
     let _k = crate::zone_alloc::kept();
+    THREAD_SINK.with(|s| s.borrow_mut().push((level, line.clone())));
     SINK.lock().unwrap_or_else(|e| e.into_inner()).push((level, line));
+}
+
+/// Thread-local lints reported on the current thread since the last `take_thread`: (errors, warnings).
+pub fn take_thread() -> (Vec<String>, Vec<String>) {
+    let all = THREAD_SINK.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (l, s) in all {
+        if !seen.insert(s.clone()) { continue; }
+        if l >= Level::Deny { errors.push(s) } else { warnings.push(s) }
+    }
+    (errors, warnings)
 }
 
 /// The lints reported since the last take: (errors, warnings).

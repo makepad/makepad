@@ -239,7 +239,10 @@ fn copy_out(s: &str, buf: *mut u8, cap: usize) -> usize {
 
 /// std::relax::post_engine_request: `p/n` is the record ([`post`]); writes the id, or `!` and the
 /// reason, into `buf` and returns the full length.
-pub extern "C" fn __relax_engine_request(p: *const u8, n: usize, buf: *mut u8, cap: usize) -> usize {
+///
+/// # Safety
+/// `p` must be null or valid for `n` readable bytes, and when `buf` is non-null and `cap > 0`, `buf` must be valid for `cap` writable bytes.
+pub unsafe extern "C" fn __relax_engine_request(p: *const u8, n: usize, buf: *mut u8, cap: usize) -> usize {
     if p.is_null() {
         return copy_out("!no request", buf, cap);
     }

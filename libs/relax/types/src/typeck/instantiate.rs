@@ -19,6 +19,12 @@ pub(super) fn try_normalize_body(prog: &Program, tcx: &Tcx, env: crate::tcx::Typ
     // a body is instantiated with exactly its generics (a `fn main<T>()`, E0131, has no instance)
     if args.len() != tcx.generic_indices_of(prog, body.def).types_consts.len() { return Err(crate::next_solver::NoSolution); }
     let mut b = body.clone();
+    let item_span = if (body.def.0 as usize) < prog.defs.len() && prog.def(body.def).item.0 != u32::MAX {
+        prog.files[body.file as usize].ast.item(prog.def(body.def).item).lo
+    } else {
+        0
+    };
+    let _codegen_cause = crate::next_solver::eval_ctxt::enter_codegen_cause(body.def, item_span);
     let root_errors = tcx.dcx.clone();
     let checkpoint = root_errors.checkpoint();
     let errors = &root_errors;
@@ -39,7 +45,12 @@ pub(super) fn try_normalize_body(prog: &Program, tcx: &Tcx, env: crate::tcx::Typ
         folded.insert(ty, result);
         Ok(result)
     };
-    for ty in &mut b.expr_ty { *ty = s(*ty)?; }
+    let pf = &prog.files[body.file as usize];
+    for (i, ty) in b.expr_ty.iter_mut().enumerate() {
+        let e = body.expr_at(i);
+        let _expr_cause = crate::next_solver::eval_ctxt::enter_codegen_cause(body.def, pf.ast.expr(e).lo);
+        *ty = s(*ty)?;
+    }
     for ty in &mut b.pat_ty { *ty = s(*ty)?; }
     b.ret = s(b.ret)?;
     for ty in b.hidden_types.values_mut() { *ty = s(*ty)?; }

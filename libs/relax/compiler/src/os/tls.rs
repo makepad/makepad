@@ -44,7 +44,10 @@ mod imp {
         static TLS_BLOCK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
-    pub fn set(key: u64, b: *mut u8) {
+    /// # Safety
+    /// `b` must be valid for the thread-exit destructor registered with `key_create`, or null /
+    /// a probe value restored before the thread exits.
+    pub unsafe fn set(key: u64, b: *mut u8) {
         unsafe {
             super::unix::pthread_setspecific(key as usize, b);
         }
@@ -205,7 +208,10 @@ mod imp {
         (tp as *mut u64).wrapping_add(TLS_SLOT_APP as usize)
     }
 
-    pub fn set(key: u64, block: *mut u8) {
+    /// # Safety
+    /// `block` must be valid for the thread-exit destructor registered with `key_create`, or null
+    /// / a probe value restored before the thread exits.
+    pub unsafe fn set(key: u64, block: *mut u8) {
         unsafe {
             super::unix::pthread_setspecific(key as usize, block);
             slot().write_volatile(block as u64);
@@ -217,9 +223,9 @@ mod imp {
         let reader = emit(&relax_backend::arm64::tsd_reader());
         let read: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(reader as usize) };
         let old = get(key);
-        set(key, 0x5a5a_0000 as *mut u8);
+        unsafe { set(key, 0x5a5a_0000 as *mut u8) };
         let seen = read(TLS_SLOT_APP);
-        set(key, old);
+        unsafe { set(key, old) };
         if seen != 0x5a5a_0000 {
             panic!("thread-local fast path: bionic TLS_SLOT_APP reads {:#x}", seen);
         }
@@ -232,7 +238,10 @@ mod imp {
     pub use super::unix::{get, key_create};
     use super::unix::pthread_setspecific;
 
-    pub fn set(key: u64, b: *mut u8) {
+    /// # Safety
+    /// `b` must be valid for the thread-exit destructor registered with `key_create`, or null /
+    /// a probe value restored before the thread exits.
+    pub unsafe fn set(key: u64, b: *mut u8) {
         unsafe {
             pthread_setspecific(key as usize, b);
         }
@@ -243,9 +252,9 @@ mod imp {
         let reader = emit(&relax_backend::arm64::tsd_reader());
         let read: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(reader as usize) };
         let old = get(key);
-        set(key, 0x5a5a_0000 as *mut u8);
+        unsafe { set(key, 0x5a5a_0000 as *mut u8) };
         let seen = read(key);
-        set(key, old);
+        unsafe { set(key, old) };
         if seen != 0x5a5a_0000 {
             panic!("thread-local fast path: TSD slot {} reads {:#x}", key, seen);
         }
@@ -294,7 +303,10 @@ mod imp {
         unsafe { TlsGetValue(key as u32) }
     }
 
-    pub fn set(key: u64, b: *mut u8) {
+    /// # Safety
+    /// `b` must be valid for the thread-exit destructor registered with `key_create`, or null /
+    /// a probe value restored before the thread exits.
+    pub unsafe fn set(key: u64, b: *mut u8) {
         unsafe {
             TlsSetValue(key as u32, b);
         }

@@ -1199,6 +1199,8 @@ impl Draw {
     pub const WIREFRAME: u32 = 16;
     /// This draw never occludes input to native content below it.
     pub const INPUT_TRANSPARENT: u32 = 32;
+    /// reversed-Z depth test (`>=` instead of `<=`, clear 0.0)
+    pub const REVERSE_Z: u32 = 64;
 }
 
 unsafe impl Plain for Draw {}

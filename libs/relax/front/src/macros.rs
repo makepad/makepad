@@ -2126,11 +2126,13 @@ pub mod uses {
     pub const RESOLVED: u32 = u32::MAX;
 
     static ON: AtomicBool = AtomicBool::new(false);
+    thread_local! { static THREAD_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
     static DEFS: Mutex<Vec<Defined>> = Mutex::new(Vec::new());
     static USED: Mutex<Option<HashSet<(String, u32, u32)>>> = Mutex::new(None);
 
     pub fn record(on: bool) { ON.store(on, Ordering::Relaxed); }
-    pub fn recording() -> bool { ON.load(Ordering::Relaxed) }
+    pub fn record_thread(on: bool) { THREAD_ON.with(|c| c.set(on)); }
+    pub fn recording() -> bool { ON.load(Ordering::Relaxed) || THREAD_ON.with(|c| c.get()) }
 
     pub(super) fn defined(d: &MacroDef) {
         if !recording() || d.builtin != 0 { return; }

@@ -1647,11 +1647,11 @@ mod tests {
         // rustc tests/ui/type-alias-enum-variants/enum-variant-generic-args-pass.rs: the `;` after the
         // outer call goes to the inner call's statement
         let src = "macro_rules! inner { ($e:expr) => ( assert!($e, \"x\"); ) }\nmacro_rules! outer { ($e:expr) => ( inner!($e) ) }\nfn main() { outer!(true); }\n";
-        crate::macros::uses::record(true);
+        crate::macros::uses::record_thread(true);
         let _ = crate::macros::uses::take_trailing_semis();
         replay(src, 2021);
         let t = crate::macros::uses::take_trailing_semis();
-        crate::macros::uses::record(false);
+        crate::macros::uses::record_thread(false);
         assert!(t.is_empty(), "{}", t.len());
     }
 
@@ -1667,12 +1667,14 @@ mod tests {
         }
         src.push_str(" }\nconst X: () = { step!(8) };\n");
         let sess = &std::sync::Arc::new(relax_session::Session::default());
-        let path = std::env::temp_dir().join(format!("relax-rsim-expansions-{}.rs", std::process::id()));
+        static NEXT_EXP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT_EXP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("relax-rsim-expansions-{}-{n}.rs", std::process::id()));
         std::fs::write(&path, &src).unwrap();
-        crate::macros::uses::record(true);
+        crate::macros::uses::record_thread(true);
         let mut prog = Program::new(sess);
         let k = prog.load_crate("rsim_test", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), vec![]);
-        crate::macros::uses::record(false);
+        crate::macros::uses::record_thread(false);
         std::fs::remove_file(path).unwrap();
         let k = k.unwrap();
         let expansions: usize = prog.files.iter().zip(&prog.file_crate).filter(|(_, &c)| c == k).map(|(f, _)| f.exp_map.len()).sum();

@@ -1081,6 +1081,7 @@ impl<'a> Lcx<'a> {
     fn resolve_instance(&mut self, d: DefId, args: &[TyId]) -> crate::instance::Instance {
         self.refresh_queries();
         if let Some(found) = self.trait_methods.get(&d).and_then(|m| m.get(args)) { return found.clone(); }
+        let _cause = relax_types::next_solver::eval_ctxt::enter_codegen_cause(self.b.def, self.pos);
         let found = crate::instance::Instance::expect_resolve(&self.u.tcx, &self.u.prog,
             crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), d, args);
         self.trait_methods.entry(d).or_default().insert(args.to_vec(), found.clone());
@@ -8259,6 +8260,7 @@ impl<'a> Lcx<'a> {
                 return r;
             }
         }
+        let _cause = relax_types::next_solver::eval_ctxt::enter_codegen_cause(self.b.def, self.pos);
         let instance = Instance::resolve_for_fn_ptr(&self.u.tcx, &self.u.prog, d, &args).expect("fn pointer instance");
         let id = self.u.instance_fn_id(instance);
         self.emit(Inst::FnAddr(r, id));

@@ -38,7 +38,10 @@ pub fn in_eval() -> bool {
 }
 
 /// std::relax::probe::__eval's answer: tag 0 the type, 1 the value.
-pub extern "C" fn relax_probe_result(tag: u32, t: *const u8, n: usize) {
+///
+/// # Safety
+/// `t` must be valid for `n` readable bytes.
+pub unsafe extern "C" fn relax_probe_result(tag: u32, t: *const u8, n: usize) {
     let s = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(t, n) }).into_owned();
     let _ = RESULT.try_with(|r| {
         let mut r = r.borrow_mut();

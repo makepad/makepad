@@ -157,6 +157,7 @@ pub const LINTS: &[(&str, LevelK, Option<(u16, LevelK)>, &[&str], bool)] = &[
     ("proc_macro_derive_resolution_fallback", Deny, None, &["future_incompatible"], false),
     ("ptr_to_integer_transmute_in_consts", Warn, None, &[], false),
     ("pub_use_of_private_extern_crate", Deny, None, &["future_incompatible"], false),
+    ("recursion_depth_exceeding_limit", Warn, None, &["future_incompatible"], false),
     ("redundant_imports", Allow, None, &[], false),
     ("redundant_lifetimes", Allow, None, &[], false),
     ("redundant_semicolons", Warn, None, &["unused"], false),

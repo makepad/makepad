@@ -56,7 +56,7 @@ fn path() -> PathBuf {
     h.u64(*KERNEL_COMPILER.get().expect("kernel compiler identity"));
     h.str(&format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
     h.u32(FORMAT);
-    crate::dirs::relax_dir().join("cache").join(format!("kernels-{:016x}.rcs", h.finish128() as u64))
+    crate::dirs::cache_dir().join(format!("kernels-{:016x}.rcs", h.finish128() as u64))
 }
 
 /// The stored payload of kernel `key` (None: absent, or torn).

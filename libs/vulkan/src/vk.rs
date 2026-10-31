@@ -4078,6 +4078,7 @@ impl CompareOp {
     pub const fn from_raw(value: i32) -> Self { Self(value) }
     pub const fn as_raw(self) -> i32 { self.0 }
     pub const LESS_OR_EQUAL: Self = Self(3 as i32);
+    pub const GREATER_OR_EQUAL: Self = Self(6 as i32);
 }
 impl core::fmt::Debug for CompareOp { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
 match self.0 {
