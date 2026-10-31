@@ -1,0 +1,611 @@
+//! This machine's capabilities and health: hardware from the OS (Linux `/proc` + `/sys` +
+//! `nvidia-smi`; macOS `sysctl` + `statfs`), policy from `~/.makepad/devhub/lease.conf`.
+//!
+//! `lease.conf` is `key = value` lines: `role = pool|suite|bench|user-wm|device`, `slots.<kind> = 0|1` (whether it takes the kind; one lease runs at a time),
+//! `disk_floor_gb`, `disk_warn_gb`, `timed = on|off`, `spec = <text>`, `work = <dir>` (default
+//! `~/devhub`), CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`) and
+//! `user_idle_min` (default 3: minutes without a person's input before a node with our WM
+//! takes work again, [`super::UserSense`]).
+
+use super::{Caps, Kind, Role};
+use std::path::{Path, PathBuf};
+
+/// The node's lease policy (`lease.conf`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LeaseConf {
+    pub role: Role,
+    /// explicit `slots.<kind>` lines; the rest come from [`LeaseConf::slots`]'s defaults
+    pub slots: Vec<(Kind, u32)>,
+    pub disk_floor_gb: f64,
+    pub disk_warn_gb: f64,
+    pub timed: bool,
+    pub spec: String,
+    /// where leases work: `wt/`, `lane/`, `target/`, `tmp/`, `recovered/`
+    pub work: PathBuf,
+    /// taskset CPU lists for shared kinds and for `timed` (empty: no pinning)
+    pub cpus_shared: String,
+    pub cpus_timed: String,
+    /// minutes without a person's input before the node takes work again
+    pub user_idle_min: u32,
+}
+
+/// `user_idle_min`'s default.
+pub const USER_IDLE_MIN: u32 = 3;
+
+pub fn home_dir() -> PathBuf {
+    crate::os::home_dir()
+}
+
+pub fn conf_path() -> PathBuf {
+    crate::proto::home().join("lease.conf")
+}
+
+impl LeaseConf {
+    /// `~/.makepad/devhub/lease.conf`, defaults where it is missing.
+    pub fn load() -> LeaseConf {
+        LeaseConf::parse(&std::fs::read_to_string(conf_path()).unwrap_or_default(), &home_dir())
+    }
+
+    pub fn parse(text: &str, home: &Path) -> LeaseConf {
+        let mut c = LeaseConf {
+            role: Role::Pool,
+            slots: Vec::new(),
+            disk_floor_gb: 25.0,
+            disk_warn_gb: 50.0,
+            timed: true,
+            spec: String::new(),
+            work: home.join("devhub"),
+            cpus_shared: String::new(),
+            cpus_timed: String::new(),
+            user_idle_min: USER_IDLE_MIN,
+        };
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let (k, v) = (k.trim(), v.trim());
+            match k {
+                "role" => c.role = Role::parse(v).unwrap_or(c.role),
+                "disk_floor_gb" => c.disk_floor_gb = v.parse().unwrap_or(c.disk_floor_gb),
+                "disk_warn_gb" => c.disk_warn_gb = v.parse().unwrap_or(c.disk_warn_gb),
+                "timed" => c.timed = v != "off",
+                "spec" => c.spec = v.to_string(),
+                "work" => c.work = v.strip_prefix("~/").map_or_else(|| PathBuf::from(v), |r| home.join(r)),
+                "cpus.shared" if valid_cpus(v) => c.cpus_shared = v.to_string(),
+                "cpus.timed" if valid_cpus(v) => c.cpus_timed = v.to_string(),
+                "user_idle_min" => c.user_idle_min = v.parse().ok().filter(|m| *m >= 1).unwrap_or(c.user_idle_min),
+                _ => {
+                    if let (Some(kind), Ok(n)) = (k.strip_prefix("slots.").and_then(Kind::parse), v.parse::<u32>()) {
+                        c.slots.retain(|(x, _)| *x != kind);
+                        c.slots.push((kind, n));
+                    }
+                }
+            }
+        }
+        c
+    }
+
+    /// Slots per kind: the conf's, else build 2, test 2, screen 3, long 2, gate 1, gpu = #GPUs,
+    /// timed 1 (0 with `timed = off`). `inspect` is not counted.
+    pub fn slots(&self, gpus: u32) -> Vec<(Kind, u32)> {
+        // one box per lease: a slot only says the node takes the kind (0: never)
+        let defaults = [(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, gpus.min(1)), (Kind::Timed, self.timed as u32)];
+        defaults.iter().map(|(k, d)| (*k, self.slots.iter().find(|(x, _)| x == k).map_or(*d, |(_, n)| *n))).collect()
+    }
+}
+
+/// Whether the master may set `key = value` in a node's lease.conf (`work` stays the node's own:
+/// moving the work dir under running leases is not a remote switch).
+pub fn settable(key: &str, value: &str) -> Result<(), String> {
+    let num = || value.parse::<f64>().map(|_| ()).map_err(|_| format!("{key} takes a number"));
+    match key {
+        "role" => Role::parse(value).map(|_| ()).ok_or_else(|| "role = pool|suite|bench|user-wm|device".to_string()),
+        "disk_floor_gb" | "disk_warn_gb" => num(),
+        "timed" => matches!(value, "on" | "off").then_some(()).ok_or_else(|| "timed = on|off".to_string()),
+        "spec" => (!value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_graphic())).then_some(()).ok_or_else(|| "spec: one word".to_string()),
+        "cpus.shared" | "cpus.timed" => (value.is_empty() || valid_cpus(value)).then_some(()).ok_or_else(|| format!("{key}: a CPU list like 8-15,24-31")),
+        "user_idle_min" => value.parse::<u32>().ok().filter(|m| (1..=1440).contains(m)).map(|_| ()).ok_or_else(|| "user_idle_min: whole minutes, 1..1440".to_string()),
+        k => match k.strip_prefix("slots.").and_then(Kind::parse) {
+            Some(_) => value.parse::<u32>().map(|_| ()).map_err(|_| format!("{key} takes a count")),
+            None => Err(format!("`{key}` is not a lease.conf key the master sets (role, slots.<kind>, disk_floor_gb, disk_warn_gb, timed, spec, cpus.shared, cpus.timed, user_idle_min)")),
+        },
+    }
+}
+
+/// `text` with each `key = value` of `pairs` set: the key's line replaced in place (comments
+/// kept), or appended.
+pub fn conf_with(text: &str, pairs: &[(String, String)]) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    for (k, v) in pairs {
+        let at = lines.iter().position(|l| l.split('#').next().and_then(|b| b.split_once('=')).is_some_and(|(lk, _)| lk.trim() == k));
+        let line = format!("{k} = {v}");
+        match at {
+            Some(i) => {
+                let comment = lines[i].find('#').map(|c| format!("  {}", &lines[i][c..])).unwrap_or_default();
+                lines[i] = format!("{line}{comment}");
+            }
+            None => lines.push(line),
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn valid_cpus(v: &str) -> bool {
+    !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b',' || b == b'-')
+}
+
+/// Measures this machine now (`node`: its devhub name; `apply`: DEVHUB2's applier kind).
+/// The node's `rustc -V` version (`1.97.1`), looked at every 5 min (an update needs no hub restart).
+fn rustc_version() -> String {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, String)>> = std::sync::Mutex::new(None);
+    let mut g = LAST.lock().unwrap();
+    if let Some((t, v)) = g.as_ref().filter(|(t, _)| t.elapsed() < std::time::Duration::from_secs(300)) {
+        let _ = t;
+        return v.clone();
+    }
+    let v = std::process::Command::new("rustc").arg("-V").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).unwrap_or("").to_string()).unwrap_or_default();
+    *g = Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
+pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
+    let mut c = os::hardware();
+    c.node = node.to_string();
+    let (free, total) = disk_space(&conf.work).unwrap_or((0, 0));
+    c.disk_free_gb = free as f64 / GB;
+    c.disk_total_gb = total as f64 / GB;
+    c.role = Some(conf.role);
+    c.spec = conf.spec.clone();
+    c.slots = conf.slots(c.gpus.len() as u32);
+    c.disk_floor_gb = conf.disk_floor_gb;
+    c.disk_warn_gb = conf.disk_warn_gb;
+    c.timed = conf.timed;
+    c.apply = apply.to_string();
+    c.hub_rev = hub_rev().to_string();
+    c.rustc = rustc_version();
+    c.hub_proto = super::HUB_PROTO;
+    c.services = services();
+    c
+}
+
+/// The WM-supervised services of this node (`~/.makepad/wm/<name>.state`, written at each start):
+/// name and start time.
+pub fn services() -> Vec<(String, u64)> {
+    let dir = makepad_network::fleet::makepad_home().join("wm");
+    let mut out: Vec<(String, u64)> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().strip_suffix(".state")?.to_string();
+            let t = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+            Some((name, t))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The commit this hub's checkout held when the hub started (its code; read once, from the files
+/// under `.git`: the tree moves with leases later).
+pub fn hub_rev() -> &'static str {
+    static REV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    REV.get_or_init(|| {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // a tree a deploy script or sync wrote with no `.git` of its own (103) names its commit in
+        // FLEET-REVISION.txt
+        head_sha(&repo).or_else(|| {
+            let t = std::fs::read_to_string(repo.join("FLEET-REVISION.txt")).ok()?;
+            t.lines().find_map(|l| l.strip_prefix("makepad ").map(|s| s.trim().to_string())).filter(|s| s.len() == 40)
+        }).unwrap_or_default()
+    })
+}
+
+/// HEAD's commit of a checkout, from its files (a linked worktree's `.git` file, a loose ref or
+/// packed-refs).
+pub fn head_sha(tree: &std::path::Path) -> Option<String> {
+    let dot = tree.join(".git");
+    let dir = if dot.is_dir() { dot } else { tree.join(std::fs::read_to_string(&dot).ok()?.trim().strip_prefix("gitdir:")?.trim()) };
+    let common = std::fs::read_to_string(dir.join("commondir")).ok().map_or(dir.clone(), |c| dir.join(c.trim()));
+    let head = std::fs::read_to_string(dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let Some(r) = head.strip_prefix("ref:").map(str::trim) else { return Some(head.to_string()) };
+    for base in [&dir, &common] {
+        if let Ok(s) = std::fs::read_to_string(base.join(r)) {
+            return Some(s.trim().to_string());
+        }
+    }
+    let packed = std::fs::read_to_string(common.join("packed-refs")).ok()?;
+    packed.lines().find_map(|l| l.strip_suffix(r).map(str::trim).filter(|s| s.len() == 40)).map(str::to_string)
+}
+
+pub const GB: f64 = (1u64 << 30) as f64;
+
+/// `model name` and the number of logical CPUs from `/proc/cpuinfo`.
+pub fn parse_cpuinfo(text: &str) -> (String, u32) {
+    let mut model = String::new();
+    let mut n = 0;
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        match k.trim() {
+            "processor" => n += 1,
+            // x86: `model name`; arm64 kernels may only give `Hardware` / `CPU part`
+            "model name" | "Hardware" if model.is_empty() => model = v.trim().to_string(),
+            _ => {}
+        }
+    }
+    (model, n)
+}
+
+/// (MemTotal, MemAvailable) in GB from `/proc/meminfo`.
+pub fn parse_meminfo(text: &str) -> (f64, f64) {
+    let kb = |key: &str| text.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / (1024.0 * 1024.0);
+    (kb("MemTotal:"), kb("MemAvailable:"))
+}
+
+pub fn parse_loadavg(text: &str) -> f64 {
+    text.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0.0)
+}
+
+/// `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits`: (name, VRAM GB).
+pub fn parse_nvidia(text: &str) -> Vec<(String, f64)> {
+    text.lines()
+        .filter_map(|l| {
+            let (name, mib) = l.rsplit_once(',')?;
+            Some((name.trim().to_string(), mib.trim().parse::<f64>().ok()? / 1024.0))
+        })
+        .filter(|(n, _)| !n.is_empty())
+        .collect()
+}
+
+/// Whether a `/sys/class/power_supply` entry is the machine's battery (`type`, `scope` files).
+pub fn system_battery(kind: &str, scope: &str) -> bool {
+    kind.trim() == "Battery" && scope.trim() != "Device"
+}
+
+/// A battery from `/sys/class/power_supply/<x>/{capacity,status}`: (percent, charging).
+pub fn parse_battery(capacity: &str, status: &str) -> Option<(u32, bool)> {
+    let pct = capacity.trim().parse().ok()?;
+    Some((pct, matches!(status.trim(), "Charging" | "Full")))
+}
+
+/// (free, total) bytes of the volume holding `path` (its nearest existing ancestor).
+pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+    let mut p = path.to_path_buf();
+    while !p.is_dir() {
+        p = p.parent()?.to_path_buf();
+    }
+    os::disk_space(&p)
+}
+
+#[cfg(target_os = "linux")]
+mod os {
+    use super::*;
+
+    pub fn hardware() -> Caps {
+        let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+        let (cpu, cores) = parse_cpuinfo(&read("/proc/cpuinfo"));
+        let (ram, avail) = parse_meminfo(&read("/proc/meminfo"));
+        let gpu = crate::top::gpu_use();
+        // CPU use since the previous measure (the master asks every 10 s)
+        static LAST: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+        let now = crate::top::parse_proc_stat(&read("/proc/stat"));
+        let cpu_pct = match (LAST.lock().unwrap().replace(now.unwrap_or((0, 0))), now) {
+            (Some(a), Some(b)) if b.1 > a.1 => Some(crate::top::cpu_pct(a, b)),
+            _ => None,
+        };
+        Caps {
+            cpu_pct,
+            gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
+            arch: std::env::consts::ARCH.to_string(),
+            os: "linux".into(),
+            cpu,
+            cores: cores.max(1),
+            load1: parse_loadavg(&read("/proc/loadavg")),
+            ram_gb: ram,
+            ram_avail_gb: avail,
+            gpus: gpu.iter().map(|g| (g.name.clone(), g.mem_total_gb)).collect(),
+            display: display(),
+            battery: battery(),
+            ..Default::default()
+        }
+    }
+
+    /// A live makepad WM socket (`$XDG_RUNTIME_DIR/makepad-wm-<n>` that accepts), else a Wayland one.
+    fn display() -> Option<String> {
+        let rt = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", uid())));
+        let mut wayland = None;
+        for e in std::fs::read_dir(&rt).ok()?.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("makepad-wm-") && !name.ends_with(".lock") && std::os::unix::net::UnixStream::connect(e.path()).is_ok() {
+                return Some(format!("wm:{name}"));
+            }
+            if name.starts_with("wayland-") && !name.ends_with(".lock") {
+                wayland = Some(format!("wayland:{name}"));
+            }
+        }
+        wayland.or_else(|| std::env::var("WAYLAND_DISPLAY").ok().filter(|w| !w.is_empty()).map(|w| format!("wayland:{w}")))
+    }
+
+    fn uid() -> u32 {
+        extern "C" {
+            fn getuid() -> u32;
+        }
+        unsafe { getuid() }
+    }
+
+    /// The machine's own battery: a power supply of type Battery whose scope is not `Device`
+    /// (wireless mice and keyboards report theirs as `scope = Device`).
+    fn battery() -> Option<(u32, bool)> {
+        for e in std::fs::read_dir("/sys/class/power_supply").ok()?.flatten() {
+            let p = e.path();
+            let read = |f: &str| std::fs::read_to_string(p.join(f)).unwrap_or_default();
+            if system_battery(&read("type"), &read("scope")) {
+                if let Some(b) = parse_battery(&std::fs::read_to_string(p.join("capacity")).unwrap_or_default(), &std::fs::read_to_string(p.join("status")).unwrap_or_default()) {
+                    return Some(b);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+        use std::os::unix::ffi::OsStrExt;
+        // 64-bit glibc and bionic share this layout
+        #[repr(C)]
+        struct StatVfs {
+            bsize: u64,
+            frsize: u64,
+            blocks: u64,
+            bfree: u64,
+            bavail: u64,
+            files: u64,
+            ffree: u64,
+            favail: u64,
+            fsid: u64,
+            flag: u64,
+            namemax: u64,
+            spare: [i32; 6],
+        }
+        extern "C" {
+            fn statvfs(path: *const std::ffi::c_char, out: *mut StatVfs) -> i32;
+        }
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut s: StatVfs = unsafe { std::mem::zeroed() };
+        if unsafe { statvfs(c.as_ptr(), &mut s) } != 0 {
+            return None;
+        }
+        let unit = if s.frsize > 0 { s.frsize } else { s.bsize };
+        Some((s.bavail.saturating_mul(unit), s.blocks.saturating_mul(unit)))
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod os {
+    use super::*;
+
+    extern "C" {
+        fn sysctlbyname(name: *const u8, oldp: *mut core::ffi::c_void, oldlenp: *mut usize, newp: *mut core::ffi::c_void, newlen: usize) -> i32;
+    }
+
+    fn sysctl_u64(name: &str) -> u64 {
+        let n = format!("{name}\0");
+        let mut v = 0u64;
+        let mut len = std::mem::size_of::<u64>();
+        if unsafe { sysctlbyname(n.as_ptr(), &mut v as *mut u64 as *mut _, &mut len, std::ptr::null_mut(), 0) } != 0 {
+            return 0;
+        }
+        // 4-byte answers (hw.logicalcpu) land in the low half
+        if len == 4 { v & 0xffff_ffff } else { v }
+    }
+
+    fn sysctl_str(name: &str) -> String {
+        let n = format!("{name}\0");
+        let mut buf = [0u8; 256];
+        let mut len = buf.len();
+        if unsafe { sysctlbyname(n.as_ptr(), buf.as_mut_ptr() as *mut _, &mut len, std::ptr::null_mut(), 0) } != 0 {
+            return String::new();
+        }
+        String::from_utf8_lossy(&buf[..len]).trim_end_matches('\0').to_string()
+    }
+
+    extern "C" {
+        fn mach_host_self() -> u32;
+        fn host_statistics(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    }
+
+    /// (busy, total) CPU ticks of all cores: `host_statistics(HOST_CPU_LOAD_INFO)` (user, system,
+    /// idle, nice), the macOS twin of `/proc/stat`'s `cpu` line.
+    fn cpu_ticks() -> Option<(u64, u64)> {
+        let mut t = [0u32; 4];
+        let mut count = 4u32;
+        // HOST_CPU_LOAD_INFO = 3, HOST_CPU_LOAD_INFO_COUNT = 4 (natural_t words)
+        if unsafe { host_statistics(mach_host_self(), 3, t.as_mut_ptr() as *mut i32, &mut count) } != 0 {
+            return None;
+        }
+        let busy = t[0] as u64 + t[1] as u64 + t[3] as u64;
+        Some((busy, busy + t[2] as u64))
+    }
+
+    pub fn hardware() -> Caps {
+        let m = crate::procinfo::machine();
+        // CPU use since the previous measure (the master asks every 10 s): what decides "busy", not
+        // the 1-minute load average, which stays high for a minute after a lease's build ended
+        static LAST: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+        let now = cpu_ticks();
+        let cpu_pct = match (LAST.lock().unwrap().replace(now.unwrap_or((0, 0))), now) {
+            (Some(a), Some(b)) if b.1 > a.1 => Some(crate::top::cpu_pct(a, b)),
+            _ => None,
+        };
+        Caps {
+            cpu_pct,
+            arch: std::env::consts::ARCH.to_string(),
+            os: "macos".into(),
+            cpu: sysctl_str("machdep.cpu.brand_string"),
+            cores: (sysctl_u64("hw.logicalcpu") as u32).max(1),
+            load1: m.load1,
+            ram_gb: sysctl_u64("hw.memsize") as f64 / GB,
+            ram_avail_gb: m.mem_avail_mb as f64 / 1024.0,
+            // a Mac shows windows on its own session; the GPU is the SoC's (not a lease resource)
+            display: Some("macos".into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+        use std::os::unix::ffi::OsStrExt;
+        #[repr(C)]
+        struct StatFs {
+            bsize: u32,
+            iosize: i32,
+            blocks: u64,
+            bfree: u64,
+            bavail: u64,
+            files: u64,
+            ffree: u64,
+            fsid: [i32; 2],
+            owner: u32,
+            fstype: u32,
+            flags: u32,
+            fssubtype: u32,
+            fstypename: [u8; 16],
+            mntonname: [u8; 1024],
+            mntfromname: [u8; 1024],
+            flags_ext: u32,
+            reserved: [u32; 7],
+        }
+        extern "C" {
+            #[cfg_attr(target_arch = "x86_64", link_name = "statfs$INODE64")]
+            fn statfs(path: *const std::ffi::c_char, out: *mut StatFs) -> i32;
+        }
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut s: StatFs = unsafe { std::mem::zeroed() };
+        if unsafe { statfs(c.as_ptr(), &mut s) } != 0 {
+            return None;
+        }
+        Some((s.bavail.saturating_mul(s.bsize as u64), s.blocks.saturating_mul(s.bsize as u64)))
+    }
+}
+
+#[cfg(windows)]
+mod os {
+    use super::*;
+
+    pub fn hardware() -> Caps {
+        let (total, avail) = crate::os::memory();
+        // CPU use since the previous measure (the master asks every 10 s)
+        static LAST: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+        let now = crate::os::cpu_times();
+        let cpu_pct = match (LAST.lock().unwrap().replace(now.unwrap_or((0, 0))), now) {
+            (Some(a), Some(b)) if b.1 > a.1 => Some(crate::top::cpu_pct(a, b)),
+            _ => None,
+        };
+        let gpu = crate::top::gpu_use();
+        Caps {
+            cpu_pct,
+            gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
+            arch: std::env::consts::ARCH.to_string(),
+            os: "windows".into(),
+            cpu: crate::os::cpu_name(),
+            cores: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1),
+            // no load average on Windows: the busy share of the cores stands in
+            load1: cpu_pct.map_or(0.0, |p| p / 100.0 * std::thread::available_parallelism().map(|n| n.get() as f64).unwrap_or(1.0)),
+            ram_gb: total as f64 / GB,
+            ram_avail_gb: avail as f64 / GB,
+            gpus: gpu.iter().map(|g| (g.name.clone(), g.mem_total_gb)).collect(),
+            // the user's desktop session (a lease's windows go there only with display=1)
+            display: Some("windows".into()),
+            battery: crate::os::battery(),
+            ..Default::default()
+        }
+    }
+
+    pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+        crate::os::disk_space(path)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+mod os {
+    use super::*;
+
+    pub fn hardware() -> Caps {
+        Caps { arch: std::env::consts::ARCH.to_string(), os: std::env::consts::OS.to_string(), cores: 1, ..Default::default() }
+    }
+
+    pub fn disk_space(_path: &Path) -> Option<(u64, u64)> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// macOS measures CPU use like Linux (two samples of all cores' ticks): the busy check uses it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_measures_cpu_use() {
+        let _ = os::hardware();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let p = os::hardware().cpu_pct.expect("a second measure has the CPU use");
+        assert!((0.0..=100.0).contains(&p), "{p}");
+    }
+    use super::*;
+
+    #[test]
+    fn cpuinfo_meminfo_loadavg_nvidia_battery() {
+        let cpu = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 7 9800X3D 8-Core Processor\n\nprocessor\t: 1\nmodel name\t: AMD Ryzen 7 9800X3D 8-Core Processor\n";
+        assert_eq!(parse_cpuinfo(cpu), ("AMD Ryzen 7 9800X3D 8-Core Processor".to_string(), 2));
+        let (t, a) = parse_meminfo("MemTotal:       65536000 kB\nMemFree:  100 kB\nMemAvailable:   32768000 kB\n");
+        assert!((t - 62.5).abs() < 0.01 && (a - 31.25).abs() < 0.01);
+        assert_eq!(parse_loadavg("3.52 2.10 1.00 2/900 1234\n"), 3.52);
+        let g = parse_nvidia("NVIDIA GeForce RTX 5090, 32607\nNVIDIA GeForce RTX 4090, 24564\n");
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].0, "NVIDIA GeForce RTX 5090");
+        assert!((g[1].1 - 23.99).abs() < 0.01);
+        assert!(parse_nvidia("").is_empty());
+        assert_eq!(parse_battery("87\n", "Discharging\n"), Some((87, false)));
+        assert_eq!(parse_battery("100", "Full"), Some((100, true)));
+        assert_eq!(parse_battery("", "Charging"), None);
+        assert!(system_battery("Battery\n", ""));
+        assert!(system_battery("Battery\n", "System\n"));
+        assert!(!system_battery("Battery\n", "Device\n"));
+        assert!(!system_battery("Mains\n", ""));
+    }
+
+    #[test]
+    fn lease_conf() {
+        let home = Path::new("/home/me");
+        let d = LeaseConf::parse("", home);
+        assert_eq!((d.role, d.disk_floor_gb, d.disk_warn_gb, d.timed), (Role::Pool, 25.0, 50.0, true));
+        assert_eq!(d.work, PathBuf::from("/home/me/devhub"));
+        assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1)]);
+        let c = LeaseConf::parse("# the 166 conf\nrole = user-wm\nslots.build = 1\nslots.nope = 4\nslots.test=6\ndisk_floor_gb = 40\ntimed = off\nspec = 7800X3D+4090  # comment\nwork = ~/scratch/dh\ncpus.shared = 8-15,24-31\ncpus.timed = rm -rf\n", home);
+        assert_eq!(c.role, Role::UserWm);
+        assert_eq!(c.disk_floor_gb, 40.0);
+        assert!(!c.timed);
+        assert_eq!(c.spec, "7800X3D+4090");
+        assert_eq!(c.work, PathBuf::from("/home/me/scratch/dh"));
+        assert_eq!(c.cpus_shared, "8-15,24-31");
+        assert_eq!(c.cpus_timed, "");
+        let s = c.slots(0);
+        assert!(s.contains(&(Kind::Build, 1)) && s.contains(&(Kind::Test, 6)) && s.contains(&(Kind::Timed, 0)) && s.contains(&(Kind::Gpu, 0)));
+    }
+
+    #[test]
+    fn master_sets_role_and_budgets() {
+        assert!(settable("role", "user-wm").is_ok() && settable("role", "boss").is_err());
+        assert!(settable("slots.build", "3").is_ok() && settable("slots.build", "x").is_err() && settable("slots.nope", "1").is_err());
+        assert!(settable("work", "/tmp").is_err() && settable("cpus.shared", "rm -rf").is_err());
+        let t = conf_with("# 165\nrole = pool  # was\nslots.build = 2\n", &[("role".into(), "user-wm".into()), ("cpus.shared".into(), "8-15,24-31".into())]);
+        assert_eq!(t, "# 165\nrole = user-wm  # was\nslots.build = 2\ncpus.shared = 8-15,24-31\n");
+        let c = LeaseConf::parse(&t, Path::new("/h"));
+        assert_eq!((c.role, c.cpus_shared.as_str()), (Role::UserWm, "8-15,24-31"));
+    }
+
+    #[test]
+    fn measures_this_machine() {
+        let c = measure("t", &LeaseConf::parse("", &std::env::temp_dir()), "checkout");
+        assert!(c.cores >= 1 && c.ram_gb > 0.0 && c.disk_total_gb > 0.0, "{c:?}");
+        assert_eq!(Caps::parse(&c.to_json()).map(|p| p.cores), Some(c.cores));
+    }
+}

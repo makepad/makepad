@@ -79,9 +79,11 @@ workspace.members = [
     "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/remote",
+    "libs/devhub",
     "libs/stack",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
+    "tools/run/runner",
     "tools/run/boot",
     "tools/run/fixture/diffpkg/tables",
     "tools/run/android_exe",
