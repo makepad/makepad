@@ -122,7 +122,8 @@ pub enum FromJavaMessage {
     SurfaceDestroyed {
         ack: SurfaceAck,
     },
-    RenderLoop,
+    /// A vsync tick, with when its callback ran.
+    RenderLoop(std::time::Instant),
     /// Sent by `wake_ui_event_loop`, so a background thread's signal is handled right away,
     /// while drawing waits for the next `RenderLoop` tick.
     Wake,
@@ -660,7 +661,7 @@ unsafe extern "C" fn vsync_callback(
     _data: *mut ndk_sys::AChoreographerFrameCallbackData,
     _user_data: *mut std::ffi::c_void,
 ) {
-    send_from_java_message(FromJavaMessage::RenderLoop);
+    send_from_java_message(FromJavaMessage::RenderLoop(std::time::Instant::now()));
     IS_VSYNC_CALLBACK_POSTED.store(false, Ordering::SeqCst);
     if IS_RENDER_LOOP_WANTED.load(Ordering::SeqCst) {
         post_vsync_callback();
@@ -740,7 +741,7 @@ fn init_simple_render_loop(device_refresh_rate: f32) {
 
             if elapsed >= target_frame_time {
                 let frame_start = std::time::Instant::now();
-                send_from_java_message(FromJavaMessage::RenderLoop);
+                send_from_java_message(FromJavaMessage::RenderLoop(std::time::Instant::now()));
                 let frame_duration = frame_start.elapsed();
 
                 // Adaptive sleep: sleep less if the last frame took longer to process
@@ -1141,7 +1142,7 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_onRenderLoop(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
 ) {
-    send_from_java_message(FromJavaMessage::RenderLoop);
+    send_from_java_message(FromJavaMessage::RenderLoop(std::time::Instant::now()));
 }
 
 #[no_mangle]
