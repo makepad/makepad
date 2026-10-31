@@ -448,6 +448,9 @@ pub struct Session {
     /// the frame id of the newest frame submitted / finished
     pub frame: u64,
     pub last_frame_done: u64,
+    /// dropped frames `(wait_for_submitted_serial, target, frame, now)` held until the
+    /// preceding submitted frame on this session completes so `FrameDone` stays in order
+    pub dropped_frames: Vec<(u64, Id, u64, u64)>,
     /// Headless inspection: the last frame's layer records. Occluder ranges address
     /// `last_frame_occluders`; draw ranges retain the submitted packet's indices.
     pub last_frame_layers: Vec<Layer>,
@@ -509,6 +512,7 @@ impl Session {
             stats: Stats::default(),
             frame: 0,
             last_frame_done: 0,
+            dropped_frames: Vec::new(),
             last_frame_layers: Vec::new(),
             last_frame_occluders: Vec::new(),
             embedded_frames: Vec::new(),
@@ -891,7 +895,24 @@ impl World {
         } else {
             None
         };
-        self.to_session(sid, |q| q.frame_done(target, frame, gpu_ns, present_ns, gpu_span[0], gpu_span[1]));
+        let done = s.last_frame_done;
+        let mut ready = Vec::new();
+        let mut i = 0;
+        while i < s.dropped_frames.len() {
+            if s.dropped_frames[i].0 <= done {
+                let (_, d_target, d_frame, d_now) = s.dropped_frames.remove(i);
+                s.last_frame_done = s.last_frame_done.max(d_frame);
+                ready.push((d_target, d_frame, d_now));
+            } else {
+                i += 1;
+            }
+        }
+        self.to_session(sid, |q| {
+            q.frame_done(target, frame, gpu_ns, present_ns, gpu_span[0], gpu_span[1]);
+            for (d_target, d_frame, d_now) in ready {
+                q.frame_done(d_target, d_frame, 0, d_now, 0.0, 0.0);
+            }
+        });
         if let Some((parent, texture)) = lent {
             self.to_session(parent, |q| q.child_frame(target, sid, texture, frame));
         }

@@ -534,7 +534,11 @@ impl Backend for Vulkan {
                             if let native_layer::Plan::Ready(plan) = plan { self.native_layers.frame = Some(plan); }
                             self.encode_frame(s, sid, key.1, kind, 0, &frame.view(), crate::clock_ns());
                         }
-                        Err(e) => { eprintln!("[hal-android-layer] retry: {e}"); s.bad(); }
+                        Err(e) => {
+                            eprintln!("[hal-android-layer] retry: {e}");
+                            s.bad();
+                            s.events.frame_done(key.1, frame.view().frames[0].frame, 0, 0, 0.0, 0.0);
+                        }
                     }
                 }
             }
@@ -954,10 +958,14 @@ impl Gpu for Vulkan {
                 Ok(native_layer::Plan::Plain) => {},
                 Ok(native_layer::Plan::Busy) => {
                     if let Some(frame) = KeptFrame::keep(view, packet) {
+                        if let Some(packet) = view.frames.get(packet as usize) {
+                            s.frame = s.frame.max(packet.frame);
+                        }
                         if let Some((_, previous)) = self.native_layers.pending.insert((sid, target), (kind, frame)) {
                             let frame = previous.view().frames[0].frame;
                             s.events.frame_done(target, frame, 0, 0, 0.0, 0.0);
                         }
+                        return Some(exec::SubmittedFrame { deps: Vec::new(), window: false });
                     }
                     return None;
                 }
