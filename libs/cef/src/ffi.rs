@@ -85,6 +85,7 @@ pub type cef_channel_layout_t = c_int;
 pub type cef_transition_type_t = c_int;
 pub type cef_errorcode_t = c_int;
 pub type cef_window_open_disposition_t = c_int;
+pub type cef_jsdialog_type_t = c_int;
 pub type cef_cursor_type_t = c_int;
 pub type cef_cursor_handle_t = *mut c_void;
 pub type cef_cursor_info_t = c_void;
@@ -149,14 +150,43 @@ pub struct cef_accelerated_paint_info_t {
 }
 
 /// `cef_accelerated_paint_info_t` for Windows (include/internal/cef_types_win.h):
-/// a D3D11 shared-texture `HANDLE`. Unused — Windows browsers paint in
-/// software.
+/// a D3D11 shared-texture `HANDLE` (an NT handle).
 #[cfg(windows)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct cef_accelerated_paint_info_t {
     pub size: usize,
     pub shared_texture_handle: *mut c_void,
+    pub format: cef_color_type_t,
+    pub extra: cef_accelerated_paint_info_common_t,
+}
+
+/// One plane of a Linux accelerated paint (include/internal/cef_types_linux.h,
+/// `cef_accelerated_paint_native_pixmap_plane_t`): usually a dmabuf.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct cef_accelerated_paint_native_pixmap_plane_t {
+    pub stride: u32,
+    pub offset: u64,
+    pub size: u64,
+    pub fd: c_int,
+}
+
+#[cfg(target_os = "linux")]
+pub const ACCELERATED_PAINT_MAX_PLANES: usize = 4;
+
+/// `cef_accelerated_paint_info_t` for Linux (include/internal/cef_types_linux.h):
+/// the planes of a native pixmap (dmabuf fds) out of CEF's pool, valid only
+/// for the duration of `on_accelerated_paint`.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct cef_accelerated_paint_info_t {
+    pub size: usize,
+    pub planes: [cef_accelerated_paint_native_pixmap_plane_t; ACCELERATED_PAINT_MAX_PLANES],
+    pub plane_count: c_int,
+    pub modifier: u64,
     pub format: cef_color_type_t,
     pub extra: cef_accelerated_paint_info_common_t,
 }
@@ -939,6 +969,48 @@ pub struct cef_popup_features_t {
 }
 
 #[repr(C)]
+pub struct cef_jsdialog_callback_t {
+    pub base: cef_base_ref_counted_t,
+    pub cont: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_jsdialog_callback_t,
+            success: c_int,
+            user_input: *const cef_string_t,
+        ),
+    >,
+}
+
+#[repr(C)]
+pub struct cef_jsdialog_handler_t {
+    pub base: cef_base_ref_counted_t,
+    pub on_jsdialog: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_jsdialog_handler_t,
+            browser: *mut cef_browser_t,
+            origin_url: *const cef_string_t,
+            dialog_type: cef_jsdialog_type_t,
+            message_text: *const cef_string_t,
+            default_prompt_text: *const cef_string_t,
+            callback: *mut cef_jsdialog_callback_t,
+            suppress_message: *mut c_int,
+        ) -> c_int,
+    >,
+    pub on_before_unload_dialog: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_jsdialog_handler_t,
+            browser: *mut cef_browser_t,
+            message_text: *const cef_string_t,
+            is_reload: c_int,
+            callback: *mut cef_jsdialog_callback_t,
+        ) -> c_int,
+    >,
+    pub on_reset_dialog_state:
+        Option<unsafe extern "system" fn(self_: *mut cef_jsdialog_handler_t, browser: *mut cef_browser_t)>,
+    pub on_dialog_closed:
+        Option<unsafe extern "system" fn(self_: *mut cef_jsdialog_handler_t, browser: *mut cef_browser_t)>,
+}
+
+#[repr(C)]
 pub struct cef_life_span_handler_t {
     pub base: cef_base_ref_counted_t,
     pub on_before_popup: Option<
@@ -1093,8 +1165,8 @@ pub struct cef_frame_t {
     pub is_valid: cef_unused_callback_t,
     pub undo: cef_unused_callback_t,
     pub redo: cef_unused_callback_t,
-    pub cut: cef_unused_callback_t,
-    pub copy: cef_unused_callback_t,
+    pub cut: Option<unsafe extern "system" fn(self_: *mut cef_frame_t)>,
+    pub copy: Option<unsafe extern "system" fn(self_: *mut cef_frame_t)>,
     pub paste: cef_unused_callback_t,
     pub paste_and_match_style: cef_unused_callback_t,
     pub del: cef_unused_callback_t,
@@ -1136,6 +1208,8 @@ pub struct cef_browser_t {
     pub is_popup: cef_unused_callback_t,
     pub has_document: cef_unused_callback_t,
     pub get_main_frame:
+        Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> *mut cef_frame_t>,
+    pub get_focused_frame:
         Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> *mut cef_frame_t>,
 }
 

@@ -211,6 +211,7 @@ mod tests {
                 call_id: "c1".into(),
                 tool: "navigate".into(),
                 args: format!(r#"{{"url":"{url}"}}"#),
+                caller: None,
             };
             let result = answer(&call, &mut target);
             assert_eq!(result.outcome, ToolOutcome::Refused);
