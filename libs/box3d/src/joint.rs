@@ -2,7 +2,7 @@
 
 use crate::math_functions::{Matrix3, Quat, Transform, Vec2, Vec3};
 use crate::solver::Softness;
-use crate::types::JointType;
+use crate::types::{JointFriction, JointType};
 
 /// A joint edge is used to connect bodies and joints together
 /// in a joint graph where each body is a node and each joint is an edge.
@@ -338,6 +338,11 @@ pub struct JointSim {
 
     pub fixed_rotation: bool,
 
+    /// Dry friction (port extension) and its accumulated impulse: angular for revolute
+    /// (x only) and spherical joints, linear along the axis for prismatic joints (x only).
+    pub friction: JointFriction,
+    pub friction_impulse: Vec3,
+
     /// The C anonymous union (tag: joint_type).
     pub joint: JointUnion,
 }
@@ -361,6 +366,8 @@ impl Default for JointSim {
             force_threshold: 0.0,
             torque_threshold: 0.0,
             fixed_rotation: false,
+            friction: JointFriction::default(),
+            friction_impulse: Vec3::ZERO,
             joint: JointUnion::Filter,
         }
     }
@@ -381,7 +388,7 @@ use crate::id_pool::{alloc_id, free_id};
 use crate::math_functions::{
     abs_float, add, clamp_float, cross, dot, get_quat_angle, get_swing_angle, get_twist_angle,
     inv_mul_quat, is_valid_float, is_valid_quat, is_valid_transform, length, max_float, max_int,
-    min_float, mul_add, mul_quat, normalize, perp, rotate_vector, sub_pos, transform_world_point,
+    min_float, mul_add, mul_quat, mul_sv, normalize, perp, rotate_vector, sub_pos, transform_world_point,
     vec3, PI,
 };
 use crate::physics_world::{World, AWAKE_SET, DISABLED_SET, FIRST_SLEEPING_SET, STATIC_SET};
@@ -425,6 +432,7 @@ fn default_joint_def() -> JointDef {
         constraint_damping_ratio: 2.0,
         draw_scale: get_length_units_per_meter(),
         collide_connected: false,
+        friction: JointFriction::default(),
         internal_value: SECRET_COOKIE,
     }
 }
@@ -775,6 +783,10 @@ fn create_joint(world: &mut World, def: &JointDef, joint_type: JointType) -> i32
         joint_sim.force_threshold = def.force_threshold;
         joint_sim.torque_threshold = def.torque_threshold;
 
+        b3_assert!(is_valid_friction(def.friction));
+        joint_sim.friction = def.friction;
+        joint_sim.friction_impulse = Vec3::ZERO;
+
         b3_assert!(joint_sim.joint_id == joint_id);
         b3_assert!(joint_sim.body_id_a == body_id_a);
         b3_assert!(joint_sim.body_id_b == body_id_b);
@@ -842,6 +854,39 @@ pub fn joint_set_constraint_tuning(world: &mut World, joint_id: JointId, hertz: 
     let base = get_joint_sim_from_id_mut(world, id);
     base.constraint_hertz = hertz;
     base.constraint_damping_ratio = damping_ratio;
+}
+
+fn is_valid_friction(f: JointFriction) -> bool {
+    is_valid_float(f.coefficient) && f.coefficient >= 0.0 && is_valid_float(f.radius) && f.radius >= 0.0 && is_valid_float(f.torque) && f.torque >= 0.0
+}
+
+/// Set a joint's dry friction (port extension, see [`JointFriction`]).
+pub fn joint_set_friction(world: &mut World, joint_id: JointId, friction: JointFriction) {
+    crate::recording::rec_op(world, crate::recording::RecOp::JointSetFriction, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(friction.coefficient);
+        b.w_f32(friction.radius);
+        b.w_f32(friction.torque);
+    });
+    b3_assert!(is_valid_friction(friction));
+    let id = get_joint_full_id(world, joint_id);
+    let base = get_joint_sim_from_id_mut(world, id);
+    if !friction.is_enabled() {
+        base.friction_impulse = Vec3::ZERO;
+    }
+    base.friction = friction;
+}
+
+pub fn joint_get_friction(world: &World, joint_id: JointId) -> JointFriction {
+    let id = get_joint_full_id(world, joint_id);
+    get_joint_sim_from_id(world, id).friction
+}
+
+/// The friction torque (force for prismatic joints) the joint applied in the last step,
+/// about its axis (revolute: x) or as a vector (spherical).
+pub fn joint_get_friction_torque(world: &World, joint_id: JointId) -> Vec3 {
+    let id = get_joint_full_id(world, joint_id);
+    mul_sv(world.inv_h, get_joint_sim_from_id(world, id).friction_impulse)
 }
 
 pub fn joint_get_constraint_tuning(world: &World, joint_id: JointId, hertz: &mut f32, damping_ratio: &mut f32) {

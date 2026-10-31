@@ -2,6 +2,11 @@
 //! their stable IDs remain untouched; these meshes exist only in a render view.
 use crate::{Document,Result,Error,mesh,SceneNode,CollisionProxy,transform::*};
 use makepad_gltf::JsonValue;
+#[path="delivery_hull.rs"]
+mod hull;
+fn mesh_proxy(positions:&[[f64;3]],triangles:&[[u32;3]])->JsonValue{
+    object(vec![("kind",JsonValue::String("mesh".into())),("positions",JsonValue::Array(positions.iter().map(|p|vector(*p)).collect())),("indices",JsonValue::Array(triangles.iter().flatten().map(|i|JsonValue::U64(*i as u64)).collect()))])
+}
 fn object(values:Vec<(&str,JsonValue)>)->JsonValue{JsonValue::Object(values.into_iter().map(|(k,v)|(k.into(),v)).collect())}
 fn vector(v:[f64;3])->JsonValue{JsonValue::Array(v.into_iter().map(JsonValue::F64).collect())}
 pub(crate) fn lod_name(object:usize,level:usize)->String{format!("__derived_lod_{object}_{level}")}
@@ -39,6 +44,12 @@ pub(crate) fn collision(doc:&Document,name:&str,ctx:&mut mesh::Context<'_>)->Res
     let value=match proxy {
         CollisionProxy::Box=>{if (0..3).any(|d|bounds[1][d]<=bounds[0][d]){return Err(Error::Invalid("box collider requires positive volume"));}object(vec![("kind",JsonValue::String("box".into())),("min",vector(bounds[0])),("max",vector(bounds[1]))])},
         CollisionProxy::Sphere=>{let center=mul(add(bounds[0],bounds[1]),0.5);let radius=source.vertices().iter().map(|v|length(sub(transform_point(local,v.position),center))).fold(0.,f64::max);object(vec![("kind",JsonValue::String("sphere".into())),("center",vector(center)),("radius",JsonValue::F64(radius))])},
+        CollisionProxy::Hull=>{
+            let points=source.vertices().iter().map(|v|transform_point(local,v.position)).collect::<Vec<_>>();
+            let (positions,triangles)=hull::convex_hull(&points).ok_or(Error::Invalid("hull collider needs a solid, non-flat object"))?;
+            mesh_proxy(&positions,&triangles)
+        }
+        CollisionProxy::Capsule=>{let (positions,triangles)=hull::capsule(bounds);mesh_proxy(&positions,&triangles)}
         CollisionProxy::Mesh{object:name_source}=>{
             let reference=doc.object(name_source).ok_or_else(||Error::MissingObject(name_source.clone()))?;let tri=reference.triangulate(ctx)?;
             if tri.triangles.len()>8192{return Err(Error::Budget("collision mesh triangles"));}

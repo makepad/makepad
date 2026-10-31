@@ -276,14 +276,14 @@ pub fn get_revolute_joint_torque(world: &World, base: &JointSim) -> Vec3 {
         rotate_vector(joint.frame_a.q, add(mul_sv(rel_q.s, Vec3::AXIS_Y), cross(rel_q.v, Vec3::AXIS_Y))),
     );
 
-    let axial_impulse = joint.spring_impulse + joint.motor_impulse + joint.lower_impulse - joint.upper_impulse;
+    let axial_impulse = joint.spring_impulse + joint.motor_impulse + base.friction_impulse.x + joint.lower_impulse - joint.upper_impulse;
     let mut angular_impulse = add(mul_sv(joint.perp_impulse.x, perp_axis_x), mul_sv(joint.perp_impulse.y, perp_axis_y));
     angular_impulse = mul_add(angular_impulse, axial_impulse, joint.rotation_axis_z);
 
     // todo add pivot torque
     let impulse = mul_add(
         angular_impulse,
-        joint.spring_impulse + joint.motor_impulse + joint.lower_impulse - joint.upper_impulse,
+        joint.spring_impulse + joint.motor_impulse + base.friction_impulse.x + joint.lower_impulse - joint.upper_impulse,
         axis,
     );
     mul_sv(world.inv_h, impulse)
@@ -364,6 +364,9 @@ pub fn prepare_revolute_joint(base: &mut JointSim, world: &World, context: &Step
         joint.lower_impulse = 0.0;
         joint.upper_impulse = 0.0;
     }
+    if !context.enable_warm_starting || !base.friction.is_enabled() {
+        base.friction_impulse = Vec3::ZERO;
+    }
 }
 
 pub fn warm_start_revolute_joint(base: &mut JointSim, states: &StateAccess, _context: &StepContext) {
@@ -374,6 +377,7 @@ pub fn warm_start_revolute_joint(base: &mut JointSim, states: &StateAccess, _con
     let i_a = base.inv_i_a;
     let i_b = base.inv_i_b;
 
+    let friction_impulse = base.friction_impulse.x;
     let joint = get_revolute(base);
 
     // dummy state for static bodies
@@ -393,7 +397,7 @@ pub fn warm_start_revolute_joint(base: &mut JointSim, states: &StateAccess, _con
     let r_a = rotate_vector(dq_a, joint.frame_a.p);
     let r_b = rotate_vector(dq_b, joint.frame_b.p);
 
-    let axial_impulse = joint.spring_impulse + joint.motor_impulse + joint.lower_impulse - joint.upper_impulse;
+    let axial_impulse = joint.spring_impulse + joint.motor_impulse + friction_impulse + joint.lower_impulse - joint.upper_impulse;
     let mut angular_impulse =
         add(mul_sv(joint.perp_impulse.x, joint.perp_axis_x), mul_sv(joint.perp_impulse.y, joint.perp_axis_y));
     angular_impulse = mul_add(angular_impulse, axial_impulse, joint.rotation_axis_z);
@@ -423,6 +427,8 @@ pub fn solve_revolute_joint(base: &mut JointSim, states: &StateAccess, context: 
     let inv_i_b = base.inv_i_b;
     let fixed_rotation = base.fixed_rotation;
     let constraint_softness = base.constraint_softness;
+    let friction = base.friction;
+    let mut friction_impulse = base.friction_impulse;
 
     let joint = get_revolute(base);
 
@@ -478,6 +484,20 @@ pub fn solve_revolute_joint(base: &mut JointSim, states: &StateAccess, context: 
         new_impulse = clamp_float(new_impulse, -max_impulse, max_impulse);
         delta_impulse = new_impulse - joint.motor_impulse;
         joint.motor_impulse = new_impulse;
+
+        w_a = mul_sub(w_a, delta_impulse, mul_mv(i_a, joint.rotation_axis_z));
+        w_b = mul_add(w_b, delta_impulse, mul_mv(i_b, joint.rotation_axis_z));
+    }
+
+    // Dry friction (port extension): a zero-speed motor whose torque limit grows with the
+    // pin's reaction force (the point constraint impulse of the previous iteration).
+    if friction.is_enabled() && !fixed_rotation {
+        let cdot = dot(sub(w_b, w_a), joint.rotation_axis_z);
+        let mut delta_impulse = -joint.axial_mass * cdot;
+        let max_impulse = friction.torque * context.h + friction.coefficient * friction.radius * length(joint.linear_impulse);
+        let new_impulse = clamp_float(friction_impulse.x + delta_impulse, -max_impulse, max_impulse);
+        delta_impulse = new_impulse - friction_impulse.x;
+        friction_impulse.x = new_impulse;
 
         w_a = mul_sub(w_a, delta_impulse, mul_mv(i_a, joint.rotation_axis_z));
         w_b = mul_add(w_b, delta_impulse, mul_mv(i_b, joint.rotation_axis_z));
@@ -633,4 +653,5 @@ pub fn solve_revolute_joint(base: &mut JointSim, states: &StateAccess, context: 
     if index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
         states.set_velocities(index_b as usize, v_b, w_b);
     }
+    base.friction_impulse = friction_impulse;
 }

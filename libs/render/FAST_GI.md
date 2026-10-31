@@ -10,10 +10,10 @@ when preparing a scene/grid, never for per-frame lighting.
 
 In Sandbox use Settings → Indirect light, or Shift+F7 while the game has keyboard
 input. `MAKEPAD_GI=fast` opts in at startup. An asset-independent fixture is
-available with `SANDBOX_WORLD=gi`: click to capture mouse look, WASD to walk,
+available with Sandbox's world setting set to `gi`: click to capture mouse look, WASD to walk,
 Shift to run, Space to jump, Escape to release. It uses the ordinary player
-rig and world collisions, with no weapon. Launch without `SANDBOX_TARGET`
-or `SANDBOX_DIST`: those deliberately pin the diagnostic camera.
+rig and world collisions, with no weapon. Launch without Sandbox's
+diagnostic camera target or distance settings: those deliberately pin the diagnostic camera.
 F6 moves its door; Shift+F7 compares GI on/off; F5 compares multi-bounce feedback
 with one-bounce lighting (allow several probe sweeps to settle).
 `MAKEPAD_GI_DEMO_FREEZE=1` freezes the fixture's spotlight for comparisons.
@@ -27,8 +27,8 @@ former faint directional source. Its roof edge casts a real line across the
 floor even with GI off. `MAKEPAD_GI_TEST_NO_SPOT_SHADOW=1` isolates spot shadows
 (it also removes that light from GI bounce lighting; do not compare GI energy).
 
-Build from `apps/sandbox` with `cargo build --release -p makepad-sandbox`,
-then launch `apps/sandbox/target/release/makepad-sandbox --remote` from the
+Build from `apps/commercial/sandbox` with `cargo build --release -p makepad-sandbox`,
+then launch `apps/commercial/sandbox/target/release/makepad-sandbox --remote` from the
 repository root with those environment variables. Close agent-owned test
 instances through `/gq`.
 

@@ -6,7 +6,7 @@
 
 use crate::b3_assert;
 use crate::b3_validate;
-use crate::constants::{linear_slop, min_capsule_length, speculative_distance};
+use crate::constants::{linear_slop, min_capsule_length};
 use crate::core::NULL_INDEX;
 use crate::manifold::{
     clip_polygon, edge_edge_separation, find_incident_face, flip_pair, make_feature_pair,
@@ -354,7 +354,7 @@ fn query_edge_directions(hull_a: &HullData, hull_b: &HullData, transform_b_to_a:
 
 // Reduce the manifold points to a maximum of 4 points.
 // Note: this modifies the input point array to improve performance
-fn reduce_manifold_points(manifold: &mut LocalManifold, capacity: i32, points: &mut [LocalManifoldPoint], count: i32) {
+fn reduce_manifold_points(manifold: &mut LocalManifold, capacity: i32, points: &mut [LocalManifoldPoint], count: i32, speculative: f32) {
     if capacity < 4 {
         return;
     }
@@ -371,8 +371,7 @@ fn reduce_manifold_points(manifold: &mut LocalManifold, capacity: i32, points: &
     }
 
     let normal = manifold.normal;
-    let speculative_distance = speculative_distance();
-    let tol_sqr = speculative_distance * speculative_distance;
+    let tol_sqr = speculative * speculative;
 
     // This bias is very important for contact point consistency across time steps.
     // It creates a pecking order to avoid flickering between candidates with similar scores.
@@ -387,7 +386,7 @@ fn reduce_manifold_points(manifold: &mut LocalManifold, capacity: i32, points: &
     for index in 0..count {
         let pt = &points[index as usize];
 
-        if pt.separation > speculative_distance {
+        if pt.separation > speculative {
             continue;
         }
 
@@ -498,7 +497,10 @@ fn reduce_manifold_points(manifold: &mut LocalManifold, capacity: i32, points: &
 }
 
 /// Collide two spheres.
-pub fn collide_spheres(manifold: &mut LocalManifold, capacity: i32, sphere_a: &Sphere, sphere_b: &Sphere, transform_b_to_a: Transform) {
+pub fn collide_spheres(manifold: &mut LocalManifold, capacity: i32, sphere_a: &Sphere, sphere_b: &Sphere, transform_b_to_a: Transform, speculative: f32) {
+    // Sphere-sphere contacts require overlap.
+    let _ = speculative;
+
     // Note: the C version relies on the caller to zero pointCount before this
     // call; the port clears here for consistency with the other collide functions.
     manifold.points.clear();
@@ -544,7 +546,10 @@ pub fn collide_spheres(manifold: &mut LocalManifold, capacity: i32, sphere_a: &S
 }
 
 /// Collide a capsule and a sphere.
-pub fn collide_capsule_and_sphere(manifold: &mut LocalManifold, capacity: i32, capsule_a: &Capsule, sphere_b: &Sphere, transform_b_to_a: Transform) {
+pub fn collide_capsule_and_sphere(manifold: &mut LocalManifold, capacity: i32, capsule_a: &Capsule, sphere_b: &Sphere, transform_b_to_a: Transform, speculative: f32) {
+    // Capsule-sphere contacts require overlap.
+    let _ = speculative;
+
     manifold.points.clear();
 
     if capacity < 1 {
@@ -591,7 +596,7 @@ pub fn collide_capsule_and_sphere(manifold: &mut LocalManifold, capacity: i32, c
 }
 
 /// Collide a hull and a sphere.
-pub fn collide_hull_and_sphere(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, sphere_b: &Sphere, transform_b_to_a: Transform, cache: &mut SimplexCache) {
+pub fn collide_hull_and_sphere(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, sphere_b: &Sphere, transform_b_to_a: Transform, cache: &mut SimplexCache, speculative: f32) {
     manifold.points.clear();
 
     if capacity == 0 {
@@ -599,8 +604,6 @@ pub fn collide_hull_and_sphere(manifold: &mut LocalManifold, capacity: i32, hull
     }
 
     let center = transform_point(transform_b_to_a, sphere_b.center);
-
-    let speculative_distance = speculative_distance();
 
     // Work in shapeA coordinates
 
@@ -618,7 +621,7 @@ pub fn collide_hull_and_sphere(manifold: &mut LocalManifold, capacity: i32, hull
 
     let distance_output = crate::distance::shape_distance(&distance_input, cache, None);
 
-    if distance_output.distance > radius + speculative_distance {
+    if distance_output.distance > radius + speculative {
         // We found a separating axis
         *cache = SimplexCache::default();
         return;
@@ -683,7 +686,7 @@ pub fn collide_hull_and_sphere(manifold: &mut LocalManifold, capacity: i32, hull
 }
 
 /// Collide two capsules.
-pub fn collide_capsules(manifold: &mut LocalManifold, capacity: i32, capsule_a: &Capsule, capsule_b: &Capsule, transform_b_to_a: Transform) {
+pub fn collide_capsules(manifold: &mut LocalManifold, capacity: i32, capsule_a: &Capsule, capsule_b: &Capsule, transform_b_to_a: Transform, speculative: f32) {
     manifold.points.clear();
 
     if capacity < 2 {
@@ -697,7 +700,7 @@ pub fn collide_capsules(manifold: &mut LocalManifold, capacity: i32, capsule_a: 
     let center_b2 = transform_point(transform_b_to_a, capsule_b.center2);
 
     let radius = capsule_a.radius + capsule_b.radius;
-    let max_distance = radius + speculative_distance();
+    let max_distance = radius + speculative;
 
     let result = segment_distance(center_a1, center_a2, center_b1, center_b2);
     let offset = sub(result.point2, result.point1);
@@ -820,7 +823,7 @@ pub fn collide_capsules(manifold: &mut LocalManifold, capacity: i32, capsule_a: 
     manifold.points.push(pt);
 }
 
-fn build_hull_face_and_capsule_contact(manifold: &mut LocalManifold, hull_a: &HullData, capsule_b: &Capsule, transform_b_to_a: Transform, query: FaceQuery) -> bool {
+fn build_hull_face_and_capsule_contact(manifold: &mut LocalManifold, hull_a: &HullData, capsule_b: &Capsule, transform_b_to_a: Transform, query: FaceQuery, speculative: f32) -> bool {
     // Work in shapeA coordinates
     let planes = &hull_a.planes;
 
@@ -843,9 +846,8 @@ fn build_hull_face_and_capsule_contact(manifold: &mut LocalManifold, hull_a: &Hu
 
     let distance1 = plane_separation(ref_plane, segment_b[0].position);
     let distance2 = plane_separation(ref_plane, segment_b[1].position);
-    let speculative_distance = speculative_distance();
 
-    if distance1 <= speculative_distance || distance2 <= speculative_distance {
+    if distance1 <= speculative || distance2 <= speculative {
         let normal = ref_plane.normal;
         let point1 = mul_sub(segment_b[0].position, 0.5 * (distance1 + capsule_b.radius), normal);
         let point2 = mul_sub(segment_b[1].position, 0.5 * (distance2 + capsule_b.radius), normal);
@@ -938,7 +940,7 @@ fn build_hull_and_capsule_edge_contact(manifold: &mut LocalManifold, capacity: i
 }
 
 /// Collide a hull and a capsule.
-pub fn collide_hull_and_capsule(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, capsule_b: &Capsule, transform_b_to_a: Transform, cache: &mut SimplexCache) {
+pub fn collide_hull_and_capsule(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, capsule_b: &Capsule, transform_b_to_a: Transform, cache: &mut SimplexCache, speculative: f32) {
     manifold.points.clear();
 
     if capacity < 2 {
@@ -955,9 +957,8 @@ pub fn collide_hull_and_capsule(manifold: &mut LocalManifold, capacity: i32, hul
     };
 
     let distance_output = crate::distance::shape_distance(&distance_input, cache, None);
-    let speculative_distance = speculative_distance();
 
-    if distance_output.distance > capsule_b.radius + speculative_distance {
+    if distance_output.distance > capsule_b.radius + speculative {
         // We found a separating axis
         *cache = SimplexCache::default();
         return;
@@ -989,8 +990,8 @@ pub fn collide_hull_and_capsule(manifold: &mut LocalManifold, capacity: i32, hul
             if point_count == 2 {
                 let distance1 = plane_separation(ref_plane, vertices_b[0].position);
                 let distance2 = plane_separation(ref_plane, vertices_b[1].position);
-                if distance1 <= capsule_b.radius + speculative_distance
-                    || distance2 <= capsule_b.radius + speculative_distance
+                if distance1 <= capsule_b.radius + speculative
+                    || distance2 <= capsule_b.radius + speculative
                 {
                     let normal = ref_plane.normal;
                     let point1 = mul_sub(vertices_b[0].position, 0.5 * (capsule_b.radius + distance1), normal);
@@ -1048,7 +1049,7 @@ pub fn collide_hull_and_capsule(manifold: &mut LocalManifold, capacity: i32, hul
 
     // Create face contact
     let mut face_separation = face_query.separation - capsule_b.radius;
-    build_hull_face_and_capsule_contact(manifold, hull_a, capsule_b, transform_b_to_a, face_query);
+    build_hull_face_and_capsule_contact(manifold, hull_a, capsule_b, transform_b_to_a, face_query, speculative);
     if manifold.point_count() > 1 {
         // If ( Out.PointCount <= 1 ) -> Compare with unclipped separation
         // If ( Out.PointCount > 1 ) -> Be aggressive and compare with clipped separation
@@ -1107,7 +1108,7 @@ fn build_polygon(out: &mut [ClipVertex], transform: Transform, hull: &HullData, 
     out_count
 }
 
-fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, query: FaceQuery, cache: &mut SATCache) -> bool {
+fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, query: FaceQuery, cache: &mut SATCache, speculative: f32) -> bool {
     let faces_a = &hull_a.faces;
     let edges_a = &hull_a.edges;
     let planes_a = &hull_a.planes;
@@ -1186,12 +1187,12 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
         min_separation = min_float(min_separation, clip_point.separation);
     }
 
-    if min_separation >= speculative_distance() {
+    if min_separation >= speculative {
         *cache = SATCache::default();
         return false;
     }
 
-    reduce_manifold_points(manifold, capacity, &mut points, point_count);
+    reduce_manifold_points(manifold, capacity, &mut points, point_count, speculative);
 
     // Save cache
     cache.separation = min_separation;
@@ -1202,9 +1203,9 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
     true
 }
 
-fn build_face_b_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, query: FaceQuery, cache: &mut SATCache) -> bool {
+fn build_face_b_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, query: FaceQuery, cache: &mut SATCache, speculative: f32) -> bool {
     let transform_a_to_b = invert_transform(transform_b_to_a);
-    let touching = build_face_a_contact(manifold, capacity, hull_b, hull_a, transform_a_to_b, query, cache);
+    let touching = build_face_a_contact(manifold, capacity, hull_b, hull_a, transform_a_to_b, query, cache, speculative);
     if !touching {
         return false;
     }
@@ -1298,7 +1299,7 @@ fn build_edge_contact(manifold: &mut LocalManifold, hull_a: &HullData, hull_b: &
 // into 2-3k-instruction bodies paying spills and I-cache pressure — the
 // measured cost concentration on low-recycle scenes (junkyard/washer).
 #[inline(never)]
-pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, cache: &mut SATCache) {
+pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, cache: &mut SATCache, speculative: f32) {
     manifold.points.clear();
 
     if capacity < 4 {
@@ -1306,8 +1307,6 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
     }
 
     // Work in shapeA coordinates
-    let speculative_distance = speculative_distance();
-
     let linear_slop = linear_slop();
     let edges_a = &hull_a.edges;
     let planes_a = &hull_a.planes;
@@ -1333,7 +1332,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
             let support = transform_point(transform_b_to_a, points_b[vertex_index as usize]);
             let separation = plane_separation(plane, support);
 
-            if separation >= speculative_distance {
+            if separation >= speculative {
                 // Cache hit, shapes are separated
                 return;
             }
@@ -1348,7 +1347,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
 
                 let mut local_cache = SATCache::default();
                 let touching =
-                    build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache);
+                    build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache, speculative);
                 if touching && abs_float(cache.separation - local_cache.separation) < linear_slop {
                     // Cache hit, contact points generated
                     return;
@@ -1366,7 +1365,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
             let support = inv_transform_point(transform_b_to_a, points_a[vertex_index as usize]);
             let separation = plane_separation(plane, support);
 
-            if separation >= speculative_distance {
+            if separation >= speculative {
                 // Cache hit, shapes are separated
                 return;
             }
@@ -1381,7 +1380,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
 
                 let mut local_cache = SATCache::default();
                 let touching =
-                    build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache);
+                    build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache, speculative);
                 if touching && abs_float(cache.separation - local_cache.separation) < linear_slop {
                     // Cache hit, contact points generated
                     return;
@@ -1425,7 +1424,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
                 let c2 = transform_point(transform_b_to_a, hull_b.center);
 
                 let separation = edge_edge_separation(p1, e1, c1, p2, e2, c2);
-                if separation > speculative_distance {
+                if separation > speculative {
                     // Cache hit, shapes are separated
                     return;
                 }
@@ -1451,14 +1450,14 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
         // This case is for testing
         T_MANUAL_FACE_AXIS_A => {
             let face_query_a = query_face_directions(hull_a, hull_b, transform_b_to_a);
-            build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query_a, cache);
+            build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query_a, cache, speculative);
             return;
         }
 
         // This case is for testing
         T_MANUAL_FACE_AXIS_B => {
             let face_query_b = query_face_directions(hull_b, hull_a, invert_transform(transform_b_to_a));
-            build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query_b, cache);
+            build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query_b, cache, speculative);
             return;
         }
 
@@ -1481,7 +1480,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
 
     // Find axis of minimum penetration
     let face_query_a = query_face_directions(hull_a, hull_b, transform_b_to_a);
-    if face_query_a.separation > speculative_distance {
+    if face_query_a.separation > speculative {
         b3_assert!(face_query_a.face_index < hull_a.face_count());
         b3_assert!(face_query_a.vertex_index < hull_b.vertex_count());
 
@@ -1494,7 +1493,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
     }
 
     let face_query_b = query_face_directions(hull_b, hull_a, invert_transform(transform_b_to_a));
-    if face_query_b.separation > speculative_distance {
+    if face_query_b.separation > speculative {
         b3_assert!(face_query_b.face_index < hull_b.face_count());
         b3_assert!(face_query_b.vertex_index < hull_a.vertex_count());
 
@@ -1507,7 +1506,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
     }
 
     let edge_query = query_edge_directions(hull_a, hull_b, transform_b_to_a);
-    if edge_query.separation > speculative_distance {
+    if edge_query.separation > speculative {
         // We found a separating axis
         cache.separation = edge_query.separation;
         cache.type_ = SeparatingFeature::EdgePairAxis as u8;
@@ -1519,14 +1518,14 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
     // Always build a face contact (e.g. Jenga problem)
     let face_separation_a = face_query_a.separation;
     let face_separation_b = face_query_b.separation;
-    b3_validate!(face_separation_a <= speculative_distance && face_separation_b <= speculative_distance);
+    b3_validate!(face_separation_a <= speculative && face_separation_b <= speculative);
 
     if face_separation_b > face_separation_a + 0.5 * linear_slop {
         // Face contact B
-        build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query_b, cache);
+        build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query_b, cache, speculative);
     } else {
         // Face contact A
-        build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query_a, cache);
+        build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query_a, cache, speculative);
     }
 
     if edge_query.index_a == NULL_INDEX {
@@ -1536,7 +1535,7 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
 
     let clipped_face_separation = cache.separation;
 
-    b3_validate!(edge_query.separation <= speculative_distance);
+    b3_validate!(edge_query.separation <= speculative);
 
     // todo get rid of relative tolerance
     const K_REL_EDGE_TOLERANCE: f32 = 0.90;
@@ -1615,6 +1614,7 @@ pub fn collide_hulls_feature_recycled(
     cache: &mut SATCache,
     recycle_distance: f32,
     was_touching: bool,
+    speculative: f32,
 ) -> u8 {
     if capacity < 4 {
         return 0;
@@ -1633,8 +1633,6 @@ pub fn collide_hulls_feature_recycled(
         return 0;
     }
 
-    let speculative_distance = speculative_distance();
-
     match cache.type_ {
         T_FACE_AXIS_A => {
             b3_assert!((cache.index_a as i32) < hull_a.face_count());
@@ -1644,7 +1642,7 @@ pub fn collide_hulls_feature_recycled(
             let support = transform_point(transform_b_to_a, *hull_at(&hull_b.points, vertex_index as usize));
             let separation = plane_separation(plane, support);
 
-            if separation >= speculative_distance {
+            if separation >= speculative {
                 // Separated along the cached witness axis (see soundness
                 // notes). If the contact WAS touching, its state changed
                 // this step — get the authoritative answer instead.
@@ -1669,7 +1667,7 @@ pub fn collide_hulls_feature_recycled(
             };
             let mut local_cache = SATCache::default();
             let touching =
-                build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache);
+                build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache, speculative);
             if !touching {
                 // Degenerate rebuild — full SAT this step.
                 return 0;
@@ -1689,7 +1687,7 @@ pub fn collide_hulls_feature_recycled(
             let support = inv_transform_point(transform_b_to_a, *hull_at(&hull_a.points, vertex_index as usize));
             let separation = plane_separation(plane, support);
 
-            if separation >= speculative_distance {
+            if separation >= speculative {
                 if was_touching {
                     return 0;
                 }
@@ -1710,7 +1708,7 @@ pub fn collide_hulls_feature_recycled(
             };
             let mut local_cache = SATCache::default();
             let touching =
-                build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache);
+                build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache, speculative);
             if !touching {
                 return 0;
             }
@@ -1746,7 +1744,7 @@ pub fn collide_hulls_feature_recycled(
             let c2 = transform_point(transform_b_to_a, hull_b.center);
             let separation = edge_edge_separation(p1, e1, c1, p2, e2, c2);
 
-            if separation >= speculative_distance {
+            if separation >= speculative {
                 // Witness separation is valid without the Minkowski test
                 // (see soundness notes above).
                 if was_touching {

@@ -26,6 +26,11 @@ pub enum TriLocation {
     Inside,
     Outside,
     OnBoundary,
+    /// A face lying on the other mesh's surface and facing into it: two
+    /// solids touching face to face (a box standing on a plate, letters on
+    /// a face, parts side by side). Its interior side is outside the other
+    /// mesh, its exterior side inside.
+    Touching,
 }
 
 /// Work item for parallel classification.
@@ -48,6 +53,8 @@ struct ClassifyContext {
 /// - Non-coplanar boundary faces: only interior side is inside → Inside
 /// - Coplanar overlapping faces: both sides report inside → OnBoundary
 ///   (kept from mesh A only to avoid double-counting)
+/// - Faces on the other mesh's surface facing into it (solids touching face
+///   to face): only the exterior side inside → Touching
 /// - Faces outside the other mesh: neither side inside → Outside
 ///
 /// Uses an AABB tree for O(log n) ray casting and thread pool for parallelism.
@@ -56,39 +63,127 @@ pub fn classify_triangles(
     other_mesh: &TriMesh,
     on_boundary: &[bool],
 ) -> Vec<TriLocation> {
+    classify_triangles_in(mesh_to_classify, &MeshAccel::build(other_mesh), on_boundary)
+}
+
+/// [`classify_triangles`] against a prepared mesh (its triangles and tree
+/// built once, for every boolean the mesh takes part in).
+pub fn classify_triangles_in(mesh_to_classify: &TriMesh, other: &MeshAccel, on_boundary: &[bool]) -> Vec<TriLocation> {
     let n = mesh_to_classify.triangle_count();
     if n == 0 {
         return Vec::new();
     }
+    let ctx = other.ctx.clone();
 
-    // Build AABB tree over other mesh for fast ray casting
-    let other_tris: Vec<(Vec3d, Vec3d, Vec3d)> = (0..other_mesh.triangle_count())
-        .map(|i| other_mesh.triangle_vertices(i))
-        .collect();
-    let tree = AabbTree::build(&other_tris);
-
-    let ctx = Arc::new(ClassifyContext {
-        tree,
-        tris: other_tris,
-    });
-
-    // Pre-compute work items
-    let work: Vec<ClassifyWork> = (0..n)
-        .map(|ti| ClassifyWork {
-            centroid: tri_centroid(mesh_to_classify, ti),
-            normal: mesh_to_classify.triangle_normal(ti),
-            is_boundary: on_boundary[ti],
+    // A connected patch of non-boundary triangles (joined across shared
+    // edges) does not cross the other mesh's surface, so it lies wholly
+    // inside or outside: classify a few of its triangles (majority) and give
+    // the patch their answer. Boundary triangles are classified one by one.
+    let (patch, patches) = non_boundary_patches(mesh_to_classify, on_boundary);
+    let mut members: Vec<Vec<u32>> = vec![Vec::new(); patches];
+    let mut work_tris: Vec<u32> = Vec::new();
+    for ti in 0..n {
+        match patch[ti] {
+            u32::MAX => work_tris.push(ti as u32),
+            p => members[p as usize].push(ti as u32),
+        }
+    }
+    // Up to three samples per patch, spread over its triangles.
+    let mut samples: Vec<(u32, usize)> = Vec::new(); // (patch, first work index)
+    for (p, m) in members.iter().enumerate() {
+        samples.push((p as u32, work_tris.len()));
+        let mut picks = [0, m.len() / 2, m.len() - 1];
+        picks.sort_unstable();
+        let mut last = usize::MAX;
+        for k in picks {
+            if k != last {
+                work_tris.push(m[k]);
+                last = k;
+            }
+        }
+    }
+    let work: Vec<ClassifyWork> = work_tris
+        .iter()
+        .map(|&ti| {
+            let ti = ti as usize;
+            ClassifyWork { centroid: tri_centroid(mesh_to_classify, ti), normal: mesh_to_classify.triangle_normal(ti), is_boundary: on_boundary[ti] }
         })
         .collect();
 
     // Parallel classification — Arc is cloned cheaply per thread.
-    thread_pool::parallel_map(&work, move |chunk: &[ClassifyWork]| {
+    let found = thread_pool::parallel_map(&work, move |chunk: &[ClassifyWork]| {
         chunk
             .iter()
             .take_while(|_| !thread_pool::cancelled())
             .map(|w| classify_one(w.centroid, w.normal, w.is_boundary, &ctx))
             .collect()
-    })
+    });
+    if found.len() != work.len() {
+        return Vec::new(); // cancelled
+    }
+    let mut out = vec![TriLocation::Outside; n];
+    let first_sample = samples.first().map_or(work_tris.len(), |s| s.1);
+    for k in 0..first_sample {
+        out[work_tris[k] as usize] = found[k];
+    }
+    for (i, &(p, start)) in samples.iter().enumerate() {
+        let end = samples.get(i + 1).map_or(work_tris.len(), |s| s.1);
+        let inside = found[start..end].iter().filter(|&&c| c == TriLocation::Inside).count();
+        let class = if inside * 2 > end - start { TriLocation::Inside } else { TriLocation::Outside };
+        for &ti in &members[p as usize] {
+            out[ti as usize] = class;
+        }
+    }
+    out
+}
+
+/// Connected patches of non-boundary triangles over shared edges: per
+/// triangle its patch (`u32::MAX` for boundary triangles), and the count.
+fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usize) {
+    let n = mesh.triangle_count();
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    fn find(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            parent[x as usize] = parent[parent[x as usize] as usize];
+            x = parent[x as usize];
+        }
+        x
+    }
+    let mut edges: Vec<(u64, u32)> = Vec::with_capacity(n * 3);
+    for (ti, &[a, b, c]) in mesh.triangles.iter().enumerate() {
+        if on_boundary[ti] {
+            continue;
+        }
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            let (lo, hi) = if u < v { (u, v) } else { (v, u) };
+            edges.push((((lo as u64) << 32) | hi as u64, ti as u32));
+        }
+    }
+    edges.sort_unstable();
+    for w in edges.windows(2) {
+        if w[0].0 == w[1].0 {
+            let (x, y) = (find(&mut parent, w[0].1), find(&mut parent, w[1].1));
+            if x != y {
+                let (lo, hi) = if x < y { (x, y) } else { (y, x) };
+                parent[hi as usize] = lo;
+            }
+        }
+    }
+    let mut patch = vec![u32::MAX; n];
+    let mut ids = vec![u32::MAX; n];
+    let mut count = 0usize;
+    for ti in 0..n {
+        if on_boundary[ti] {
+            continue;
+        }
+        let r = find(&mut parent, ti as u32) as usize;
+        if ids[r] == u32::MAX {
+            ids[r] = count as u32;
+            count += 1;
+        }
+        patch[ti] = ids[r];
+    }
+    (patch, count)
 }
 
 /// Classify a single triangle given its centroid, normal, and boundary status.
@@ -109,6 +204,8 @@ fn classify_one(
             TriLocation::OnBoundary
         } else if interior_in {
             TriLocation::Inside
+        } else if exterior_in {
+            TriLocation::Touching
         } else {
             TriLocation::Outside
         }
@@ -127,10 +224,12 @@ fn classify_one(
     }
 }
 
-/// Pre-built acceleration structure for repeated point-in-mesh queries.
+/// A mesh prepared for booleans: its triangles' corners and their AABB
+/// tree, built once and shared (cheaply cloned) by the overlap search, the
+/// classification and point-in-mesh queries of every boolean it takes part in.
+#[derive(Clone)]
 pub struct MeshAccel {
-    tree: AabbTree,
-    tris: Vec<(Vec3d, Vec3d, Vec3d)>,
+    ctx: Arc<ClassifyContext>,
 }
 
 impl MeshAccel {
@@ -140,12 +239,20 @@ impl MeshAccel {
             .map(|i| mesh.triangle_vertices(i))
             .collect();
         let tree = AabbTree::build(&tris);
-        MeshAccel { tree, tris }
+        MeshAccel { ctx: Arc::new(ClassifyContext { tree, tris }) }
     }
 
     /// Test if a point is inside the mesh.
     pub fn point_inside(&self, point: Vec3d) -> bool {
-        point_inside_bvh(point, &self.tree, &self.tris)
+        point_inside_bvh(point, &self.ctx.tree, &self.ctx.tris)
+    }
+
+    pub fn tree(&self) -> &AabbTree {
+        &self.ctx.tree
+    }
+
+    pub fn triangles(&self) -> &[(Vec3d, Vec3d, Vec3d)] {
+        &self.ctx.tris
     }
 }
 

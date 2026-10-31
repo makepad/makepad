@@ -13,12 +13,12 @@ use makepad_render::model::{StaticModel, MODEL_VERTEX_FLOATS};
 fn main() {
     let root = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "apps/sandbox/resources/models/kenney".to_string());
+        .unwrap_or_else(|| "apps/commercial/sandbox/resources/models/kenney".to_string());
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect(std::path::Path::new(&root), &mut files);
     files.sort();
     if files.is_empty() {
-        eprintln!("no .glb under {root} — run apps/sandbox/download_assets.sh");
+        eprintln!("no .glb under {root} — run apps/commercial/sandbox/download_assets.sh");
         return;
     }
 

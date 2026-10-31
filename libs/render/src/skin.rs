@@ -20,7 +20,7 @@ use makepad_draw::makepad_math::{Mat3f, Mat4f, Quat, Vec3f};
 
 /// Minimal owned JSON value — glTF headers are small (a few hundred KB max),
 /// clarity beats speed here.
-pub(crate) enum Val {
+pub enum Val {
     Null,
     Bool(bool),
     Num(f64),
@@ -30,19 +30,19 @@ pub(crate) enum Val {
 }
 
 impl Val {
-    pub(crate) fn get(&self, key: &str) -> Option<&Val> {
+    pub fn get(&self, key: &str) -> Option<&Val> {
         match self {
             Val::Obj(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
-    pub(crate) fn idx(&self, i: usize) -> Option<&Val> {
+    pub fn idx(&self, i: usize) -> Option<&Val> {
         match self {
             Val::Arr(items) => items.get(i),
             _ => None,
         }
     }
-    pub(crate) fn arr(&self) -> &[Val] {
+    pub fn arr(&self) -> &[Val] {
         match self {
             Val::Arr(items) => items,
             _ => &[],
@@ -50,22 +50,22 @@ impl Val {
     }
     /// An object's fields in file order — for `extras`, whose keys are
     /// whatever the exporter chose to write.
-    pub(crate) fn obj(&self) -> &[(String, Val)] {
+    pub fn obj(&self) -> &[(String, Val)] {
         match self {
             Val::Obj(fields) => fields,
             _ => &[],
         }
     }
-    pub(crate) fn f64(&self) -> Option<f64> {
+    pub fn f64(&self) -> Option<f64> {
         match self {
             Val::Num(n) => Some(*n),
             _ => None,
         }
     }
-    pub(crate) fn usize(&self) -> Option<usize> {
+    pub fn usize(&self) -> Option<usize> {
         self.f64().map(|n| n as usize)
     }
-    pub(crate) fn str(&self) -> Option<&str> {
+    pub fn str(&self) -> Option<&str> {
         match self {
             Val::Str(s) => Some(s),
             _ => None,
@@ -73,13 +73,13 @@ impl Val {
     }
 }
 
-pub(crate) struct JsonParser<'a> {
+pub struct JsonParser<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
 
 impl<'a> JsonParser<'a> {
-    pub(crate) fn parse(bytes: &'a [u8]) -> Result<Val, String> {
+    pub fn parse(bytes: &'a [u8]) -> Result<Val, String> {
         let mut p = JsonParser { bytes, pos: 0 };
         let v = p.value()?;
         Ok(v)
@@ -385,6 +385,9 @@ impl PreparedSkinPart { pub fn upload_bytes(&self)->usize{(self.vertices.len()+s
 
 #[path = "skin_soft.rs"]
 pub(crate) mod soft_deform;
+#[path = "skin_anim.rs"]
+mod anim;
+pub use anim::*;
 
 pub struct SkinnedModel {
     primitives: Vec<SkinPrimitive>,
@@ -550,6 +553,18 @@ pub(crate) fn trs_to_mat4(trs: &NodeTrs) -> Mat4f {
     }
 }
 
+/// Samples per cycle of a walk clip's support-foot track.
+const SUPPORT_STEPS: usize = 48;
+
+/// One sampled cycle of a walk clip's support foot
+/// ([`SkinnedModel::support_track`]): the lowest lower-body probe at each
+/// sample (node, mesh-space point), `dt` apart, on a skeleton `height` tall.
+struct SupportTrack {
+    height: f32,
+    dt: f32,
+    samples: Vec<Option<(usize, Vec3f)>>,
+}
+
 pub(crate) fn mat4_mul_point(m: &Mat4f, p: Vec3f) -> Vec3f {
     Vec3f {
         x: m.v[0] * p.x + m.v[4] * p.y + m.v[8] * p.z + m.v[12],
@@ -600,7 +615,7 @@ impl<'a> Accessors<'a> {
             .json
             .get("accessors")
             .and_then(|a| a.idx(index))
-            .ok_or(format!("missing accessor {index}"))?;
+            .ok_or_else(|| format!("missing accessor {index}"))?;
         let ct = acc.get("componentType").and_then(Val::usize).unwrap_or(0);
         let ty = acc.get("type").and_then(Val::str).unwrap_or("");
         let count = acc.get("count").and_then(Val::usize).unwrap_or(0);
@@ -613,12 +628,12 @@ impl<'a> Accessors<'a> {
         let view_index = acc
             .get("bufferView")
             .and_then(Val::usize)
-            .ok_or(format!("accessor {index}: sparse/no view unsupported"))?;
+            .ok_or_else(|| format!("accessor {index}: sparse/no view unsupported"))?;
         let view = self
             .json
             .get("bufferViews")
             .and_then(|v| v.idx(view_index))
-            .ok_or(format!("missing bufferView {view_index}"))?;
+            .ok_or_else(|| format!("missing bufferView {view_index}"))?;
         let view_off = view.get("byteOffset").and_then(Val::usize).unwrap_or(0);
         let stride = view
             .get("byteStride")
@@ -630,14 +645,12 @@ impl<'a> Accessors<'a> {
         let end=if count==0{base}else{base.checked_add((count-1).checked_mul(stride).ok_or("accessor stride overflow")?).and_then(|n|n.checked_add(lanes*csize)).ok_or("accessor range overflow")?};
         if floats>32*1024*1024||end>self.bin.len()||stride<lanes*csize{return Err("accessor exceeds source or128MiB decoded budget".into())}
         let mut out = Vec::with_capacity(floats);
+        // `end` was checked against the buffer above: every element is in range.
         for i in 0..count {
             let elem = base + i * stride;
             for lane in 0..lanes {
                 let at = elem + lane * csize;
-                let bytes = self
-                    .bin
-                    .get(at..at + csize)
-                    .ok_or(format!("accessor {index}: out of range"))?;
+                let bytes = &self.bin[at..at + csize];
                 let v = match ct {
                     5126 => f32::from_le_bytes(bytes.try_into().unwrap()),
                     5121 => {
@@ -1548,8 +1561,11 @@ impl SkinnedModel {
                 .and_then(|index|json.get("textures")?.idx(index)?.get("source")?.usize())
                 .and_then(|index|crate::model::gltf_embedded_png(&json,bin,index));
             let mut image=|bytes:Option<Vec<u8>>,semantic|->Result<PreparedTexture,String>{
-                let image=if let Some(bytes)=bytes{crate::renderer::decode_generated_png(&bytes,4096,budget)?}else{let mut image=makepad_draw::ImageBuffer::default();image.width=1;image.height=1;image.data=vec![0xffff_ffff];image};
-                let texture=PreparedTexture::prepare(image,semantic);budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;Ok(texture)
+                if let Some(texture)=bytes.as_deref().filter(|b|crate::texture_pack::is_ktx2(b)).and_then(|b|crate::material_surface::texture_work(crate::material_surface::TextureWork::Remap,||crate::texture_pack::texture_from_ktx2(b))) {
+                    let texture=texture?;budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;return Ok(texture);
+                }
+                let image=if let Some(bytes)=bytes{crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::renderer::decode_generated_png(&bytes,4096,budget))?}else{let mut image=makepad_draw::ImageBuffer::default();image.width=1;image.height=1;image.data=vec![0xffff_ffff];image};
+                let texture=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||PreparedTexture::prepare(image,semantic));budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;Ok(texture)
             };
             let base=image(texture("baseColorTexture"),PixelSemantic::Color)?;
             let orm=image(texture("metallicRoughnessTexture"),PixelSemantic::Data)?;
@@ -1712,6 +1728,16 @@ impl SkinnedModel {
     /// be used here because its matrices also contain inverse-bind transforms.
     pub fn node_index(&self, name: &str) -> Option<usize> {
         self.nodes.iter().position(|node| node.name == name)
+    }
+
+    /// The skeleton joint named `name`, preferring a skin joint over any
+    /// other node of that name: a hand-built character's mesh parts are
+    /// nodes too and are often named after the joint they ride ("head"),
+    /// and posing or following that part node instead of the joint misses
+    /// every rotation the pose puts on the joint. Falls back to any node.
+    pub fn joint_node(&self, name: &str) -> Option<usize> {
+        self.joint_nodes.iter().copied().find(|&n| self.nodes.get(n).is_some_and(|node| node.name == name))
+            .or_else(|| self.node_index(name))
     }
 
     /// Authored node name, for diagnostics that report a node index.
@@ -2672,10 +2698,11 @@ impl SkinnedModel {
 
     /// First clip whose name contains `needle` (ASCII case-insensitive).
     pub fn clip_index(&self, needle: &str) -> Option<usize> {
-        let needle = needle.to_ascii_lowercase();
-        self.clips
-            .iter()
-            .position(|c| c.name.to_ascii_lowercase().contains(&needle))
+        // Compared in place: hosts resolve clips per character per frame.
+        let needle = needle.as_bytes();
+        self.clips.iter().position(|c| {
+            needle.is_empty() || c.name.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+        })
     }
 
     /// Clip whose authored name exactly matches `name`, ignoring ASCII case.
@@ -2806,6 +2833,124 @@ impl SkinnedModel {
     /// lower-body node or the measurement is degenerate — callers keep
     /// their heuristic.
     pub fn walk_clip_ground_speed(&self, clip_index: usize) -> Option<f32> {
+        let track = self.support_track(clip_index)?;
+        let mut speeds: Vec<(f32, f32)> = Vec::new();
+        for pair in track.samples.windows(2) {
+            if let [Some((prev_node, pp)), Some((node, p))] = pair {
+                if prev_node == node {
+                    let (dx, dz) = (p.x - pp.x, p.z - pp.z);
+                    speeds.push(((dx * dx + dz * dz).sqrt() / track.dt, p.y.max(pp.y)));
+                }
+            }
+        }
+        if speeds.len() < SUPPORT_STEPS / 4 {
+            return None;
+        }
+        // Only a foot on the ground carries the body: a bounding sprint's
+        // flight phase (both feet up, the lower one swinging forward) must
+        // not count as support.
+        let floor = speeds.iter().map(|s| s.1).fold(f32::MAX, f32::min);
+        let planted: Vec<f32> = speeds.iter().filter(|s| s.1 <= floor + track.height * 0.03).map(|s| s.0).collect();
+        let median = |mut v: Vec<f32>| { v.sort_by(|a, b| a.total_cmp(b)); v[v.len() / 2] };
+        let all = median(speeds.iter().map(|s| s.0).collect());
+        let v = if planted.len() >= SUPPORT_STEPS / 8 { all.max(median(planted)) } else { all };
+        (v > 1.0e-3).then_some(v)
+    }
+
+    /// The way the walk `clip` carries its body, as a unit planar direction
+    /// in the model's own space: which way the rig FACES when it walks.
+    ///
+    /// A walk cycle says it with its feet: a planted foot holds the ground
+    /// while the body passes over it, so in a cycle played on the spot the
+    /// support foot slides BACK under the body, and in a clip with root
+    /// travel the root moves forward over a still foot. Travel is the root's
+    /// displacement over the cycle minus the planted foot's slide (the same
+    /// support probe as [`Self::walk_clip_ground_speed`]), which reads both
+    /// kinds and any mix. This is an asset fact, measured once per rig: a
+    /// pack's +Z-front walker and a -Z-front one built here differ only in
+    /// which way their feet push. `None` for a rig without a skeleton
+    /// hierarchy, when the clip animates no lower body, or when the cycle
+    /// carries the body less than 5% of its height.
+    pub fn walk_clip_forward(&self, clip_index: usize) -> Option<Vec3f> {
+        // Only a skeleton walks with feet. A vertex-animated import (Quake's
+        // models) has a flat "joint" per vertex: its lowest vertex hops from
+        // one to another and read both ways round on models that face alike.
+        if !self.joint_nodes.iter().any(|&n| self.nodes[n].parent.is_some_and(|p| self.joint_nodes.contains(&p))) {
+            return None;
+        }
+        let track = self.support_track(clip_index)?;
+        let floor = track.samples.iter().flatten().map(|(_, p)| p.y).fold(f32::MAX, f32::min);
+        let mut slide = Vec3f::default();
+        let mut planted = 0;
+        for pair in track.samples.windows(2) {
+            if let [Some((prev_node, pp)), Some((node, p))] = pair {
+                if prev_node == node && p.y.max(pp.y) <= floor + track.height * 0.03 {
+                    slide.x += p.x - pp.x;
+                    slide.z += p.z - pp.z;
+                    planted += 1;
+                }
+            }
+        }
+        // Root travel: the skeleton root's origin at the cycle's end against
+        // its start (zero for a cycle played on the spot). Only a root that
+        // carries a skeleton counts: a vertex-animated import's "joints" are
+        // its vertices, flat, and one of them moving says nothing.
+        let root = self.joint_nodes.iter().copied().find(|&n| {
+            self.nodes[n].parent.map_or(true, |p| !self.joint_nodes.contains(&p))
+                && self.joint_nodes.iter().any(|&c| self.nodes[c].parent == Some(n))
+        });
+        let mut travel = Vec3f::default();
+        if let Some(root) = root {
+            let mut pose = self.rest_pose();
+            let at = |pose: &PoseBuffer| self.node_mesh_transform(pose, root).map(|m| Vec3f { x: m.v[12], y: 0.0, z: m.v[14] });
+            self.sample_clip_clamped(clip_index, 0.0, &mut pose);
+            let from = at(&pose);
+            let duration = self.clips[clip_index].duration;
+            self.sample_clip_clamped(clip_index, duration, &mut pose);
+            if let (Some(from), Some(to)) = (from, at(&pose)) {
+                travel = Vec3f { x: to.x - from.x, y: 0.0, z: to.z - from.z };
+            }
+        }
+        if planted < SUPPORT_STEPS / 8 && travel.length() < 1.0e-6 {
+            return None;
+        }
+        let carried = Vec3f { x: travel.x - slide.x, y: 0.0, z: travel.z - slide.z };
+        let length = carried.length();
+        (length > track.height * 0.05).then(|| carried.scale(1.0 / length))
+    }
+
+    /// The way the rig's toes point in its rest pose, as a unit planar
+    /// direction in the model's own space: from each joint named for a toe
+    /// to its parent (the foot), the two feet averaged. The face of a rig
+    /// with feet but no walk to read (a kart driver, a seated pose).
+    /// `None` without toe joints or when they point nowhere along the ground.
+    pub fn rest_toes_forward(&self) -> Option<Vec3f> {
+        let rest = self.rest_pose();
+        let at = |n: usize| self.node_mesh_transform(&rest, n).map(|m| Vec3f { x: m.v[12], y: 0.0, z: m.v[14] });
+        let mut sum = Vec3f::default();
+        let mut feet = 0;
+        for &toe in &self.joint_nodes {
+            if !self.nodes[toe].name.to_ascii_lowercase().contains("toe") {
+                continue;
+            }
+            let Some(foot) = self.nodes[toe].parent else { continue };
+            if let (Some(t), Some(f)) = (at(toe), at(foot)) {
+                sum.x += t.x - f.x;
+                sum.z += t.z - f.z;
+                feet += 1;
+            }
+        }
+        let length = sum.length();
+        (feet > 0 && length > 1.0e-4).then(|| sum.scale(1.0 / length))
+    }
+
+    /// One sampled cycle of the walk `clip`'s support foot, whatever the rig
+    /// calls it. Candidates are the clip-animated nodes whose rest origin
+    /// sits in the lower body; each carries a probe at its rest ground
+    /// reach, so a hip-pivoted block leg (kenney mini rigs have no foot
+    /// bones) measures exactly like a real foot bone. At each of
+    /// [`SUPPORT_STEPS`] + 1 samples the lowest probe is the support.
+    fn support_track(&self, clip_index: usize) -> Option<SupportTrack> {
         let clip = self.clips.get(clip_index)?;
         if clip.duration <= 1.0e-3 {
             return None;
@@ -2818,8 +2963,12 @@ impl SkinnedModel {
                     .unwrap_or_default()
             })
             .collect();
-        let min_y = origins.iter().map(|o| o.y).fold(f32::MAX, f32::min);
-        let max_y = origins.iter().map(|o| o.y).fold(f32::MIN, f32::max);
+        // The skeleton's own extent: a model whose rigid parts are separate
+        // nodes (antennae, hats) must not stretch the "lower body" band up
+        // to the hips, whose bob then won the support test.
+        let skeleton: Vec<usize> = if self.joint_nodes.is_empty() { (0..origins.len()).collect() } else { self.joint_nodes.clone() };
+        let min_y = skeleton.iter().map(|&i| origins[i].y).fold(f32::MAX, f32::min);
+        let max_y = skeleton.iter().map(|&i| origins[i].y).fold(f32::MIN, f32::max);
         let height = max_y - min_y;
         if !(height > 1.0e-3) {
             return None;
@@ -2827,21 +2976,29 @@ impl SkinnedModel {
         let animated: std::collections::HashSet<usize> =
             clip.channels.iter().map(|c| c.node).collect();
         // (node, rest ground reach below its origin)
-        let candidates: Vec<(usize, f32)> = origins
-            .iter()
-            .enumerate()
-            .filter(|(i, o)| animated.contains(i) && o.y - min_y < height * 0.45)
-            .map(|(i, o)| (i, o.y - min_y))
-            .collect();
+        // Feet first: the bottom fifth of the skeleton. The wider band is
+        // the fallback for rigs without animated nodes that low; with it,
+        // an A-pose rest let the hanging hands (far below their rest) win
+        // the support test and the measured stride came out near zero.
+        let band = |f: f32| -> Vec<(usize, f32)> {
+            origins
+                .iter()
+                .enumerate()
+                .filter(|(i, o)| animated.contains(i) && o.y - min_y < height * f)
+                .map(|(i, o)| (i, o.y - min_y))
+                .collect()
+        };
+        let mut candidates = band(0.2);
+        if candidates.len() < 2 {
+            candidates = band(0.45);
+        }
         if candidates.is_empty() {
             return None;
         }
-        const STEPS: usize = 48;
-        let dt = clip.duration / STEPS as f32;
+        let dt = clip.duration / SUPPORT_STEPS as f32;
         let mut pose = self.rest_pose();
-        let mut prev: Option<(usize, Vec3f)> = None;
-        let mut speeds: Vec<f32> = Vec::new();
-        for s in 0..=STEPS {
+        let mut samples = Vec::with_capacity(SUPPORT_STEPS + 1);
+        for s in 0..=SUPPORT_STEPS {
             self.sample_clip(clip_index, s as f32 * dt, &mut pose);
             let mut support: Option<(usize, Vec3f)> = None;
             for (node, reach) in &candidates {
@@ -2853,21 +3010,9 @@ impl SkinnedModel {
                     support = Some((*node, p));
                 }
             }
-            let Some((node, p)) = support else { continue };
-            if let Some((prev_node, pp)) = prev {
-                if prev_node == node {
-                    let (dx, dz) = (p.x - pp.x, p.z - pp.z);
-                    speeds.push((dx * dx + dz * dz).sqrt() / dt);
-                }
-            }
-            prev = Some((node, p));
+            samples.push(support);
         }
-        if speeds.len() < STEPS / 4 {
-            return None;
-        }
-        speeds.sort_by(|a, b| a.total_cmp(b));
-        let v = speeds[speeds.len() / 2];
-        (v > 1.0e-3).then_some(v)
+        Some(SupportTrack { height, dt, samples })
     }
 
     /// Reset translation on every skeleton root to its rest value while
@@ -3048,7 +3193,13 @@ impl SkinnedModel {
 
     /// Joint palette for a pose: `inv(global(mesh_node)) * global(joint) * ibm`.
     pub fn palette(&self, pose: &PoseBuffer, out: &mut Vec<Mat4f>) {
-        let mut globals: Vec<Option<Mat4f>> = vec![None; self.nodes.len()];
+        // Scratch kept per thread: a palette is built per character per frame.
+        thread_local! { static GLOBALS: std::cell::RefCell<Vec<Option<Mat4f>>> = const { std::cell::RefCell::new(Vec::new()) }; }
+        GLOBALS.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let globals: &mut Vec<Option<Mat4f>> = &mut scratch;
+        globals.clear();
+        globals.resize(self.nodes.len(), None);
         fn global(
             nodes: &[Node],
             pose: &PoseBuffer,
@@ -3066,12 +3217,31 @@ impl SkinnedModel {
             globals[i] = Some(m);
             m
         }
-        let mesh_inv = global(&self.nodes, pose, &mut globals, self.mesh_node).invert();
+        let mesh_inv = global(&self.nodes, pose, globals, self.mesh_node).invert();
         out.clear();
         for (j, node) in self.joint_nodes.iter().enumerate() {
-            let g = global(&self.nodes, pose, &mut globals, *node);
+            let g = global(&self.nodes, pose, globals, *node);
             out.push(Mat4f::mul(&Mat4f::mul(&mesh_inv, &g), &self.inverse_bind[j]));
         }
+        });
+    }
+
+    /// The skinning matrix [`Self::palette`] gives the joint at `node` for
+    /// `pose` (mesh space, bind to posed): what every vertex bound to that
+    /// joint goes through. A part that rides the joint takes the same
+    /// matrix, so it moves exactly with the skin. `None` for a non-joint.
+    pub fn joint_skin_matrix(&self, pose: &PoseBuffer, node: usize) -> Option<Mat4f> {
+        let j = self.joint_nodes.iter().position(|&n| n == node)?;
+        let global = |mut i: usize| -> Mat4f {
+            let mut m = Mat4f::identity();
+            loop {
+                let local = trs_to_mat4(pose.get(i).unwrap_or(&self.nodes[i].rest));
+                m = Mat4f::mul(&local, &m);
+                match self.nodes[i].parent { Some(p) => i = p, None => return m }
+            }
+        };
+        let mesh_inv = global(self.mesh_node).invert();
+        Some(Mat4f::mul(&Mat4f::mul(&mesh_inv, &global(node)), &self.inverse_bind[j]))
     }
 
     /// CPU-skin into the packed `geom.GameMeshVertexAo` layout the prop
@@ -3617,8 +3787,8 @@ const _: () = assert!(
 /// Octahedral normal encoding: a unit vector into two components in [-1, 1].
 /// Standard sphere->octahedron->square unfolding; ~1 degree of error at f16,
 /// far below what flat-shaded game geometry can show.
-/// f16-pair unpack, the shader's `unpack2f16` on the CPU (tests/oracles).
-#[allow(dead_code)]
+/// f16-pair unpack, the shader's `unpack2f16` on the CPU (tests/oracles,
+/// the impostor bake's vertex normals).
 pub(crate) fn unpack2f16_pub(f: f32) -> (f32, f32) {
     let half = |h: u32| -> f32 {
         let (s, e, m) = ((h >> 15) & 1, (h >> 10) & 0x1f, h & 0x3ff);
@@ -3633,8 +3803,8 @@ pub(crate) fn unpack2f16_pub(f: f32) -> (f32, f32) {
     (half(b & 0xffff), half(b >> 16))
 }
 
-/// Octahedral decode, the shader's `oct_decode` on the CPU (tests/oracles).
-#[allow(dead_code)]
+/// Octahedral decode, the shader's `oct_decode` on the CPU (tests/oracles,
+/// the impostor bake's vertex normals).
 pub(crate) fn oct_decode_pub(ox: f32, oy: f32) -> makepad_draw::makepad_math::Vec3f {
     let nz = 1.0 - ox.abs() - oy.abs();
     let t = (0.0 - nz).max(0.0);
@@ -3733,6 +3903,78 @@ mod tests {
             ragdoll: None,
             soft_body: None,
         }
+    }
+
+    /// Two block legs under a hips joint, walking on the spot: each planted
+    /// foot slides `-slide` along Z for half the cycle, then lifts and swings
+    /// back. `slide` > 0 (feet pushed back toward -Z) walks toward +Z.
+    fn walking_legs(slide: f32) -> SkinnedModel {
+        let at = |x: f32, y: f32, z: f32| NodeTrs { t: Vec3f { x, y, z }, ..NodeTrs::default() };
+        let mut model = SkinnedModel::from_nodes(vec![
+            ("mesh".into(), None, NodeTrs::default()),
+            ("hips".into(), Some(0), at(0.0, 1.0, 0.0)),
+            ("foot_l".into(), Some(1), at(-0.1, -0.9, 0.0)),
+            ("foot_r".into(), Some(1), at(0.1, -0.9, 0.0)),
+            ("head".into(), Some(1), at(0.0, 0.8, 0.0)),
+        ], 0);
+        model.joint_nodes = vec![1, 2, 3, 4];
+        let half = slide * 0.5;
+        // Planted (y -0.9) from +half to -half, then lifted (y -0.75) back.
+        let foot = |node: usize, x: f32, phase: f32| {
+            let keys: Vec<(f32, [f32; 3])> = (0..=8)
+                .map(|k| {
+                    let t = k as f32 / 8.0;
+                    let u = (t + phase).fract();
+                    let (y, z) = if u < 0.5 {
+                        (-0.9, half - slide * (u / 0.5))
+                    } else {
+                        (-0.75, -half + slide * ((u - 0.5) / 0.5))
+                    };
+                    (t, [x, y, z])
+                })
+                .collect();
+            Channel {
+                step: false,
+                node,
+                path: ChannelPath::Translation,
+                times: keys.iter().map(|k| k.0).collect(),
+                values: keys.iter().flat_map(|k| k.1).collect(),
+            }
+        };
+        model.clips.push(AnimClip { name: "walk".into(), duration: 1.0, channels: vec![foot(2, -0.1, 0.0), foot(3, 0.1, 0.5)] });
+        model
+    }
+
+    #[test]
+    fn a_walk_cycle_faces_away_from_where_its_planted_foot_slides() {
+        // Feet sliding back toward -Z carry the body toward +Z (a glTF pack
+        // walker), and the mirror image walks toward -Z (a rig built here).
+        let pos_z = walking_legs(0.6).walk_clip_forward(0).expect("a stride");
+        assert!(pos_z.z > 0.95, "{pos_z:?}");
+        let neg_z = walking_legs(-0.6).walk_clip_forward(0).expect("a stride");
+        assert!(neg_z.z < -0.95, "{neg_z:?}");
+        // A cycle that carries nothing says nothing.
+        assert!(walking_legs(0.0).walk_clip_forward(0).is_none());
+    }
+
+    #[test]
+    fn a_rest_pose_faces_where_its_toes_point() {
+        let at = |x: f32, y: f32, z: f32| NodeTrs { t: Vec3f { x, y, z }, ..NodeTrs::default() };
+        let feet = |z: f32| {
+            let mut model = SkinnedModel::from_nodes(vec![
+                ("mesh".into(), None, NodeTrs::default()),
+                ("hips".into(), Some(0), at(0.0, 1.0, 0.0)),
+                ("foot_l".into(), Some(1), at(-0.1, -0.9, 0.0)),
+                ("toe_l".into(), Some(2), at(0.0, -0.05, z)),
+                ("foot_r".into(), Some(1), at(0.1, -0.9, 0.0)),
+                ("toe_r".into(), Some(4), at(0.0, -0.05, z)),
+            ], 0);
+            model.joint_nodes = vec![1, 2, 3, 4, 5];
+            model.rest_toes_forward()
+        };
+        assert!(feet(-0.12).is_some_and(|f| f.z < -0.99));
+        assert!(feet(0.12).is_some_and(|f| f.z > 0.99));
+        assert!(walking_legs(0.6).rest_toes_forward().is_none(), "no toes, no answer");
     }
 
     #[test]
@@ -5045,13 +5287,13 @@ mod tests {
 
     #[test]
     fn parses_vendored_knight_if_present() {
-        // Real-asset smoke: skips (with a hint) when the download hasn't run.
+        // Real-asset smoke: skips when the optional KayKit fixture is absent.
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/sandbox/resources/characters/knight.glb"
+            "/../../apps/commercial/sandbox/resources/characters/knight.glb"
         );
         let Ok(bytes) = std::fs::read(path) else {
-            println!("SKIP: knight.glb absent — run apps/sandbox/download_assets.sh");
+            println!("SKIP: optional KayKit knight fixture absent at {path}");
             return;
         };
         let model = SkinnedModel::parse_glb(&bytes).expect("knight.glb must parse");

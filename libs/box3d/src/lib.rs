@@ -40,12 +40,14 @@ pub mod height_field;
 pub mod hull;
 pub mod mesh;
 pub mod sphere;
+pub mod tube;
 
 // Manifolds / narrow phase
 pub mod convex_manifold;
 pub mod manifold;
 pub mod mesh_contact;
 pub mod triangle_manifold;
+pub mod tube_contact;
 
 // Dynamics
 pub mod body;
@@ -93,3 +95,4 @@ pub use crate::distance::*;
 pub use crate::dynamic_tree::*;
 pub use crate::hull::*;
 pub use crate::sphere::*;
+pub use crate::tube::*;

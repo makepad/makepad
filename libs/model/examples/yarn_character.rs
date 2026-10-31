@@ -9,23 +9,21 @@ use std::{collections::BTreeMap, f64::consts::{PI,TAU}};
 fn apply(d:&mut Document,id:&str,operations:Vec<Operation>)->Result<()> {
     d.apply(Transaction{request_id:id.into(),expected:d.head(),operations},None).map_err(|error|{eprintln!("{id}: {error}");error})?;Ok(())
 }
-fn commands(d:&mut Document,id:&str,source:&str)->Result<()> {
-    let operations=parse_operations(&json::parse(source.as_bytes()).map_err(Error::Invalid)?,d.limits()).map_err(|error|{eprintln!("{id}: {error}");error})?;apply(d,id,operations)
-}
 fn material(d:&mut Document,id:u32,color:[f64;4],roughness:f64)->Result<()> {
     apply(d,&format!("material-{id}"),vec![Operation::SetMaterial{material:id,value:Material::default()},
         Operation::Surface(SurfaceOperation::Material{material:id,value:SurfaceMaterial{base_color:color,roughness,metallic:0.,..Default::default()}})])
 }
 fn sphere(d:&mut Document,name:&str,center:[f64;3],radii:[f64;3],material:u32)->Result<()> {
-    commands(d,&format!("mesh-{name}"),&format!(r#"[{{"op":"sphere","object":"{name}","radius":1,"segments":24,"rings":12,"smooth":true}}]"#))?;
+    let operation=Operation::sphere(name,1.,24,12,true,d.limits())?;
+    apply(d,&format!("mesh-{name}"),vec![operation])?;
     let mesh=d.object(name).unwrap();let vertices=mesh.vertices().iter().map(|v|v.id).collect();let faces=mesh.faces().iter().map(|f|f.id).collect();
     apply(d,&format!("place-{name}"),vec![Operation::Transform{object:name.into(),vertices,matrix:Transform{translation:center,scale:radii,..Default::default()}.matrix()?},Operation::AssignMaterial{object:name.into(),faces,material}])
 }
 fn strand(d:&mut Document,name:&str,path:Vec<[f64;3]>,radius:f64,material:u32)->Result<()> {
     let profile=(0..8).map(|i|{let a=TAU*i as f64/8.;[radius*a.cos(),radius*a.sin()]}).collect::<Vec<_>>();
-    let vectors=|points:Vec<Vec<f64>>|json::Value::Arr(points.into_iter().map(|p|json::Value::Arr(p.into_iter().map(json::Value::F64).collect())).collect());
-    let value=json::obj(vec![("op",json::s("sweep")),("object",json::s(name)),("profile",vectors(profile.into_iter().map(|p|p.to_vec()).collect())),("path",vectors(path.into_iter().map(|p|p.to_vec()).collect())),("caps",json::Value::Bool(true)),("material",json::Value::Int(material as i64))]);
-    let ops=parse_operations(&json::Value::Arr(vec![value]),d.limits())?;apply(d,&format!("strand-{name}"),ops)
+    apply(d,&format!("strand-{name}"),vec![Operation::Construction(ConstructionOperation {
+        object:name.into(),kind:Construction::Sweep{profile,path,caps:true,material},
+    })])
 }
 fn normalize(p:[f64;3])->[f64;3]{let n=p.iter().map(|v|v*v).sum::<f64>().sqrt();p.map(|v|v/n)}
 fn cross(a:[f64;3],b:[f64;3])->[f64;3]{[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]}
@@ -33,9 +31,8 @@ fn cross(a:[f64;3],b:[f64;3])->[f64;3]{[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],
 /// A triangulated UV sphere with a smooth recessed mouth, keeping a closed
 /// manifold body. Area-weighted normals follow the dent, including its rim.
 fn warped_sphere(d:&mut Document,name:&str,radius:f64,segments:u32,rings:u32,material:u32,warp:impl Fn([f64;3])->[f64;3])->Result<()> {
-    let temp=json::parse(format!(r#"[{{"op":"sphere","object":"{name}","radius":{radius},"segments":{segments},"rings":{rings}}}]"#).as_bytes()).map_err(Error::Invalid)?;
-    let operations=parse_operations(&temp,d.limits())?;
-    let Operation::ImportMesh{source,..}=&operations[0] else{unreachable!()};
+    let operation=Operation::sphere(name,radius,segments,rings,true,d.limits())?;
+    let Operation::ImportMesh{source,..}=&operation else{unreachable!()};
     let mut ctx=mesh::Context::new(d.limits().mesh.clone(),None);let original=mesh::Mesh::from_bytes(source,&mut ctx)?;
     let mut positions=Vec::new();let mut map=BTreeMap::new();
     for v in original.vertices() {
@@ -80,13 +77,20 @@ fn character()->Result<Document> {
     let mut d=Document::new(Limits{max_joints:128,..Default::default()})?;
     for(id,color,roughness)in[(0,[1.,0.82,0.9,1.],0.95),(1,[1.,0.98,0.96,1.],0.25),(2,[0.10,0.62,1.,1.],0.35),(3,[0.006,0.008,0.018,1.],0.13),(4,[1.,1.,1.,1.],0.1),(5,[0.105,0.008,0.025,1.],0.84),(6,[1.,0.15,0.28,1.],0.75),(7,[0.48,0.025,0.12,1.],0.95),(8,[0.96,0.35,0.57,1.],0.98)] {material(&mut d,id,color,roughness)?;}
     body(&mut d)?;
-    commands(&mut d,"yarn-surface",r#"[
-      {"op":"surface_layer","material":0,"channel":"base_color","layer":"yarn","width":512,"height":512},
-      {"op":"surface_pattern","material":0,"channel":"base_color","layer":"yarn","pattern":{"kind":"yarn","color_a":[0.56,0.22,0.34,1],"color_b":[0.87,0.43,0.56,1],"scale":[72,50],"seed":"42"}},
-      {"op":"surface_derive","material":0,"source_channel":"base_color","source_layer":"yarn","channel":"normal","layer":"fiber-normal","strength":0.0006,"wrap":true},
-      {"op":"surface_derive","material":0,"source_channel":"base_color","source_layer":"yarn","channel":"metallic_roughness","layer":"fiber-roughness","roughness_min":0.90,"roughness_max":0.99,"metallic":0},
-      {"op":"fiber_shell","object":"fuzz","source":"body","count":1400,"length":0.012,"width":0.0006,"seed":42,"material":8}
-    ]"#)?;
+    let yarn=SurfaceLayer::new("yarn",RgbaImage::new(512,512,[255;4],d.limits())?);
+    apply(&mut d,"yarn-surface",vec![
+        Operation::Surface(SurfaceOperation::Layer{material:0,channel:SurfaceChannel::BaseColor,layer:yarn}),
+        Operation::Surface(SurfaceOperation::Pattern{material:0,channel:SurfaceChannel::BaseColor,layer:"yarn".into(),pattern:SurfacePattern{
+            kind:PatternKind::Yarn,color_a:[0.56,0.22,0.34,1.],color_b:[0.87,0.43,0.56,1.],scale:[72.,50.],seed:42,
+        }}),
+        Operation::Surface(SurfaceOperation::Derive{material:0,channel:SurfaceChannel::Normal,layer:"fiber-normal".into(),recipe:SurfaceDerivation{
+            source_channel:SurfaceChannel::BaseColor,source_layer:Some("yarn".into()),strength:0.0006,roughness_min:0.2,roughness_max:0.9,metallic:0.,wrap:true,
+        }}),
+        Operation::Surface(SurfaceOperation::Derive{material:0,channel:SurfaceChannel::MetallicRoughness,layer:"fiber-roughness".into(),recipe:SurfaceDerivation{
+            source_channel:SurfaceChannel::BaseColor,source_layer:Some("yarn".into()),strength:1.,roughness_min:0.90,roughness_max:0.99,metallic:0.,wrap:true,
+        }}),
+        Operation::Construction(ConstructionOperation{object:"fuzz".into(),kind:Construction::Fibers{source:"body".into(),count:1400,length:0.012,width:0.0006,seed:42,material:8}}),
+    ])?;
     for (side,x) in [("left",-0.167),("right",0.167)] {
         sphere(&mut d,&format!("{side}-sclera"),[x,0.97,-0.413],[0.165,0.18,0.108],1)?;
         sphere(&mut d,&format!("{side}-iris"),[x+0.012,0.967,-0.513],[0.092,0.103,0.026],2)?;
@@ -126,16 +130,23 @@ fn character()->Result<Document> {
     strand(&mut d,"top-heart",top_heart,0.007,8)?;
     let stalk=(0..25).map(|i|{let t=i as f64/24.;[0.025*t+0.023*(PI*t).sin(),1.185+0.36*t,-0.025*t]}).collect();
     strand(&mut d,"top-stalk",stalk,0.009,0)?;
-    commands(&mut d,"soft-body-bind",r#"[{"op":"soft_body_bind","object":"body","deform_objects":["fuzz","heart-strand"],"preset":"yarn_ball","attachments":[
-      {"name":"face-left","objects":["left-sclera","left-iris","left-pupil","left-highlight","left-glint","left-brow"],"pivot":[-0.167,0.97,-0.413]},
-      {"name":"face-right","objects":["right-sclera","right-iris","right-pupil","right-highlight","right-glint","right-brow"],"pivot":[0.167,0.97,-0.413]},
-      {"name":"mouth-frame","objects":["mouth-interior","tongue","smile-rim","upper-lip","upper-teeth"],"pivot":[0,0.684,-0.40]},
-      {"name":"top-stalk-frame","objects":["top-stalk","top-heart"],"pivot":[0,1.185,0]},
-      {"name":"arm-left-frame","objects":["left-arm","left-hand"],"pivot":[-0.405,0.79,0]},
-      {"name":"arm-right-frame","objects":["right-arm","right-hand"],"pivot":[0.405,0.79,0]},
-      {"name":"leg-left-frame","objects":["left-leg","left-foot"],"pivot":[-0.17,0.405,0]},
-      {"name":"leg-right-frame","objects":["right-leg","right-foot"],"pivot":[0.17,0.405,0]}
-    ]}]"#)?;
+    let attachments:[(&str,&[&str],[f64;3]);8]=[
+        ("face-left",&["left-sclera","left-iris","left-pupil","left-highlight","left-glint","left-brow"],[-0.167,0.97,-0.413]),
+        ("face-right",&["right-sclera","right-iris","right-pupil","right-highlight","right-glint","right-brow"],[0.167,0.97,-0.413]),
+        ("mouth-frame",&["mouth-interior","tongue","smile-rim","upper-lip","upper-teeth"],[0.,0.684,-0.40]),
+        ("top-stalk-frame",&["top-stalk","top-heart"],[0.,1.185,0.]),
+        ("arm-left-frame",&["left-arm","left-hand"],[-0.405,0.79,0.]),
+        ("arm-right-frame",&["right-arm","right-hand"],[0.405,0.79,0.]),
+        ("leg-left-frame",&["left-leg","left-foot"],[-0.17,0.405,0.]),
+        ("leg-right-frame",&["right-leg","right-foot"],[0.17,0.405,0.]),
+    ];
+    apply(&mut d,"soft-body-bind",vec![Operation::SoftBody(SoftBodyBind{
+        object:"body".into(),deform_objects:vec!["fuzz".into(),"heart-strand".into()],
+        attachments:attachments.into_iter().map(|(name,objects,pivot)|SoftBodyAttachmentRequest{
+            name:name.into(),objects:objects.iter().map(|s|(*s).into()).collect(),pivot:Some(pivot),
+        }).collect(),
+        settings:SoftBodySettings{mass:1.,edge_compliance:0.001,volume_compliance:1e-7,pose_compliance:0.001,damping:22.,gravity:[0.,-9.81,0.],contact_radius:0.01,friction:0.5,substeps:4,iterations:6,max_speed:20.,max_displacement:2.},
+    })])?;
     let frames=d.soft_body().unwrap().attachments.iter().map(|a|(a.name.clone(),a.joint as u32)).collect::<BTreeMap<_,_>>();
     let mut skeleton=d.skeleton().unwrap().clone();let mut operations=Vec::new();let mut blink_joints=Vec::new();let mut gaze_joints=Vec::new();
     for side in ["left","right"] {

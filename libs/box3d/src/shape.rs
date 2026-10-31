@@ -5,13 +5,15 @@ use std::sync::Arc;
 use crate::math_functions::{Vec3, AABB};
 use crate::types::{
     Capsule, CompoundData, Filter, HeightFieldData, HullData, Mesh, QueryFilter, ShapeType, Sphere,
-    SurfaceMaterial,
+    SurfaceMaterial, Tube,
 };
 
 /// The C b3Shape geometry union.
 #[derive(Clone, Debug)]
 pub enum ShapeGeometry {
     Capsule(Capsule),
+    /// A closed loop of capsule segments sharing one shape and contact per pair.
+    Tube(Arc<Tube>),
     Sphere(Sphere),
     Hull(Arc<HullData>),
     Mesh(Mesh),
@@ -97,6 +99,7 @@ impl Shape {
     pub fn shape_type(&self) -> ShapeType {
         match &self.geom {
             ShapeGeometry::Capsule(_) => ShapeType::Capsule,
+            ShapeGeometry::Tube(_) => ShapeType::Tube,
             ShapeGeometry::Sphere(_) => ShapeType::Sphere,
             ShapeGeometry::Hull(_) => ShapeType::Hull,
             ShapeGeometry::Mesh(_) => ShapeType::Mesh,
@@ -154,7 +157,7 @@ pub fn should_query_collide(shape_filter: Filter, query_filter: QueryFilter) -> 
 
 use crate::b3_assert;
 use crate::b3_validate;
-use crate::constants::{max_aabb_margin, speculative_distance, AABB_MARGIN_FRACTION, MAX_SHAPE_CAST_POINTS, MAX_SHAPES};
+use crate::constants::{max_aabb_margin, AABB_MARGIN_FRACTION, MAX_SHAPE_CAST_POINTS, MAX_SHAPES};
 use crate::core::{get_length_units_per_meter, NULL_INDEX, SECRET_COOKIE};
 use crate::id::{BodyId, ContactId, ShapeId, WorldId, NULL_SHAPE_ID};
 use crate::id_pool::{alloc_id, free_id};
@@ -186,6 +189,13 @@ impl Shape {
         match &self.geom {
             ShapeGeometry::Capsule(c) => c,
             _ => panic!("shape is not a capsule"),
+        }
+    }
+    #[inline]
+    pub fn as_tube(&self) -> &Arc<Tube> {
+        match &self.geom {
+            ShapeGeometry::Tube(t) => t,
+            _ => panic!("shape is not a tube"),
         }
     }
     #[inline]
@@ -258,6 +268,14 @@ fn compute_shape_margin(shape: &Shape) -> f32 {
             margin = 0.5 * crate::math_functions::distance(capsule.center2, capsule.center1) + capsule.radius;
         }
 
+        ShapeGeometry::Tube(tube) => {
+            let mut max_extent_sqr = 0.0;
+            for &point in &tube.points {
+                max_extent_sqr = max_float(max_extent_sqr, crate::math_functions::distance_squared(point, shape.local_centroid));
+            }
+            margin = max_extent_sqr.sqrt() + tube.radius;
+        }
+
         ShapeGeometry::Hull(hull) => {
             let points = &hull.points;
             let mut max_extent_sqr = 0.0;
@@ -280,16 +298,15 @@ fn compute_shape_margin(shape: &Shape) -> f32 {
     min_float(max_aabb_margin(), AABB_MARGIN_FRACTION * margin)
 }
 
-fn update_shape_aabbs(shape: &mut Shape, transform: WorldTransform, proxy_type: BodyType) {
+fn update_shape_aabbs(shape: &mut Shape, transform: WorldTransform, proxy_type: BodyType, speculative: f32) {
     // Compute a bounding box with a speculative margin
-    let speculative_distance = speculative_distance();
     let aabb_margin = shape.aabb_margin;
 
-    let aabb = compute_fat_shape_aabb(shape, transform, speculative_distance);
+    let aabb = compute_fat_shape_aabb(shape, transform, speculative);
     shape.aabb = aabb;
 
     // Smaller margin for static bodies. Cannot be zero due to TOI tolerance.
-    let margin = if proxy_type == BodyType::Static { speculative_distance } else { aabb_margin };
+    let margin = if proxy_type == BodyType::Static { speculative } else { aabb_margin };
     let fat_aabb = AABB {
         lower_bound: Vec3 {
             x: aabb.lower_bound.x - margin,
@@ -308,6 +325,8 @@ fn update_shape_aabbs(shape: &mut Shape, transform: WorldTransform, proxy_type: 
 /// The C geometry `void*` parameter of b3CreateShapeInternal.
 pub enum ShapeGeometryInput<'a> {
     Capsule(&'a Capsule),
+    /// Closed capsule loop copied into shared geometry on creation.
+    Tube(&'a Tube),
     Sphere(&'a Sphere),
     Hull(&'a Arc<HullData>),
     Mesh(&'a Arc<crate::types::MeshData>),
@@ -319,6 +338,7 @@ impl ShapeGeometryInput<'_> {
     fn shape_type(&self) -> ShapeType {
         match self {
             ShapeGeometryInput::Capsule(_) => ShapeType::Capsule,
+            ShapeGeometryInput::Tube(_) => ShapeType::Tube,
             ShapeGeometryInput::Sphere(_) => ShapeType::Sphere,
             ShapeGeometryInput::Hull(_) => ShapeType::Hull,
             ShapeGeometryInput::Mesh(_) => ShapeType::Mesh,
@@ -354,6 +374,7 @@ fn create_shape_internal(
     // Resolve the geometry union member first (C switch at the top).
     let geom = match geometry {
         ShapeGeometryInput::Capsule(capsule) => ShapeGeometry::Capsule(**capsule),
+        ShapeGeometryInput::Tube(tube) => ShapeGeometry::Tube(Arc::new((**tube).clone())),
 
         ShapeGeometryInput::Compound(compound) => {
             // Compounds must be a static and not a sensor
@@ -604,6 +625,26 @@ pub fn create_capsule_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, 
         }
         shape_id
     }
+}
+
+/// Create one shape for a closed loop of capsule segments.
+pub fn create_tube_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, tube: &Tube) -> ShapeId {
+    if !crate::tube::is_valid_tube(tube) {
+        return NULL_SHAPE_ID;
+    }
+    let shape_id = create_shape(
+        world, body_id, def, &ShapeGeometryInput::Tube(tube),
+        Transform::IDENTITY, Vec3::ONE, false,
+    );
+    if shape_id.index1 != 0 {
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateTubeShape, |b| {
+            b.w_bodyid(body_id);
+            b.w_shapedef(def);
+            b.w_tube(tube);
+            b.w_shapeid(shape_id);
+        });
+    }
+    shape_id
 }
 
 pub fn create_hull_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, hull: &Arc<HullData>) -> ShapeId {
@@ -906,6 +947,7 @@ pub fn destroy_shape(world: &mut World, shape_id: ShapeId, update_body_mass: boo
 pub fn compute_shape_aabb(shape: &Shape, transform: Transform) -> AABB {
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::compute_capsule_aabb(capsule, transform),
+        ShapeGeometry::Tube(tube) => crate::tube::compute_tube_aabb(tube, transform),
         ShapeGeometry::Compound(compound) => crate::compound::compute_compound_aabb(compound, transform),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::compute_height_field_aabb(height_field, transform)
@@ -949,6 +991,7 @@ pub fn compute_swept_shape_aabb(shape: &Shape, sweep: &Sweep, time: f32) -> AABB
 
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::compute_swept_capsule_aabb(capsule, xf1, xf2),
+        ShapeGeometry::Tube(tube) => crate::tube::compute_swept_tube_aabb(tube, xf1, xf2),
         ShapeGeometry::Hull(hull) => crate::hull::compute_swept_hull_aabb(hull, xf1, xf2),
         ShapeGeometry::Sphere(sphere) => crate::sphere::compute_swept_sphere_aabb(sphere, xf1, xf2),
         _ => {
@@ -961,6 +1004,7 @@ pub fn compute_swept_shape_aabb(shape: &Shape, sweep: &Sweep, time: f32) -> AABB
 pub fn get_shape_centroid(shape: &Shape) -> Vec3 {
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => lerp(capsule.center1, capsule.center2, 0.5),
+        ShapeGeometry::Tube(tube) => crate::tube::compute_tube_mass(tube, 1.0).center,
         ShapeGeometry::Compound(compound) => {
             let aabb = crate::compound::compute_compound_aabb(compound, Transform::IDENTITY);
             crate::math_functions::aabb_center(aabb)
@@ -984,6 +1028,10 @@ pub fn get_shape_area(shape: &Shape) -> f32 {
         ShapeGeometry::Capsule(capsule) => {
             2.0 * length(sub(capsule.center1, capsule.center2)) + 2.0 * PI * capsule.radius
         }
+        ShapeGeometry::Tube(tube) => (0..tube.points.len()).map(|i| {
+            let capsule = tube.segment(i);
+            2.0 * length(sub(capsule.center1, capsule.center2)) + 2.0 * PI * capsule.radius
+        }).sum(),
         ShapeGeometry::Hull(hull) => hull.surface_area,
         ShapeGeometry::Sphere(sphere) => 2.0 * PI * sphere.radius,
         _ => 0.0,
@@ -1001,6 +1049,11 @@ pub fn get_shape_projected_area(shape: &Shape, plane_normal: Vec3) -> f32 {
             let sphere_area = PI * radius * radius;
             sphere_area + cylinder_area
         }
+        ShapeGeometry::Tube(tube) => (0..tube.points.len()).map(|i| {
+            let capsule = tube.segment(i);
+            PI * tube.radius * tube.radius
+                + 2.0 * tube.radius * length(cross(sub(capsule.center2, capsule.center1), plane_normal))
+        }).sum(),
         ShapeGeometry::Hull(hull) => crate::hull::compute_hull_projected_area(hull, plane_normal),
         ShapeGeometry::Sphere(sphere) => PI * sphere.radius * sphere.radius,
         _ => 0.0,
@@ -1010,6 +1063,7 @@ pub fn get_shape_projected_area(shape: &Shape, plane_normal: Vec3) -> f32 {
 pub fn compute_shape_mass(shape: &Shape) -> MassData {
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::compute_capsule_mass(capsule, shape.density),
+        ShapeGeometry::Tube(tube) => crate::tube::compute_tube_mass(tube, shape.density),
         ShapeGeometry::Hull(hull) => crate::hull::compute_hull_mass(hull, shape.density),
         ShapeGeometry::Sphere(sphere) => crate::sphere::compute_sphere_mass(sphere, shape.density),
         _ => MassData::default(),
@@ -1027,6 +1081,14 @@ pub fn compute_shape_extent(shape: &Shape, local_center: Vec3) -> ShapeExtent {
             let c2 = sub(capsule.center2, local_center);
             let r = vec3(radius, radius, radius);
             extent.max_extent = add(max(c1, c2), r);
+        }
+
+        ShapeGeometry::Tube(tube) => {
+            extent.min_extent = tube.radius;
+            for &point in &tube.points {
+                extent.max_extent = max(extent.max_extent, abs(sub(point, local_center)));
+            }
+            extent.max_extent = add(extent.max_extent, vec3(tube.radius, tube.radius, tube.radius));
         }
 
         ShapeGeometry::Compound(compound) => {
@@ -1076,6 +1138,7 @@ pub fn ray_cast_shape(shape: &Shape, transform: Transform, input: &RayCastInput)
 
     let mut output = match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::ray_cast_capsule(capsule, &local_input),
+        ShapeGeometry::Tube(tube) => crate::tube::ray_cast_tube(tube, &local_input),
         ShapeGeometry::Compound(compound) => crate::compound::ray_cast_compound(compound, &local_input),
         ShapeGeometry::Sphere(sphere) => crate::sphere::ray_cast_sphere(sphere, &local_input),
         ShapeGeometry::Hull(hull) => crate::hull::ray_cast_hull(hull, &local_input),
@@ -1110,6 +1173,7 @@ pub fn shape_cast_shape(shape: &Shape, transform: Transform, input: &ShapeCastIn
 
     let mut output = match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::shape_cast_capsule(capsule, &local_input),
+        ShapeGeometry::Tube(tube) => crate::tube::shape_cast_tube(tube, &local_input),
         ShapeGeometry::Compound(compound) => crate::compound::shape_cast_compound(compound, &local_input),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::shape_cast_height_field(height_field, &local_input)
@@ -1127,6 +1191,7 @@ pub fn shape_cast_shape(shape: &Shape, transform: Transform, input: &ShapeCastIn
 pub fn overlap_shape(shape: &Shape, transform: Transform, proxy: &ShapeProxy) -> bool {
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::overlap_capsule(capsule, transform, proxy),
+        ShapeGeometry::Tube(tube) => crate::tube::overlap_tube(tube, transform, proxy),
         ShapeGeometry::Compound(compound) => crate::compound::overlap_compound(compound, transform, proxy),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::overlap_height_field(height_field, transform, proxy)
@@ -1156,6 +1221,7 @@ pub fn collide_mover(
 
     let plane_count = match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::collide_mover_and_capsule(&mut planes[0], capsule, &local_mover),
+        ShapeGeometry::Tube(tube) => crate::tube::collide_mover_and_tube(&mut planes[..plane_capacity as usize], tube, &local_mover),
         ShapeGeometry::Compound(compound) => {
             crate::compound::collide_mover_and_compound(&mut planes[..plane_capacity as usize], compound, &local_mover)
         }
@@ -1190,7 +1256,7 @@ pub fn create_shape_proxy(
 ) {
     b3_assert!(world.shapes[shape_id as usize].proxy_key == NULL_INDEX);
 
-    update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, body_type);
+    update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, body_type, world.speculative_distance);
 
     let (fat_aabb, category_bits) = {
         let shape = &world.shapes[shape_id as usize];
@@ -1232,6 +1298,10 @@ fn destroy_shape_allocation_for_shape_change(world: &mut World, shape_id: i32) {
         remove_hull_from_database(world, &hull);
     }
 
+    if matches!(&world.shapes[shape_id as usize].geom, ShapeGeometry::Tube(_)) {
+        world.shapes[shape_id as usize].geom = ShapeGeometry::default();
+    }
+
     // userShape / debug draw callbacks: not ported.
 }
 
@@ -1245,7 +1315,7 @@ pub fn destroy_shape_allocations(world: &mut World, shape_id: i32) {
 }
 
 /// C: b3MakeShapeProxy. The buffer holds the capsule end points (C borrows the
-/// adjacent center1/center2 fields directly).
+/// adjacent center1/center2 fields directly). Non-convex shapes need per-part proxies.
 pub fn make_shape_proxy<'a>(shape: &'a Shape, buffer: &'a mut [Vec3; 2]) -> ShapeProxy<'a> {
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => {
@@ -1260,6 +1330,8 @@ pub fn make_shape_proxy<'a>(shape: &'a Shape, buffer: &'a mut [Vec3; 2]) -> Shap
         },
 
         ShapeGeometry::Hull(hull) => ShapeProxy { points: &hull.points, radius: 0.0 },
+
+        ShapeGeometry::Tube(_) => panic!("a tube requires one convex proxy per segment"),
 
         _ => {
             b3_assert!(false);
@@ -1370,7 +1442,7 @@ fn reset_proxy(world: &mut World, shape_id: i32, wake_bodies: bool, destroy_prox
     let proxy_key = world.shapes[shape_id as usize].proxy_key;
     if proxy_key != NULL_INDEX {
         let proxy_type = crate::broad_phase::proxy_type(proxy_key);
-        update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, proxy_type);
+        update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, proxy_type, world.speculative_distance);
 
         if destroy_proxy {
             crate::broad_phase::broad_phase_destroy_proxy(&mut world.broad_phase, proxy_key);
@@ -1394,7 +1466,7 @@ fn reset_proxy(world: &mut World, shape_id: i32, wake_bodies: bool, destroy_prox
         }
     } else {
         let proxy_type = world.bodies[body_id as usize].body_type;
-        update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, proxy_type);
+        update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, proxy_type, world.speculative_distance);
     }
 
     crate::physics_world::validate_solver_sets(world);
@@ -1706,6 +1778,11 @@ pub fn shape_get_capsule(world: &World, shape_id: ShapeId) -> Capsule {
     *world.shapes[shape_idx as usize].as_capsule()
 }
 
+pub fn shape_get_tube(world: &World, shape_id: ShapeId) -> Arc<Tube> {
+    let shape_idx = get_shape_full_id(world, shape_id);
+    Arc::clone(world.shapes[shape_idx as usize].as_tube())
+}
+
 pub fn shape_get_hull(world: &World, shape_id: ShapeId) -> Arc<HullData> {
     let shape_idx = get_shape_full_id(world, shape_id);
     Arc::clone(world.shapes[shape_idx as usize].as_hull())
@@ -1985,6 +2062,11 @@ pub fn shape_get_closest_point(world: &World, shape_id: ShapeId, target: Vec3) -
     // Low level closest point query is a documented float carve-out far from the origin
     let transform = to_relative_transform(crate::body::get_body_transform_quick(world, shape.body_id), POS_ZERO);
 
+    if let ShapeGeometry::Tube(tube) = &shape.geom {
+        let (point, _) = crate::tube::closest_point_on_tube(tube, inv_transform_point(transform, target), true);
+        return transform_point(transform, point);
+    }
+
     let mut buffer = [Vec3::ZERO; 2];
     let input = DistanceInput {
         proxy_a: make_shape_proxy(shape, &mut buffer),
@@ -2017,7 +2099,7 @@ pub fn shape_apply_wind(world: &mut World, shape_id: ShapeId, wind: Vec3, drag: 
     let shape_idx = get_shape_full_id(world, shape_id);
 
     let shape_type = world.shapes[shape_idx as usize].shape_type();
-    if shape_type != ShapeType::Sphere && shape_type != ShapeType::Capsule && shape_type != ShapeType::Hull {
+    if shape_type != ShapeType::Sphere && shape_type != ShapeType::Capsule && shape_type != ShapeType::Hull && shape_type != ShapeType::Tube {
         return;
     }
 
@@ -2106,6 +2188,29 @@ pub fn shape_apply_wind(world: &mut World, shape_id: ShapeId, wind: Vec3, drag: 
 
             let edge_lever = mul_add(lever, radius, normal);
             torque = cross(edge_lever, force);
+        }
+
+        ShapeGeometry::Tube(tube) => {
+            for i in 0..tube.points.len() {
+                let capsule = tube.segment(i);
+                let centroid = lerp(capsule.center1, capsule.center2, 0.5);
+                let lever = rotate_vector(transform.q, sub(centroid, sim.local_center));
+                let shape_velocity = add(state.linear_velocity, cross(state.angular_velocity, lever));
+                let relative_velocity = mul_sub(wind, drag, shape_velocity);
+                let mut speed = 0.0;
+                let direction = get_length_and_normalize(&mut speed, relative_velocity);
+                speed = min_float(speed, max_speed);
+                let d = rotate_vector(transform.q, sub(capsule.center2, capsule.center1));
+                let radius = tube.radius;
+                let projected_area = PI * radius * radius + 2.0 * radius * length(cross(d, direction));
+                let e = normalize(d);
+                let normal = sub(mul_sv(dot(direction, e), e), direction);
+                let lift_direction = cross(cross(normal, direction), direction);
+                let force_magnitude = 0.5 * air_density * projected_area * speed * speed;
+                let segment_force = mul_sv(force_magnitude, mul_add(direction, lift, lift_direction));
+                force = add(force, segment_force);
+                torque = add(torque, cross(mul_add(lever, radius, normal), segment_force));
+            }
         }
 
         ShapeGeometry::Hull(hull) => {
@@ -2282,7 +2387,11 @@ fn mesh_time_of_impact_fcn(ctx: &mut MeshImpactContext, a: Vec3, b: Vec3, c: Vec
     true
 }
 
-pub fn shape_time_of_impact(shape_a: &Shape, shape_b: &Shape, sweep_a: &Sweep, sweep_b: &Sweep, max_fraction: f32) -> TOIOutput {
+pub fn shape_time_of_impact(shape_a: &Shape, shape_b: &Shape, sweep_a: &Sweep, sweep_b: &Sweep, max_fraction: f32, speculative: f32) -> TOIOutput {
+    if shape_a.shape_type() == ShapeType::Tube || shape_b.shape_type() == ShapeType::Tube {
+        return crate::tube::tube_time_of_impact(shape_a, shape_b, sweep_a, sweep_b, max_fraction);
+    }
+
     let is_sensor = shape_a.sensor_index != NULL_INDEX;
 
     let mut buffer_b = [Vec3::ZERO; 2];
@@ -2297,7 +2406,7 @@ pub fn shape_time_of_impact(shape_a: &Shape, shape_b: &Shape, sweep_a: &Sweep, s
             let local_centroid_b = get_shape_centroid(shape_b);
 
             let extents = compute_shape_extent(shape_b, local_centroid_b);
-            let fallback_radius = max_float(0.75 * extents.min_extent, speculative_distance());
+            let fallback_radius = max_float(0.75 * extents.min_extent, speculative);
 
             // Swept bounds of shapeB
             let bounds = compute_swept_shape_aabb(shape_b, sweep_b, max_fraction);

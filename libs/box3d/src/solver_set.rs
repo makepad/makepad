@@ -5,7 +5,7 @@ use crate::bitset::clear_bit;
 use crate::body::{BodySim, BodyState, HAD_TIME_OF_IMPACT, IDENTITY_BODY_STATE, IS_FAST, IS_SPEED_CAPPED};
 use crate::constants::GRAPH_COLOR_COUNT;
 use crate::constraint_graph::OVERFLOW_INDEX;
-use crate::contact::{CONTACT_TOUCHING_FLAG, SIM_MESH_CONTACT, SIM_TOUCHING_FLAG};
+use crate::contact::{CONTACT_TOUCHING_FLAG, SIM_MESH_CONTACT, SIM_TUBE_CONTACT, SIM_TOUCHING_FLAG};
 use crate::container::array_remove_swap;
 use crate::core::NULL_INDEX;
 use crate::id_pool::{alloc_id, free_id};
@@ -399,7 +399,7 @@ pub fn try_sleep_island(world: &mut World, island_id: i32) {
             let sleep_contact_index = world.solver_sets[sleep_set_id as usize].contact_indices.len() as i32;
             world.solver_sets[sleep_set_id as usize].contact_indices.push(contact_id);
 
-            if (flags & SIM_MESH_CONTACT) != 0 || color_index == OVERFLOW_INDEX {
+            if (flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0 || color_index == OVERFLOW_INDEX {
                 let moved_local_index = array_remove_swap(
                     &mut world.constraint_graph.colors[color_index as usize].contacts,
                     local_index,

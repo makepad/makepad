@@ -1,0 +1,165 @@
+//! DrawSceneTexture: composites the offscreen 3D pass into the host pane.
+//!
+//! Legacy hosts render the scene in display space into BGRA8 and this is a
+//! plain blit. A host that opted into HDR output (`Renderer::set_hdr_output`)
+//! renders linear, scene-referred light into RGBA16F; the post chain here is
+//! exposure -> AgX tone map (display-encoded) -> FXAA on the tone-mapped
+//! image -> dither to the 8-bit swapchain.
+
+use super::*;
+
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
+    use mod.geom
+
+    mod.draw.DrawSceneTexture = mod.std.set_type_default() do #(DrawSceneTexture::script_shader(vm)){
+        ..mod.draw.DrawQuad,
+        ..mod.draw.ToneCurves,
+        scene_texture: texture_2d(float)
+        // HDR lane post inputs (post.rs BloomPass): the half-res bloom and
+        // the 1x1 adapted mean luminance.
+        bloom_texture: texture_2d(float)
+        exposure_texture: texture_2d(float)
+
+        // AgX (ToneCurves' encode, sigmoid and decode) with the game's
+        // contrast (grade.x) as a slope about mid-grey (0.18 encodes to
+        // 0.606) before the sigmoid, which rolls both ends off. Output is
+        // display-encoded (no extra sRGB OETF). A light "punch" restores
+        // the contrast and saturation plain AgX gives up.
+        agx_graded: fn(c: vec3) -> vec3 {
+            let e = clamp((self.agx_encode(c) - vec3(0.606, 0.606, 0.606)) * self.grade.x + vec3(0.606, 0.606, 0.606), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            let o = self.agx_decode(self.agx_contrast(e))
+            let p = pow(clamp(o, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), vec3(1.1, 1.1, 1.1))
+            let luma = dot(p, vec3(0.2126, 0.7152, 0.0722))
+            return clamp(vec3(luma, luma, luma) + (p - vec3(luma, luma, luma)) * (1.35 * self.grade.y), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+        }
+        // One tone-mapped scene texel at exposure `e`, bloom mixed in
+        // (energy-conserving: a few percent of the blurred image replaces
+        // the same share of the sharp one).
+        mapped: fn(uv: vec2, e: float) -> vec3 {
+            var c = self.scene_texture.sample(uv).xyz
+            if self.post2.x > 0.0 {
+                // Tilt-shift: away from the sharp band the frame softens
+                // further toward the same blurred image (a diorama's
+                // shallow focus, free: the bloom chain already made it).
+                let soft = self.tilt.x * smoothstep(self.tilt.z, self.tilt.z + self.tilt_feather(), abs(uv.y - self.tilt.y))
+                c = mix(c, self.bloom_texture.sample(uv).xyz * self.post2.w, min(self.post2.x + soft, 1.0))
+            }
+            return self.agx_graded(c * e)
+        }
+        // The width of the tilt band's soft edge: `tilt.w`, or 0.3 when unset.
+        tilt_feather: fn() -> float {
+            if self.tilt.w > 0.0 { return self.tilt.w }
+            return 0.3
+        }
+        // Perceptual luma of an HDR texel for FXAA's edge search, without
+        // paying the full tone map per tap.
+        edge_luma: fn(uv: vec2, e: float) -> float {
+            let l = dot(self.scene_texture.sample(uv).xyz, vec3(0.2126, 0.7152, 0.0722)) * e
+            return sqrt(l / (1.0 + l))
+        }
+        // The exposure this frame: the host's metered value, or with
+        // auto-exposure the adapted scene mean mapped to the key, held
+        // within a band around the metered value (night stays night);
+        // the game's bias (grade.w) on top.
+        adapted_exposure: fn() -> float {
+            if self.post.w < 0.5 { return self.post.y }
+            let raw = self.exposure_texture.sample_nearest(vec2(0.5, 0.5)).x
+            // A non-finite adapted mean falls back to the metered exposure
+            // instead of blacking out the frame (false for NaN and Inf).
+            if raw > 0.0 && raw < 60000.0 {
+                let mean = max(raw, 0.00001)
+                return clamp(self.post2.y / mean, self.post.y * self.post2.z, self.post.y * self.grade.z)
+            }
+            return self.post.y
+        }
+        exposure: fn() -> float {
+            return self.adapted_exposure() * self.grade.w
+        }
+
+        pixel: fn() {
+            if self.post.x < 0.5 {
+                if self.tilt.x > 0.0 {
+                    // Tilt-shift alone: the scene and `bloom_texture` (its
+                    // blurred copy), both already premultiplied, no
+                    // exposure or tone map.
+                    let soft = self.tilt.x * smoothstep(self.tilt.z, self.tilt.z + self.tilt_feather(), abs(self.pos.y - self.tilt.y))
+                    return mix(self.scene_texture.sample(self.pos), self.bloom_texture.sample(self.pos), clamp(soft, 0.0, 1.0))
+                }
+                let color = self.scene_texture.sample(self.pos)
+                return Pal.premul(color)
+            }
+            let uv = self.pos
+            let ex = self.exposure()
+            var c = vec3(0.0, 0.0, 0.0)
+            if self.post.z > 0.5 {
+                // FXAA (Lottes, the console/lite variant): one directional
+                // blur along the local edge, rejected when it overshoots.
+                let t = self.texel
+                let nw = self.edge_luma(uv + vec2(0.0 - t.x, 0.0 - t.y), ex)
+                let ne = self.edge_luma(uv + vec2(t.x, 0.0 - t.y), ex)
+                let sw = self.edge_luma(uv + vec2(0.0 - t.x, t.y), ex)
+                let se = self.edge_luma(uv + vec2(t.x, t.y), ex)
+                let m = self.edge_luma(uv, ex)
+                let lmin = min(m, min(min(nw, ne), min(sw, se)))
+                let lmax = max(m, max(max(nw, ne), max(sw, se)))
+                if lmax - lmin < max(0.0312, lmax * 0.125) {
+                    c = self.mapped(uv, ex)
+                } else {
+                    var dir = vec2(0.0 - ((nw + ne) - (sw + se)), (nw + sw) - (ne + se))
+                    let reduce = max((nw + ne + sw + se) * 0.03125, 0.0078125)
+                    let rcp = 1.0 / (min(abs(dir.x), abs(dir.y)) + reduce)
+                    dir = clamp(dir * rcp, vec2(-8.0, -8.0), vec2(8.0, 8.0)) * t
+                    let a = (self.mapped(uv + dir * (1.0 / 3.0 - 0.5), ex) + self.mapped(uv + dir * (2.0 / 3.0 - 0.5), ex)) * 0.5
+                    let b = a * 0.5 + (self.mapped(uv - dir * 0.5, ex) + self.mapped(uv + dir * 0.5, ex)) * 0.25
+                    let lb = dot(b, vec3(0.299, 0.587, 0.114))
+                    c = b
+                    if lb < lmin - 0.02 || lb > lmax + 0.02 { c = a }
+                }
+            } else {
+                c = self.mapped(uv, ex)
+            }
+            // Half-LSB triangular dither in screen space: breaks the 8-bit
+            // banding of night skies and fog without drifting in world space.
+            let q = floor(uv / self.texel)
+            let n1 = fract(sin(dot(q, vec2(12.9898, 78.233))) * 43758.5453)
+            let n2 = fract(sin(dot(q, vec2(39.3468, 11.1352))) * 24634.6345)
+            let d = (n1 + n2 - 1.0) / 255.0
+            return vec4(c + vec3(d, d, d), 1.0)
+        }
+    }
+}
+
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawSceneTexture {
+    #[deref]
+    pub draw_super: DrawQuad,
+    /// The composite's post chain, set by the host from
+    /// `makepad_render::Renderer::composite_post`: x = 1 when the scene texture is
+    /// linear HDR (exposure + tone map + sRGB encode here), y = exposure,
+    /// z = 1 for FXAA, w unused. All zero (the default) is the plain blit.
+    #[live(vec4(0.0, 1.0, 0.0, 0.0))]
+    pub post: Vec4f,
+    /// One scene-texture texel in uv (1/width, 1/height), for FXAA.
+    #[live(vec2(0.001, 0.001))]
+    pub texel: Vec2f,
+    /// HDR post, set from `makepad_render::Renderer::bind_composite`: x = bloom
+    /// share, y = auto-exposure key, z = auto-exposure floor as a factor of
+    /// the metered exposure, w = bloom level normalisation.
+    #[live(vec4(0.0, 0.18, 0.5, 1.0))]
+    pub post2: Vec4f,
+    /// The game's grade, from `makepad_render::Renderer::set_grade`: x = contrast,
+    /// y = saturation, z = auto-exposure ceiling as a factor of the metered
+    /// exposure, w = exposure bias factor. The default is the stock look.
+    #[live(vec4(1.0, 1.0, 1.6, 1.0))]
+    pub grade: Vec4f,
+    /// Tilt-shift: x = strength (0 = off), y = the sharp band's centre in
+    /// uv (0 = top), z = its half-height, w = the width of its soft edge in
+    /// uv (0 = 0.3). Needs the bloom texture (the blurred image it softens
+    /// toward). With the post chain off (`post.x` 0) a non-zero strength
+    /// draws the tilt-shift alone, over premultiplied textures.
+    #[live(vec4(0.0, 0.6, 0.2, 0.0))]
+    pub tilt: Vec4f,
+}

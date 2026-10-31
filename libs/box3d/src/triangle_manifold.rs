@@ -102,6 +102,7 @@ pub fn collide_sphere_and_triangle(
 
     // Test separating axis
     let squared_distance = distance_squared(closest.point, center);
+    // static mesh/height contacts keep the default speculative distance
     let speculative = speculative_distance();
     let max_distance = sphere_a.radius + speculative;
     if squared_distance > max_distance * max_distance {
@@ -253,6 +254,7 @@ fn build_triangle_and_capsule_face_contact(
     let distance1 = plane_separation(plane, segment[0].position);
     let distance2 = plane_separation(plane, segment[1].position);
 
+    // static mesh/height contacts keep the default speculative distance
     let speculative = speculative_distance();
     if distance1 > speculative + radius && distance2 > speculative + radius {
         return;
@@ -371,6 +373,7 @@ pub fn collide_capsule_and_triangle(
     let distance_output = shape_distance(&distance_input, cache, None);
 
     let radius = capsule_a.radius;
+    // static mesh/height contacts keep the default speculative distance
     if distance_output.distance > radius + speculative_distance() {
         // Shapes are separated, persist the cache
         return;
@@ -681,6 +684,7 @@ fn collide_hull_face(
         min_separation = min_float(min_separation, clip_point.separation);
     }
 
+    // static mesh/height contacts keep the default speculative distance
     if min_separation > speculative_distance() {
         // This can occur with a stale SAT cache
         manifold.points.clear();
@@ -788,6 +792,7 @@ fn collide_triangle_face(
         min_separation = min_float(min_separation, clip_point.separation);
     }
 
+    // static mesh/height contacts keep the default speculative distance
     if min_separation >= speculative_distance() {
         // This can happen if the objects move apart while re-using a cached axis
         manifold.points.clear();
@@ -816,6 +821,7 @@ fn collide_hull_and_triangle_edges(
     query: EdgeQuery,
     cache: &mut SATCache,
 ) {
+    // static mesh/height contacts keep the default speculative distance
     b3_validate!(query.separation <= 2.0 * speculative_distance());
     b3_assert!(query.index_a < 3);
 
@@ -960,6 +966,7 @@ pub fn collide_hull_and_triangle(
         flags: triangle_flags,
     };
 
+    // static mesh/height contacts keep the default speculative distance
     let speculative = speculative_distance();
     cache.hit = 1;
 

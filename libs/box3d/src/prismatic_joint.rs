@@ -303,7 +303,7 @@ pub fn get_prismatic_joint_force(world: &World, base: &JointSim) -> Vec3 {
     let impulse = vec3(
         joint.perp_impulse.x,
         joint.perp_impulse.y,
-        joint.motor_impulse + joint.lower_impulse + joint.upper_impulse + joint.spring_impulse,
+        joint.motor_impulse + base.friction_impulse.x + joint.lower_impulse + joint.upper_impulse + joint.spring_impulse,
     );
 
     // convert impulse to force
@@ -382,6 +382,9 @@ pub fn prepare_prismatic_joint(base: &mut JointSim, world: &World, context: &Ste
         joint.lower_impulse = 0.0;
         joint.upper_impulse = 0.0;
     }
+    if !context.enable_warm_starting || !base.friction.is_enabled() {
+        base.friction_impulse = Vec3::ZERO;
+    }
 }
 
 pub fn warm_start_prismatic_joint(base: &mut JointSim, states: &StateAccess, _context: &StepContext) {
@@ -392,6 +395,7 @@ pub fn warm_start_prismatic_joint(base: &mut JointSim, states: &StateAccess, _co
     let i_a = base.inv_i_a;
     let i_b = base.inv_i_b;
 
+    let friction_impulse = base.friction_impulse.x;
     let joint = prismatic_joint_mut(base);
 
     // dummy state for static bodies
@@ -422,7 +426,7 @@ pub fn warm_start_prismatic_joint(base: &mut JointSim, states: &StateAccess, _co
     let s_az = cross(add(r_a, d), perp_z);
     let s_bz = cross(r_b, perp_z);
 
-    let axial_impulse = joint.spring_impulse + joint.motor_impulse + joint.lower_impulse - joint.upper_impulse;
+    let axial_impulse = joint.spring_impulse + joint.motor_impulse + friction_impulse + joint.lower_impulse - joint.upper_impulse;
     let perp_impulse = joint.perp_impulse;
 
     let p = blend3(axial_impulse, joint_axis, perp_impulse.x, perp_y, perp_impulse.y, perp_z);
@@ -451,6 +455,8 @@ pub fn solve_prismatic_joint(base: &mut JointSim, states: &StateAccess, context:
     let i_b = base.inv_i_b;
     let fixed_rotation = base.fixed_rotation;
     let constraint_softness = base.constraint_softness;
+    let friction = base.friction;
+    let mut friction_impulse = base.friction_impulse;
 
     let joint = prismatic_joint_mut(base);
 
@@ -496,6 +502,27 @@ pub fn solve_prismatic_joint(base: &mut JointSim, states: &StateAccess, context:
         let cdot = dot(v_rel, joint_axis);
         let delta_impulse = (-impulse_scale).mul_add(joint.spring_impulse, -mass_scale * axial_mass * (cdot + bias));
         joint.spring_impulse += delta_impulse;
+
+        let p = mul_sv(delta_impulse, joint_axis);
+        let l_a = mul_sv(delta_impulse, s_ax);
+        let l_b = mul_sv(delta_impulse, s_bx);
+
+        v_a = mul_sub(v_a, m_a, p);
+        w_a = sub(w_a, mul_mv(i_a, l_a));
+        v_b = mul_add(v_b, m_b, p);
+        w_b = add(w_b, mul_mv(i_b, l_b));
+    }
+
+    // Dry friction (port extension): limited by the perpendicular reaction force.
+    if friction.is_enabled() && !fixed_rotation {
+        let v_rel = sub(sub(add(v_b, cross(w_b, r_b)), v_a), cross(w_a, add(r_a, d)));
+        let cdot = dot(v_rel, joint_axis);
+        let mut delta_impulse = -axial_mass * cdot;
+        let normal = (joint.perp_impulse.x * joint.perp_impulse.x + joint.perp_impulse.y * joint.perp_impulse.y).sqrt();
+        let max_impulse = friction.torque * context.h + friction.coefficient * normal;
+        let new_impulse = clamp_float(friction_impulse.x + delta_impulse, -max_impulse, max_impulse);
+        delta_impulse = new_impulse - friction_impulse.x;
+        friction_impulse.x = new_impulse;
 
         let p = mul_sv(delta_impulse, joint_axis);
         let l_a = mul_sv(delta_impulse, s_ax);
@@ -696,4 +723,5 @@ pub fn solve_prismatic_joint(base: &mut JointSim, states: &StateAccess, context:
     if joint.index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
         states.set_velocities(joint.index_b as usize, v_b, w_b);
     }
+    base.friction_impulse = friction_impulse;
 }

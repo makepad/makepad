@@ -1063,7 +1063,7 @@ mod tests {
     #[test]
     fn sidecar_matches_off_thread_bake_for_real_model() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/car-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/car-kit");
         let model = match std::fs::read(root.join("ambulance.aomesh"))
             .ok()
             .and_then(|b| crate::model::StaticModel::from_aomesh(&b))
@@ -1111,7 +1111,7 @@ mod tests {
     #[test]
     fn sidecar_matches_off_thread_bake_for_real_rig() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/mini-characters/character-female-a.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/mini-characters/character-female-a.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("kenney assets absent — skipped");

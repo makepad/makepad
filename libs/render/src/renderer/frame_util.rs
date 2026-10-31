@@ -1,0 +1,855 @@
+//! Frame helpers: light selection, frustum/chunk culling, terrain tiles, sun and sky uniforms.
+
+use super::*;
+
+pub(super) fn perf_us(t0: f64) -> u64 {
+    ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64
+}
+
+/// Fold a baked shade multiplier into an instance colour.
+///
+/// Emissive surfaces opt out in proportion to their glow: a beacon in a
+/// tunnel is the light source, so darkening it reads as a bug rather than
+/// as occlusion. Alpha is never touched — for the alpha batch that would
+/// change coverage, not brightness.
+pub(super) fn shade_color(color: Vec4f, shade: f32, glow: f32) -> Vec4f {
+    let k = shade + (1.0 - shade) * glow.clamp(0.0, 1.0);
+    vec4(color.x * k, color.y * k, color.z * k, color.w)
+}
+
+/// Hard cap on per-draw dynamic lights — 8 pairs of vec4 uniforms, the
+/// Quest budget line. Selection below never returns more.
+pub const MAX_DYNAMIC_LIGHTS: usize = 8;
+
+/// Brightest component — the "how strong is this light" scalar the
+/// selection ranks by.
+pub(super) fn light_intensity(l: &crate::lightmap::LmLight) -> f32 {
+    l.color.x.max(l.color.y).max(l.color.z)
+}
+
+/// The transient flash a bursting firework shell throws on the world.
+///
+/// `None` while the shell is climbing (negative age) or after its sparks
+/// die. Colour comes from the shell; intensity pops hard at the burst (the
+/// same quarter-second "heat" window the spark shader whitens with) and
+/// decays quadratically over the shell's life. Radius is generous — a shell
+/// bursts 30-46 units up and the pool it throws on the street below is the
+/// whole point.
+pub fn firework_flash_light(
+    f: &crate::firework::FireworkInstance,
+) -> Option<crate::lightmap::LmLight> {
+    if f.age < 0.0 || f.age >= f.life || f.life <= 0.0 {
+        return None;
+    }
+    let t = (f.age / f.life).clamp(0.0, 1.0);
+    let fade = (1.0 - t) * (1.0 - t);
+    let heat = (1.0 - f.age * 4.0).clamp(0.0, 1.0);
+    let s = fade * (1.2 + 1.8 * heat);
+    Some(crate::lightmap::LmLight::omni(
+        f.origin,
+        vec3f(f.color.x * s, f.color.y * s, f.color.z * s),
+        55.0,
+    ))
+}
+
+/// Rank `lights` by their strongest contribution to ANY anchor point and
+/// append up to `max` indices to `out`, strongest first, skipping indices
+/// already in `out`. Score is intensity × (1 - d/radius)² at the nearest
+/// anchor; lights whose radius reaches no anchor are rejected outright.
+/// `range` restricts which light indices compete (so lamps and transients
+/// can be ranked separately). No allocation in the steady state — `rank`
+/// and `out` are caller-owned scratch.
+pub fn select_strongest_lights(
+    lights: &[crate::lightmap::LmLight],
+    range: std::ops::Range<usize>,
+    anchors: &[Vec3f],
+    max: usize,
+    rank: &mut Vec<(f32, usize)>,
+    out: &mut Vec<usize>,
+) {
+    rank.clear();
+    for i in range {
+        let l = &lights[i];
+        if l.radius <= 0.0 || out.contains(&i) {
+            continue;
+        }
+        let mut best_d2 = f32::MAX;
+        for a in anchors {
+            let (dx, dy, dz) = (a.x - l.pos.x, a.y - l.pos.y, a.z - l.pos.z);
+            best_d2 = best_d2.min(dx * dx + dy * dy + dz * dz);
+        }
+        if best_d2 >= l.radius * l.radius {
+            continue; // early radius reject: reaches no anchor
+        }
+        let att = 1.0 - best_d2.sqrt() / l.radius;
+        rank.push((light_intensity(l) * att * att, i));
+    }
+    rank.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (_, i) in rank.iter().take(max.min(MAX_DYNAMIC_LIGHTS)) {
+        out.push(*i);
+    }
+}
+
+/// Selection for the WORLD-SPANNING batches (cube slabs, terrain): there is
+/// no meaningful batch anchor, so lights are kept when their sphere touches
+/// the frustum and ranked by intensity with a soft distance-to-camera bias
+/// (no hard radius reject — a shell bursting far from the camera still
+/// lights the visible ground beneath it). v1 per-frame selection; a chunked
+/// world would want per-chunk lists.
+pub(super) fn select_lights_for_world(
+    lights: &[crate::lightmap::LmLight],
+    range: std::ops::Range<usize>,
+    camera: Vec3f,
+    frustum: Option<&Frustum>,
+    rank: &mut Vec<(f32, usize)>,
+    out: &mut Vec<usize>,
+) {
+    rank.clear();
+    out.clear();
+    for i in range {
+        let l = &lights[i];
+        if l.radius <= 0.0 {
+            continue;
+        }
+        if let Some(f) = frustum {
+            if !f.intersects_sphere(l.pos, l.radius) {
+                continue;
+            }
+        }
+        let (dx, dy, dz) = (camera.x - l.pos.x, camera.y - l.pos.y, camera.z - l.pos.z);
+        let d = (dx * dx + dy * dy + dz * dz).sqrt();
+        rank.push((light_intensity(l) * l.radius / (l.radius + d), i));
+    }
+    rank.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (_, i) in rank.iter().take(MAX_DYNAMIC_LIGHTS) {
+        out.push(*i);
+    }
+}
+
+/// Write a selected light list into a shader's `dl_*` uniforms: 8 pairs of
+/// vec4 (pos.xyz + radius, rgb + spot), unfilled slots zeroed so the shader
+/// rejects them on radius. `split` is how many leading slots hold TRANSIENT
+/// lights — DrawSceneSkinned's per-instance static gate reads it as
+/// `dl_split`; shaders without that uniform ignore the write.
+///
+/// The shader-side spot term assumes emission straight DOWN (the harvested
+/// street-lamp convention); a spot light with any other `dir` will still
+/// light, but its cone will point down. Fine for v1 — lamps are the only
+/// spot sources.
+/// Write a pre-packed light block (light_grid.rs layout — 8 × pos/col vec4
+/// pairs) straight into a shader's `dl_*` uniforms. The per-instance path:
+/// the append test compares dyn uniforms, so instances sharing a block still
+/// merge into one draw item and instances in different cells split — which
+/// is the point (a car must never flicker because a batch-shared ranking
+/// churned under it).
+pub(super) fn write_light_block(
+    cx: &Cx,
+    dv: &mut DrawVars,
+    packed: &[f32; LIGHT_BLOCK_FLOATS],
+    split: usize,
+) {
+    let pos_ids = [
+        live_id!(dl_pos0),
+        live_id!(dl_pos1),
+        live_id!(dl_pos2),
+        live_id!(dl_pos3),
+        live_id!(dl_pos4),
+        live_id!(dl_pos5),
+        live_id!(dl_pos6),
+        live_id!(dl_pos7),
+    ];
+    let col_ids = [
+        live_id!(dl_col0),
+        live_id!(dl_col1),
+        live_id!(dl_col2),
+        live_id!(dl_col3),
+        live_id!(dl_col4),
+        live_id!(dl_col5),
+        live_id!(dl_col6),
+        live_id!(dl_col7),
+    ];
+    for slot in 0..MAX_DYNAMIC_LIGHTS {
+        dv.set_uniform(cx, pos_ids[slot], &packed[slot * 8..slot * 8 + 4]);
+        dv.set_uniform(cx, col_ids[slot], &packed[slot * 8 + 4..slot * 8 + 8]);
+    }
+    dv.set_uniform(cx, live_id!(dl_split), &[split as f32]);
+}
+
+pub(super) fn write_light_uniforms(
+    cx: &Cx,
+    dv: &mut DrawVars,
+    lights: &[crate::lightmap::LmLight],
+    sel: &[usize],
+    split: usize,
+) {
+    let pos_ids = [
+        live_id!(dl_pos0),
+        live_id!(dl_pos1),
+        live_id!(dl_pos2),
+        live_id!(dl_pos3),
+        live_id!(dl_pos4),
+        live_id!(dl_pos5),
+        live_id!(dl_pos6),
+        live_id!(dl_pos7),
+    ];
+    let col_ids = [
+        live_id!(dl_col0),
+        live_id!(dl_col1),
+        live_id!(dl_col2),
+        live_id!(dl_col3),
+        live_id!(dl_col4),
+        live_id!(dl_col5),
+        live_id!(dl_col6),
+        live_id!(dl_col7),
+    ];
+    for slot in 0..MAX_DYNAMIC_LIGHTS {
+        let (p, c) = match sel.get(slot).map(|i| &lights[*i]) {
+            Some(l) => (
+                [l.pos.x, l.pos.y, l.pos.z, l.radius],
+                [l.color.x, l.color.y, l.color.z, l.spot],
+            ),
+            None => ([0.0; 4], [0.0; 4]),
+        };
+        dv.set_uniform(cx, pos_ids[slot], &p);
+        dv.set_uniform(cx, col_ids[slot], &c);
+    }
+    dv.set_uniform(cx, live_id!(dl_split), &[split as f32]);
+}
+
+/// World-unit slack on every cull test. The bounds themselves are measured
+/// (mesh min/max, entity half extents), so this only has to absorb float
+/// rounding across the frustum math — but a skipped visible object is a real
+/// bug and an extra drawn one is not, so it is sized generously.
+pub(super) const CULL_MARGIN: f32 = 0.5;
+
+/// Side of a world-space culling cell. The tradeoff: smaller cells cull
+/// tighter but cost more per-frame AABB tests and — for the chunked shadow
+/// geometry and terrain tiles, which draw one item per visible cell — more
+/// draw items on a tiler. 48 keeps the village in a handful of cells and a
+/// Zelda-scale map under ~100, while a ground-level camera still rejects
+/// most of them. (The static instance SLABS are chunked too but share the
+/// per-shape draw item, so their count is unaffected by this value.)
+pub const CHUNK_SIZE: f32 = 48.0;
+
+/// Which grid cell a world-space point lives in. Floor, not truncation:
+/// negative coordinates must not fold cell -1 onto cell 0.
+pub(super) fn chunk_cell(x: f32, z: f32) -> (i32, i32) {
+    (
+        (x / CHUNK_SIZE).floor() as i32,
+        (z / CHUNK_SIZE).floor() as i32,
+    )
+}
+
+/// The view frustum in world space — the space instance transforms live in,
+/// which is why the clip matrix handed to [`Frustum::from_clip_matrix`] must
+/// include the stage transform (shaders compute
+/// `projection * view * view_transform * transform`).
+///
+/// Planes come from the rows of the clip matrix (Gribb-Hartmann) and point
+/// INWARD: a point is inside a plane when its signed distance is >= 0. Every
+/// test below is conservative — it only rejects what is provably beyond ONE
+/// plane, so anything straddling or spanning the frustum always draws.
+#[derive(Clone, Copy, Debug)]
+pub struct Frustum {
+    first: Planes,
+    /// A stereo view's second eye: what either eye sees draws (`from_clip_matrices`).
+    second: Option<Planes>,
+}
+
+impl Frustum {
+    /// `clip` maps world space to clip space, column-vector convention as
+    /// `Mat4f` stores it — row `i` is `v[i], v[i+4], v[i+8], v[i+12]`.
+    pub fn from_clip_matrix(clip: &Mat4f) -> Self {
+        Self { first: Planes::from_clip_matrix(clip), second: None }
+    }
+
+    /// The union of two views (the eyes of a stereo frame): a test rejects only what
+    /// both views reject.
+    pub fn from_clip_matrices(a: &Mat4f, b: &Mat4f) -> Self {
+        Self { first: Planes::from_clip_matrix(a), second: Some(Planes::from_clip_matrix(b)) }
+    }
+
+    /// Sphere-vs-frustum; false only when the sphere is fully beyond a plane.
+    pub fn intersects_sphere(&self, center: Vec3f, radius: f32) -> bool {
+        self.first.intersects_sphere(center, radius) || self.second.is_some_and(|p| p.intersects_sphere(center, radius))
+    }
+
+    /// World-axis-aligned box vs the frustum (`Planes::intersects_aabb`).
+    pub fn intersects_aabb(&self, min: Vec3f, max: Vec3f) -> bool {
+        self.first.intersects_aabb(min, max) || self.second.is_some_and(|p| p.intersects_aabb(min, max))
+    }
+
+    /// Model-space AABB under `transform` vs the frustum (`Planes::intersects_obb`).
+    pub fn intersects_obb(&self, min: Vec3f, max: Vec3f, transform: &Mat4f) -> bool {
+        self.first.intersects_obb(min, max, transform) || self.second.is_some_and(|p| p.intersects_obb(min, max, transform))
+    }
+}
+
+/// One view's six inward planes.
+#[derive(Clone, Copy, Debug)]
+struct Planes {
+    planes: [Vec4f; 6],
+}
+
+impl Planes {
+    fn from_clip_matrix(clip: &Mat4f) -> Self {
+        let row = |i: usize| vec4(clip.v[i], clip.v[i + 4], clip.v[i + 8], clip.v[i + 12]);
+        let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+        // Near uses the GL convention (-w <= z). A backend that clips at
+        // 0 <= z has a tighter near plane, so testing against the looser one
+        // only ever keeps more — conservative in the direction that matters.
+        let mut planes = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 + r2, r3 - r2];
+        // Normalised so caller margins are world units.
+        for p in planes.iter_mut() {
+            let len = vec3f(p.x, p.y, p.z).length();
+            if len > 1.0e-8 {
+                *p = *p * (1.0 / len);
+            }
+        }
+        Self { planes }
+    }
+
+    fn distance(p: Vec4f, v: Vec3f) -> f32 {
+        p.x * v.x + p.y * v.y + p.z * v.z + p.w
+    }
+
+    /// Sphere-vs-frustum; false only when the sphere is fully beyond a plane.
+    fn intersects_sphere(&self, center: Vec3f, radius: f32) -> bool {
+        self.planes
+            .iter()
+            .all(|p| Self::distance(*p, center) >= -(radius + CULL_MARGIN))
+    }
+
+    /// World-axis-aligned box vs the frustum, via the positive-vertex trick:
+    /// per plane, only the corner most inside can decide "fully outside".
+    /// Same conservatism as the corner tests — straddlers always pass.
+    fn intersects_aabb(&self, min: Vec3f, max: Vec3f) -> bool {
+        self.planes.iter().all(|p| {
+            let v = vec3f(
+                if p.x >= 0.0 { max.x } else { min.x },
+                if p.y >= 0.0 { max.y } else { min.y },
+                if p.z >= 0.0 { max.z } else { min.z },
+            );
+            Self::distance(*p, v) >= -CULL_MARGIN
+        })
+    }
+
+    /// Model-space AABB under `transform` vs the frustum: the 8 transformed
+    /// corners, rejected only when all of them sit beyond one plane. That is
+    /// exact for "entirely outside plane P" and never false-culls, because a
+    /// box with any part inside keeps at least one corner inside every plane's
+    /// reject test.
+    fn intersects_obb(&self, min: Vec3f, max: Vec3f, transform: &Mat4f) -> bool {
+        let t = &transform.v;
+        // The bounding sphere of the transformed box decides first: beyond
+        // a plane by more than its radius puts every corner beyond it (the
+        // corner test's reject), and inside every plane by its radius keeps
+        // a corner inside each (its accept). Only a straddler takes the
+        // eight corners. A forest's thousands of copies a frame.
+        let (mid, half) = ((min + max) * 0.5, (max - min) * 0.5);
+        let center = vec3f(
+            t[0] * mid.x + t[4] * mid.y + t[8] * mid.z + t[12],
+            t[1] * mid.x + t[5] * mid.y + t[9] * mid.z + t[13],
+            t[2] * mid.x + t[6] * mid.y + t[10] * mid.z + t[14],
+        );
+        let column = |k: usize| (t[k] * t[k] + t[k + 1] * t[k + 1] + t[k + 2] * t[k + 2]).sqrt();
+        let radius = half.x.abs() * column(0) + half.y.abs() * column(4) + half.z.abs() * column(8);
+        let mut straddles = false;
+        for p in &self.planes {
+            let d = Self::distance(*p, center);
+            if d < -(radius + CULL_MARGIN) {
+                return false;
+            }
+            straddles |= d < radius;
+        }
+        if !straddles {
+            return true;
+        }
+        let mut corners = [Vec3f::default(); 8];
+        for (i, c) in corners.iter_mut().enumerate() {
+            let l = vec3f(
+                if i & 1 == 0 { min.x } else { max.x },
+                if i & 2 == 0 { min.y } else { max.y },
+                if i & 4 == 0 { min.z } else { max.z },
+            );
+            *c = vec3f(
+                t[0] * l.x + t[4] * l.y + t[8] * l.z + t[12],
+                t[1] * l.x + t[5] * l.y + t[9] * l.z + t[13],
+                t[2] * l.x + t[6] * l.y + t[10] * l.z + t[14],
+            );
+        }
+        for p in &self.planes {
+            if corners
+                .iter()
+                .all(|c| Self::distance(*p, *c) < -CULL_MARGIN)
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// One world-grid cell's packed static instances, per shape and pass. The
+/// bounds are CONTENT bounds — the union of what is actually packed here
+/// (height included), never the cell footprint — so a tall tower culls by
+/// what it is, and a cell whose content leans over the border still tests
+/// correctly. Chunks exist only when something packed into them, so an
+/// empty cell x shape combination costs nothing anywhere.
+pub(super) struct SlabChunk {
+    pub(super) cell: (i32, i32),
+    pub(super) min: Vec3f,
+    pub(super) max: Vec3f,
+    pub(super) slab: [Vec<f32>; 5],
+    pub(super) slab_alpha: [Vec<f32>; 5],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PrimitiveBucket {
+    Opaque,
+    Alpha,
+}
+
+/// `None` = not drawn at all. `Entity::shell` boxes are pure containment:
+/// solid to movement, skipped by the camera boom, and INVISIBLE — an
+/// interior is an open stage (user, 2026-08-27: "make these indoor spaces
+/// without walls — all you see is a little box you're inside of"). The
+/// earlier inward-wound "dollhouse" rendering was wrong twice from a thin
+/// wall slab: inside the room you saw its far skin, outside you saw the
+/// near wall's inner skin — a box either way.
+pub(super) fn primitive_bucket(entity: &Entity) -> Option<PrimitiveBucket> {
+    if entity.alpha_primitive {
+        Some(PrimitiveBucket::Alpha)
+    } else if entity.suppress_primitive {
+        None
+    } else {
+        Some(PrimitiveBucket::Opaque)
+    }
+}
+
+/// A dynamic cube instance whose colour carries fractional alpha. The opaque
+/// cube batch replaces the destination (its shader does not blend), so such
+/// instances are held back here and drawn in the alpha pass of the same
+/// shape through `DrawSceneAlpha`, after all opaque geometry, where blending
+/// sees depth. All-opaque batches are unaffected: nothing is deferred.
+pub(super) struct DeferredAlphaCube {
+    pub(super) transform: Mat4f,
+    pub(super) size: Vec3f,
+    pub(super) color: Vec4f,
+    pub(super) glow: f32,
+    pub(super) color_adjust_ctl: Vec4f,
+}
+
+/// Settle delay before the world-settle work (receiver refresh + lightmap
+/// kick) runs after an edit. A burst of mutations (a game spawning
+/// platforms, a dragged kinematic) pays ONE refresh once the world has been
+/// still this long — "only re-render the shadows when an object stops
+/// moving" — instead of one per mutation.
+pub(super) const SHADOW_SETTLE: f64 = 0.2;
+
+/// Coalescing debounce for the settle work. Pure state machine — the caller
+/// supplies the clock — so the burst behaviour is testable without threads
+/// or sleeps. However many times the key moves while pending, at most one
+/// rebuild fires, for the LATEST key, once it has been stable for the
+/// settle window; the very first build runs immediately, because there is
+/// no stale state to keep showing in its place.
+#[derive(Default)]
+pub(super) struct ShadowRebuildGate {
+    /// The key the current chunks were built for. None = never built.
+    pub(super) built: Option<(u64, u64, u64, u32)>,
+    /// Latest key seen since `built`, and when it last CHANGED.
+    pub(super) pending: Option<((u64, u64, u64, u32), f64)>,
+}
+
+impl ShadowRebuildGate {
+    /// True when the caller should rebuild for `key` NOW. Call `mark_built`
+    /// after doing so, or the gate will keep saying yes.
+    pub(super) fn should_rebuild(
+        &mut self,
+        key: (u64, u64, u64, u32),
+        now: f64,
+        settle: f64,
+    ) -> bool {
+        if self.built == Some(key) {
+            self.pending = None;
+            return false;
+        }
+        if self.built.is_none() {
+            return true;
+        }
+        match self.pending {
+            // A hair of slack: `t + 0.2 - t` is a few ulps under 0.2 in f64,
+            // and a settle that never fires is a rebuild that never comes.
+            Some((k, since)) if k == key => now - since + 1.0e-9 >= settle,
+            // New key (first change, or changed again mid-wait): the settle
+            // clock restarts — the world is still being edited.
+            _ => {
+                self.pending = Some((key, now));
+                false
+            }
+        }
+    }
+
+    pub(super) fn mark_built(&mut self, key: (u64, u64, u64, u32)) {
+        self.built = Some(key);
+        self.pending = None;
+    }
+}
+
+/// One tile of the terrain mesh: the same triangles the whole-mesh builder
+/// emitted for its cell range, regrouped so offscreen tiles skip the draw.
+pub(super) struct TerrainTile {
+    pub(super) min: Vec3f,
+    pub(super) max: Vec3f,
+    pub(super) geometry: Geometry,
+    pub(super) shadow_geometry: Option<Geometry>,
+}
+
+/// One uploaded voxel chunk mesh. The vertex layout is the terrain tiles'
+/// PbrVertex (the sim mesher emits it directly), so DrawSceneTerrain draws
+/// both without knowing which is which.
+pub(super) struct VoxelTile {
+    pub(super) key: ChunkKey,
+    pub(super) rev: u64,
+    pub(super) min: Vec3f,
+    pub(super) max: Vec3f,
+    pub(super) geometry: Geometry,
+    pub(super) shadow_geometry: Option<Geometry>,
+}
+
+/// Emit terrain triangles for grid cells [gx0..gx1) x [gz0..gz1) — exactly
+/// the primitives the single-mesh builder produced for those cells, in the
+/// same per-cell order, so tiling regroups the mesh without changing one
+/// triangle. Returns (vertices, indices, min, max); bounds come from the
+/// emitted vertices, heights included.
+pub(super) fn terrain_tile_data(
+    terrain: &Terrain,
+    materials: Option<&TerrainMaterials>,
+    gx0: usize,
+    gx1: usize,
+    gz0: usize,
+    gz1: usize,
+) -> (Vec<f32>, Vec<u32>, Vec3f, Vec3f) {
+    let n = terrain.cells;
+    let mut vertices: Vec<f32> = Vec::with_capacity((gx1 - gx0) * (gz1 - gz0) * 2 * 3 * 16);
+    let mut indices: Vec<u32> = Vec::with_capacity((gx1 - gx0) * (gz1 - gz0) * 6);
+    let mut min = vec3f(f32::MAX, f32::MAX, f32::MAX);
+    let mut max = vec3f(f32::MIN, f32::MIN, f32::MIN);
+    let world_pos = |gx: usize, gz: usize| -> Vec3f {
+        vec3f(
+            terrain.origin + gx as f32 * terrain.cell_size,
+            terrain.heights[gz * n + gx],
+            terrain.origin + gz as f32 * terrain.cell_size,
+        )
+    };
+    let mut push_tri = |vertices: &mut Vec<f32>, indices: &mut Vec<u32>, a: Vec3f, b: Vec3f, c: Vec3f, color: Vec4f| {
+        let normal = Vec3f::cross(b - a, c - a).normalize();
+        for p in [a, b, c] {
+            // PbrVertex: pos_nx, ny_nz_uv, color, tangent — 16 floats.
+            vertices.extend_from_slice(&[
+                p.x, p.y, p.z, normal.x, normal.y, normal.z, 0.0, 0.0, color.x, color.y,
+                color.z, color.w, 1.0, 0.0, 0.0, 1.0,
+            ]);
+            indices.push(vertices.len() as u32 / 16 - 1);
+            min = vec3f(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+            max = vec3f(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+        }
+    };
+    for gz in gz0..gz1 {
+        for gx in gx0..gx1 {
+            // 0xFF is the hole value (mix.md T4): the voxel field took over
+            // this cell's surface — box3d skips it, and so do we.
+            if let Some(m) = materials {
+                if m.indices.get(gz * (n - 1) + gx) == Some(&0xFF) {
+                    continue;
+                }
+            }
+            let a = world_pos(gx, gz);
+            let b = world_pos(gx + 1, gz);
+            let c = world_pos(gx, gz + 1);
+            let d = world_pos(gx + 1, gz + 1);
+            let color_at = |gx: usize, gz: usize| terrain.colors[gz * n + gx];
+            let c0 = color_at(gx, gz);
+            let c1 = color_at(gx + 1, gz);
+            let c2 = color_at(gx, gz + 1);
+            let c3 = color_at(gx + 1, gz + 1);
+            let avg3 = |x: Vec4f, y: Vec4f, z: Vec4f| {
+                vec4(
+                    (x.x + y.x + z.x) / 3.0,
+                    (x.y + y.y + z.y) / 3.0,
+                    (x.z + y.z + z.z) / 3.0,
+                    1.0,
+                )
+            };
+            // Same diagonal split as Terrain::height_at, CCW seen from +y.
+            push_tri(&mut vertices, &mut indices, a, c, b, avg3(c0, c2, c1));
+            push_tri(&mut vertices, &mut indices, b, c, d, avg3(c1, c2, c3));
+        }
+    }
+    (vertices, indices, min, max)
+}
+
+/// Write one [`SunLight`] into every game shader. This is the whole of the
+/// T7 unification on the game side: before it, cube/terrain/skinned each
+/// hardcoded their own ambient/direct split and five script blocks set the
+/// light direction by hand. Skinned is applied in `draw_skinned_inner`,
+/// which owns that struct.
+/// Exact sRGB -> linear, per channel (the HDR lane's Rust-side decode of
+/// authored colours).
+pub fn srgb_to_linear(c: Vec3f) -> Vec3f {
+    let f = |v: f32| {
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    vec3f(f(c.x), f(c.y), f(c.z))
+}
+
+pub(crate) fn apply_sun(cx: &Cx, draws: &mut SceneDraws, sun: &SunLight, fog_color: Vec3f) {
+    // The cube family batches thousands of instances, so its sun and fog
+    // colour ride in uniforms; only the direction stays per-instance (it
+    // belongs to DrawCube, shared with consumers outside this crate).
+    draws.cube.cube.light_dir = sun.dir;
+    sun.write_uniforms(cx, &mut draws.cube.cube.draw_vars);
+    draws
+        .cube
+        .cube
+        .draw_vars
+        .set_uniform(cx, live_id!(fog_color), &[fog_color.x, fog_color.y, fog_color.z]);
+    draws.alpha.cube.cube.light_dir = sun.dir;
+    sun.write_uniforms(cx, &mut draws.alpha.cube.cube.draw_vars);
+    draws.alpha.cube.cube.draw_vars.set_uniform(
+        cx,
+        live_id!(fog_color),
+        &[fog_color.x, fog_color.y, fog_color.z],
+    );
+    // Terrain and skinned draw one instance each, so there is nothing to
+    // save by moving their sun off the instance stream.
+    sun.write_into(
+        &mut draws.terrain.light_dir,
+        &mut draws.terrain.sun_color,
+        &mut draws.terrain.sun_sky,
+        &mut draws.terrain.sun_ground,
+    );
+}
+
+/// Does this script-configured sky take the ANALYTIC (Preetham) dome? Yes
+/// while the DOME colours are the stock defaults — a script that authored
+/// its own top/ground palette keeps the gradient it asked for. The horizon
+/// colour is deliberately NOT part of the test: it only ever tinted the fog
+/// (the village demo customises exactly that), and analytic mode derives
+/// its fog from the model instead.
+/// This world's analytic sky frame for `sun_dir`, when it draws one.
+///
+/// A world on a RUNNING clock (`clock`: its `time_of_day` has moved since
+/// the realm began) always takes the analytic dome: a painted gradient
+/// cannot set, dusk or go dark, and a game that painted its sky blue and
+/// then ran a day cycle got a day-blue midnight. Its authored colours
+/// become a TINT of the analytic day instead ([`authored_sky_tint`]): the
+/// top tints the dome, the horizon tints the fog, both fading out through
+/// twilight so every night is the same starry one. A painted sky under a
+/// fixed hour keeps its gradient.
+pub(super) fn analytic_sky_frame(world: &World, sun_dir: Vec3f, shows_environment: bool, hdr: bool, clock: bool) -> Option<crate::sky::SkyFrame> {
+    world
+        .sky
+        .as_ref()
+        .filter(|s| shows_environment && (clock || sky_wants_analytic(s)))
+        .map(|sky| {
+            let turbidity = if sky.turbidity.is_finite() { sky.turbidity } else { sky_turbidity() };
+            let compensation = if sky.exposure_ev.is_finite() {
+                2.0f32.powf(sky.exposure_ev.clamp(-12.0, 12.0))
+            } else {
+                1.0
+            };
+            let mut frame = crate::sky::preetham_frame(sun_dir, turbidity, sky_exposure() * compensation);
+            if !sky_wants_analytic(sky) {
+                let day = 1.0 - frame.zenith.w;
+                let d = makepad_scene::SkyConfig::default();
+                let top = authored_sky_tint(sky.top, d.top, day);
+                let horizon = authored_sky_tint(sky.horizon, d.horizon, day);
+                let gamma = |t: Vec3f| vec3f(t.x.powf(1.0 / 2.2), t.y.powf(1.0 / 2.2), t.z.powf(1.0 / 2.2));
+                frame.dome_tint = if hdr { top } else { gamma(top) };
+                frame.fog_linear = frame.fog_linear * horizon;
+                frame.fog_rgb = frame.fog_rgb * gamma(horizon);
+            }
+            frame
+        })
+}
+
+/// A LINEAR-light tint that moves the analytic default toward an authored
+/// sky colour: the hue ratio of `authored` over the stock `default`, its
+/// brightness kept within half to one and a half times, faded to neutral
+/// by `day` (1 = full day, 0 = night). Bounded so an authored palette
+/// colours the sky without breaking the model's sunset.
+pub(super) fn authored_sky_tint(authored: Vec4f, default: Vec4f, day: f32) -> Vec3f {
+    let a = srgb_to_linear(vec3f(authored.x, authored.y, authored.z));
+    let b = srgb_to_linear(vec3f(default.x, default.y, default.z));
+    let ratio = vec3f(a.x / b.x.max(1.0e-4), a.y / b.y.max(1.0e-4), a.z / b.z.max(1.0e-4));
+    let lum = (ratio.x * 0.2126 + ratio.y * 0.7152 + ratio.z * 0.0722).max(1.0e-4);
+    let hue = |v: f32| (v / lum).clamp(0.3, 2.5);
+    let bright = lum.clamp(0.5, 1.5);
+    let tint = vec3f(hue(ratio.x), hue(ratio.y), hue(ratio.z)) * bright;
+    let day = day.clamp(0.0, 1.0);
+    vec3f(1.0, 1.0, 1.0) * (1.0 - day) + tint * day
+}
+
+pub(super) fn sky_wants_analytic(sky: &makepad_scene::SkyConfig) -> bool {
+    let d = makepad_scene::SkyConfig::default();
+    let close = |a: Vec4f, b: Vec4f| {
+        (a.x - b.x).abs() < 1.0e-3 && (a.y - b.y).abs() < 1.0e-3 && (a.z - b.z).abs() < 1.0e-3
+    };
+    close(sky.top, d.top) && close(sky.ground, d.ground) && close(sky.ground_bottom, d.ground_bottom)
+}
+
+/// Sky turbidity (haze), MAKEPAD_SKY_TURBIDITY overridable; 2.5 is a clear
+/// day with enough aerosol for a warm horizon.
+pub(super) fn sky_turbidity() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("MAKEPAD_SKY_TURBIDITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2.5)
+    })
+}
+
+/// Sky exposure for the Preetham tone-map (MAKEPAD_SKY_EXPOSURE); tuned so
+/// the default noon matches the hand-painted dome's brightness.
+pub(super) fn sky_exposure() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("MAKEPAD_SKY_EXPOSURE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.1)
+    })
+}
+
+/// Desktop-class default; see [`Renderer::set_shadow_budget`].
+/// Default bloom share of the HDR composite.
+pub(super) const DEFAULT_BLOOM: f32 = 0.05;
+
+pub const DEFAULT_SHADOW_BUDGET: usize = 24;
+
+/// Palette-texture width in texels. Power of two: `(i + 0.5) / width` is then
+/// exact in f32, so nearest sampling at texel centres cannot land on a
+/// neighbouring matrix row. 128 texels = 42 joints per row; palettes wrap
+/// rows freely because the shader addresses texels by flat index.
+pub(super) const JOINT_TEX_WIDTH: usize = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorldModelLane {
+    Placed,
+    Attachment,
+}
+
+impl WorldModelLane {
+    pub(super) fn is_dynamic(self, inst: &ModelInstance) -> bool {
+        self == Self::Attachment || inst.dynamic
+    }
+
+    pub(super) fn light_key(self, slot: usize) -> u64 {
+        // Top-bit namespaces are deliberately disjoint from skinned actors
+        // (0x8000...) and from each other. Stable slot keys let the light
+        // grid's dead-band remember an attached prop without allowing it to
+        // disturb a placed car's light selection.
+        match self {
+            Self::Placed => 0x4000_0000_0000_0000 | slot as u64,
+            Self::Attachment => 0xC000_0000_0000_0000 | slot as u64,
+        }
+    }
+}
+
+/// One settled bake's atlas signature, and — for every bake after the
+/// first — its DIFF against that first one. Re-baking a world nothing has
+/// edited must land on the same bytes; a bake that only ever grows the lit
+/// set is an accumulator that was not cleared (gpu_lightmap.rs, section 1,
+/// carries the measurement this instrument produced).
+///
+/// Driven by MAKEPAD_GPU_LM_REBAKE. macOS only: it needs a texture readback.
+#[cfg(target_os = "macos")]
+pub(super) fn lm_probe_report(
+    k: usize,
+    w: usize,
+    h: usize,
+    regions: usize,
+    lamps: usize,
+    bytes: &[u8],
+    rects: &[(crate::lightmap::LmRect, bool)],
+) {
+    // Readback callbacks run serially on the worker pool and may use different workers.
+    static REFERENCE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut sum = [0u64; 4];
+    let mut mx = [0u8; 4];
+    for px in bytes.chunks_exact(4) {
+        for c in 0..4 {
+            hash = (hash ^ px[c] as u64).wrapping_mul(0x100000001b3);
+            sum[c] += px[c] as u64;
+            mx[c] = mx[c].max(px[c]);
+        }
+    }
+    let px_count = (bytes.len() / 4).max(1) as f64;
+    log!(
+        "lm probe: bake {k} — {w}x{h}, {regions} regions, {lamps} lamp(s), hash {hash:016x}, \
+         mean BGRA {:.3} {:.3} {:.3} {:.1}, max {:?}",
+        sum[0] as f64 / px_count,
+        sum[1] as f64 / px_count,
+        sum[2] as f64 / px_count,
+        sum[3] as f64 / px_count,
+        mx
+    );
+    (|| {
+        let Some(prev) = REFERENCE.get() else {
+            let _ = REFERENCE.set(bytes.to_vec());
+            return;
+        };
+        if prev.len() != bytes.len() {
+            log!("lm probe: bake {k} — atlas resized, no diff against bake 0");
+            return;
+        }
+        let (mut diff, mut up, mut down) = (0u64, 0u64, 0u64);
+        let mut worst = 0i32;
+        let mut worst_at = (0usize, 0usize, 0usize);
+        let mut sum_delta = 0i64;
+        for (i, (a, b)) in prev.chunks_exact(4).zip(bytes.chunks_exact(4)).enumerate() {
+            let mut any = false;
+            for c in 0..4 {
+                let d = b[c] as i32 - a[c] as i32;
+                if d != 0 {
+                    any = true;
+                    sum_delta += d as i64;
+                    if d.abs() > worst.abs() {
+                        worst = d;
+                        worst_at = (i % w, i / w, c);
+                    }
+                }
+            }
+            if any {
+                diff += 1;
+                let sa: i32 = a[..3].iter().map(|v| *v as i32).sum();
+                let sb: i32 = b[..3].iter().map(|v| *v as i32).sum();
+                if sb > sa {
+                    up += 1;
+                } else if sb < sa {
+                    down += 1;
+                }
+            }
+        }
+        let owner = rects
+            .iter()
+            .position(|(rc, _)| {
+                worst_at.0 >= rc.x
+                    && worst_at.0 < rc.x + rc.w
+                    && worst_at.1 >= rc.y
+                    && worst_at.1 < rc.y + rc.h
+            })
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        log!(
+            "lm probe: bake {k} vs 0 — {diff} texels differ (rgb up {up}, down {down}), \
+             worst delta {worst} at ({},{}) chan {} region {owner}, sum delta {sum_delta}",
+            worst_at.0,
+            worst_at.1,
+            worst_at.2
+        );
+    })();
+}

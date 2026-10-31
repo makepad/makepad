@@ -62,7 +62,7 @@ pub struct ConstraintGraph {
 use crate::b3_assert;
 use crate::bitset::{clear_bit, create_bit_set, destroy_bit_set, get_bit, set_bit_count_and_clear, set_bit_grow};
 use crate::container::array_remove_swap;
-use crate::contact::{CONTACT_TOUCHING_FLAG, SIM_MESH_CONTACT};
+use crate::contact::{CONTACT_TOUCHING_FLAG, SIM_MESH_CONTACT, SIM_TUBE_CONTACT};
 use crate::core::NULL_INDEX;
 use crate::math_functions::max_int;
 use crate::physics_world::{HexColor, World, AWAKE_SET};
@@ -210,7 +210,7 @@ pub fn add_contact_to_graph(world: &mut World, contact_id: i32) {
         }
     }
 
-    let is_scalar = (contact_flags & SIM_MESH_CONTACT != 0) || color_index == OVERFLOW_INDEX;
+    let is_scalar = (contact_flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT) != 0) || color_index == OVERFLOW_INDEX;
 
     let color = &mut graph.colors[color_index as usize];
     let local_index = if is_scalar {
@@ -244,7 +244,7 @@ pub fn remove_contact_from_graph(
     body_id_b: i32,
     color_index: i32,
     local_index: i32,
-    mesh_contact: bool,
+    multi_manifold: bool,
 ) {
     b3_assert!(0 <= color_index && color_index < GRAPH_COLOR_COUNT as i32);
 
@@ -255,7 +255,7 @@ pub fn remove_contact_from_graph(
         clear_bit(&mut color.body_set, body_id_b as u32);
     }
 
-    if mesh_contact || color_index == OVERFLOW_INDEX {
+    if multi_manifold || color_index == OVERFLOW_INDEX {
         let moved_index =
             array_remove_swap(&mut world.constraint_graph.colors[color_index as usize].contacts, local_index);
         if moved_index != NULL_INDEX {
@@ -279,7 +279,7 @@ pub fn remove_contact_from_graph(
             b3_assert!(moved_contact.set_index == AWAKE_SET);
             b3_assert!(moved_contact.color_index == color_index);
             b3_assert!(moved_contact.local_index == moved_index);
-            b3_assert!(moved_contact.flags & SIM_MESH_CONTACT == 0);
+            b3_assert!(moved_contact.flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT) == 0);
             moved_contact.local_index = local_index;
         }
     }

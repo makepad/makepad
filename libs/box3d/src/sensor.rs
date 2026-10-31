@@ -69,6 +69,25 @@ use crate::shape::{should_shapes_collide, Shape, ShapeGeometry};
 use crate::types::{CustomFilterFcn, SensorBeginTouchEvent, SensorEndTouchEvent, ShapeProxy, ShapeType};
 
 fn overlap_sensor(sensor_shape: &Shape, sensor_transform: Transform, visitor_shape: &Shape, visitor_transform: Transform) -> bool {
+    if matches!(&sensor_shape.geom, ShapeGeometry::Tube(_))
+        && matches!(&visitor_shape.geom, ShapeGeometry::Mesh(_) | ShapeGeometry::HeightField(_) | ShapeGeometry::Compound(_))
+    {
+        return overlap_sensor(visitor_shape, visitor_transform, sensor_shape, sensor_transform);
+    }
+
+    if let ShapeGeometry::Tube(tube) = &visitor_shape.geom {
+        let relative_transform = inv_mul_transforms(sensor_transform, visitor_transform);
+        return (0..tube.points.len()).any(|i| {
+            let capsule = tube.segment(i);
+            let points = [
+                transform_point(relative_transform, capsule.center1),
+                transform_point(relative_transform, capsule.center2),
+            ];
+            let proxy = ShapeProxy { points: &points, radius: tube.radius };
+            crate::shape::overlap_shape(sensor_shape, Transform::IDENTITY, &proxy)
+        });
+    }
+
     let mut proxy_buffer = [Vec3::ZERO; 2];
     let proxy = crate::shape::make_shape_proxy(visitor_shape, &mut proxy_buffer);
 
@@ -89,6 +108,8 @@ fn overlap_sensor(sensor_shape: &Shape, sensor_transform: Transform, visitor_sha
 
     match &sensor_shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::overlap_capsule(capsule, Transform::IDENTITY, &local_proxy),
+
+        ShapeGeometry::Tube(tube) => crate::tube::overlap_tube(tube, Transform::IDENTITY, &local_proxy),
 
         ShapeGeometry::Compound(compound) => crate::compound::overlap_compound(compound, Transform::IDENTITY, &local_proxy),
 

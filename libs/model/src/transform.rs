@@ -1,5 +1,6 @@
 //! Authoring-space TRS and quaternion math. Matrices are row-major; vectors are
 //! columns. All public transforms validate finite, invertible render values.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{Error, Result};
 
 pub type Vector3 = [f64; 3];
@@ -48,7 +49,7 @@ pub fn sub(a:Vector3,b:Vector3)->Vector3 {std::array::from_fn(|i|a[i]-b[i])}
 pub fn mul(a:Vector3,s:f64)->Vector3 {a.map(|v|v*s)}
 pub fn dot(a:Vector3,b:Vector3)->f64 {a.iter().zip(b).map(|(a,b)|a*b).sum()}
 pub fn cross(a:Vector3,b:Vector3)->Vector3 {[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]}
-pub fn length(a:Vector3)->f64 {a[0].hypot(a[1]).hypot(a[2])}
+pub fn length(a:Vector3)->f64 {a[0].phypot(a[1]).phypot(a[2])}
 pub fn normalized(a:Vector3)->Result<Vector3> {
     let n=length(a); if !n.is_finite() || n<1e-12 {Err(Error::Invalid("zero or non-finite direction"))} else {Ok(mul(a,1./n))}
 }
@@ -89,7 +90,7 @@ pub fn quat_normalize(q:Quaternion)->Result<Quaternion> {
 }
 pub fn quat_axis_angle(axis:Vector3,angle:f64)->Result<Quaternion> {
     if !angle.is_finite() {return Err(Error::Invalid("non-finite angle"));}
-    let a=normalized(axis)?; let (s,c)=(angle*0.5).sin_cos();Ok([a[0]*s,a[1]*s,a[2]*s,c])
+    let a=normalized(axis)?; let (s,c)=(angle*0.5).psin_cos();Ok([a[0]*s,a[1]*s,a[2]*s,c])
 }
 pub fn quat_rotate(q:Quaternion,p:Vector3)->Vector3 {
     let u=[q[0],q[1],q[2]];add(p,mul(add(mul(cross(u,p),q[3]),cross(u,cross(u,p))),2.))
@@ -107,8 +108,8 @@ pub fn quat_slerp(a:Quaternion,mut b:Quaternion,t:f64)->Quaternion {
     let mut d=a.iter().zip(b).map(|(a,b)|a*b).sum::<f64>();
     if d<0. {b=b.map(|v|-v);d=-d;}
     if d>0.9995 {return quat_normalize(std::array::from_fn(|i|a[i]+t*(b[i]-a[i]))).unwrap_or(a);}
-    let theta=d.clamp(-1.,1.).acos();let denom=theta.sin();
-    std::array::from_fn(|i|(((1.-t)*theta).sin()*a[i]+(t*theta).sin()*b[i])/denom)
+    let theta=d.clamp(-1.,1.).pacos();let denom=theta.psin();
+    std::array::from_fn(|i|(((1.-t)*theta).psin()*a[i]+(t*theta).psin()*b[i])/denom)
 }
 
 #[cfg(test)] mod tests {

@@ -2,12 +2,16 @@
 name = "makepad-csg-sdf"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [features]
 default = ["threads"]
 threads = ["makepad-csg-math/threads"]
 
 [dependencies]
+makepad-script-compute-sched = { path = "../../../platform/script/compute_sched" }
 makepad-csg-math = { path = "../csg_math" }
+makepad-core-util = { path = "../../core_util" }
 makepad-csg-mesh = { path = "../csg_mesh" }
 makepad-script = { path = "../../../platform/script", version = "1.0.0" }
+makepad-script-compute = { path = "../../../platform/script/compute", version = "1.0.0", features = ["vm"] }

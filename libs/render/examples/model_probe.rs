@@ -1,7 +1,7 @@
 // Parse real Kenney GLBs and report what came out.
 use makepad_render::model::StaticModel;
 fn main() {
-    let root = std::path::Path::new("apps/sandbox/resources/models/kenney");
+    let root = std::path::Path::new("apps/commercial/sandbox/resources/models/kenney");
     let mut total = 0usize;
     let mut ok = 0usize;
     let mut tris = 0usize;

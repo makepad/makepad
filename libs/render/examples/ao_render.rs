@@ -24,7 +24,7 @@ const SKY: f32 = 0.40;
 const GROUND: f32 = 0.20;
 
 fn main() {
-    let root = "apps/sandbox/resources/models/kenney";
+    let root = "apps/commercial/sandbox/resources/models/kenney";
     // A prop with eaves, an arch, a slatted bench, a barrel, a tree, a wall.
     let wanted = [
         ("house", "fantasy-town-kit"),
@@ -58,7 +58,7 @@ fn main() {
         }
     }
     if picks.is_empty() {
-        eprintln!("no models found under {root} — run apps/sandbox/download_assets.sh");
+        eprintln!("no models found under {root} — run apps/commercial/sandbox/download_assets.sh");
         return;
     }
 

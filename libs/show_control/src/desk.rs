@@ -12,11 +12,13 @@
 //! - scene-launch notes 82–86 → scenes 8–12
 //! - note 81 write-preset, note 89 power
 //!
-//! Output is the original [`crate::apply_dmx_mapping`] room patch.
+//! Output is the original [`crate::apply_dmx_mapping`] room patch, with any
+//! [`crate::RigColors`] an application lays over it.
 
 use crate::{
-    apply_dmx_mapping, clamp01, ArtNetPacket, ControllerButtons, ControllerState, ARTNET_BIND_ADDR,
-    ARTNET_BROADCAST_ADDR, CONTROLLER_INSTANCE_LOCK_ADDR, DMX_FRAME_DT, DMX_FRAME_HZ,
+    apply_dmx_mapping_with_colors, clamp01, ArtNetPacket, ControllerButtons, ControllerState,
+    RigColors, ARTNET_BIND_ADDR, ARTNET_BROADCAST_ADDR, CONTROLLER_INSTANCE_LOCK_ADDR,
+    DMX_FRAME_DT, DMX_FRAME_HZ,
 };
 use makepad_micro_serde::*;
 use makepad_platform::Cx;
@@ -102,6 +104,9 @@ pub struct DeskState {
     pub state: ControllerState,
     pub buttons: ControllerButtons,
     pub last_scene: Option<usize>,
+    /// Colours laid over the rig from outside the desk. Scenes neither save
+    /// nor recall them, and power off still darkens the whole frame.
+    pub colors: RigColors,
     write_preset: bool,
     scene_cooldown_until: f64,
 }
@@ -114,6 +119,7 @@ impl Default for DeskState {
             state: ControllerState::default(),
             buttons,
             last_scene: None,
+            colors: RigColors::default(),
             write_preset: false,
             scene_cooldown_until: Cx::monotonic_now(),
         }
@@ -270,6 +276,18 @@ impl DeskState {
     pub fn trigger_scene(&mut self, index: usize, presets: &PresetBank) -> DeskEvent {
         self.scene_note(index, true, presets)
     }
+
+    /// Lay `colors` over the rig, clamped into 0..1; [`RigColors::default`]
+    /// hands every group back to its hue dial.
+    pub fn set_colors(&mut self, colors: RigColors) {
+        self.colors = colors.clamped();
+    }
+
+    /// One whole universe as the writer sends it.
+    fn render_frame(&self, dmx: &mut [u8], clock: f64) {
+        dmx.fill(0);
+        apply_dmx_mapping_with_colors(&self.state, &self.buttons, dmx, clock, &self.colors);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -399,6 +417,7 @@ pub struct RoomSnapshot {
     pub state: ControllerState,
     pub buttons: ControllerButtons,
     pub last_scene: Option<usize>,
+    pub colors: RigColors,
     pub packets: u64,
 }
 
@@ -455,11 +474,7 @@ impl RoomShow {
                     let started = Cx::monotonic_now();
                     let desk = worker_shared.lock().unwrap().clone();
                     universe.set_sequence((sent % 255 + 1) as u8);
-                    {
-                        let dmx = universe.dmx_mut();
-                        dmx.fill(0);
-                        apply_dmx_mapping(&desk.state, &desk.buttons, dmx, clock);
-                    }
+                    desk.render_frame(universe.dmx_mut(), clock);
                     let _ = socket.send_to(universe.as_bytes(), target_addr.as_str());
                     sent += 1;
                     persist += 1;
@@ -531,12 +546,19 @@ impl RoomShow {
             .trigger_scene(index, &self.presets)
     }
 
+    /// Lay `colors` over the rig from the next frame on. It is an override
+    /// from outside the desk: scenes neither save nor recall it.
+    pub fn set_colors(&self, colors: RigColors) {
+        self.shared.lock().unwrap().set_colors(colors);
+    }
+
     pub fn snapshot(&self) -> RoomSnapshot {
         let desk = self.shared.lock().unwrap();
         RoomSnapshot {
             state: desk.state,
             buttons: desk.buttons,
             last_scene: desk.last_scene,
+            colors: desk.colors,
             packets: *self.packets.lock().unwrap(),
         }
     }
@@ -555,6 +577,7 @@ impl Drop for RoomShow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{apply_dmx_mapping, fixture_patch, DMX_LEN};
 
     struct TestBank(PresetBank);
 
@@ -863,5 +886,120 @@ mod tests {
             DeskEvent::Write(true)
         );
         assert!(desk.write_preset);
+    }
+
+    /// The application's handle without its writer thread: no socket is
+    /// opened and no frame is sent.
+    fn offline_room(presets: PresetBank) -> RoomShow {
+        let mut desk = DeskState::default();
+        desk.scene_cooldown_until = 0.0;
+        RoomShow {
+            shared: Arc::new(Mutex::new(desk)),
+            packets: Arc::new(Mutex::new(0)),
+            presets,
+            stop: Arc::new(AtomicBool::new(false)),
+            #[cfg(not(target_arch = "wasm32"))]
+            thread: None,
+        }
+    }
+
+    #[test]
+    fn rig_colors_reach_the_snapshot_clamped() {
+        let room = offline_room(PresetBank::new("/tmp/vj-desk-none"));
+        assert_eq!(room.snapshot().colors, RigColors::default());
+        room.set_colors(RigColors { washes: Some([0.25, 1.5, f32::NAN]), laser_strobe: None });
+        assert_eq!(
+            room.snapshot().colors,
+            RigColors { washes: Some([0.25, 1.0, 0.0]), laser_strobe: None }
+        );
+        let laser = RigColors { washes: None, laser_strobe: Some([0.0, 0.5, 1.0]) };
+        room.set_colors(laser);
+        assert_eq!(room.snapshot().colors, laser);
+        room.set_colors(RigColors::default());
+        assert_eq!(room.snapshot().colors, RigColors::default());
+    }
+
+    #[test]
+    fn scene_recall_and_save_leave_rig_colors_alone() {
+        let bank = TestBank::new();
+        let room = offline_room(bank.0.clone());
+        let colors = RigColors {
+            washes: Some([0.1, 0.2, 0.3]),
+            laser_strobe: Some([0.9, 0.8, 0.7]),
+        };
+        room.set_colors(colors);
+        for slot in [0, 5, 13] {
+            room.shared.lock().unwrap().scene_cooldown_until = 0.0;
+            assert_eq!(room.trigger_scene(slot), DeskEvent::SceneLoad(slot));
+            let mut expected = ControllerState::default();
+            assert!(bank.0.load_slot(slot, &mut expected));
+            let snapshot = room.snapshot();
+            assert_state_eq(&snapshot.state, &expected);
+            assert_eq!(snapshot.colors, colors, "P{} recall", slot + 1);
+        }
+        {
+            let mut desk = room.shared.lock().unwrap();
+            desk.scene_cooldown_until = 0.0;
+            assert_eq!(
+                desk.handle_midi(note_on(2, NOTE_SCENE_STOP), &bank.0),
+                DeskEvent::SceneLoad(2)
+            );
+            assert_eq!(desk.colors, colors, "MIDI recall");
+        }
+
+        room.set_write(true);
+        room.shared.lock().unwrap().scene_cooldown_until = 0.0;
+        assert_eq!(room.trigger_scene(15), DeskEvent::SceneSave(15));
+        room.set_write(false);
+        let saved = std::fs::read_to_string(bank.0.slot_path(15)).unwrap();
+        assert_eq!(saved, room.snapshot().state.serialize_ron(), "a scene holds the desk only");
+        assert_eq!(room.snapshot().colors, colors, "save");
+
+        let other = RigColors { washes: None, laser_strobe: Some([0.0, 0.0, 1.0]) };
+        room.set_colors(other);
+        room.shared.lock().unwrap().scene_cooldown_until = 0.0;
+        assert_eq!(room.trigger_scene(15), DeskEvent::SceneLoad(15));
+        assert_eq!(room.snapshot().colors, other, "recall of the saved scene");
+    }
+
+    #[test]
+    fn desk_frames_wear_rig_colors_until_the_power_goes_off() {
+        let presets = PresetBank::new("/tmp/vj-desk-none");
+        let mut desk = DeskState::default();
+        desk.set_fader(1, 0.8);
+        desk.set_fader(3, 0.5);
+        desk.set_top_knob(2, 0.0);
+        desk.set_top_knob(3, 0.5);
+        let mut hue = [0xa5u8; DMX_LEN];
+        desk.render_frame(&mut hue, 3.0);
+        let mut expected = [0u8; DMX_LEN];
+        apply_dmx_mapping(&desk.state, &desk.buttons, &mut expected, 3.0);
+        assert_eq!(hue, expected, "without colours the writer sends the room patch");
+
+        desk.set_colors(RigColors {
+            washes: Some([0.0, 0.0, 1.0]),
+            laser_strobe: Some([1.0, 0.0, 0.0]),
+        });
+        let mut laid = [0xa5u8; DMX_LEN];
+        desk.render_frame(&mut laid, 3.0);
+        for base in fixture_patch::MOVING_WASHES {
+            assert_eq!(&laid[base + 14..base + 17], &[0, 0, 255]);
+        }
+        let laser = fixture_patch::RGB_LASER;
+        let strobe = fixture_patch::RGB_STROBE;
+        assert_eq!(&laid[laser..laser + 3], &[255, 0, 0]);
+        assert_eq!(&laid[strobe + 1..strobe + 4], &[127, 0, 0]);
+
+        let mut dark = [0xa5u8; DMX_LEN];
+        desk.set_power(false);
+        desk.render_frame(&mut dark, 3.0);
+        assert!(dark.iter().all(|v| *v == 0), "power off wins over the colours");
+        assert_eq!(desk.handle_midi(note_on(0, NOTE_POWER), &presets), DeskEvent::Power(true));
+        desk.render_frame(&mut dark, 3.0);
+        assert_eq!(dark, laid);
+        assert_eq!(desk.handle_midi([0x80, NOTE_POWER, 0], &presets), DeskEvent::Power(false));
+        desk.render_frame(&mut dark, 3.0);
+        assert!(dark.iter().all(|v| *v == 0), "the power note still darkens the room");
+        assert!(desk.colors.washes.is_some(), "power off keeps the override for the way back");
     }
 }

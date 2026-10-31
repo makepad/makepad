@@ -274,22 +274,20 @@ edge SAT is now FASTER than C, and that removing the remaining bounds
 checks adds nothing once the boundaries are restored — the safe fix
 superseded the unsafe one (see the unchecked-hulls note).
 
-**PGO — on by default:** profile-guided optimization gives another 11–19%
+**PGO — opt-in:** profile-guided optimization gives another 11–19%
 over the plain fat-LTO build (paired same-machine runs: large_pyramid
 −15%, junkyard −14%, many_pyramids −11%), with the determinism hash
-bit-identical (PGO changes layout/inlining, never arithmetic). The trained
-profile is checked in at `libs/box3d/box3d.profdata` and applied
-automatically to every workspace build by `.cargo/config.toml`
-(`-Cprofile-use=…`) — `cargo build --release` on any example just gets it.
-The profile is target-independent (an x86_64 cross-build with the
-ARM-trained profile compiles clean — counters are IR-level, keyed by
-source function hashes); functions without profile data, or whose source
-has changed, silently fall back to normal heuristics, so a stale profile
-degrades gracefully — retrain with `libs/box3d/pgo.sh` (copies to
-/tmp/box3d-pgo/merged.profdata; cp over box3d.profdata) when the hot code
-or the toolchain major-version changes. Projects using this crate OUTSIDE
-the makepad workspace don't inherit the config — they add the same
-rustflags line to their own .cargo/config.toml. Fairness note when quoting
+bit-identical (PGO changes layout/inlining, never arithmetic). The profile
+is not checked in (it is a generated binary): train it with
+`libs/box3d/pgo.sh`, which writes /tmp/box3d-pgo/merged.profdata, and build
+with `RUSTFLAGS="-Cprofile-use=/tmp/box3d-pgo/merged.profdata" cargo build
+--release -p makepad-box3d` (an absolute path: a relative one breaks other
+crates in the graph, see .cargo/config.toml). The profile is
+target-independent (counters are IR-level, keyed by source function
+hashes); functions without profile data, or whose source has changed,
+silently fall back to normal heuristics, so a stale profile degrades
+gracefully — retrain when the hot code or the toolchain major-version
+changes. Fairness note when quoting
 vs-C numbers: the C reference is not profile-guided; PGO-ing C would claw
 back some of its own margin.
 

@@ -11,11 +11,12 @@
 // 4. Re-triangulate affected triangles using CDT.
 
 use crate::aabb_tree::AabbTree;
+use crate::classify::MeshAccel;
 use crate::cdt::{Point2, CDT};
 use crate::tri_tri::{tri_tri_intersection_indexed, EdgeIsect};
 use makepad_csg_math::{thread_pool, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
-use std::collections::HashMap;
+use makepad_csg_math::fast_hash::FastMap as HashMap;
 
 /// Information about an intersection point.
 #[derive(Clone, Debug)]
@@ -68,19 +69,17 @@ pub struct CorefinementResult {
 /// Both meshes are split along their intersection curve so that the intersection
 /// is represented as edges in both output meshes.
 pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
-    // Step 1: Build AABB trees
-    let tris_a: Vec<_> = (0..mesh_a.triangle_count())
-        .map(|i| mesh_a.triangle_vertices(i))
-        .collect();
-    let tris_b: Vec<_> = (0..mesh_b.triangle_count())
-        .map(|i| mesh_b.triangle_vertices(i))
-        .collect();
+    corefine_in(mesh_a, &MeshAccel::build(mesh_a), mesh_b, &MeshAccel::build(mesh_b))
+}
 
-    let tree_a = AabbTree::build(&tris_a);
-    let tree_b = AabbTree::build(&tris_b);
+/// [`corefine`] of prepared meshes (their triangle lists and trees built once).
+pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_b: &MeshAccel) -> CorefinementResult {
+    // Step 1: the AABB trees (prepared)
+    let (tris_a, tris_b) = (prep_a.triangles(), prep_b.triangles());
+    let (tree_a, tree_b): (&AabbTree, &AabbTree) = (prep_a.tree(), prep_b.tree());
 
     // Step 2: Find candidate pairs
-    let pairs = tree_a.find_overlaps(&tree_b);
+    let pairs = tree_a.find_overlaps(tree_b);
 
     // Step 3: Compute intersection segments for each pair.
     //
@@ -92,7 +91,7 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
     // (edge, other_triangle) intersection so it's computed exactly once.
     let mut segments: Vec<IntersectionSegment> = Vec::new();
     let mut shared_vert_grid = VertexGrid::new(1e-10);
-    let mut edge_cache: HashMap<EdgeIsect, Vec3d> = HashMap::new();
+    let mut edge_cache: HashMap<EdgeIsect, Vec3d> = HashMap::default();
 
     for &(ai, bi) in &pairs {
         if thread_pool::cancelled() {
@@ -197,7 +196,7 @@ impl VertexGrid {
         let cell = tolerance * 2.0;
         VertexGrid {
             verts: Vec::new(),
-            grid: HashMap::new(),
+            grid: HashMap::default(),
             inv_cell: 1.0 / cell,
             tol_sq: tolerance * tolerance,
         }
@@ -262,7 +261,7 @@ fn retriangulate_mesh(
     let mut boundaries: Vec<bool> = Vec::with_capacity(mesh.triangle_count());
 
     // Exact-position map for vertices appended beyond the original array.
-    let mut new_vert_map: HashMap<[u64; 3], u32> = HashMap::new();
+    let mut new_vert_map: HashMap<[u64; 3], u32> = HashMap::default();
     let key = |v: Vec3d| -> [u64; 3] { [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()] };
 
     for ti in 0..mesh.triangle_count() {

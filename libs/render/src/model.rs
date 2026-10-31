@@ -78,10 +78,51 @@ pub struct StaticModel {
     /// direction-mapped. `None` for anything with no `extras.kind == "sky"`
     /// node — again, every model that existed before this lane.
     pub sky: Option<SkyPart>,
+    /// The map's liquid surfaces (water, slime, lava), drawn by the water
+    /// renderer instead of the model shader. Their triangles stay in the
+    /// static stream (collision and every triangle count a level walk
+    /// checks still see them; a nukage floor is still a floor) and are
+    /// copied here; the DRAWN stream leaves them out (`liquid_ranges`, and
+    /// split layers skip their spans). Empty for anything without an
+    /// `extras.liquid` node.
+    pub liquids: Vec<LiquidSurface>,
+    /// Index ranges of `indices` that are liquid triangles (not drawn).
+    pub liquid_ranges: Vec<(usize, usize)>,
     /// The metallic-roughness half of the material the merged single-layer
     /// stream draws with — the counterpart of `texture_png`, read from the
     /// same primitive. Split models carry theirs per [`StaticDrawLayer`].
     pub pbr: PbrMaterial,
+}
+
+/// One liquid node of a level (`extras.liquid: true`): its name (the
+/// source flat/texture, which says water, slime or lava), the damage it
+/// declares, and its triangles in model space.
+#[derive(Clone, Debug, Default)]
+pub struct LiquidSurface {
+    pub name: String,
+    pub damage: f32,
+    pub positions: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+/// A node's liquid declaration: (name, damage) when `extras.liquid` is true.
+fn liquid_of(node: &Val) -> Option<(String, f32)> {
+    let extras = node.get("extras")?;
+    let liquid = matches!(extras.get("liquid"), Some(Val::Bool(true)))
+        || extras.get("liquid").and_then(Val::f64).unwrap_or(0.0) > 0.0;
+    if !liquid {
+        return None;
+    }
+    let name = extras
+        .get("flat")
+        .and_then(Val::str)
+        .or_else(|| node.get("name").and_then(Val::str))
+        .unwrap_or("water")
+        .to_string();
+    let damage = extras.get("damage").and_then(Val::f64).unwrap_or(0.0) as f32;
+    Some((name, damage))
 }
 
 /// One textured subset of a [`StaticModel`]. Positions live in the packed
@@ -122,11 +163,15 @@ pub struct PbrMaterial {
     /// chunk. glTF packs occlusion/roughness/metallic as R/G/B — the "ORM"
     /// convention — and the factors multiply the sampled channels.
     pub orm_png: Option<Vec<u8>>,
+    /// The base-colour texture's glTF sampler says `magFilter: NEAREST`
+    /// (9728): magnified texels draw as hard squares — the pixel-art look of
+    /// the classic games' textures. Minification stays filtered.
+    pub mag_nearest: bool,
 }
 
 impl Default for PbrMaterial {
     fn default() -> Self {
-        Self { metallic: 1.0, roughness: 1.0, orm_png: None, surface: None }
+        Self { metallic: 1.0, roughness: 1.0, orm_png: None, surface: None, mag_nearest: false }
     }
 }
 
@@ -355,7 +400,7 @@ impl AnimPart {
 /// Where those values came from is an asset-import concern. Runtime code only
 /// consumes this generic contract and supplies a complete model-space pose.
 pub struct DrivenPart {
-    pub connection: String,
+    pub connection: std::sync::Arc<str>,
     pub pivot: Vec3f,
     pub anchor: Vec3f,
     pub radius: f32,
@@ -638,6 +683,28 @@ pub(crate) fn voxel_boxes(
     min: Vec3f,
     max: Vec3f,
 ) -> Vec<(Vec3f, Vec3f)> {
+    voxel_boxes_of(
+        |i| {
+            let o = i as usize * MODEL_VERTEX_FLOATS;
+            Vec3f {
+                x: vertices[o],
+                y: vertices[o + 1],
+                z: vertices[o + 2],
+            }
+        },
+        indices,
+        min,
+        max,
+    )
+}
+
+/// [`voxel_boxes`] over vertex positions given by `vp` (by index).
+pub(crate) fn voxel_boxes_of(
+    vp: impl Fn(u32) -> Vec3f,
+    indices: &[u32],
+    min: Vec3f,
+    max: Vec3f,
+) -> Vec<(Vec3f, Vec3f)> {
     {
         let size = max - min;
         let span = size.x.max(size.y).max(size.z);
@@ -665,14 +732,6 @@ pub(crate) fn voxel_boxes(
         let mut filled: Vec<Option<(Vec3f, Vec3f)>> =
             vec![None; dims[0] * dims[1] * dims[2]];
         let at = |x: usize, y: usize, z: usize| x + dims[0] * (y + dims[1] * z);
-        let vp = |i: u32| {
-            let o = i as usize * MODEL_VERTEX_FLOATS;
-            Vec3f {
-                x: vertices[o],
-                y: vertices[o + 1],
-                z: vertices[o + 2],
-            }
-        };
         for tri in indices.chunks_exact(3) {
             let (a, b, c) = (vp(tri[0]), vp(tri[1]), vp(tri[2]));
             let tlo = vec3f(
@@ -1107,6 +1166,9 @@ impl StaticModel {
             Vec::new()
         };
 
+        // Liquid nodes: their primitives' triangle spans, by surface.
+        let liquid_nodes: Vec<Option<(String, f32)>> = node_vals.iter().map(liquid_of).collect();
+        let mut liquid_spans: Vec<(usize, usize, usize)> = Vec::new();
         let mut vertices: Vec<f32> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
         let mut min = Vec3f {
@@ -1315,6 +1377,9 @@ impl StaticModel {
                     indices.extend((0..count as u32).map(|i| base + i));
                 }
                 vert_total += count;
+                if count > 0 && liquid_nodes[node_index].is_some() {
+                    liquid_spans.push((node_index, prim_i0, indices.len()));
+                }
                 if count > 0 {
                     parts.push((pmin, pmax));
                     prim_spans.push(PrimSpan {
@@ -1329,6 +1394,7 @@ impl StaticModel {
                         v1: vert_total,
                         i0: prim_i0,
                         i1: indices.len(),
+                        liquid: false,
                     });
                 }
             }
@@ -1491,26 +1557,52 @@ impl StaticModel {
             .and_then(|i| i.idx(0))
             .and_then(|i| i.get("uri"))
             .and_then(Val::str)
+            .filter(|uri| !uri.starts_with(SHARED_IMAGE_SCHEME))
             .map(str::to_string);
         // Embedded base color (image stored in the BIN chunk via bufferView):
         // the self-contained convention of generated/baked GLBs. Resolved
-        // through the first material's baseColorTexture; falls back to
-        // images[0] when materials carry no texture reference.
-        let image_index = json
-            .get("materials")
-            .and_then(|m| m.idx(0))
-            .and_then(|m| m.get("pbrMetallicRoughness"))
-            .and_then(|p| p.get("baseColorTexture"))
-            .and_then(|t| t.get("index"))
-            .and_then(Val::usize)
-            .and_then(|ti| {
-                json.get("textures")
-                    .and_then(|t| t.idx(ti))
-                    .and_then(|t| t.get("source"))
-                    .and_then(Val::usize)
-            })
-            .unwrap_or(0);
+        // through the material the geometry USES — materials[0] may be a
+        // palette nothing references (script models: the single-material
+        // model sampled that white placeholder and rendered white) — and
+        // falls back to images[0] when no material carries a texture.
+        let image_index = prim_spans
+            .first()
+            .map(|s| s.image)
+            .unwrap_or_else(|| gltf_used_material_image(&json));
         let texture_png = gltf_embedded_png(&json, bin_chunk, image_index);
+
+        // Liquids are drawn by the water renderer; one surface per liquid
+        // node, the triangles copied (the stream keeps them for collision).
+        let mut liquids: Vec<LiquidSurface> = Vec::new();
+        let mut liquid_of_node: BTreeMap<usize, usize> = BTreeMap::new();
+        for &(node_index, i0, i1) in &liquid_spans {
+            let Some((name, damage)) = liquid_nodes[node_index].clone() else { continue };
+            let at = *liquid_of_node.entry(node_index).or_insert_with(|| {
+                liquids.push(LiquidSurface {
+                    name,
+                    damage,
+                    min: Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX },
+                    max: Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN },
+                    ..Default::default()
+                });
+                liquids.len() - 1
+            });
+            let surface = &mut liquids[at];
+            for tri in indices[i0..i1].chunks_exact(3) {
+                for &v in tri.iter() {
+                    let o = v as usize * MODEL_VERTEX_FLOATS;
+                    let q = [vertices[o], vertices[o + 1], vertices[o + 2]];
+                    surface.min = Vec3f { x: surface.min.x.min(q[0]), y: surface.min.y.min(q[1]), z: surface.min.z.min(q[2]) };
+                    surface.max = Vec3f { x: surface.max.x.max(q[0]), y: surface.max.y.max(q[1]), z: surface.max.z.max(q[2]) };
+                    surface.indices.push(surface.positions.len() as u32);
+                    surface.positions.push(q);
+                }
+            }
+        }
+        let liquid_ranges: Vec<(usize, usize)> = liquid_spans.iter().map(|(_, i0, i1)| (*i0, *i1)).collect();
+        for span in prim_spans.iter_mut() {
+            span.liquid = liquid_ranges.contains(&(span.i0, span.i1));
+        }
 
         // Split by embedded image so a world GLB (one PNG per tile) draws
         // every surface instead of smearing image 0. AO bake un-indexes the
@@ -1540,6 +1632,8 @@ impl StaticModel {
             anim_parts,
             driven_parts,
             sky,
+            liquids,
+            liquid_ranges,
             pbr,
         })
     }
@@ -1561,6 +1655,8 @@ struct PrimSpan {
     v1: usize,
     i0: usize,
     i1: usize,
+    /// A liquid node's primitive: drawn by the water renderer, not here.
+    liquid: bool,
 }
 
 pub(crate) fn gltf_material_is_surface(json:&Val,index:usize)->bool {
@@ -1571,6 +1667,23 @@ pub(crate) fn gltf_material_is_surface(json:&Val,index:usize)->bool {
         ||matches!(material.get("alphaMode").and_then(Val::str),Some("MASK"|"BLEND"))
         ||matches!(material.get("doubleSided"),Some(Val::Bool(true)))
         ||material.get("extras").is_some_and(|e|e.get("makepadMips").is_some()||matches!(e.get("makepadSurface"),Some(Val::Bool(true))))
+}
+
+/// Does material `index`'s base-colour texture sample with `magFilter:
+/// NEAREST` (9728)? glTF's default (no sampler, or no magFilter) is the
+/// implementation's choice, which here is linear.
+pub(crate) fn gltf_mag_nearest(json: &Val, index: usize) -> bool {
+    (|| {
+        let texture = json
+            .get("materials")?
+            .idx(index)?
+            .get("pbrMetallicRoughness")?
+            .get("baseColorTexture")?
+            .get("index")?
+            .usize()?;
+        let sampler = json.get("textures")?.idx(texture)?.get("sampler")?.usize()?;
+        json.get("samplers")?.idx(sampler)?.get("magFilter")?.usize()
+    })() == Some(9728)
 }
 
 pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<crate::material_surface::MaterialSurface> {
@@ -1591,7 +1704,13 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         };
         fur.valid().then_some(fur)
     });
+    let shading=material.get("extras").and_then(|e|e.get("makepadShading"));
+    let term=|key:&str|value(shading,key,0.0).clamp(0.0,1.0);
     Some(crate::material_surface::MaterialSurface {
+        wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),rim:term("rim"),
+        impostor:value(shading,"impostor",0.0).max(0.0),
+        plate:value(shading,"plate",0.0)>0.5,
+        lamp:shading.and_then(|s|s.get("lamp")).and_then(Val::str).and_then(makepad_gltf::GlbLamp::from_name),
         fur,
         normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
         occlusion_png:image("occlusionTexture"),occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),
@@ -1599,7 +1718,30 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         alpha_mode:match material.get("alphaMode").and_then(Val::str){Some("MASK")=>1,Some("BLEND")=>2,_=>0},
         alpha_cutoff:value(Some(material),"alphaCutoff",0.5),base_alpha:alpha,
         double_sided:matches!(material.get("doubleSided"),Some(Val::Bool(true))),
+        // Negative marks an up-facing part (`makepadTriplanarFlat`): the
+        // shader reads only the top projection there.
+        triplanar:(material.get("extras").and_then(|e|e.get("makepadTriplanar")).and_then(Val::f64).unwrap_or(0.0).max(0.0) as f32)
+            *if material.get("extras").and_then(|e|e.get("makepadTriplanarFlat")).is_some_and(|v|matches!(v,Val::Bool(true))){-1.0}else{1.0},
+        splat:material.get("extras").and_then(|e|e.get("makepadSplat")).and_then(|s|gltf_splat(json,bin,s)).map(std::sync::Arc::new),
     })
+}
+
+/// A generated terrain tile's paint (gen level glb.rs `splat_material`):
+/// `weights` (a texture index), `map` [x, z, cell, width, rows] and per
+/// layer its `albedo` (or flat sRGB `color`), `normal` and `bump`, `scale`
+/// (1/metres), `roughness`, `metallic`.
+fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::SplatSurface> {
+    let texture=|v:Option<&Val>|v.and_then(Val::usize).and_then(|i|json.get("textures")?.idx(i)?.get("source")?.usize()).and_then(|i|gltf_embedded_png(json,bin,i));
+    let num=|v:&Val,key:&str,default:f32|v.get(key).and_then(Val::f64).map_or(default,|f|f as f32);
+    let map=splat.get("map")?;
+    let m=|i:usize|map.idx(i).and_then(Val::f64).map(|v|v as f32);
+    let layers=splat.get("layers")?.arr().iter().map(|l|crate::material_surface::SplatLayer{
+        albedo_png:texture(l.get("albedo")),
+        color:std::array::from_fn(|i|l.get("color").and_then(|c|c.idx(i)).and_then(Val::f64).unwrap_or(0.5) as f32),
+        normal_png:texture(l.get("normal")),
+        scale:num(l,"scale",1.0),roughness:num(l,"roughness",0.9),metallic:num(l,"metallic",0.0),bump:num(l,"bump",0.0),
+    }).collect::<Vec<_>>();
+    Some(crate::material_surface::SplatSurface{layers,weights_png:texture(splat.get("weights"))?,origin:[m(0)?,m(1)?],cell:m(2)?,width:m(3)?,rows:m(4)?})
 }
 
 impl PrimSpan {
@@ -1611,6 +1753,7 @@ impl PrimSpan {
             metallic: self.metallic,
             roughness: self.roughness,
             orm_png: self.orm_image.and_then(|i| gltf_embedded_png(json, bin, i)),
+            mag_nearest: self.material.is_some_and(|i| gltf_mag_nearest(json, i)),
         }
     }
 
@@ -1674,6 +1817,7 @@ fn model_level_pbr(spans: &[PrimSpan], json: &Val, bin: &[u8]) -> PbrMaterial {
         return PbrMaterial::default();
     };
     PbrMaterial {
+        mag_nearest: gltf_mag_nearest(json, 0),
         surface: gltf_material_surface(json,bin,0).map(std::sync::Arc::new),
         metallic: (pbr.get("metallicFactor").and_then(Val::f64).unwrap_or(1.0) as f32)
             .clamp(0.0, 1.0),
@@ -2239,6 +2383,7 @@ fn pack_node_stream(
                 v1: out.vert_total,
                 i0: prim_i0,
                 i1: out.indices.len(),
+                liquid: false,
             });
         }
     }
@@ -2484,7 +2629,7 @@ fn build_driven_parts(
         }
         let layers = stream.layers(json, bin);
         out.push(DrivenPart {
-            connection: def.connection,
+            connection: def.connection.into(),
             pivot: def.pivot,
             anchor: def.anchor,
             radius: def.radius,
@@ -2610,25 +2755,50 @@ pub fn embedded_base_color_png(glb: &[u8]) -> Option<Vec<u8>> {
         at += 8 + len + (4 - len % 4) % 4;
     }
     let json = JsonParser::parse(json_chunk?).ok()?;
-    let image = json
-        .get("materials")
-        .and_then(|m| m.idx(0))
-        .and_then(|m| m.get("pbrMetallicRoughness"))
-        .and_then(|p| p.get("baseColorTexture"))
-        .and_then(|t| t.get("index"))
-        .and_then(Val::usize)
-        .and_then(|ti| {
-            json.get("textures")
-                .and_then(|t| t.idx(ti))
-                .and_then(|t| t.get("source"))
-                .and_then(Val::usize)
-        })
-        .unwrap_or(0);
+    let image = gltf_used_material_image(&json);
     gltf_embedded_png(&json, bin_chunk, image)
+}
+
+/// The base-colour image of the first material a mesh primitive actually
+/// references (a GLB may carry unreferenced materials ahead of it), else of
+/// materials[0], else image 0.
+fn gltf_used_material_image(json: &Val) -> usize {
+    let meshes = json.get("meshes").map(Val::arr).unwrap_or_default();
+    let first_prim = meshes
+        .iter()
+        .flat_map(|mesh| mesh.get("primitives").map(Val::arr).unwrap_or_default())
+        .find(|p| p.get("material").and_then(Val::usize).is_some());
+    match first_prim {
+        Some(prim) => gltf_prim_image_index(json, prim),
+        None => json
+            .get("materials")
+            .and_then(|m| m.idx(0))
+            .and_then(|m| m.get("pbrMetallicRoughness"))
+            .and_then(|p| p.get("baseColorTexture"))
+            .and_then(|t| t.get("index"))
+            .and_then(Val::usize)
+            .and_then(|ti| json.get("textures").and_then(|t| t.idx(ti)).and_then(|t| t.get("source")).and_then(Val::usize))
+            .unwrap_or(0),
+    }
+}
+
+/// The `uri` scheme of an image stored once outside the GLB and shared by
+/// every model that names it (level products' material images). The host
+/// resolves the key ([`set_shared_image_resolver`]).
+pub const SHARED_IMAGE_SCHEME: &str = "makepad-image:";
+static SHARED_IMAGE_RESOLVER: std::sync::OnceLock<fn(&str) -> Option<Vec<u8>>> = std::sync::OnceLock::new();
+/// How this process finds a shared image's bytes by key (worker threads call
+/// it, once per model naming the image: the bytes it returns are the copy
+/// the model keeps).
+pub fn set_shared_image_resolver(resolve: fn(&str) -> Option<Vec<u8>>) {
+    let _ = SHARED_IMAGE_RESOLVER.set(resolve);
 }
 
 pub(crate) fn gltf_embedded_png(json: &Val, bin: &[u8], image_index: usize) -> Option<Vec<u8>> {
     let image = json.get("images").and_then(|i| i.idx(image_index))?;
+    if let Some(key) = image.get("uri").and_then(Val::str).and_then(|u| u.strip_prefix(SHARED_IMAGE_SCHEME)) {
+        return SHARED_IMAGE_RESOLVER.get().and_then(|resolve| resolve(key));
+    }
     let bv = image.get("bufferView").and_then(Val::usize)?;
     let view = json.get("bufferViews").and_then(|v| v.idx(bv))?;
     let offset = view.get("byteOffset").and_then(Val::usize).unwrap_or(0);
@@ -2659,8 +2829,27 @@ fn split_draw_layers(
         /// chrome bumper with a rubber tyre would be the actual bug.
         pbr: Option<(u32, u32, usize)>,
     }
+    // Surface materials that differ only in their base colour (which the
+    // vertex tint already carries) share a layer: a script model declares
+    // one material per colour of trim, and each was a draw of its own.
+    // Anything with images, fur, a far stand-in or a plate keeps its own.
+    let mut canonical: BTreeMap<usize, usize> = BTreeMap::new();
+    {
+        let mut seen: Vec<(Vec<u32>, usize)> = Vec::new();
+        let mut materials: Vec<usize> = prim_spans.iter().filter_map(|s| s.material).collect();
+        materials.sort_unstable();
+        materials.dedup();
+        for i in materials {
+            let Some(sig) = plain_surface_signature(json, bin, i) else { continue };
+            let first = match seen.iter().find(|(s, _)| *s == sig) {
+                Some((_, first)) => *first,
+                None => { seen.push((sig, i)); i }
+            };
+            canonical.insert(i, first);
+        }
+    }
     let key_of = |s: &PrimSpan| LayerKey {
-        surface: s.material.filter(|i| gltf_material_is_surface(json,*i)),
+        surface: s.material.filter(|i| gltf_material_is_surface(json,*i)).map(|i| canonical.get(&i).copied().unwrap_or(i)),
         image: s.image,
         detail: s.detail_image.map(|i| i as i32).unwrap_or(-1),
         sx: s.detail_scale[0].to_bits(),
@@ -2675,8 +2864,9 @@ fn split_draw_layers(
     };
     let mut by_img: BTreeMap<LayerKey, (Vec<f32>, Vec<u32>, Vec<[f32; 2]>, PrimSpan)> =
         BTreeMap::new();
+    let has_liquid = prim_spans.iter().any(|s| s.liquid);
     for span in prim_spans {
-        if span.v1 <= span.v0 || span.i1 <= span.i0 {
+        if span.v1 <= span.v0 || span.i1 <= span.i0 || span.liquid {
             continue;
         }
         let v_end = (span.v1 * MODEL_VERTEX_FLOATS).min(vertices.len());
@@ -2696,7 +2886,9 @@ fn split_draw_layers(
             dest.1.push(idx - span.v0 as u32 + base);
         }
     }
-    if by_img.len() <= 1 {
+    // One layer draws as the merged stream — unless liquids must be left
+    // out of it, which only the split layers do.
+    if by_img.len() <= 1 && !has_liquid {
         return Vec::new();
     }
     let mut layers = Vec::with_capacity(by_img.len());
@@ -2721,6 +2913,26 @@ fn split_draw_layers(
     } else {
         layers
     }
+}
+
+/// Everything but the base colour of an untextured surface material, for
+/// merging layers; `None` when it has anything a colour cannot stand in for.
+fn plain_surface_signature(json: &Val, bin: &[u8], index: usize) -> Option<Vec<u32>> {
+    let s = gltf_material_surface(json, bin, index)?;
+    let material = json.get("materials")?.idx(index)?;
+    let textured = material.get("pbrMetallicRoughness").is_some_and(|p| p.get("baseColorTexture").is_some() || p.get("metallicRoughnessTexture").is_some())
+        || material.get("extras").is_some_and(|e| e.get("makepadMips").is_some());
+    // A lamp keeps its own layer too: its emission changes per copy.
+    if textured || s.fur.is_some() || s.normal_png.is_some() || s.occlusion_png.is_some() || s.emissive_png.is_some() || s.impostor > 0.0 || s.plate || s.lamp.is_some() {
+        return None;
+    }
+    let factor = |key: &str| material.get("pbrMetallicRoughness").and_then(|p| p.get(key)).and_then(Val::f64).unwrap_or(1.0) as f32;
+    let (metallic, roughness) = (factor("metallicFactor"), factor("roughnessFactor"));
+    Some(vec![
+        s.emissive[0].to_bits(), s.emissive[1].to_bits(), s.emissive[2].to_bits(), s.alpha_mode as u32, s.alpha_cutoff.to_bits(),
+        s.base_alpha.to_bits(), s.double_sided as u32, s.triplanar.to_bits(), s.wind.to_bits(), s.clearcoat.to_bits(),
+        s.flake.to_bits(), s.rim.to_bits(), metallic.to_bits(), roughness.to_bits(),
+    ])
 }
 
 /// How parallel two faces must be for a shared corner to smooth between
@@ -3065,6 +3277,8 @@ impl StaticModel {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             pbr: PbrMaterial::default(),
         })
     }
@@ -3079,6 +3293,8 @@ mod sidecar_tests {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             vertices: (0..MODEL_VERTEX_FLOATS as u32 * 3).map(|i| i as f32 * 0.25).collect(),
             indices: vec![0, 1, 2],
             texture_uri: Some("Textures/colormap.png".into()),
@@ -3773,6 +3989,194 @@ pub(crate) mod tests {
         );
     }
 
+    /// A GLB whose materials[0] is an unreferenced palette (the script-model
+    /// writer's shape) draws with the texture of the material its primitive
+    /// USES: sampling materials[0]'s placeholder drew single-material script
+    /// models white.
+    #[test]
+    fn single_material_models_take_the_used_materials_texture() {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let palette: &[u8] = b"PALETTE-PNG-BYTES";
+        let leaf: &[u8] = b"LEAF-PNG-BYTES!!";
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let (p0, p1) = (bin.len(), bin.len() + palette.len());
+        bin.extend_from_slice(palette);
+        bin.extend_from_slice(leaf);
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"material":1}}]}}],
+            "materials":[
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}}}}}},
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":1}}}}}}],
+            "textures":[{{"source":0}},{{"source":1}}],
+            "images":[{{"bufferView":1,"mimeType":"image/png"}},{{"bufferView":2,"mimeType":"image/png"}}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],
+            "bufferViews":[
+              {{"buffer":0,"byteOffset":0,"byteLength":36}},
+              {{"buffer":0,"byteOffset":{p0},"byteLength":{}}},
+              {{"buffer":0,"byteOffset":{p1},"byteLength":{}}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            palette.len(),
+            leaf.len(),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+
+        let m = StaticModel::parse_glb(&glb).unwrap();
+        assert!(m.draw_layers.is_empty(), "one material is one layer: the main texture draws it");
+        assert_eq!(m.texture_png.as_deref(), Some(leaf));
+        assert_eq!(embedded_base_color_png(&glb).as_deref(), Some(leaf));
+    }
+
+    /// Script-model materials (every one a surface) that differ only in
+    /// their colour share one draw layer, each part keeping its colour in
+    /// the vertex tint; a different finish, or an emissive, stays apart.
+    #[test]
+    fn surfaces_differing_only_in_colour_share_a_layer() {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let material = |rgb: &str, rough: f32, extra: &str| format!(
+            r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{rgb},1],"roughnessFactor":{rough},"metallicFactor":0}}{extra},"extras":{{"makepadSurface":true}}}}"#);
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[
+              {{"attributes":{{"POSITION":0}},"material":0}},
+              {{"attributes":{{"POSITION":0}},"material":1}},
+              {{"attributes":{{"POSITION":0}},"material":2}},
+              {{"attributes":{{"POSITION":0}},"material":3}}]}}],
+            "materials":[{},{},{},{}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],
+            "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            material("0.1,0.1,0.1", 0.9, ""),
+            material("0.8,0.8,0.8", 0.9, ""),
+            material("0.1,0.1,0.1", 0.5, ""),
+            material("0.9,0.1,0.1", 0.9, r#","emissiveFactor":[1,0,0]"#),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+
+        let m = StaticModel::parse_glb(&glb).unwrap();
+        let tris: Vec<usize> = m.draw_layers.iter().map(|l| l.indices.len() / 3).collect();
+        assert_eq!(tris.len(), 3, "dark and light matte merge; the glossy and the lamp stay apart: {tris:?}");
+        assert!(tris.contains(&2));
+        // The merged layer still carries both colours in its vertex tint.
+        let merged = m.draw_layers.iter().find(|l| l.indices.len() == 6).unwrap();
+        let reds: std::collections::BTreeSet<u32> = merged.vertices.chunks_exact(MODEL_VERTEX_FLOATS).map(|v| v[5].to_bits() & 0xff).collect();
+        assert_eq!(reds.len(), 2, "two tints in one layer");
+    }
+
+    /// A splat terrain (level terrain_mesh → level glb): an opaque base part
+    /// and an alpha-masked overlay part over the SAME triangles with the
+    /// splat weight in COLOR_0 alpha. The overlay must become its own layer
+    /// AFTER the base, keep its MASK surface and carry the weight per vertex,
+    /// and both keep the terrain's triplanar scale.
+    #[test]
+    fn splat_overlays_parse_as_masked_layers_after_their_base() {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        // COLOR_0 as normalized ubyte VEC4: white, alpha 0.7 (weight 0.45).
+        for _ in 0..3 {
+            bin.extend_from_slice(&[255, 255, 255, 179]);
+        }
+        let png_at = bin.len();
+        let png: &[u8] = b"TERRAIN-PNG!";
+        bin.extend_from_slice(png);
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[
+              {{"attributes":{{"POSITION":0}},"material":0}},
+              {{"attributes":{{"POSITION":0,"COLOR_0":1}},"material":1}}]}}],
+            "materials":[
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"extras":{{"makepadMips":true,"makepadTriplanar":0.25}}}},
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"alphaMode":"MASK","alphaCutoff":0.5,"extras":{{"makepadMips":true,"makepadTriplanar":0.25}}}}],
+            "textures":[{{"source":0}}],
+            "images":[{{"bufferView":2,"mimeType":"image/png"}}],
+            "accessors":[
+              {{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}},
+              {{"bufferView":1,"componentType":5121,"normalized":true,"count":3,"type":"VEC4"}}],
+            "bufferViews":[
+              {{"buffer":0,"byteOffset":0,"byteLength":36}},
+              {{"buffer":0,"byteOffset":36,"byteLength":12}},
+              {{"buffer":0,"byteOffset":{png_at},"byteLength":{}}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            png.len(),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+
+        let m = StaticModel::parse_glb(&glb).unwrap();
+        assert_eq!(m.draw_layers.len(), 2);
+        let modes: Vec<_> = m.draw_layers.iter().map(|l| l.pbr.surface.as_ref().map(|s| s.alpha_mode)).collect();
+        assert_eq!(modes, vec![Some(0), Some(1)], "base first, the MASK overlay after it");
+        let alpha = |l: &StaticDrawLayer| l.vertices.chunks_exact(MODEL_VERTEX_FLOATS).map(|v| (v[5].to_bits() >> 24) as u8).collect::<Vec<_>>();
+        assert_eq!(alpha(&m.draw_layers[1]), vec![179; 3], "the splat weight rides the colour lane");
+        // Terrain asks for world-position triplanar texturing (cliffs).
+        for l in &m.draw_layers {
+            assert_eq!(l.pbr.surface.as_ref().map(|s| s.triplanar), Some(0.25));
+        }
+    }
+
     /// The node transform must be folded into the vertices, not dropped —
     /// dropping it is why a prop would silently render at the origin.
     #[test]
@@ -3801,6 +4205,8 @@ pub(crate) mod tests {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,
@@ -3839,6 +4245,8 @@ pub(crate) mod tests {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,
@@ -3879,6 +4287,8 @@ pub(crate) mod tests {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,
@@ -4065,7 +4475,7 @@ mod real_asset_tests {
 
     fn kit_model(name: &str) -> Option<StaticModel> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit")
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit")
             .join(name);
         let bytes = std::fs::read(path).ok()?;
         StaticModel::parse_glb(&bytes).ok()
@@ -4103,7 +4513,7 @@ mod real_asset_tests {
     #[test]
     fn eye_height_silhouette_gap_report() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             eprintln!("asset pack absent — skipped");
             return;
@@ -4268,7 +4678,7 @@ mod ao_invariant_tests {
 
     fn kit_path(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit")
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit")
             .join(name)
     }
 
@@ -4373,7 +4783,7 @@ mod ao_fix_check {
     #[test]
     fn corridor_bakes_right_side_out() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/corridor.glb");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/corridor.glb");
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");
             return;
@@ -4426,7 +4836,7 @@ mod sidecar_pair_check {
     #[test]
     fn corridor_sidecar_top_is_bright() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Some(m) = std::fs::read(root.join("corridor.aomesh"))
             .ok()
             .and_then(|b| StaticModel::from_aomesh(&b))
@@ -4504,7 +4914,7 @@ mod chart_border_forensics {
     #[test]
     fn corner_texel_neighbourhood() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Some(m) = std::fs::read(root.join("corridor.aomesh"))
             .ok()
             .and_then(|b| StaticModel::from_aomesh(&b))
@@ -4586,7 +4996,7 @@ mod double_sided_probe {
     #[test]
     fn pergola_double_sidedness() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");
@@ -4633,7 +5043,7 @@ mod normal_authoring_probe {
     #[test]
     fn pergola_edge_normals() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");

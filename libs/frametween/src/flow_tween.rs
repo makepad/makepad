@@ -32,7 +32,7 @@
 //!   -> sub-pixel parabola at L0 -> final field texture
 //!   -> warp pass: NV12 A + B + both fields + t -> RGBA out.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 use crate::frame::{
     bgra32_proxy_rgb8, nv12_proxy_rgb8, rgb8_proxy, rgb8_to_bgra32, tl_on, Frame, Pixels,
@@ -2471,9 +2471,7 @@ impl Widget for FlowTweenView {
                     );
                     match chain_parent {
                         Some(parent_id) => {
-                            let child_id = st.pass.draw_pass_id();
-                            cx.cx.passes[child_id].parent =
-                                CxDrawPassParent::DrawPass(parent_id);
+                            st.pass.set_pass_parent(cx.cx, parent_id);
                         }
                         None => cx.make_child_pass(&st.pass),
                     }

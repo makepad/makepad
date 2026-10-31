@@ -1,5 +1,6 @@
 //! Automatic dihedral/seam charts with convex-boundary harmonic disk maps.
 //! Non-disk charts split to checked per-face maps instead of losing triangles.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{context::invalid,geometry::*,modifiers::select_faces,uv::{components,install_uv},*};
 use std::collections::{BTreeMap,BTreeSet};
 
@@ -51,7 +52,7 @@ fn disk_map(mesh:&Mesh,faces:&[FaceId],ctx:&mut Context<'_>)->Result<Option<BTre
     if at!=start||!outgoing.is_empty()||boundary.len()<3{return Ok(None);}
     let lengths=(0..boundary.len()).map(|i|length(sub(mesh.vertex(boundary[i]).unwrap().position,mesh.vertex(boundary[(i+1)%boundary.len()]).unwrap().position))).collect::<Vec<_>>();
     let total=lengths.iter().sum::<f64>();if total<=0.||!total.is_finite(){return Err(invalid("unwrap boundary length is invalid"));}
-    let mut uv=vertices.iter().map(|&v|(v,[0.5,0.5])).collect::<BTreeMap<_,_>>();let mut arc=0.;for (i,&v) in boundary.iter().enumerate(){let angle=std::f64::consts::TAU*arc/total;uv.insert(v,[0.5+0.5*angle.cos(),0.5+0.5*angle.sin()]);arc+=lengths[i];}
+    let mut uv=vertices.iter().map(|&v|(v,[0.5,0.5])).collect::<BTreeMap<_,_>>();let mut arc=0.;for (i,&v) in boundary.iter().enumerate(){let angle=std::f64::consts::TAU*arc/total;uv.insert(v,[0.5+0.5*angle.pcos(),0.5+0.5*angle.psin()]);arc+=lengths[i];}
     let fixed=boundary.iter().copied().collect::<BTreeSet<_>>();let mut next=uv.clone();for _ in 0..128{for &v in &vertices{ctx.checkpoint(1)?;if fixed.contains(&v){continue;}let mut p=[0.;2];for other in &neighbors[&v]{ctx.checkpoint(1)?;for d in 0..2{p[d]+=uv[other][d]/neighbors[&v].len()as f64;}}next.insert(v,p);}std::mem::swap(&mut uv,&mut next);}
     let mut result=BTreeMap::new();for &f in faces{let cs=mesh.face_corners(f)?;let mut area=0.;for i in 0..cs.len(){let a=uv[&cs[i].vertex];let b=uv[&cs[(i+1)%cs.len()].vertex];area+=a[0]*b[1]-a[1]*b[0];result.insert(cs[i].id,a);}
         if !area.is_finite()||area<=1e-14{return Ok(None);}

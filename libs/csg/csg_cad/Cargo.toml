@@ -1,0 +1,12 @@
+[package]
+name = "makepad-csg-cad"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Parametric CAD operations on triangle meshes: sketches and regions, extrude/revolve/sweep/loft, gears, threads, holes, text, edge fillets and chamfers"
+
+[dependencies]
+makepad-csg-math = { path = "../csg_math" }
+makepad-csg-mesh = { path = "../csg_mesh" }
+makepad-csg-boolean = { path = "../csg_boolean" }
+ttf-parser = { path = "../../ttf-parser" }

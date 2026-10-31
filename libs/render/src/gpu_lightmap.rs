@@ -53,11 +53,12 @@
 //! the player. What differs between modes is how DYNAMIC
 //! casters shadow and where SUN visibility comes from at shade time:
 //!
-//! [`GpuLightmapMode::OnChange`] (default everywhere, the slow-GPU tier):
+//! [`GpuLightmapMode::OnChange`] (the type's default, the slow-GPU tier):
 //! sun visibility from the atlas A channel; dynamics cast through the
 //! prebaked SDF silhouette quads ([`dynamic_shadow_tiers`]).
 //!
-//! [`GpuLightmapMode::Realtime`] (opt-in, fast GPUs): classic CASCADED
+//! [`GpuLightmapMode::Realtime`] (fast GPUs; [`GpuLightmapMode::for_gpu`]
+//! picks it for desktop-class HDR GPUs): classic CASCADED
 //! SHADOW MAPS — per frame, [`crate::shadow_csm`] fits ortho cascades to
 //! the view frustum and ONE depth pass renders every caster (statics,
 //! entity boxes, movers, skinned characters) into them, chained ahead of
@@ -71,13 +72,20 @@
 //! per-frame cost is the cascade depth pass.
 
 use crate::lightmap::{plan_atlas, LmLight, LmRect, LmScene};
-use crate::shadow_csm::{fit_cascades, CsmFrame, CsmView, CSM_CASCADES};
+use crate::shadow_csm::{
+    cascade_overlaps, csm_tile_clip, CsmFrame, CSM_DEPTH_WINDOW,
+    CsmView, CSM_CASCADES, CSM_GRID,
+};
 use crate::shaders::*;
 use makepad_draw::*;
 
 /// Mirrors lightmap.rs's private constants — the GPU passes must agree with
 /// the CPU conventions the material shaders were tuned against.
 const RAY_OFFSET: f32 = 0.02;
+/// Lowest sun (dir.y) the cascades still render for: the sun disc keeps
+/// throwing gold light until it is fully below the horizon (sun.rs fades
+/// it over -2..0.5 degrees), so its shadows must last as long as it does.
+const CSM_MIN_SUN_Y: f32 = 0.005;
 
 /// How the baker schedules work. Pure runtime policy — no platform
 /// conditionals; switchable live via [`Renderer::set_gpu_lightmap_mode`].
@@ -97,12 +105,35 @@ pub enum GpuLightmapMode {
     Off,
 }
 
+impl GpuLightmapMode {
+    /// The tier a device should boot in, by one explicit rule: Realtime
+    /// cascades on a GPU that runs the HDR scene lane (float16 blend
+    /// targets: every Metal device, desktop Vulkan on discrete and
+    /// integrated parts) unless it is a mobile or XR part (a phone or Quest
+    /// target, or an Adreno / Mali / PowerVR GPU); OnChange everywhere else
+    /// (Quest, phones, the web, GL fallbacks). `vendor` and `renderer` are
+    /// the lower-cased GpuInfo strings.
+    pub fn for_gpu(float16_blend_targets: bool, vendor: &str, renderer: &str) -> Self {
+        let mobile_target = cfg!(any(target_os = "android", target_os = "ios", target_arch = "wasm32"));
+        let mobile_gpu = vendor == "arm"
+            || ["qualcomm", "adreno", "mali", "powervr", "imagination"]
+                .iter()
+                .any(|part| vendor.contains(part) || renderer.contains(part));
+        if float16_blend_targets && !mobile_target && !mobile_gpu {
+            Self::Realtime
+        } else {
+            Self::OnChange
+        }
+    }
+}
+
 /// Device-local budget for the Realtime cascaded-shadow tier.
 ///
-/// `tile_resolution` is the edge of ONE cascade. The three fixed-layout
-/// cascade tiles are stored side by side, with one R32F color target and one
-/// D32 depth target, so target memory is `24 * tile_resolution^2` bytes.
-/// `far_range` is the world-space reach of the final cascade.
+/// `tile_resolution` is the edge of ONE cascade. The four cascade tiles sit
+/// in a 2x2 grid (shadow_csm::CSM_GRID), with one R32F color target and one
+/// D32 depth target, so target memory is `32 * tile_resolution^2` bytes.
+/// `far_range` is the detail range (the third cascade ends near it); the
+/// far cascade reaches `far_range * shadow_csm::FAR_REACH`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CsmConfig {
     pub tile_resolution: usize,
@@ -260,12 +291,85 @@ fn schedule_regions(
 }
 
 /// One caster the depth passes rasterize.
+#[derive(Clone)]
 pub struct GpuBakeMesh {
     pub geometry: GeometryId,
     pub transform: Mat4f,
     /// World AABB (transformed model bounds).
     pub min: Vec3f,
     pub max: Vec3f,
+    /// A cut-out layer (leaf cards): its base-colour texture, alpha-tested
+    /// in the cascades (DrawLmSunDepthCutout).
+    pub cutout: Option<Texture>,
+    /// Which cascades draw it (foliage LOD for shadows).
+    pub band: CasterBand,
+}
+
+/// A run of consecutive static casters (`start..end` of their list) and
+/// the union of their world bounds: a cascade that misses the run skips
+/// all of it. Built with the list, which keeps each layer's copies in
+/// spatial order, so a run is a small patch of the world.
+#[derive(Clone, Copy, Debug)]
+pub struct CasterBlock {
+    pub start: u32,
+    pub end: u32,
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+/// Static casters for the cascades: a list and its blocks (none: every
+/// caster is tested on its own).
+#[derive(Clone, Copy)]
+pub struct CasterSlice<'a> {
+    pub casters: &'a [GpuBakeMesh],
+    pub blocks: &'a [CasterBlock],
+}
+
+/// Runs of up to 32 consecutive casters.
+pub fn caster_blocks(casters: &[GpuBakeMesh]) -> Vec<CasterBlock> {
+    casters.chunks(32).enumerate().map(|(k, run)| {
+        let (mut min, mut max) = (run[0].min, run[0].max);
+        for m in &run[1..] {
+            min = v3(min.x.min(m.min.x), min.y.min(m.min.y), min.z.min(m.min.z));
+            max = v3(max.x.max(m.max.x), max.y.max(m.max.y), max.z.max(m.max.z));
+        }
+        CasterBlock { start: (k * 32) as u32, end: (k * 32 + run.len()) as u32, min, max }
+    }).collect()
+}
+
+/// The casters of `slices` in blocks that reach cascade `casc`, in list order.
+fn casters_reaching<'a>(slices: &'a [CasterSlice<'a>], casc: &'a crate::shadow_csm::CsmCascade) -> impl Iterator<Item = &'a GpuBakeMesh> + 'a {
+    slices.iter().flat_map(move |s| {
+        let whole = std::iter::once((0, s.casters.len())).filter(move |_| s.blocks.is_empty());
+        let blocks = s.blocks.iter()
+            .filter(move |b| cascade_overlaps(casc, b.min, b.max) && crate::shadow_csm::cascade_sees(casc, b.min, b.max))
+            .map(|b| (b.start as usize, b.end as usize));
+        whole.chain(blocks).flat_map(move |(a, e)| s.casters[a..e].iter())
+    })
+}
+
+/// A model with a far stand-in (impostor.rs) casts its own layers into the
+/// near cascade and only its stand-in's cards into the others: a hillside
+/// of trees there is a few thousand alpha-cut quads, not millions of
+/// triangles. (An opaque ~100-triangle crown proxy for the outer cascades
+/// was measured slower on the M4 than the cards: the cost there is per
+/// instance and vertex, not the alpha test.)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CasterBand {
+    #[default]
+    All,
+    Near,
+    Far,
+}
+
+impl CasterBand {
+    /// Cascade 0 (the first ~10 m) takes the tree's own layers, every
+    /// outer one (to ~320 m) its stand-in: a tree casts in every cascade
+    /// that covers it, so its shadow never cuts in as it nears, and the
+    /// receivers cross-fade each seam between two of them.
+    pub fn draws_in(self, cascade: usize) -> bool {
+        match self { CasterBand::All => true, CasterBand::Near => cascade == 0, CasterBand::Far => cascade >= 1 }
+    }
 }
 
 /// A dynamic caster for Realtime mode's depth passes. No identity, no
@@ -281,6 +385,20 @@ pub struct GpuLmMover {
     /// frame's joint palette. `None` = rigid.
     pub skin: Option<GpuLmSkin>,
     pub morph: Option<crate::asset_morph::DepthMorph>,
+    /// A Splash material's derived caster (custom_material.rs): its
+    /// displaced or alpha-tested shadow instead of the stock one.
+    pub material: Option<MoverMaterial>,
+}
+
+/// The derived caster a mover's material asked for, and what it binds.
+#[derive(Clone)]
+pub struct MoverMaterial {
+    pub shader: DrawShaderId,
+    pub params: Vec4f,
+    /// Alpha under this cuts the caster (Mask); 0 = none.
+    pub cutoff: f32,
+    /// The layer's base texture (the Mask test samples it).
+    pub texture: Texture,
 }
 
 /// A skinned mover's pose source: the frame's shared joint-palette texture
@@ -455,7 +573,14 @@ struct BakeState {
 struct LmDraws {
     zero: DrawLmZero,
     sun_depth: DrawLmSunDepth,
+    sun_depth_cutout: DrawLmSunDepthCutout,
+    /// Far stand-ins' quads, turned to the sun (shaders/lm_depth.rs).
+    sun_depth_impostor: DrawLmSunDepthImpostor,
+    sun_depth_inside: DrawLmSunDepthInside,
     sun_depth_skinned: DrawLmSunDepthSkinned,
+    /// Splash materials' derived casters: one draw struct, the variant's
+    /// shader swapped in per mover (every variant has this struct's layout).
+    material_shadow: Option<crate::custom_material::DrawMaterialShadow>,
     lamp_depth: DrawLmLampDepth,
     gather_mesh: DrawLmSunGatherMesh,
     gather_ground: DrawLmSunGatherGround,
@@ -499,7 +624,7 @@ fn zero_rect(cx: &mut CxDraw, d: &mut DrawLmZero, rect: LmRect, size: usize, fil
 /// baker keeps the rest of its state borrowable.
 fn ensure_pool(pool: &mut Vec<BakePass>, cx: &mut Cx, n: usize) {
     while pool.len() < n {
-        let pass = DrawPass::new(cx);
+        let pass = DrawPass::new_with_name(cx, "lightmap");
         // Recover the pool index of this pass id: pass ids are small
         // (one per pass ever alive), so a linear probe terminates fast.
         let probe = (0..1_000_000)
@@ -560,8 +685,7 @@ impl<'a> PassSeq<'a> {
         // whatever pass is open right now.
         if k + 1 < n {
             let parent_id = self.pool[self.order[k + 1]].pass.draw_pass_id();
-            let child_id = self.pool[self.order[k]].pass.draw_pass_id();
-            cx.cx.passes[child_id].parent = CxDrawPassParent::DrawPass(parent_id);
+            self.pool[self.order[k]].pass.set_pass_parent(cx.cx, parent_id);
         } else {
             cx.make_child_pass(&self.pool[self.order[k]].pass);
         }
@@ -576,7 +700,7 @@ impl<'a> PassSeq<'a> {
                     .set_depth_texture(cx.cx, t, DrawPassClearDepth::ClearWith(1.0));
             }
             None => {
-                cx.cx.passes[bp.pass.draw_pass_id()].depth_texture = None;
+                bp.pass.clear_depth_texture(cx.cx);
             }
         }
         bp.list.begin_always(cx);
@@ -595,6 +719,8 @@ pub struct GpuLightmapBaker {
     /// Realtime CSM resolution/range are presentation policy, not realm
     /// state. They survive realm switches and may change live.
     csm_policy: CsmPolicy,
+    /// See [`GpuLightmapBaker::set_csm_far_reach`].
+    csm_far_reach: f32,
     /// A job scheduled by the renderer, realized on the next draw.
     pending: Option<GpuBakeJob>,
     /// Keep the previous completed atlas visible until every new region is
@@ -603,7 +729,7 @@ pub struct GpuLightmapBaker {
     state: Option<BakeState>,
     draws: Option<Box<LmDraws>>,
     pool: Vec<BakePass>,
-    /// Realtime's cascaded shadow maps: CSM_CASCADES tiles side by side in
+    /// Realtime's cascaded shadow maps: CSM_CASCADES tiles in a 2x2 grid in
     /// one Rf32 strip (one texture slot in every material family), plus its
     /// hardware depth. Written every Realtime frame, sampled by the PCF
     /// compare in the material shaders.
@@ -617,7 +743,7 @@ pub struct GpuLightmapBaker {
     /// cascades, no binding, `csm_vis` returning full sun.
     ///
     /// Allocated only while Realtime is serving. At the default 2048 tile
-    /// edge these two targets are about 96 MiB per view, so retaining them
+    /// edge these two targets are about 128 MiB per view, so retaining them
     /// in OnChange (where they are never sampled) is a serious split/mobile
     /// memory leak rather than harmless scratch.
     csm_tex: Option<Texture>,
@@ -659,13 +785,33 @@ pub struct GpuLightmapBaker {
     /// per-frame cascade-encode averages every 120 frames).
     rt_frames: u64,
     rt_us: u64,
+    /// Last Realtime frame: (static casters, movers, CPU encode us); zero
+    /// when the cascades did not render.
+    csm_frame_stats: (usize, usize, u64),
+    /// GPU time of the cascade pass, ms: an exponential average of the
+    /// command-buffer samples the backend reports (Metal; 0 elsewhere).
+    csm_gpu_ms: f32,
+    /// Caster instances the last cascade pass encoded, summed over the
+    /// cascades after per-cascade culling.
+    csm_draws: usize,
+    csm_mover_bounds: Vec<(Vec3f, Vec3f)>,
+    /// Rigid movers grouped by geometry (scratch, per frame).
+    csm_mover_order: Vec<usize>,
+    /// The cascades the tiles were rendered with this frame (receivers
+    /// compare against them).
+    csm_tiles: CsmFrame,
+    /// A 1x1 sampled depth texture parked in the `csm_map` slot while the
+    /// tier is off: the slot is a depth texture in every material family.
+    csm_fallback: Option<Texture>,
 }
+
 
 impl Default for GpuLightmapBaker {
     fn default() -> Self {
         Self {
             mode: GpuLightmapMode::default(),
             csm_policy: CsmPolicy::default(),
+            csm_far_reach: 0.0,
             pending: None,
             pending_delivery: None,
             state: None,
@@ -686,6 +832,13 @@ impl Default for GpuLightmapBaker {
             csm_logged: None,
             rt_frames: 0,
             rt_us: 0,
+            csm_frame_stats: (0, 0, 0),
+            csm_gpu_ms: 0.0,
+            csm_draws: 0,
+            csm_mover_bounds: Vec::new(),
+            csm_mover_order: Vec::new(),
+            csm_tiles: CsmFrame::default(),
+            csm_fallback: None,
         }
     }
 }
@@ -706,6 +859,24 @@ fn bake_budget_from_env() -> usize {
 
 fn v3(x: f32, y: f32, z: f32) -> Vec3f {
     Vec3f { x, y, z }
+}
+
+/// One smoothing step for a GPU pass timer (about a 16-sample window);
+/// the first sample seeds it.
+pub(crate) fn ema_ms(avg: f32, sample: f64) -> f32 {
+    let sample = sample as f32;
+    if avg <= 0.0 { sample } else { avg + (sample - avg) * 0.0625 }
+}
+
+/// The slot a cut-out caster's alpha texture (`tex`) binds to. The depth
+/// casters inherit `morph_map` from DrawLmSunDepth, so `tex` is NOT slot 0:
+/// binding the alpha at 0 fed it to the morph lane and left the alpha test
+/// reading whatever the slot held last — stand-in cards cast nothing, or
+/// (with a float palette left bound) their whole rectangles, which a low
+/// sun stretches into long straight-edged bands.
+pub(crate) fn cutout_slot(cx: &Cx, dv: &DrawVars) -> Option<usize> {
+    let id = dv.draw_shader_id?;
+    cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == live_id!(tex))
 }
 
 fn csm_caster_counts(
@@ -1078,6 +1249,19 @@ fn render_tex(cx: &mut Cx, w: usize, h: usize) -> Texture {
     )
 }
 
+fn depth_tex_sampled(cx: &mut Cx, w: usize, h: usize) -> Texture {
+    Texture::new_with_format(
+        cx,
+        TextureFormat::DepthD32Sampled {
+            size: TextureSize::Fixed {
+                width: w,
+                height: h,
+            },
+            initial: true,
+        },
+    )
+}
+
 fn render_tex_rf32(cx: &mut Cx, w: usize, h: usize) -> Texture {
     Texture::new_with_format(
         cx,
@@ -1140,6 +1324,13 @@ impl GpuLightmapBaker {
     /// combine a new inverse resolution with an old target.
     ///
     /// Returns the effective configuration after environment overrides.
+    /// Stretch the far cascade to `metres` (0 = the default reach of
+    /// `far_range * FAR_REACH`). The detail cascades are unchanged.
+    pub fn set_csm_far_reach(&mut self, metres: f32) {
+        let metres = if metres.is_finite() { metres.clamp(0.0, 16384.0) } else { 0.0 };
+        if metres != self.csm_far_reach { self.csm_far_reach = metres; self.csm_last = None; }
+    }
+
     pub fn set_csm_config(&mut self, tile_resolution: usize, far_range: f32) -> CsmConfig {
         let old = self.csm_policy.effective();
         let new = self.csm_policy.set_device(tile_resolution, far_range);
@@ -1187,9 +1378,9 @@ impl GpuLightmapBaker {
         self.rt_us = 0;
     }
 
-    /// DEBUG (idempotence probe): re-bake every region of the CURRENT
-    /// layout into the CURRENT targets — no re-plan, no fresh textures.
-    /// This is the exact path the accumulator invariant is about.
+    /// Re-bake every region of the CURRENT layout into the CURRENT targets --
+    /// no re-plan, no fresh textures: the idempotence probe, and a replaced
+    /// GPU device (`Renderer::gpu_reset`), whose targets came back empty.
     pub fn debug_redirty(&mut self) {
         self.dirty = true;
     }
@@ -1245,16 +1436,24 @@ impl GpuLightmapBaker {
             let res = self.csm_policy.effective().tile_resolution;
             if self.csm_tex.is_none() || self.csm_depth.is_none() || self.csm_res != res {
                 self.csm_res = res;
-                let width = res * CSM_CASCADES;
-                self.csm_tex = Some(render_tex_rf32(cx, width, res));
-                self.csm_depth = Some(depth_tex(cx, width, res));
+                let edge = res * CSM_GRID;
+                self.csm_tex = Some(render_tex_rf32(cx, edge, edge));
+                self.csm_depth = Some(depth_tex_sampled(cx, edge, edge));
             }
         } else {
-            // Dropping the last handles lets the backend reclaim ~96 MiB per
+            // Dropping the last handles lets the backend reclaim ~128 MiB per
             // 2048px view instead of carrying realtime-only memory forever.
             self.csm_tex = None;
             self.csm_depth = None;
             self.csm_last = None;
+            self.csm_gpu_ms = 0.0;
+        }
+    }
+
+    /// The off-tier `csm_map` binding (1x1 sampled depth), created once.
+    pub fn ensure_csm_fallback(&mut self, cx: &mut Cx) {
+        if self.csm_fallback.is_none() {
+            self.csm_fallback = Some(depth_tex_sampled(cx, 1, 1));
         }
     }
 
@@ -1297,17 +1496,37 @@ impl GpuLightmapBaker {
     /// the horizon) — the renderer then writes csm off into the uniforms.
     /// A realized atlas is NOT a precondition: a world with no static
     /// lightmap still gets full cascade shadows for its dynamics.
-    pub fn csm_binding(&self) -> Option<(CsmFrame, Texture, f32)> {
-        let frame = self.csm_last?;
-        Some((
-            frame,
-            self.csm_tex.as_ref()?.clone(),
-            1.0 / self.csm_res.max(1) as f32,
-        ))
+    /// Last Realtime frame's cascade work: (static casters, movers, CPU
+    /// encode us).
+    pub fn csm_frame_stats(&self) -> (usize, usize, u64) {
+        self.csm_frame_stats
     }
 
-    pub(crate) fn parent_csm_to(&self,cx:&mut Cx,parent:DrawPassId){
-        if self.csm_binding().is_some(){for p in &self.csm_pool{cx.passes[p.pass.draw_pass_id()].parent=CxDrawPassParent::DrawPass(parent);}}
+    /// Smoothed GPU time of the cascade pass in ms (0 until a backend that
+    /// times command buffers reports one, or while the cascades are off).
+    pub fn csm_gpu_ms(&self) -> f32 {
+        self.csm_gpu_ms
+    }
+
+    /// Caster instances the last cascade pass drew, summed over cascades
+    /// (after per-cascade culling; each caster counts once per cascade).
+    pub fn csm_draws(&self) -> usize {
+        self.csm_draws
+    }
+
+    /// This frame's cascade binding for the material shaders: the fitted
+    /// cascades (each tile's fit, `on` set), the
+    /// sampled depth target and one tile's inverse resolution. Whenever the
+    /// tier is not serving (OnChange/Off, sun below the horizon, no target)
+    /// the frame is off (`on` false) and the texture is the 1x1 depth
+    /// fallback; None only before that fallback exists.
+    pub fn csm_binding(&self) -> Option<(CsmFrame, Texture, f32)> {
+        if let (Some(frame), Some(depth)) = (self.csm_last, self.csm_depth.as_ref()) {
+            let mut frame = frame;
+            frame.on = true;
+            return Some((frame, depth.clone(), 1.0 / self.csm_res.max(1) as f32));
+        }
+        Some((CsmFrame::default(), self.csm_fallback.clone()?, 0.001))
     }
 
     /// DEBUG: the stage textures worth dumping alongside the atlas. The mask
@@ -1359,8 +1578,7 @@ impl GpuLightmapBaker {
                 geometry: job.mesh_geometry[i],
                 transform: m.transform,
                 min: lo,
-                max: hi,
-            });
+                max: hi, cutout: None, band: Default::default() });
         }
         // Caster-only statics come AFTER the regioned meshes, so the
         // `RegionKind::Mesh(i)` indices above stay valid; every depth loop
@@ -1372,8 +1590,7 @@ impl GpuLightmapBaker {
                 geometry: m.geometry,
                 transform: m.transform,
                 min: m.min,
-                max: m.max,
-            });
+                max: m.max, cutout: None, band: Default::default() });
         }
         for (bmin, bmax) in &job.scene.boxes {
             scene_min = min3(scene_min, *bmin);
@@ -1557,7 +1774,11 @@ impl GpuLightmapBaker {
             Box::new(LmDraws {
                 zero: DrawLmZero::script_new_with_default(vm),
                 sun_depth: DrawLmSunDepth::script_new_with_default(vm),
+                sun_depth_cutout: DrawLmSunDepthCutout::script_new_with_default(vm),
+                sun_depth_impostor: DrawLmSunDepthImpostor::script_new_with_default(vm),
+                sun_depth_inside: DrawLmSunDepthInside::script_new_with_default(vm),
                 sun_depth_skinned: DrawLmSunDepthSkinned::script_new_with_default(vm),
+                material_shadow: None,
                 lamp_depth: DrawLmLampDepth::script_new_with_default(vm),
                 gather_mesh: DrawLmSunGatherMesh::script_new_with_default(vm),
                 gather_ground: DrawLmSunGatherGround::script_new_with_default(vm),
@@ -1592,13 +1813,18 @@ impl GpuLightmapBaker {
         &mut self,
         cx: &mut CxDraw,
         sun_dir: Vec3f,
-        static_casters: &[GpuBakeMesh],
+        static_casters: &[CasterSlice],
         movers: &[GpuLmMover],
         csm_view: Option<&CsmView>,
         eye: Vec3f,
         scene_bounds: Option<(Vec3f, Vec3f)>,
     ) -> Option<GpuLmDelivery> {
         self.csm_last = None;
+        for bp in &self.csm_pool {
+            for ms in bp.pass.take_gpu_times_ms(cx.cx) {
+                self.csm_gpu_ms = ema_ms(self.csm_gpu_ms, ms);
+            }
+        }
         if !self.ensure_draws(cx.cx) {
             return None;
         }
@@ -1653,7 +1879,7 @@ impl GpuLightmapBaker {
         };
         // Realtime: fit this frame's cascades (sun below the horizon fits
         // nothing — the materials' sun term is dead anyway).
-        let csm = (realtime && sun_dir.y > 0.02 && self.csm_tex.is_some()).then(|| {
+        let csm = (realtime && sun_dir.y > CSM_MIN_SUN_Y && self.csm_tex.is_some()).then(|| {
             let range = self.csm_policy.effective().far_range;
             // The z window reaches from the cascade slice BACK to the scene
             // bound toward the sun. With a realized atlas that bound is
@@ -1668,13 +1894,14 @@ impl GpuLightmapBaker {
                     v3(eye.x + range, eye.y + range, eye.z + range),
                 ),
             };
-            fit_cascades(
+            crate::shadow_csm::fit_cascades_reach(
                 csm_view,
                 eye,
                 sun_dir,
                 scene_min,
                 scene_max,
                 range,
+                self.csm_far_reach,
                 self.csm_res as f32,
             )
         });
@@ -1691,8 +1918,11 @@ impl GpuLightmapBaker {
         if !batch.is_empty() {
             passes += self.encode_batch(cx, sun_dir, &batch);
         }
-        if let Some(frame) = csm {
-            passes += self.encode_cascades(cx, static_casters, movers, &frame);
+        if let Some(frame) = &csm {
+            // Every tile is rendered from a clear every frame. (Keeping far
+            // tiles across frames drew stale, misplaced shadow blocks on
+            // Metal while the camera moved.)
+            passes += self.encode_cascades(cx, static_casters, movers, frame);
         }
         let us = ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64;
         if let Some(frame) = &csm {
@@ -1705,11 +1935,18 @@ impl GpuLightmapBaker {
                 self.csm_tex.as_ref().map(|t| t.texture_id()),
                 c.rx.w, c.ry.w, c.rz.w, c.bias01,
                 sun_dir.x, sun_dir.y, sun_dir.z,
-                static_casters.len(), movers.len(),
+                static_casters.iter().map(|s| s.casters.len()).sum::<usize>(), movers.len(),
                 self.state.is_some()
             );
         }
-        self.csm_last = csm;
+        self.csm_frame_stats = if csm.is_some() {
+            (static_casters.iter().map(|s| s.casters.len()).sum::<usize>(), movers.len(), us)
+        } else {
+            (0, 0, 0)
+        };
+        // Receivers compare against each tile's own fit (a kept tile keeps
+        // the cascade it was rendered with).
+        self.csm_last = csm.map(|_| self.csm_tiles);
         if !batch.is_empty() {
             self.bake_frames += 1;
             self.bake_passes += passes;
@@ -2500,13 +2737,15 @@ impl GpuLightmapBaker {
         encoded
     }
 
-    /// Realtime cascades: ONE pass, CSM_CASCADES tiles side by side in the
-    /// strip, EVERY caster — static meshes, occluder boxes, rigid movers
+    /// Realtime cascades: ONE pass, CSM_CASCADES tiles in the 2x2 grid of the
+    /// target, EVERY caster — static meshes, occluder boxes, rigid movers
     /// and skinned characters (posed from the same joint palette the
     /// visible draw binds, so a character shadows in exactly the pose it
-    /// renders in). No CPU per-cascade culling yet: instance encodes are
-    /// cheap at village scale and the GPU clips; cull here first if a big
-    /// world ever makes this loop hot.
+    /// renders in). Each cascade draws only the casters whose world box
+    /// overlaps its light-space box (shadow_csm::cascade_overlaps), so the
+    /// far cascade's town does not cost the near cascades anything. Tiles
+    /// are still clipped by `discard` in the depth shader: the platform has
+    /// no per-draw viewport/scissor to confine a draw to its tile.
     ///
     /// The static half comes from the realized atlas layout when there IS
     /// one; a world without a layout still encodes its dynamic casters,
@@ -2514,7 +2753,7 @@ impl GpuLightmapBaker {
     fn encode_cascades(
         &mut self,
         cx: &mut CxDraw,
-        static_casters: &[GpuBakeMesh],
+        static_casters: &[CasterSlice],
         movers: &[GpuLmMover],
         frame: &CsmFrame,
     ) -> usize {
@@ -2524,7 +2763,15 @@ impl GpuLightmapBaker {
         };
         let state = self.state.take();
         let mut draws = self.draws.take().unwrap();
-        ensure_pool(&mut self.csm_pool, cx.cx, 1);
+        if self.csm_pool.is_empty() {
+            ensure_pool(&mut self.csm_pool, cx.cx, 1);
+            let pass = &self.csm_pool[0].pass;
+            pass.set_pass_name(cx.cx, "csm");
+            pass.set_gpu_timing_enabled(cx.cx, true);
+            // Receivers sample the cascade DEPTH; the R32F colour is only
+            // the attachment the depth pipeline writes.
+            pass.set_color_scratch(cx.cx, true);
+        }
         let order = pass_order(&self.csm_pool, 1);
         let mut seq = PassSeq {
             pool: &mut self.csm_pool,
@@ -2533,8 +2780,8 @@ impl GpuLightmapBaker {
         };
         let idx = seq.open(
             cx,
-            res * CSM_CASCADES,
-            res,
+            res * CSM_GRID,
+            res * CSM_GRID,
             &csm_tex,
             DrawPassClearColor::ClearWith(Vec4f {
                 x: 1.0,
@@ -2544,26 +2791,77 @@ impl GpuLightmapBaker {
             }),
             Some(&csm_z),
         );
-        for (ci, casc) in frame.cascades.iter().enumerate() {
-            let tile = Vec4f {
-                x: 1.0 / CSM_CASCADES as f32,
-                y: 1.0,
-                z: (2.0 * ci as f32 + 1.0) / CSM_CASCADES as f32 - 1.0,
-                w: 0.0,
+        // Rigid movers in geometry order: the batcher only appends to the
+        // previous draw of the same geometry, and a town's cars interleave
+        // body, glass and wheels copy by copy: every part of every car was
+        // its own draw in every cascade. Grouped, each car model's part is
+        // one instanced draw. (Morphed movers keep their own draws.)
+        {
+            use std::hash::{Hash, Hasher};
+            let key = |m: &GpuLmMover| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                m.geometry.hash(&mut h);
+                (m.morph.is_some(), h.finish())
             };
+            self.csm_mover_order.clear();
+            self.csm_mover_order.extend((0..movers.len()).filter(|i| movers[*i].skin.is_none()));
+            self.csm_mover_order.sort_by_cached_key(|i| key(&movers[*i]));
+        }
+        // Posed world bounds, once per frame for all cascades (scratch
+        // retained across frames: no per-frame allocation once warm).
+        self.csm_mover_bounds.clear();
+        self.csm_mover_bounds.extend(
+            movers.iter().map(|m| crate::lightmap::world_bounds(&m.transform, (m.min, m.max))),
+        );
+        let mut draws_n = 0usize;
+        // Casters that reach past their cascade's tile (drawn after the rest
+        // through the discarding pipeline), by index.
+        let mut straddle: Vec<&GpuBakeMesh> = Vec::new();
+        // Where the backend applies the tile scissor, nothing reaches past
+        // the tile at all and every caster takes the discard-free pipeline.
+        let scissored = cx.cx.gpu_backend().honors_scissor();
+        if draws.material_shadow.is_none() && movers.iter().any(|m| m.material.is_some()) {
+            draws.material_shadow = cx.cx.try_with_vm(|vm| {
+                crate::custom_material::register(vm);
+                crate::custom_material::DrawMaterialShadow::script_new_with_default(vm)
+            });
+        }
+        // The GPU profiler names each cascade's draws (fixed names: no formatting per frame).
+        const CASCADE_NAMES: [&str; 8] = ["shadow csm cascade 0", "shadow csm cascade 1", "shadow csm cascade 2", "shadow csm cascade 3",
+            "shadow csm cascade 4", "shadow csm cascade 5", "shadow csm cascade 6", "shadow csm cascade 7"];
+        let outer_owner = cx.enter_draw_name(CASCADE_NAMES[0]);
+        for (ci, casc) in frame.cascades.iter().enumerate() {
+            cx.exit_draw_label(outer_owner);
+            cx.enter_draw_name(CASCADE_NAMES[ci.min(CASCADE_NAMES.len() - 1)]);
+            self.csm_tiles.cascades[ci] = *casc;
+            let tile = csm_tile_clip(ci);
+            // The tile in target pixels: every draw into this cascade is
+            // scissored to it, so a caster larger than the tile (a city block
+            // in the 13 m near cascade) rasterizes only its tile's texels
+            // instead of up to the whole 2x2 target, every fragment of which
+            // the tile clip then discarded.
+            let scissor = Some([(ci % CSM_GRID) as u32 * res as u32, (ci / CSM_GRID) as u32 * res as u32, res as u32, res as u32]);
+            // The tile's depth window: z_clip = z01 * (1 - y) + z.
+            let (gs, go) = CSM_DEPTH_WINDOW;
+            let gen = vec4(0.0, 1.0 - gs, go, 0.0);
             let d = &mut draws.sun_depth;
-                d.set_morph(cx.cx,None);
+            d.set_morph(cx.cx, None);
+            d.flip_a = gen;
+            d.tile_a = tile;
+            d.draw_vars.options.scissor = scissor;
             d.sun_rx = casc.rx;
             d.sun_ry = casc.ry;
             d.sun_rz = casc.rz;
-            d.flip_a = Vec4f::default();
-            d.tile_a = tile;
             if let Some(state) = state.as_ref() {
                 // Regioned meshes already live in the realized atlas state.
                 // Its caster-only suffix is deliberately skipped here: the
                 // upload-time registry below owns that lane in Realtime and
                 // carries every material layer rather than only layer zero.
                 for m in state.meshes.iter().take(state.region_mesh_count) {
+                    if !cascade_overlaps(casc, m.min, m.max) || !crate::shadow_csm::cascade_sees(casc, m.min, m.max) {
+                        continue;
+                    }
+                    draws_n += 1;
                     d.transform = m.transform;
                     d.draw_vars.geometry_id = Some(m.geometry);
                     if d.draw_vars.can_instance() {
@@ -2578,14 +2876,135 @@ impl GpuLightmapBaker {
                     }
                 }
             }
-            for m in static_casters {
+            // MAKEPAD_FOLIAGE_SHADOWS, the A/B switch for foliage casters:
+            // far (no leaf cards in cascade 0), none (no cut-out casters),
+            // near (stand-ins in cascade 1 only: the old cut-in at ~27 m).
+            thread_local! { static MODE: u8 = match std::env::var("MAKEPAD_FOLIAGE_SHADOWS").as_deref() { Ok("far") => 1, Ok("none") => 2, Ok("near") => 3, _ => 0 }; }
+            let mode = MODE.with(|m| *m);
+            let band_in = |band: CasterBand, c: usize| if mode == 3 && band == CasterBand::Far { c == 1 } else { band.draws_in(c) };
+            let draws_in = |band: CasterBand| band_in(band, ci);
+            // Shadow LOD: a caster whose whole shadow the next finer cascade
+            // serves (it draws there, and no receiver of that shadow reads
+            // or cross-fades into this cascade) is left out of this one. Its
+            // shadow is followed onto ground up to 2 m below its base.
+            let finer = (ci > 0).then(|| &frame.cascades[ci - 1]);
+            let held = |band: CasterBand, lo: Vec3f, hi: Vec3f| {
+                finer.is_some_and(|f| band_in(band, ci - 1) && crate::shadow_csm::cascade_holds_shadow(f, lo, hi, 2.0))
+            };
+            // A caster that cannot rasterize past its tile (the scissor stops
+            // it, or it lies wholly inside) draws through the pipeline without
+            // the tile clip's discard: one with discard loses the GPU's
+            // hidden-surface removal. Only casters reaching past the tile's
+            // edge on a backend without the scissor pay for the clip.
+            let di = &mut draws.sun_depth_inside.depth;
+            di.flip_a = gen;
+            di.tile_a = tile;
+            di.draw_vars.options.scissor = scissor;
+            di.sun_rx = casc.rx;
+            di.sun_ry = casc.ry;
+            di.sun_rz = casc.rz;
+            straddle.clear();
+            for m in casters_reaching(static_casters, casc).filter(|m| m.cutout.is_none() && draws_in(m.band)) {
+                if !cascade_overlaps(casc, m.min, m.max) || !crate::shadow_csm::cascade_sees(casc, m.min, m.max) || held(m.band, m.min, m.max) {
+                    continue;
+                }
+                draws_n += 1;
+                if !scissored && !crate::shadow_csm::cascade_contains_xy(casc, m.min, m.max) {
+                    straddle.push(m);
+                    continue;
+                }
+                di.transform = m.transform;
+                di.draw_vars.geometry_id = Some(m.geometry);
+                if di.draw_vars.can_instance() {
+                    cx.add_instance(&di.draw_vars);
+                }
+            }
+            let d = &mut draws.sun_depth;
+            for m in &straddle {
                 d.transform = m.transform;
                 d.draw_vars.geometry_id = Some(m.geometry);
                 if d.draw_vars.can_instance() {
                     cx.add_instance(&d.draw_vars);
                 }
             }
-            for mv in movers.iter().filter(|m| m.skin.is_none()) {
+            // Cut-out layers after every opaque caster: their pipeline
+            // discards, the opaque one above never does. A tree's leaf cards
+            // in the first cascade, its stand-in's cards in the next (CasterBand);
+            // a masked model without a stand-in in every one.
+            // A stand-in (band Far) draws through the sun-facing impostor
+            // caster: its quad is not the shape it casts.
+            let cutouts = static_casters;
+            let dc = &mut draws.sun_depth_cutout;
+            let dimp = &mut draws.sun_depth_impostor.cutout;
+            let cut_slot = cutout_slot(cx.cx, &dc.depth.draw_vars);
+            let imp_slot = cutout_slot(cx.cx, &dimp.depth.draw_vars);
+            for d in [&mut *dc, &mut *dimp] {
+                d.depth.flip_a = gen;
+                d.depth.tile_a = tile;
+                d.depth.draw_vars.options.scissor = scissor;
+                d.depth.sun_rx = casc.rx;
+                d.depth.sun_ry = casc.ry;
+                d.depth.sun_rz = casc.rz;
+            }
+            for m in casters_reaching(cutouts, casc).filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
+                if !cascade_overlaps(casc, m.min, m.max) || !crate::shadow_csm::cascade_sees(casc, m.min, m.max) || held(m.band, m.min, m.max) {
+                    continue;
+                }
+                draws_n += 1;
+                let (d, slot) = if m.band == CasterBand::Far { (&mut *dimp, imp_slot) } else { (&mut *dc, cut_slot) };
+                d.depth.transform = m.transform;
+                d.depth.draw_vars.geometry_id = Some(m.geometry);
+                if let (Some(t), Some(slot)) = (&m.cutout, slot) { d.depth.draw_vars.set_texture(slot, t); }
+                if d.depth.draw_vars.can_instance() {
+                    cx.add_instance(&d.depth.draw_vars);
+                }
+            }
+            let d = &mut draws.sun_depth;
+            let di = &mut draws.sun_depth_inside.depth;
+            for &i in &self.csm_mover_order {
+                let (mv, (lo, hi)) = (&movers[i], &self.csm_mover_bounds[i]);
+                // Rigid movers cull by their posed AABB. Morphed casters are
+                // never culled by a rest AABB (a posed limb can leave it);
+                // the GPU clips them.
+                if mv.morph.is_none() && (!cascade_overlaps(casc, *lo, *hi) || !crate::shadow_csm::cascade_sees(casc, *lo, *hi) || held(CasterBand::All, *lo, *hi)) {
+                    continue;
+                }
+                draws_n += 1;
+                // A material's derived caster, once its pipeline exists
+                // (until then the stock shadow below).
+                if let (Some(mat), Some(dm)) = (&mv.material, draws.material_shadow.as_mut()) {
+                    if cx.cx.draw_shader_ready(mat.shader, false) {
+                        // The material's own pipeline first: the morph map and
+                        // the alpha texture bind by name into ITS slots.
+                        dm.draw_vars.draw_shader_id = Some(mat.shader);
+                        dm.set_morph(cx.cx, mv.morph.as_ref());
+                        dm.depth.depth.flip_a = gen;
+                        dm.depth.depth.tile_a = tile;
+                        dm.depth.depth.draw_vars.options.scissor = scissor;
+                        dm.depth.depth.sun_rx = casc.rx;
+                        dm.depth.depth.sun_ry = casc.ry;
+                        dm.depth.depth.sun_rz = casc.rz;
+                        dm.depth.depth.transform = mv.transform;
+                        dm.params = mat.params;
+                        dm.cutoff = mat.cutoff;
+                        dm.draw_vars.geometry_id = Some(mv.geometry);
+                        if let Some(slot) = cutout_slot(cx.cx, &dm.draw_vars) {
+                            dm.draw_vars.set_texture(slot, &mat.texture);
+                        }
+                        if dm.draw_vars.can_instance() {
+                            cx.add_instance(&dm.draw_vars);
+                        }
+                        continue;
+                    }
+                }
+                if mv.morph.is_none() && (scissored || crate::shadow_csm::cascade_contains_xy(casc, *lo, *hi)) {
+                    di.transform = mv.transform;
+                    di.draw_vars.geometry_id = Some(mv.geometry);
+                    if di.draw_vars.can_instance() {
+                        cx.add_instance(&di.draw_vars);
+                    }
+                    continue;
+                }
                 d.set_morph(cx.cx,mv.morph.as_ref());
                 d.transform = mv.transform;
                 d.draw_vars.geometry_id = Some(mv.geometry);
@@ -2593,15 +3012,30 @@ impl GpuLightmapBaker {
                     cx.add_instance(&d.draw_vars);
                 }
             }
-            for mv in movers {
+            for (mv, (lo, hi)) in movers.iter().zip(&self.csm_mover_bounds) {
                 let Some(skin) = &mv.skin else { continue };
+                // A posed limb can leave the rest bounds, but not by more
+                // than the body's own size: cull by the bounds grown that
+                // much, so a character far outside this cascade (across the
+                // island, off-screen, parked out of sight) costs nothing.
+                let half = (*hi - *lo) * 0.5;
+                let grow = half.x.max(half.y).max(half.z) + 0.25;
+                let grow = vec3f(grow, grow, grow);
+                if !cascade_overlaps(casc, *lo - grow, *hi + grow) || !crate::shadow_csm::cascade_sees(casc, *lo - grow, *hi + grow) {
+                    continue;
+                }
+                if held(CasterBand::All, *lo - grow, *hi + grow) {
+                    continue;
+                }
+                draws_n += 1;
                 let ds = &mut draws.sun_depth_skinned;
                 ds.set_morph(cx.cx,mv.morph.as_ref());
                 ds.sun_rx = casc.rx;
                 ds.sun_ry = casc.ry;
                 ds.sun_rz = casc.rz;
-                ds.flip_a = Vec4f::default();
+                ds.flip_a = gen;
                 ds.tile_a = tile;
+                ds.draw_vars.options.scissor = scissor;
                 ds.transform = mv.transform;
                 ds.skin_a.x = skin.joint_base;
                 ds.draw_vars.set_texture(0, &skin.joint_tex);
@@ -2611,11 +3045,19 @@ impl GpuLightmapBaker {
                 }
             }
         }
+        cx.exit_draw_label(outer_owner);
         seq.close(cx, idx);
+        // The depth drawers are shared with the atlas passes (whole target).
+        draws.sun_depth.draw_vars.options.scissor = None;
+        draws.sun_depth_cutout.depth.draw_vars.options.scissor = None;
+        draws.sun_depth_impostor.cutout.depth.draw_vars.options.scissor = None;
+        draws.sun_depth_inside.depth.draw_vars.options.scissor = None;
+        draws.sun_depth_skinned.draw_vars.options.scissor = None;
+        self.csm_draws = draws_n;
         let encoded = seq.cursor;
         let caster_counts = csm_caster_counts(
             state.as_ref(),
-            static_casters.len(),
+            static_casters.iter().map(|s| s.casters.len()).sum::<usize>(),
             movers.len(),
         );
         let statics = caster_counts.0;
@@ -2748,6 +3190,19 @@ mod tests {
     fn registered_static_layers_do_not_need_an_atlas_state() {
         assert_eq!(csm_caster_counts(None, 9, 0), (9, 0));
         assert_eq!(csm_caster_counts(None, 9, 3), (9, 3));
+    }
+
+    /// The boot tier rule: desktop-class HDR GPUs get cascades, mobile and
+    /// XR parts (and anything without float16 blend) keep the baked tier.
+    #[test]
+    fn boot_tier_follows_the_gpu() {
+        use GpuLightmapMode::*;
+        assert_eq!(GpuLightmapMode::for_gpu(true, "apple", "apple m4 max"), Realtime);
+        assert_eq!(GpuLightmapMode::for_gpu(true, "nvidia", "nvidia geforce rtx 4090"), Realtime);
+        assert_eq!(GpuLightmapMode::for_gpu(true, "intel", "intel(r) arc(tm) graphics"), Realtime);
+        assert_eq!(GpuLightmapMode::for_gpu(false, "intel", "intel(r) uhd graphics 620"), OnChange);
+        assert_eq!(GpuLightmapMode::for_gpu(true, "qualcomm", "adreno (tm) 740"), OnChange);
+        assert_eq!(GpuLightmapMode::for_gpu(true, "arm", "mali-g78"), OnChange);
     }
 
     /// The mode split is airtight by construction: exactly ONE tier serves

@@ -1,5 +1,6 @@
 //! Transactional source surfacing. Layers, masks and vertex colors are source
 //! data; flattened PBR textures are derived on the document worker.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{
     canon::{Reader, Writer},
     mesh, Error, ImageEncoding, Limits, Material, Result, RgbaImage,
@@ -63,11 +64,37 @@ pub enum PatternKind {
     Perlin,
     Fbm,
     Yarn,
+    /// Running-bond masonry: scale is [bricks per row, rows] per UV tile;
+    /// color_a is the mortar, color_b the brick face.
+    Bricks,
+    /// Square tiles or pavers with grout lines (color_a) and per-tile tone.
+    Tiles,
+    /// Staggered boards along U with fine grain; color_a is the gap.
+    Planks,
+    /// Rounded horizontal slots (color_a) on a plate; scale = [columns, rows].
+    Vents,
+    /// Hexagonal mesh holes (color_a) in a grille; scale = cells per tile.
+    Grille,
+    /// Diamond knurling/stippling for grips; color_a is the groove.
+    Knurl,
+    /// Three-tone disruptive camouflage: domain-warped blotches in
+    /// color_a, color_b and their mean, hard-edged like printed cloth.
+    Camo,
+    /// Leaf clusters for alpha-tested foliage cards: pointed leaves with a
+    /// midrib, color_a (alpha 0) between them and inside color_a→color_b
+    /// shading per leaf; the cluster thins toward the tile's edge. Use
+    /// `alpha: "mask"` and color_a with alpha 0. scale = leaves per tile row.
+    Leaves,
+    /// The conifer sibling of Leaves: needle sprays along short twigs.
+    Needles,
 }
 impl PatternKind {
     pub fn name(self) -> &'static str { match self {
         Self::Checker => "checker", Self::Stripes => "stripes", Self::Gradient => "gradient",
         Self::Noise => "noise", Self::Perlin => "perlin", Self::Fbm => "fbm", Self::Yarn => "yarn",
+        Self::Bricks => "bricks", Self::Tiles => "tiles", Self::Planks => "planks",
+        Self::Vents => "vents", Self::Grille => "grille", Self::Knurl => "knurl", Self::Camo => "camo",
+        Self::Leaves => "leaves", Self::Needles => "needles",
     } }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +155,11 @@ pub struct SurfaceLayer {
     pub mips: Vec<RgbaImage>,
 }
 impl SurfaceLayer {
+    /// A `width` x `height` layer of the channel's neutral value (what `surface_layer`
+    /// without colour or pixels makes).
+    pub fn blank(id: impl Into<String>, channel: SurfaceChannel, width: u32, height: u32, limits: &Limits) -> Result<Self> {
+        Ok(Self::new(id, RgbaImage::new(width, height, encode(channel, decode(channel, channel.neutral())), limits)?))
+    }
     pub fn new(id: impl Into<String>, image: RgbaImage) -> Self {
         Self {
             id: id.into(),
@@ -154,6 +186,8 @@ impl SurfaceLayer {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceMaterial {
     pub fur: Option<makepad_gltf::GlbFurMaterial>,
+    /// Foliage wind / clear-coat paint terms (`makepadShading`).
+    pub shading: Option<makepad_gltf::GlbShading>,
     pub base_color: [f64; 4],
     pub metallic: f64,
     pub roughness: f64,
@@ -170,6 +204,7 @@ impl Default for SurfaceMaterial {
     fn default() -> Self {
         Self {
             fur: None,
+            shading: None,
             base_color: [1.; 4],
             metallic: 0.,
             roughness: 1.,
@@ -287,6 +322,12 @@ pub enum SurfaceOperation {
         color: [f64; 4],
         opacity: f64,
     },
+    /// Replaces the colours of many vertices at once (baked weathering).
+    VertexColors {
+        object: String,
+        vertices: Vec<mesh::VertexId>,
+        colors: Vec<[f64; 4]>,
+    },
     Bake {
         source: String,
         target: String,
@@ -321,8 +362,8 @@ pub(crate) use codec::{
 };
 #[path = "surface_geometry.rs"]
 mod geometry;
-#[path = "surface_parse.rs"]
-mod parse;
+#[path = "surface_check.rs"]
+mod check;
 #[path = "surface_pattern.rs"]
 mod pattern_sampler;
 #[path = "surface_derive.rs"]
@@ -348,6 +389,9 @@ impl SurfaceMaterial {
     pub fn validate(&self, limits: &Limits, ctx: &mut mesh::Context<'_>) -> Result<()> {
         if self.fur.is_some_and(|fur| !fur.valid()) {
             return Err(Error::Invalid("fur material: length 0.001..0.05m, density 0.05..1, scale 20..1000, seed 0..65535"));
+        }
+        if self.shading.is_some_and(|s| !s.valid()) {
+            return Err(Error::Invalid("shading: wind, clearcoat, flake and rim are 0..1, impostor a distance in metres"));
         }
         if !color_valid(&self.base_color)
             || !unit(self.metallic)
@@ -758,6 +802,17 @@ impl SurfaceState {
                     }
                 }
             }
+            VertexColors { object, vertices, colors } => {
+                if vertices.len() != colors.len() || vertices.is_empty() || vertices.len() > limits.mesh.max_vertices || !colors.iter().all(|c| color_valid(c)) {
+                    return Err(Error::Invalid("vertex colors"));
+                }
+                let mesh = objects.get(object).ok_or(Error::Invalid("unknown paint object"))?;
+                for (id, color) in vertices.iter().zip(colors) {
+                    ctx.checkpoint(1)?;
+                    mesh.vertex(*id).ok_or(Error::Invalid("unknown painted vertex"))?;
+                    self.vertex_colors.insert((object.clone(), *id), *color);
+                }
+            }
             Bake { .. } => geometry::bake(self, op, objects, legacy, limits, ctx)?,
             Dilate {
                 material,
@@ -819,12 +874,13 @@ impl SurfaceOperation {
             Mask { mask, .. } => mask.as_ref().map_or(0, Vec::len) + 256,
             Stroke { points, .. } => points.len() * 16 + 512,
             VertexPaint { vertices, .. } => vertices.len() * 8 + 256,
+            VertexColors { vertices, .. } => vertices.len() * 40 + 256,
             _ => 512,
         }
     }
     pub fn object_name(&self) -> Option<&str> {
         match self {
-            Self::ProjectedStroke { object, .. } | Self::VertexPaint { object, .. } => Some(object),
+            Self::ProjectedStroke { object, .. } | Self::VertexPaint { object, .. } | Self::VertexColors { object, .. } => Some(object),
             Self::Bake { target, .. } => Some(target),
             _ => None,
         }
@@ -894,7 +950,7 @@ fn falloff(distance: f64, radius: f64, hardness: f64) -> f64 {
     }
 }
 fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
+    (a[0] - b[0]).phypot(a[1] - b[1])
 }
 fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     let d = [b[0] - a[0], b[1] - a[1]];
@@ -960,7 +1016,7 @@ fn render_pattern(
                     n = (n ^ (n >> 27)).wrapping_mul(0x94d049bb133111eb);
                     ((n ^ (n >> 31)) >> 11) as f64 / ((1u64 << 53) - 1) as f64
                 },
-                PatternKind::Perlin | PatternKind::Fbm | PatternKind::Yarn =>
+                PatternKind::Perlin | PatternKind::Fbm | PatternKind::Yarn | PatternKind::Bricks | PatternKind::Tiles | PatternKind::Planks | PatternKind::Vents | PatternKind::Grille | PatternKind::Knurl | PatternKind::Camo | PatternKind::Leaves | PatternKind::Needles =>
                     pattern_sampler::sample(pattern.kind, u, v, pattern.scale, pattern.seed),
             };
             let mut color = [0.; 4];

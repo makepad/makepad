@@ -1,6 +1,7 @@
 //! Bounded real-solver review scenarios, executed on the document worker.
 use crate::{*,transform::*};
 use makepad_soft_body::*;
+use makepad_soft_body::SoftBodyBinding;
 use std::sync::Arc;
 
 pub(crate) fn sample(doc:&Document,scenario:&str,cancelled:Option<&dyn Fn()->bool>)->Result<(Vec<Matrix4>,Vec<Matrix4>,SoftBodyStats)> {

@@ -1,10 +1,21 @@
 use makepad_model::*;
 fn apply(d:&mut Document,id:&str,ops:Vec<Operation>)->Applied{d.apply(Transaction{request_id:id.into(),expected:d.head(),operations:ops},None).unwrap()}
-fn parse(d:&Document,s:&str)->Vec<Operation>{parse_operations(&json::parse(s.as_bytes()).unwrap(),d.limits()).unwrap()}
 #[test]
 fn published_snapshot_is_current_state_without_replay_and_retains_retry_identity(){
     let mut d=Document::new(Limits::default()).unwrap();
-    let ops=parse(&d,r#"[{"op":"lathe","object":"vase","profile":[[0,0],[0.7,0.1],[0.8,0.8],[0.3,1.7]],"axis":1,"segments":17,"caps":true,"material":0}]"#);
+    let ops=vec![
+        Operation::Construction(ConstructionOperation {
+            object: "vase".into(),
+            kind: Construction::Lathe {
+                profile: vec![[0.0, 0.0], [0.7, 0.1], [0.8, 0.8], [0.3, 1.7]],
+                axis: 1,
+                segments: 17,
+                caps: true,
+                material: 0,
+                outward: false
+            }
+        }),
+    ];
     let tx=Transaction{request_id:"lathe".into(),expected:d.head(),operations:ops};let applied=d.apply(tx.clone(),None).unwrap();
     let history=d.to_bytes(None).unwrap();let snapshot=d.to_snapshot_bytes(None).unwrap();
     let mut restored=Document::from_bytes(&snapshot,Limits::default(),None).unwrap();
@@ -30,10 +41,52 @@ fn receipt_byte_cap_preserves_editability_and_tombstones(){
 #[test]
 fn pivot_keeps_vertices_children_and_headlight_world_positions(){
     let mut d=Document::new(Limits::default()).unwrap();
-    let ops=parse(&d,r#"[{"op":"cube","object":"car","size":[2,1,4]},{"op":"cube","object":"lamp","size":[0.2,0.2,0.1]},{"op":"object_node","object":"car","node":{"transform":{"translation":[3,2,1],"rotation":[0,0,0,1],"scale":[2,1,3]}}},{"op":"object_node","object":"lamp","node":{"parent":"car","transform":{"translation":[0.7,0,-2]}}},{"op":"light","name":"headlight","attachment":{"object":"car"},"transform":{"translation":[0.7,0,-2]},"kind":"spot","inner":0.2,"outer":0.5,"color":[1,1,1],"intensity":500,"range":40}]"#);apply(&mut d,"car",ops);
+    let ops=vec![
+        Operation::Cube { object: "car".into(), size: [2.0, 1.0, 4.0] },
+        Operation::Cube { object: "lamp".into(), size: [0.2, 0.2, 0.1] },
+        Operation::Scene(SceneOperation::Node {
+            object: "car".into(),
+            node: SceneNode {
+                parent: None,
+                linked_to: None,
+                transform: Transform {
+                    translation: [3.0, 2.0, 1.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [2.0, 1.0, 3.0]
+                }
+            }
+        }),
+        Operation::Scene(SceneOperation::Node {
+            object: "lamp".into(),
+            node: SceneNode {
+                parent: Some("car".into()),
+                linked_to: None,
+                transform: Transform {
+                    translation: [0.7, 0.0, -2.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0]
+                }
+            }
+        }),
+        Operation::Scene(SceneOperation::Light(LightEmitter {
+            name: "headlight".into(),
+            attachment: Attachment::Object("car".into()),
+            transform: Transform {
+                translation: [0.7, 0.0, -2.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0]
+            },
+            kind: LightKind::Spot { inner: 0.2, outer: 0.5 },
+            color: [1.0, 1.0, 1.0],
+            intensity: 500.0,
+            range: 40.0
+        })),
+    ];apply(&mut d,"car",ops);
     let positions=|d:&Document|d.object("car").unwrap().vertices().iter().map(|v|transform::transform_point(d.scene().world_matrix("car").unwrap(),v.position)).collect::<Vec<_>>();
     let before=positions(&d);let child=d.scene().world_matrix("lamp").unwrap();let emitter=transform::transform_point(d.scene().world_matrix("car").unwrap(),d.scene().emitters["headlight"].transform.translation);
-    let ops=parse(&d,r#"[{"op":"pivot","object":"car","position":[0.25,0.5,-1]}]"#);apply(&mut d,"pivot",ops);
+    let ops=vec![
+        Operation::Scene(SceneOperation::Pivot { object: "car".into(), position: [0.25, 0.5, -1.0] }),
+    ];apply(&mut d,"pivot",ops);
     assert_eq!(positions(&d),before);assert_eq!(d.scene().world_matrix("lamp").unwrap(),child);
     assert_eq!(transform::transform_point(d.scene().world_matrix("car").unwrap(),d.scene().emitters["headlight"].transform.translation),emitter);
     let bytes=d.to_bytes(None).unwrap();assert_eq!(Document::from_bytes(&bytes,Limits::default(),None).unwrap().head(),d.head());

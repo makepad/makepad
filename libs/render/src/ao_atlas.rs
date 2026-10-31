@@ -1678,7 +1678,7 @@ mod tests {
     fn every_vertex_uv_reads_back_its_own_occlusion() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/sandbox/resources/models/kenney/city-kit-suburban/building-type-h.glb"
+            "/../../../apps/commercial/sandbox/resources/models/kenney/city-kit-suburban/building-type-h.glb"
         );
         let Ok(bytes) = std::fs::read(path) else {
             println!("  (no asset packs — skipped)");
@@ -1827,7 +1827,7 @@ mod tests {
     fn report_real_model_histogram() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/sandbox/resources/models/kenney/city-kit-suburban/building-type-h.glb"
+            "/../../../apps/commercial/sandbox/resources/models/kenney/city-kit-suburban/building-type-h.glb"
         );
         let Ok(bytes) = std::fs::read(path) else {
             println!("  (no asset packs)");
@@ -2198,7 +2198,7 @@ mod sidecar_consistency {
     #[test]
     fn disk_pair_matches_fresh_bake() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(bytes) = std::fs::read(root.join("template-floor-layer-raised.glb")) else {
             eprintln!("asset absent — skipped");
             return;
@@ -2294,7 +2294,7 @@ mod dark_chart_owner {
     #[test]
     fn who_owns_the_dark_strips() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");
@@ -2365,7 +2365,7 @@ mod pergola_forensics {
     #[test]
     fn rafter_underside_tells_all() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");
@@ -2510,7 +2510,7 @@ mod seam_acceptance {
 
     fn kit_path(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/{name}"
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/{name}"
         ))
     }
 

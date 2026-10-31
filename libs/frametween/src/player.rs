@@ -26,7 +26,7 @@ use crate::flow_tween::{
 };
 use crate::frame::rgb8_to_bgra32;
 use crate::mode::{ai_ceiling, AiRateGate, Mode};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::sync::Arc;
 use std::time::Duration;
 

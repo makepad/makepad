@@ -13,32 +13,75 @@ fn apply(doc: &mut Document, id: &str, operations: Vec<Operation>) {
     )
     .unwrap();
 }
-fn commands(doc: &mut Document, id: &str, text: &str) {
-    let operations =
-        parse_operations(&json::parse(text.as_bytes()).unwrap(), doc.limits()).unwrap();
-    apply(doc, id, operations);
-}
 fn fixture() -> Document {
     let mut doc = Document::new(Limits {
         max_joints: 128,
         ..Default::default()
     })
     .unwrap();
-    commands(
+    apply(
         &mut doc,
         "shapes",
-        r#"[
-      {"op":"sphere","object":"body","radius":0.45,"segments":16,"rings":8},
-      {"op":"sphere","object":"eye","radius":0.14,"segments":12,"rings":6},
-      {"op":"object_node","object":"body","node":{"transform":{"translation":[0,0.7,0]}}},
-      {"op":"object_node","object":"eye","node":{"transform":{"translation":[0.18,0.84,-0.4]}}},
-      {"op":"surface_material","material":0,"roughness":0.12}
-    ]"#,
+        vec![
+        Operation::sphere("body", 0.45, 16, 8, true, &Limits::default()).unwrap(),
+        Operation::sphere("eye", 0.14, 12, 6, true, &Limits::default()).unwrap(),
+        Operation::Scene(SceneOperation::Node {
+            object: "body".into(),
+            node: SceneNode {
+                parent: None,
+                linked_to: None,
+                transform: Transform {
+                    translation: [0.0, 0.7, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0]
+                }
+            }
+        }),
+        Operation::Scene(SceneOperation::Node {
+            object: "eye".into(),
+            node: SceneNode {
+                parent: None,
+                linked_to: None,
+                transform: Transform {
+                    translation: [0.18, 0.84, -0.4],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0]
+                }
+            }
+        }),
+        Operation::Surface(SurfaceOperation::Material { material: 0, value: SurfaceMaterial { roughness: 0.12, ..Default::default() } }),
+    ],
     );
-    commands(
+    apply(
         &mut doc,
         "bind",
-        r#"[{"op":"soft_body_bind","object":"body","attachments":[{"name":"eye-frame","objects":["eye"],"pivot":[0.18,0.84,-0.4]}]}]"#,
+        vec![
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec![],
+            attachments: vec![
+                SoftBodyAttachmentRequest {
+                    name: "eye-frame".into(),
+                    objects: vec!["eye".into()],
+                    pivot: Some([0.18, 0.84, -0.4])
+                }
+            ],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ],
     );
     doc
 }
@@ -238,18 +281,14 @@ fn soft_review_invalid_requests_and_mid_solve_cancellation_leave_source_unchange
         .is_err());
     assert!(polls.get() > 20);
     assert_eq!(doc.to_bytes(None).unwrap(), before);
-    for text in [
-        r#"{"kind":"soft_body","scenario":"settled"}"#,
-        r#"{"kind":"soft_body","scenario":"wall","time":0}"#,
-        r#"{"kind":"soft_body","scenario":3}"#,
-    ] {
-        assert!(ReviewPose::from_json(&json::parse(text.as_bytes()).unwrap()).is_err());
-    }
+    assert!(doc.compile_review_pose(&ReviewPose::SoftBody { scenario: "settled".into() }, None).is_err());
     let mut unbound = Document::new(Limits::default()).unwrap();
-    commands(
+    apply(
         &mut unbound,
         "sphere",
-        r#"[{"op":"sphere","object":"body","radius":1,"segments":12,"rings":6}]"#,
+        vec![
+        Operation::sphere("body", 1.0, 12, 6, true, &Limits::default()).unwrap(),
+    ],
     );
     assert!(unbound
         .compile_review_pose(
@@ -265,10 +304,12 @@ fn soft_review_invalid_requests_and_mid_solve_cancellation_leave_source_unchange
 fn imported_static_node_scale_uses_inverse_transpose_without_double_mirror_sign() {
     for scale in [[2.3, 0.6, 1.4], [-2.3, 0.6, 1.4]] {
         let mut doc = Document::new(Limits::default()).unwrap();
-        commands(
+        apply(
             &mut doc,
             "sphere",
-            r#"[{"op":"sphere","object":"body","radius":0.7,"segments":12,"rings":8}]"#,
+            vec![
+        Operation::sphere("body", 0.7, 12, 8, true, &Limits::default()).unwrap(),
+    ],
         );
         let frame = Transform {
             translation: [3., -1., 2.],

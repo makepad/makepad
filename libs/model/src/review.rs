@@ -21,37 +21,39 @@ impl Document {
                     ("intersections",Value::Int(report.intersection_count as i64))]));
             }
         }
-        Ok(json::obj(vec![("head",crate::head_json(self.head())),("valid",Value::Bool(errors.is_empty())),
+        Ok(json::obj(vec![("head",crate::service::head_json(self.head())),("valid",Value::Bool(errors.is_empty())),
             ("closed_objects",Value::Int(closed as i64)),("open_objects",Value::Int(open as i64)),("errors",Value::Arr(errors))]))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{Engine,Limits,head_json};
+    use crate::{Document, Limits, Operation, Transaction, MeshEditingOperation, Action, mesh};
     #[test]
-    fn inward_closed_shells_fail_review_and_flip_repairs_them(){
-        let mut engine=Engine::new(Limits::default());engine.open("car",None,None).unwrap();
-        let apply=|engine:&mut Engine,id:&str,operations:Value|{
-            let expected=head_json(engine.document("car").unwrap().head());
-            engine.execute("model.apply",&json::obj(vec![("document",json::s("car")),("request_id",json::s(id)),("expected",expected),("operations",operations)]),None).unwrap()
+    fn inward_closed_shells_fail_review_and_flip_repairs_them() {
+        let mut doc=Document::new(Limits::default()).unwrap();
+        let apply=|doc:&mut Document,id:&str,operations:Vec<Operation>| {
+            doc.apply(Transaction{request_id:id.into(),expected:doc.head(),operations},None).unwrap()
         };
-        apply(&mut engine,"box",json::parse(br#"[{"op":"cube","object":"body","size":[2,1,4]}]"#).unwrap());
-        assert_eq!(engine.document("car").unwrap().publication_checks(None).unwrap().get("valid"),Some(&Value::Bool(true)));
-        let faces=engine.document("car").unwrap().object("body").unwrap().faces().iter().map(|f|json::s(f.id.0.to_string())).collect::<Vec<_>>();
-        let flip=Value::Arr(vec![json::obj(vec![("op",json::s("flip_faces")),("object",json::s("body")),("faces",Value::Arr(faces))])]);
-        apply(&mut engine,"invert",flip.clone());
-        let broken=engine.document("car").unwrap().publication_checks(None).unwrap();assert_eq!(broken.get("valid"),Some(&Value::Bool(false)));assert!(broken.to_json().contains("orientation_errors"));
-        apply(&mut engine,"repair",flip);
-        assert_eq!(engine.document("car").unwrap().publication_checks(None).unwrap().get("valid"),Some(&Value::Bool(true)));
+        apply(&mut doc,"box",vec![Operation::Cube{object:"body".into(),size:[2.,1.,4.]}]);
+        let review=|doc:&Document| doc.object("body").unwrap().validate_global(&mut mesh::Context::default()).unwrap();
+        assert!(review(&doc).is_valid_solid);
+        let faces=doc.object("body").unwrap().faces().iter().map(|f|f.id).collect();
+        let flip=vec![Operation::MeshEditing(MeshEditingOperation{object:"body".into(),action:Action::FlipFaces{faces}})];
+        apply(&mut doc,"invert",flip.clone());
+        let broken=review(&doc);assert!(!broken.is_valid_solid);assert!(broken.orientation_errors>0);
+        apply(&mut doc,"repair",flip);
+        assert!(review(&doc).is_valid_solid);
     }
     #[test]
-    fn summary_mode_preserves_exact_commit_and_replay_without_id_chatter(){
-        let mut engine=Engine::new(Limits::default());engine.open("car",None,None).unwrap();
-        let args=json::obj(vec![("document",json::s("car")),("request_id",json::s("box")),("expected",head_json(engine.document("car").unwrap().head())),
-            ("result_mode",json::s("summary")),("operations",json::parse(br#"[{"op":"cylinder","object":"tire","radius":1,"height":1,"segments":64}]"#).unwrap())]);
-        let result=engine.execute("model.apply",&args,None).unwrap();assert!(result.to_json().len()<400);assert!(result.get("results").is_none());
-        let replay=engine.execute("model.apply",&args,None).unwrap();assert_eq!(result.get("head"),replay.get("head"));assert_eq!(replay.get("replayed"),Some(&Value::Bool(true)));
+    fn summary_mode_preserves_exact_commit_and_replay_without_id_chatter() {
+        let mut doc=Document::new(Limits::default()).unwrap();
+        let args=Transaction{request_id:"box".into(),expected:doc.head(),
+            operations:vec![Operation::cylinder("tire",1.,1.,64,true,doc.limits()).unwrap()]};
+        let result=doc.apply(args.clone(),None).unwrap();
+        let replay=doc.apply(args,None).unwrap();
+        assert_eq!(result.current,replay.current);
+        assert_eq!(result.committed,replay.committed);
+        assert!(replay.replayed);
     }
 }

@@ -3,7 +3,7 @@
 
 use makepad_csg_boolean::classify::{classify_triangles, TriLocation};
 use makepad_csg_boolean::corefine::corefine;
-use makepad_csg_math::{dvec3, Mat4d, Vec3d};
+use makepad_csg_math::{dvec3, Mat4d};
 use makepad_csg_mesh::mesh::{make_unit_cube, TriMesh};
 use makepad_csg_mesh::validate::validate_mesh;
 use makepad_csg_mesh::volume::mesh_volume;
@@ -116,29 +116,31 @@ fn main() {
     let class_a = classify_triangles(&coref.mesh_a, &coref.mesh_b, &coref.on_boundary_a);
     let class_b = classify_triangles(&coref.mesh_b, &coref.mesh_a, &coref.on_boundary_b);
 
-    let mut a_counts = [0usize; 3]; // Inside, Outside, OnBoundary
+    let mut a_counts = [0usize; 4]; // Inside, Outside, OnBoundary, Touching
     for &c in &class_a {
         match c {
             TriLocation::Inside => a_counts[0] += 1,
             TriLocation::Outside => a_counts[1] += 1,
             TriLocation::OnBoundary => a_counts[2] += 1,
+            TriLocation::Touching => a_counts[3] += 1,
         }
     }
-    let mut b_counts = [0usize; 3];
+    let mut b_counts = [0usize; 4];
     for &c in &class_b {
         match c {
             TriLocation::Inside => b_counts[0] += 1,
             TriLocation::Outside => b_counts[1] += 1,
             TriLocation::OnBoundary => b_counts[2] += 1,
+            TriLocation::Touching => b_counts[3] += 1,
         }
     }
     println!(
-        "\nClassification A: inside={} outside={} on_boundary={}",
-        a_counts[0], a_counts[1], a_counts[2]
+        "\nClassification A: inside={} outside={} on_boundary={} touching={}",
+        a_counts[0], a_counts[1], a_counts[2], a_counts[3]
     );
     println!(
-        "Classification B: inside={} outside={} on_boundary={}",
-        b_counts[0], b_counts[1], b_counts[2]
+        "Classification B: inside={} outside={} on_boundary={} touching={}",
+        b_counts[0], b_counts[1], b_counts[2], b_counts[3]
     );
 
     // Step 3: Manually do union selection

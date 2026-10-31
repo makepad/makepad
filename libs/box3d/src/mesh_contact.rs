@@ -96,6 +96,7 @@ fn refresh_cache(mesh_contact: &mut MeshContact, shape_a: &Shape, xf_a: WorldTra
     }
 
     // Enlarge to the query bounds to absorb small movement
+    // static mesh/height contacts keep the default speculative distance
     let radius = max_aabb_margin() + speculative_distance();
     let extension = Vec3 { x: radius, y: radius, z: radius };
     mesh_contact.query_bounds.lower_bound = sub(bounds.lower_bound, extension);

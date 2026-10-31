@@ -1,213 +1,717 @@
-//! Opt-in procedural model materials. Stock models pay no additional shader cost.
+//! Splash materials on the model lanes (KERNELS.md §3.3): the Pbr lane with
+//! a material's hooks installed (makepad-render-material), the Unlit kind,
+//! the error material, opt-in IBL, and the derived shadow caster.
+//!
+//! The engine owns the lane: its vertex stage, cascades, clustered lights
+//! and fog run unchanged, and the hooks replace only what they name (their
+//! stock bodies are in shaders/pbr.rs, skinned.rs and clustered.rs). A
+//! recoloured car keeps the clear-coat response of its stock material. A
+//! host passes the hooks it allows: Sandbox's game.material allows the
+//! albedo `surface` hook only (`HookMask::ALBEDO`).
 use makepad_draw::*;
-use crate::shaders::DrawSceneSkinned;
+use makepad_render_material::{self as material, builtin, Builtin, HookMask, HookSet, MaterialDesc, MaterialError, ShadowVariant, VariantPlan};
+use makepad_scene::{BaseKind, Blend};
+use crate::renderer::variants::{self, Features};
+use crate::shaders::{DrawLmSunDepthCutout, DrawScenePbr};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSceneCustom {
-    #[deref] pub skinned: DrawSceneSkinned,
-    #[live(vec4(0.0, 0.0, 0.0, 0.0))] pub params: Vec4f,
-}
-
-// The engine owns vertex, lighting and fog. Only the albedo surface hook is
-// taken from a game's spec; arbitrary pixel/vertex overrides are not applied.
-script_mod! {
-    use mod.prelude.widgets_internal.*
-    mod.draw.DrawSceneCustom = mod.std.set_type_default() do #(DrawSceneCustom::script_shader(vm)) {
-        ..mod.draw.DrawSceneSkinned
-        surface: fn(base: vec4) -> vec4 { return base }
-        pixel: fn() {
-            // Atlas x vertex tint. Kenney ships both conventions — most packs
-            // UV-map into one colormap (tint = white), nature-kit and friends
-            // carry no texture and colour per material (atlas = white 1x1).
-            // Multiplying serves both without a branch or a second shader.
-            // REPEAT + raw UVs (not fract): fract() wraps in software but
-            // explodes screen-space derivatives at every tile seam, so the
-            // GPU picks the tiniest mip and distant walls turn to noise.
-            let tex = self.tex.sample_as_bgra_repeat(self.v_uv)
-            // BUILD punch-through: palette 255 / magenta is the overlay key.
-            let magenta = (tex.x > 0.75) && (tex.z > 0.75) && (tex.y < 0.22)
-            if tex.w < 0.5 || magenta {
-                discard()
-            }
-            let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
-            var albedo = self.color_adjust(
-                vec3(base.x * self.v_tint.x, base.y * self.v_tint.y, base.z * self.v_tint.z),
-                self.tint,
-                self.color_adjust_ctl
-            )
-            // Detail: blendFunc GL_DST_COLOR GL_SRC_COLOR = 2 * dest * src.
-            // Mean-127 overlay is identity; far mips go gray and drop out.
-            if self.detail_st.x > 0.001 {
-                let det = self.detail_map.sample_as_bgra_repeat(self.v_uv * self.detail_st)
-                albedo = vec3(albedo.x * det.x * 2.0, albedo.y * det.y * 2.0, albedo.z * det.z * 2.0)
-            }
-            let surface = self.surface(vec4(albedo, tex.w))
-            if surface.w < 0.5 { discard() }
-            albedo = surface.xyz
-            // AO scales AMBIENT only. Ambient is light arriving from
-            // everywhere, which is exactly what a crevice blocks; direct
-            // sunlight is already zero where the surface faces away. Folding
-            // it into both would darken a lit wall twice for the same reason.
-            // Occlusion from the ATLAS when the pack has one, else from the
-            // vertex lane. Both live in [AO_FLOOR, 1].
-            let baked = self.ao_map.sample(self.v_ao_uv).x
-            // Dithered: the atlas is 8-bit and magnified well past a texel per
-            // pixel, so a shallow wall gradient otherwise lands as visible
-            // bands of piecewise-linear bilinear. Hash noise anchored in WORLD
-            // space (screen-anchored grain swims when the camera moves) at
-            // ±1.5% breaks the bands without reading as dirt on flat colour.
-            let hash = fract(
-                sin(dot(self.world.xy + self.world.zz, vec2(12.9898, 78.233))) * 43758.5453
-            )
-            let ao = clamp(
-                mix(self.v_tint.w, baked, self.ao_enabled) + (hash - 0.5) * 0.03,
-                0.0, 1.0
-            )
-            // AO scales ambient FULLY and direct partially. Ambient-only is
-            // the physically tidy answer and it is why the bake was invisible:
-            // ambient is about a quarter of the light here, so even a properly
-            // dark corner moved the pixel by a few percent. Letting occlusion
-            // take some of the direct term too is what every stylised renderer
-            // does, and it is what makes a crease read as a crease.
-            let ao_direct = mix(1.0, ao, 0.75)
-            // Screen-space AO (ssao.rs), composed with the baked term on the
-            // AMBIENT fill only — same law as `ao` above, stricter split:
-            // a crevice blocks sky light, not the sun, so the direct and
-            // shadow-mapped terms never see this factor at all.
-            var sao = 1.0
-            if self.ssao_ctl.x > 0.001 {
-                let sp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
-                let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
-                sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
-            }
-            // Baked light: A gates the analytic sun through a smoothstep over
-            // the signed-distance field — the penumbra width is the decode
-            // WINDOW ([`LM_SUN_SOFT`]), a runtime knob, not a bake product.
-            // RGB adds the lamps (x2: half range stored for overbright).
-            let lm = self.light_map.sample_as_bgra(self.v_lm_uv)
-            let has_lm = step(0.000001, self.lm_rect.z)
-            let sun_vis = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
-            // Dynamics gate their sun through the GROUND region instead
-            // (statics have v_lmg.z = 0, dynamics have lm_rect = 0, so the
-            // two gates never both engage). The shadow-top plane rejects
-            // the ground's shadow for vertices ABOVE the blocker along the
-            // sun ray: a fence rail shades shins, never the head over it.
-            let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
-            let top_g = self.lm_top_decode.x
-                + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
-            let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
-            let sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
-            // Realtime: the cascades replace BOTH baked gates (own chart
-            // and ground projection) — one receive path for every family.
-            let sun_all = mix(
-                sun_vis * sun_vis_g,
-                self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
-                self.csm_p.x
-            )
-            // 0.9 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
-            let lamps = lm.xyz * (0.9 * has_lm)
-            // Local light — baked pools plus the per-frame slots — reaches
-            // this fragment WITHOUT the sun's shadow term, because a shadow
-            // is the absence of SUN and of nothing else. Over its bright core
-            // a pool additionally fills that shadow back in, so a lamp drowns
-            // out the streak its own pole throws across its own pool:
-            // lightmap::lamp_shadow_fill.
-            var local = lamps + self.v_dl
-            if self.cluster_on > 0.5 { local = self.cluster_sum(self.v_csm.xyz, self.v_csm_n) }
-            let sun_lit = self.sun_filled(sun_all, local)
-            let analytic = self.v_ambient * (ao * sao)
-                + self.v_direct * (ao_direct * sun_lit)
-                + local * ao_direct
-            // prelit: albedo already carries COLOR_0 = LM×4. Multiplying
-            // the sun again zeros any face that looks inward or down.
-            let lit = albedo * mix(analytic, vec3(1.0, 1.0, 1.0), self.prelit)
-            // AO DEBUG: show baked occlusion alone, contrast-stretched. AO
-            // lives in [AO_FLOOR, 1] (0.52..1), so raw it is a wash of pale
-            // greys and judging whether a 90-degree corner actually darkens is
-            // guesswork. Remapped to full black-to-white, a corner that works
-            // is unmistakable and one that does not is equally so.
-            if self.ao_debug > 0.5 {
-                // HARD PINK, heavily accentuated. Greyscale AO on grey-white
-                // Kenney walls is unreadable — the whole reason the last three
-                // bakes looked "a bit smudgy" is that a real defect and a
-                // correct result differ by a few percent of luminance. Hue
-                // separates occlusion from albedo completely, and the cube
-                // curve pushes even slight darkening to saturation, so where
-                // AO does anything at all it is obvious.
-                // LINEAR over AO's actual range. An earlier version cubed this
-                // to make faint occlusion obvious and that made the view lie:
-                // a barely-shaded wall at ao=0.9 came out 37% pink, so the
-                // whole house read as heavily occluded while the atlas was in
-                // fact 74% unoccluded. A debug view that exaggerates is worse
-                // than none — it hides the very problem it is there to show.
-                let occ = clamp((1.0 - ao) / 0.70, 0.0, 1.0)
-                return vec4(mix(vec3(1.0, 1.0, 1.0), vec3(1.0, 0.0, 0.55), occ), 1.0)
-            }
-            // LM DEBUG: the ACTIVE sun tier alone — red in shadow, green in
-            // sun, lamps added as their own colour on top. Albedo suppressed
-            // so a faint lamp or a misplaced shadow reads instantly.
-            if self.lm_debug > 0.5 {
-                return vec4(
-                    mix(vec3(0.6, 0.1, 0.1), vec3(0.1, 0.6, 0.1), sun_lit) + lamps,
-                    1.0
-                )
-            }
-            return vec4(mix(self.to_display(lit), self.fog_color, self.v_fog), 1.0)
-        }
-
-        fragment: fn() {
-            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
-        }
-    }
-}
-
-/// Install shader declarations in the owning isolate. Registration grants
-/// no IO or host-widget access. GameMaterials only copies its allowlisted hook.
-pub fn register(vm: &mut ScriptVm) -> ScriptValue {
-    if vm.bx.heap.type_default_for_id(DrawSceneCustom::script_type_id_static()).is_some() {
-        return NIL;
-    }
-    if vm.bx.heap.type_default_for_id(DrawSceneSkinned::script_type_id_static()).is_none() {
-        crate::local_shadows::sampling::script_mod(vm);
-        crate::clustered::script_mod(vm);
-        crate::fast_gi::script_mod(vm);
-        crate::shaders::script_mod(vm);
-        crate::local_shadows::script_mod(vm);
-    }
-    script_mod(vm)
+    #[deref] pub pbr: DrawScenePbr,
 }
 
 impl DrawSceneCustom {
-    /// Construct a fresh allowlisted surface override. Source edits reuse a
-    /// ScriptIp (body + opcode offset), while the draw function cache hashes
-    /// only those locations. Invalidate this object's function-hash shortcut
-    /// so a new body is frontend-checked; generated-code caching still safely
-    /// shares identical shaders. Call only when declarations change, not for
-    /// per-frame parameter updates.
-    pub fn from_surface(vm: &mut ScriptVm, surface: ScriptObject, params: Vec4f) -> Result<Self, String> {
-        if !vm.bx.heap.is_fn(surface) { return Err("surface is not a shader function".into()); }
-        register(vm);
-        let base = vm.bx.heap.type_default_for_id(Self::script_type_id_static())
-            .ok_or_else(|| "custom material shader registration failed".to_string())?;
-        let obj = vm.bx.heap.new_with_proto_no_vec(base.into());
-        let result = vm.bx.heap.set_value(obj, id!(surface).into(), surface.into(), NoTrap);
-        if !result.is_nil() || vm.bx.heap.object_method(obj, id!(surface).into(), NoTrap).as_object() != Some(surface) {
-            return Err("custom material surface override was not installed".into());
+    /// Set the material's four keyable floats (`self.params` in the hooks).
+    pub fn set_params(&mut self, cx: &Cx, params: Vec4f) {
+        self.pbr.skinned.draw_vars.set_uniform(cx, live_id!(params), &[params.x, params.y, params.z, params.w]);
+    }
+
+    /// The material's four keyable floats as last set.
+    pub fn params(&self, cx: &Cx) -> Vec4f {
+        let p = self.pbr.skinned.uniform_value(cx, live_id!(params));
+        vec4(p[0], p[1], p[2], p[3])
+    }
+}
+
+/// The derived shadow caster: the sun-depth projection with the material's
+/// `vertex` hook, and for a masked material its `surface` alpha.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawMaterialShadow {
+    #[deref] pub depth: DrawLmSunDepthCutout,
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))] pub params: Vec4f,
+    /// Alpha under this cuts the caster (Mask); 0 casts every fragment.
+    #[live(0.0)] pub cutoff: f32,
+}
+
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    mod.draw.DrawSceneCustom = mod.std.set_type_default() do #(DrawSceneCustom::script_shader(vm)) {
+        ..mod.draw.DrawScenePbr
+        // The material's four keyable floats (`self.params` in the hooks),
+        // the whole per-draw budget; more data rides textures. A uniform: on
+        // the instance stream they took the lane one output register past
+        // what D3D11's `vs_5_0` allows, and they are one per material draw.
+        params: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // The control of an IBL program's two lookups (render-material's
+        // lane functions read it; the renderer writes it per draw,
+        // renderer/stock_ibl.rs): y = the lane's scale on the map (1 under
+        // HDR output, the map's own exposure in the legacy lane, as the
+        // rig's fill carries it), z = 1 while the fill comes from the map
+        // (0: the stock IBL program keeps an authored or a gathered fill).
+        // x is the skin lane's switch (shaders/skinned_gpu.rs has the same
+        // uniform); a program here is IBL by construction. The default is
+        // the lookups as they are without a lane: the map's own scale, its
+        // fill. Only a program with Builtin::Ibl reads it.
+        ibl_ctl: uniform(vec4(1.0, 1.0, 1.0, 0.0))
+        surface: fn(base: vec4) -> vec4 { return base }
+        // What a hook may read besides its arguments: the clock, the true
+        // world position, the mesh uv and the geometric normal.
+        mat_time: fn() -> float { return self.draw_pass.time }
+        // The same clock for the vertex hook: a helper binds to one stage.
+        mat_vtime: fn() -> float { return self.draw_pass.time }
+        mat_pos: fn() -> vec3 { return self.v_csm.xyz }
+        mat_uv: fn() -> vec2 { return self.v_uv }
+        mat_geo_normal: fn() -> vec3 { return normalize(self.v_csm_n) }
+    }
+
+    mod.draw.DrawMaterialShadow = mod.std.set_type_default() do #(DrawMaterialShadow::script_shader(vm)) {
+        ..mod.draw.DrawLmSunDepthCutout
+        v_csm: varying(vec4f)
+        v_csm_n: varying(vec3f)
+        // What a colour lane's hooks may read for their alpha: the vertex
+        // colour, and neutral stand-ins for the instance tint, the scene
+        // transform and the eye (the caster's alpha never depends on them).
+        v_tint: varying(vec4f)
+        tint: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        to_scene: fn(c: vec3) -> vec3 { return c }
+        oct_decode: fn(e: vec2f) -> vec3f {
+            let nz = 1.0 - abs(e.x) - abs(e.y)
+            let t = max(0.0 - nz, 0.0)
+            let sx = step(0.0, e.x) * 2.0 - 1.0
+            let sy = step(0.0, e.y) * 2.0 - 1.0
+            return normalize(vec3(e.x - t * sx, e.y - t * sy, nz))
         }
-        let hash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, obj);
-        vm.host.cx_mut().draw_shaders.cache_functions_to_shader.remove(&hash);
-        // #[deref] construction applies DrawSceneSkinned's defaults and can
-        // already have compiled its stock shader. A failed override leaves
-        // an existing ID untouched, so clear it before testing this candidate.
-        let mut draw = Self::script_new(vm);
+        mat_vertex: fn(p: vec3, n: vec3, uv: vec2) -> vec3 { return p }
+        surface: fn(base: vec4) -> vec4 { return base }
+        mat_time: fn() -> float { return self.draw_pass.time }
+        // The same clock for the vertex hook: a helper binds to one stage.
+        mat_vtime: fn() -> float { return self.draw_pass.time }
+        mat_pos: fn() -> vec3 { return self.v_csm.xyz }
+        mat_uv: fn() -> vec2 { return self.v_uv }
+        mat_geo_normal: fn() -> vec3 { return normalize(self.v_csm_n) }
+        vertex: fn() {
+            var pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            if self.morph_ctl.w > 0.5 { pos = pos + self.morph_delta(self.geom.ao_uv, 0.0) }
+            let n = self.oct_decode(unpack2f16(self.geom.nrm))
+            self.v_uv = unpack2f16(self.geom.uv)
+            self.v_tint = unpack4u8(self.geom.color)
+            pos = self.mat_vertex(pos, n, self.v_uv)
+            let wp = self.transform * vec4(pos, 1.0)
+            self.v_csm = vec4(wp.xyz, 0.0)
+            self.v_csm_n = (self.transform * vec4(n, 0.0)).xyz
+            let nx = dot(self.sun_rx.xyz, wp.xyz) + self.sun_rx.w
+            let ny = dot(self.sun_ry.xyz, wp.xyz) + self.sun_ry.w
+            let nz = dot(self.sun_rz.xyz, wp.xyz) + self.sun_rz.w
+            self.v_d = nz
+            self.v_clip = vec2(nx, ny)
+            let zq = nz + self.flip_a.x * (1.0 - 2.0 * nz)
+            self.vertex_pos = vec4(
+                nx * self.tile_a.x + self.tile_a.z,
+                ny * self.tile_a.y + self.tile_a.w,
+                zq * (1.0 - self.flip_a.y) + self.flip_a.z,
+                1.0
+            )
+        }
+        // The caster's alpha: 1 here; the Mask variant installs
+        // mat_shadow_alpha_mask, the surface hook's alpha of the texel.
+        mat_shadow_alpha: fn() -> float { return 1.0 }
+        mat_shadow_alpha_mask: fn() -> float {
+            let texel = self.tex.sample_repeat(self.v_uv)
+            return self.surface(texel).w
+        }
+        pixel: fn() {
+            if abs(self.v_clip.x) > 1.001 || abs(self.v_clip.y) > 1.001 {
+                discard()
+            }
+            if self.mat_shadow_alpha() < self.cutoff {
+                discard()
+            }
+            return vec4(self.v_d, 0.0, 0.0, 1.0)
+        }
+    }
+
+}
+
+/// Install shader declarations in the owning isolate. Registration grants
+/// no IO or host-widget access.
+pub fn register(vm: &mut ScriptVm) -> ScriptValue {
+    if vm.heap().type_default_for_id(DrawSceneCustom::script_type_id_static()).is_some() {
+        builtin::register(vm);
+        return NIL;
+    }
+    // The scene shaders exactly as `crate::script_mod` registers them (the
+    // shared stdlib, the shadow sampling this build uses, ...): a second,
+    // partial list here made different shaders (and shader-pack keys)
+    // depending on which registration ran first.
+    if vm.heap().type_default_for_id(DrawScenePbr::script_type_id_static()).is_none() {
+        crate::script_mod(vm);
+    }
+    builtin::register(vm);
+    script_mod(vm)
+}
+
+/// Runs `f` in the VM that owns a material's program (a level isolate's);
+/// false when that VM is busy. A material without one uses the Cx's VM.
+pub type MaterialVm = Rc<dyn Fn(&mut Cx, &mut dyn FnMut(&mut ScriptVm)) -> bool>;
+
+/// A built material: the colour draw, and what its plan derived.
+pub struct CustomMaterial {
+    pub draw: DrawSceneCustom,
+    pub plan: VariantPlan,
+    /// The colour program, which the feature variants derive from
+    /// (renderer/variants.rs), and its stock shader.
+    program: Option<ScriptObjectRef>,
+    stock: Option<DrawShaderId>,
+    /// The VM that owns `program`, when it is not the Cx's.
+    pub host_vm: Option<MaterialVm>,
+    /// The variants built so far per feature set: the colour shader and,
+    /// for a material no hook of which can cut a pixel, the one without
+    /// `clip`. `None`: not available (its layout differs), stock instead.
+    variants: HashMap<Features, Option<(DrawShaderId, Option<DrawShaderId>)>>,
+    /// The derived caster (`ShadowVariant::Derived`), when it compiled.
+    pub shadow: Option<DrawShaderId>,
+    pub cutoff: f32,
+    /// How far the vertex hook may move geometry (culling grows by it).
+    pub bounds_pad: f32,
+    /// The program samples the IBL texture (bind it on `detail_map`).
+    pub ibl: bool,
+    /// A texture the host binds on `detail_map` for this program (a
+    /// planar reflection, a screen): wins over the IBL.
+    pub texture: Option<Texture>,
+    /// Problems that did not stop the colour program (a caster that did not
+    /// compile casts the stock shadow instead).
+    pub warnings: Vec<material::Diagnostic>,
+}
+
+impl CustomMaterial {
+    fn new(draw: DrawSceneCustom, plan: VariantPlan, program: Option<ScriptObjectRef>) -> Self {
+        Self {
+            stock: draw.draw_vars.draw_shader_id,
+            draw,
+            plan,
+            program,
+            host_vm: None,
+            variants: HashMap::new(),
+            shadow: None,
+            cutoff: 0.0,
+            bounds_pad: 0.0,
+            ibl: false,
+            texture: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// The colour program's own shader (the one built for every feature).
+    pub fn stock_shader(&self) -> Option<DrawShaderId> {
+        self.stock
+    }
+
+    /// Whether the program composes light: the Unlit, Flat and error
+    /// programs do not, so their variants drop the lighting the lane
+    /// computes for the composition.
+    fn lit(&self) -> bool {
+        !self.plan.builtins.iter().any(|b| matches!(b, Builtin::Unlit | Builtin::Flat | Builtin::Error))
+    }
+
+    /// The blend the colour draw is set to (0 opaque, 1 mask, 2 over): a
+    /// uniform of the lane, read back from the draw.
+    pub fn alpha_mode(&self, cx: &Cx) -> f32 {
+        self.draw.pbr.skinned.uniform_value(cx, live_id!(alpha_mode))[0]
+    }
+
+    /// Whether no draw of this material cuts a pixel (no hook can discard,
+    /// opaque blend): it may draw through the variant without `clip`.
+    pub fn cuts_no_pixel(&self, cx: &Cx) -> bool {
+        !self.plan.can_discard && self.alpha_mode(cx) == 0.0
+    }
+
+    /// The shaders for this frame's `features` (renderer/variants.rs): the
+    /// one the material draws through, and the one without `clip` when no
+    /// draw of it cuts a pixel. Built on first use; until then (its VM is
+    /// busy), or when a variant's layout differs, the stock shader.
+    pub(crate) fn shaders(&mut self, cx: &mut Cx, features: Features) -> (Option<DrawShaderId>, Option<DrawShaderId>) {
+        let Some(stock) = self.stock else { return (None, None) };
+        if std::env::var_os("MAKEPAD_SHADER_VARIANTS").is_some_and(|v| v == "0") {
+            return (Some(stock), None);
+        }
+        let features = Features { clip: true, ..features };
+        if !self.variants.contains_key(&features) {
+            let Some(program) = self.program.clone() else { return (Some(stock), None) };
+            let (lit, opaque) = (self.lit(), self.cuts_no_pixel(cx) && std::env::var_os("MAKEPAD_OPAQUE_VARIANT").is_none_or(|v| v != "0"));
+            let mut built = None;
+            let mut run = |vm: &mut ScriptVm| {
+                // Only against the heap that owns the program.
+                if vm.heap_key() != program.heap_key() { built = Some(None); return; }
+                let full = build_variant(vm, program.as_object(), stock, features, lit);
+                let no_clip = if opaque { build_variant(vm, program.as_object(), stock, Features { clip: false, ..features }, lit) } else { None };
+                built = Some(full.map(|full| (full, no_clip)));
+            };
+            let ran = match &self.host_vm {
+                Some(host) => host(cx, &mut run),
+                None => cx.try_with_vm(|vm| run(vm)).is_some(),
+            };
+            match built {
+                Some(built) if ran => { self.variants.insert(features, built); }
+                _ => return (Some(stock), None),
+            }
+        }
+        match self.variants[&features] {
+            Some((full, no_clip)) => (Some(full), no_clip),
+            None => (Some(stock), None),
+        }
+    }
+}
+
+impl From<DrawSceneCustom> for CustomMaterial {
+    /// A colour draw built elsewhere: the stock caster, no derived
+    /// variants.
+    fn from(draw: DrawSceneCustom) -> Self {
+        Self::new(draw, VariantPlan { builtins: Vec::new(), can_discard: true, shadow: ShadowVariant::Stock }, None)
+    }
+}
+
+/// `program`'s variant for `features` (the stock shader when it replaces
+/// nothing), `None` when it does not build or its layout differs.
+fn build_variant(vm: &mut ScriptVm, program: ScriptObject, stock: DrawShaderId, features: Features, lit: bool) -> Option<DrawShaderId> {
+    let Some(obj) = variants::variant_object(vm, program, features, lit) else { return Some(stock) };
+    let variant = instance_custom(vm, obj).ok()?.draw_vars.draw_shader_id?;
+    if !variants::same_layout(vm.cx(), stock, variant) {
+        log!("render: a material's variant {features:?} has another layout than its shader; drawing through that");
+        return None;
+    }
+    Some(variant)
+}
+
+/// Build one program object on the lane and instance a draw struct from it.
+fn instance_custom(vm: &mut ScriptVm, obj: ScriptObject) -> Result<DrawSceneCustom, MaterialError> {
+    // #[deref] construction applies DrawScenePbr's defaults and can already
+    // have compiled its stock shader: clear it before testing this candidate.
+    let mut draw = DrawSceneCustom::script_new(vm);
+    draw.draw_vars.draw_shader_id = None;
+    draw.draw_vars.geometry_id = None;
+    draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
+    if !draw.draw_vars.can_instance() {
+        let detail = makepad_draw::makepad_platform::shader_error::take().unwrap_or_else(|| "see the shader diagnostic in the app log".into());
+        return Err(MaterialError::new(format!("the material's shader did not build: {detail}")));
+    }
+    Ok(draw)
+}
+
+impl DrawSceneCustom {
+    /// A Splash material: `hooks` (checked against `mask`) on the kind the
+    /// description names, with every variant its plan derives. Errors carry
+    /// the author's source lines.
+    pub fn build(vm: &mut ScriptVm, desc: &MaterialDesc, hooks: &HookSet, mask: HookMask, params: Vec4f) -> Result<CustomMaterial, MaterialError> {
+        Self::build_with(vm, desc, hooks, mask, params, &[])
+    }
+
+    /// [`Self::build`] plus the author's own helper functions (called by the
+    /// hooks). A helper may add a name, never replace one the lane has:
+    /// that would reach past the hook set.
+    pub fn build_with(vm: &mut ScriptVm, desc: &MaterialDesc, hooks: &HookSet, mask: HookMask, params: Vec4f, helpers: &[(LiveId, ScriptObject)]) -> Result<CustomMaterial, MaterialError> {
+        if !matches!(desc.blend, Blend::Opaque | Blend::Mask { .. } | Blend::Over) {
+            return Err(MaterialError::new("the model lane draws Opaque, Mask and Over materials; Add, Multiply and Screen blend on the line and point lanes"));
+        }
+        register(vm);
+        let plan = material::plan(desc, hooks)?;
+        let base = vm.heap().type_default_for_id(Self::script_type_id_static())
+            .ok_or_else(|| MaterialError::new("custom material shader registration failed"))?;
+        let mut overrides = Vec::new();
+        for (name, f) in helpers {
+            let existing = vm.object_method(base, *name);
+            let taken = !(existing.is_nil() || existing.is_err())
+                || material::HOOKS.iter().any(|h| LiveId::from_str(h.method) == *name);
+            if taken || !vm.is_fn(*f) {
+                return Err(MaterialError::new(format!("helper `{name}` would replace a function the lane owns; give it another name")));
+            }
+            overrides.push((*name, *f));
+        }
+        for b in &plan.builtins {
+            overrides.extend(builtin::overrides(vm, *b));
+        }
+        let obj = material::install_program(vm, &material::ProgramRequest { base, kind: desc.kind, hooks, mask, overrides: &overrides })?;
+        // Compiled once; the front end is asked for located errors only
+        // when that fails.
+        let mut draw = match instance_custom(vm, obj) {
+            Ok(draw) => draw,
+            Err(e) => return Err(material::diagnose(vm, obj, hooks).err().unwrap_or(e)),
+        };
+        draw.set_params(vm.cx(), params);
+        let cutoff = match desc.blend {
+            Blend::Mask { cutoff } => cutoff,
+            _ => 0.0,
+        };
+        match desc.blend {
+            Blend::Mask { cutoff } => {
+                draw.pbr.skinned.draw_vars.set_uniform(vm.cx(), live_id!(alpha_mode), &[1.0]);
+                draw.pbr.skinned.draw_vars.set_uniform(vm.cx(), live_id!(alpha_cutoff), &[cutoff]);
+            }
+            Blend::Over => {
+                draw.pbr.skinned.draw_vars.set_uniform(vm.cx(), live_id!(alpha_mode), &[2.0]);
+                draw.draw_vars.options.alpha_blend = true;
+                draw.draw_vars.options.depth_write = false;
+            }
+            _ => {}
+        }
+        let mut warnings = Vec::new();
+        let shadow = match plan.shadow {
+            ShadowVariant::Derived { vertex, mask } => match Self::build_shadow(vm, hooks, vertex, mask, &overrides[..helpers.len()]) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    warnings.extend(e.diagnostics.into_iter().map(|mut d| {
+                        d.message = format!("its shadow caster did not build, so it casts the stock shadow: {}", d.message);
+                        d
+                    }));
+                    None
+                }
+            },
+            _ => None,
+        };
+        let ibl = plan.builtins.contains(&Builtin::Ibl);
+        let program = vm.new_object_ref(obj);
+        Ok(CustomMaterial { ibl, shadow, cutoff, bounds_pad: hooks.bounds_pad, warnings, ..CustomMaterial::new(draw, plan, Some(program)) })
+    }
+
+    fn build_shadow(vm: &mut ScriptVm, hooks: &HookSet, vertex: bool, mask: bool, helpers: &[(LiveId, ScriptObject)]) -> Result<DrawShaderId, MaterialError> {
+        let base = vm.heap().type_default_for_id(DrawMaterialShadow::script_type_id_static())
+            .ok_or_else(|| MaterialError::new("material shadow shader registration failed"))?;
+        let mut caster_hooks = HookSet::new();
+        // The author's helpers, where the caster has no function of that name.
+        let mut overrides: Vec<(LiveId, ScriptObject)> = helpers.iter().copied().filter(|(name, _)| {
+            let v = vm.object_method(base, *name);
+            v.is_nil() || v.is_err()
+        }).collect();
+        if vertex {
+            if let Some(f) = hooks.get(material::Hook::Vertex) { caster_hooks.set(material::Hook::Vertex, f); }
+        }
+        if mask {
+            if let Some(f) = hooks.get(material::Hook::Surface) { caster_hooks.set(material::Hook::Surface, f); }
+            if let Some(alpha) = vm.value(base, id!(mat_shadow_alpha_mask)).as_object() {
+                overrides.push((id!(mat_shadow_alpha), alpha));
+            }
+        }
+        let obj = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Pbr, hooks: &caster_hooks, mask: HookMask::ALL, overrides: &overrides })?;
+        let mut draw = DrawMaterialShadow::script_new(vm);
         draw.draw_vars.draw_shader_id = None;
         draw.draw_vars.geometry_id = None;
         draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
-        draw.params = params;
-        if !draw.draw_vars.can_instance() {
-            return Err("surface shader failed frontend compilation; see shader diagnostic in app log".into());
-        }
-        Ok(draw)
+        draw.draw_vars.draw_shader_id.filter(|_| draw.draw_vars.can_instance())
+            .ok_or_else(|| MaterialError::new("the shadow caster's shader did not build"))
+    }
+
+    /// Unlit: the base colour lifted by `stops` of HDR intensity (params.w;
+    /// 0 = as authored), no light, shadow or reflection. An instance's own
+    /// params replace the material's, so a host keeps w for the intensity.
+    pub fn unlit(vm: &mut ScriptVm, hooks: &HookSet, mask: HookMask, stops: f32) -> Result<CustomMaterial, MaterialError> {
+        let desc = MaterialDesc { kind: BaseKind::Unlit, ..Default::default() };
+        Self::build(vm, &desc, hooks, mask, vec4(0.0, 0.0, 0.0, stops))
+    }
+
+    /// The error material: hatched magenta, unlit. What a material that did
+    /// not compile draws as in a preview.
+    pub fn error_material(vm: &mut ScriptVm) -> Result<CustomMaterial, MaterialError> {
+        register(vm);
+        let overrides = builtin::overrides(vm, Builtin::Error);
+        let base = vm.heap().type_default_for_id(Self::script_type_id_static())
+            .ok_or_else(|| MaterialError::new("custom material shader registration failed"))?;
+        let obj = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Unlit, hooks: &HookSet::new(), mask: HookMask::NONE, overrides: &overrides })?;
+        let draw = instance_custom(vm, obj)?;
+        let program = vm.new_object_ref(obj);
+        Ok(CustomMaterial::new(draw, VariantPlan { builtins: vec![Builtin::Error], can_discard: false, shadow: ShadowVariant::Stock }, Some(program)))
+    }
+
+    /// Sandbox's game.material: one albedo `surface(base: vec4) -> vec4`
+    /// (a host whose program lives in another VM than the Cx's sets the
+    /// material's `host_vm`).
+    pub fn from_surface(vm: &mut ScriptVm, surface: ScriptObject, params: Vec4f) -> Result<CustomMaterial, String> {
+        if !vm.is_fn(surface) { return Err("surface is not a shader function".into()); }
+        let hooks = HookSet::new().with(material::Hook::Surface, surface);
+        Self::build(vm, &MaterialDesc::default(), &hooks, HookMask::ALBEDO, params)
+            .map_err(|e| format!("surface shader failed frontend compilation: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_draw::makepad_platform::makepad_script::script_eval;
+    use makepad_render_material::{frontend_errors_for, Hook, ShaderBackend};
+    use makepad_scene::LightingModel;
+
+    fn with_vm(f: impl FnOnce(&mut ScriptVm)) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.capture_errors();
+            makepad_draw::script_mod(vm);
+            vm.heap_mut().new_module(id!(prelude));
+            script_eval!(vm, { mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw } });
+            vm.heap_mut().new_module(id!(widgets));
+            register(vm);
+            f(vm);
+        });
+    }
+
+    /// A material document's hooks, evaluated from Splash source under a
+    /// file name (so errors can name its lines).
+    fn spec(vm: &mut ScriptVm, file: &str, code: &str) -> ScriptObject {
+        let code = format!("use mod.prelude.widgets_internal.*\n{{\n{code}\n}}");
+        // Hosts evaluate documents with `line: 1`, so rows report 1-based.
+        let value = vm.eval(ScriptMod::new("", "", &file, 1, 0, &code, &[]));
+        value.as_object().unwrap_or_else(|| panic!("spec did not evaluate: {:?}", vm.take_errors()))
+    }
+
+    const EVERY_HOOK: &str = r#"
+        vertex: fn(p: vec3, n: vec3, uv: vec2) -> vec3 { return p + n * (0.05 * sin(p.y * 8.0 + self.mat_vtime())) }
+        surface: fn(base: vec4) -> vec4 { return vec4(base.xyz * vec3(1.0, 0.5, 0.2), base.w) }
+        emission: fn(e: vec3) -> vec3 { return e + vec3(self.params.x, 0.0, 0.0) }
+        normal: fn(n: vec3) -> vec3 { return normalize(n + vec3(0.0, 0.1, 0.0)) }
+        metal_rough: fn(mr: vec2) -> vec2 { return vec2(mr.x, clamp(mr.y * 0.5, 0.05, 1.0)) }
+        light: fn(radiance: vec3, l: vec3, n: vec3, v: vec3, brdf: vec3) -> vec3 { return radiance * step(0.3, dot(n, l)) }
+        lighting: fn(direct: vec3, ambient: vec3) -> vec3 { return direct * 0.8 + ambient }
+        finish: fn(c: vec4) -> vec4 { return vec4(c.xyz + vec3(0.02, 0.0, 0.0) * fract(self.mat_pos().x), c.w) }
+        bounds_pad: 0.05
+    "#;
+
+    #[test]
+    fn every_hook_compiles_on_every_backend_with_its_variants() {
+        with_vm(|vm| {
+            let obj = spec(vm, "test://every.splash", EVERY_HOOK);
+            let hooks = HookSet::from_spec(vm, obj, HookMask::ALL).unwrap();
+            assert_eq!(hooks.bounds_pad, 0.05);
+            for h in [Hook::Vertex, Hook::Surface, Hook::Emission, Hook::Normal, Hook::MetalRough, Hook::Light, Hook::Lighting, Hook::Finish] {
+                assert!(hooks.has(h), "{h:?}");
+            }
+            let desc = MaterialDesc { ibl: true, blend: Blend::Mask { cutoff: 0.4 }, ..Default::default() };
+            let m = DrawSceneCustom::build(vm, &desc, &hooks, HookMask::ALL, vec4(0.5, 0.0, 0.0, 0.0)).unwrap_or_else(|e| panic!("{e}"));
+            assert!(m.draw.draw_vars.can_instance());
+            assert_eq!(m.plan.builtins, vec![Builtin::HookedCompose, Builtin::Ibl]);
+            assert!(m.ibl && !m.cuts_no_pixel(vm.cx()), "a surface hook can cut pixels");
+            assert!(m.shadow.is_some(), "displaced, masked caster: {:?}", m.warnings);
+            assert_eq!((m.cutoff, m.alpha_mode(vm.cx()), m.bounds_pad), (0.4, 1.0, 0.05));
+            // The same program lowers for every backend, not only Metal.
+            let base = vm.heap().type_default_for_id(DrawSceneCustom::script_type_id_static()).unwrap();
+            let mut overrides = builtin::overrides(vm, Builtin::HookedCompose);
+            overrides.extend(builtin::overrides(vm, Builtin::Ibl));
+            let prog = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Pbr, hooks: &hooks, mask: HookMask::ALL, overrides: &overrides }).unwrap();
+            for backend in [ShaderBackend::Metal, ShaderBackend::Hlsl, ShaderBackend::Glsl, ShaderBackend::Wgsl] {
+                let errors = frontend_errors_for(vm, prog, backend);
+                assert!(errors.is_empty(), "{backend:?}: {errors:?}");
+            }
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    /// The lowered source of a program object, for GLSL or HLSL.
+    fn lowered(vm: &mut ScriptVm, program: ScriptObject, glsl: bool) -> String {
+        let draw = vm.value(vm.modules(), id!(draw)).as_object().unwrap();
+        vm.set_value(draw, id!(program_under_test), program);
+        let source = if glsl {
+            script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "glsl", false) })
+        } else {
+            script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "hlsl", false) })
+        };
+        crate::shaders::test_source(&vm.heap().string_with(source, |_, s| s.to_string()).unwrap_or_default())
+    }
+
+    /// An IBL program (the stock IBL program and the built-in item IBL
+    /// material are this one: the PBR lane, IBL, no hooks) takes the
+    /// reflection and the fill through the lane's control: both lookups x
+    /// `ibl_ctl.y` (the lane's scale, so the lookups carry the exposure the
+    /// rig's fill carries), and the fill from the map only while
+    /// `ibl_ctl.z` is set, else the fill the lane passes in (an authored
+    /// ambient, the gathered GI). Never written, the control is neutral:
+    /// the raw lookups. The stock PBR lane's own program has no control.
+    #[test]
+    fn an_ibl_program_takes_its_lookups_through_the_lanes_control() {
+        use crate::shaders::lowered_fn_body;
+        with_vm(|vm| {
+            let m = DrawSceneCustom::build(vm, &MaterialDesc { ibl: true, ..Default::default() }, &HookSet::new(), HookMask::ALL, Vec4f::default()).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(m.plan.builtins, vec![Builtin::Ibl]);
+            assert_eq!(m.draw.pbr.skinned.uniform_value(vm.cx(), live_id!(ibl_ctl)), [1.0, 1.0, 1.0, 0.0], "never written: the map's own scale, the fill from the map");
+            let program = m.program.as_ref().unwrap().as_object();
+            for glsl in [true, false] {
+                let source = lowered(vm, program, glsl);
+                assert!(!source.is_empty() && !source.starts_with("ERRORS:"), "glsl {glsl}: {source}");
+                // `sky_env` (the reflection of the surface and of the clear
+                // coat) and `mat_ambient` (the fill) are the lane functions.
+                let reflection = lowered_fn_body(&source, "sky_env").unwrap_or_else(|| panic!("glsl {glsl}: no sky_env"));
+                assert!(reflection.contains("mat_ibl_sky_env(p_r, p_rough) * ") && reflection.contains("ibl_ctl.y"), "glsl {glsl}: the reflection carries the lane's scale: {reflection}");
+                let fill = lowered_fn_body(&source, "mat_ambient").unwrap_or_else(|| panic!("glsl {glsl}: no mat_ambient"));
+                assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "glsl {glsl}: the fill carries the lane's scale: {fill}");
+                assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "glsl {glsl}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
+                // Nothing in the lit surface or the coat reads the map past them.
+                for stage in ["shade", "clear_coat"] {
+                    let body = lowered_fn_body(&source, stage).unwrap_or_else(|| panic!("glsl {glsl}: no {stage}"));
+                    assert!(!body.contains("mat_ibl_"), "glsl {glsl}: {stage} takes a lookup at the map's raw scale");
+                }
+            }
+            // No environment, no change: the stock PBR lane's program has
+            // neither the control nor a lookup.
+            let stock = script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.DrawScenePbr, "glsl", false) });
+            let stock = vm.heap().string_with(stock, |_, s| s.to_string()).unwrap_or_default();
+            assert!(!stock.is_empty() && !stock.starts_with("ERRORS:"));
+            assert!(!stock.contains("ibl_ctl") && !stock.contains("mat_ibl_"), "the stock PBR lane's program is as it was");
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    /// Car paint's clear coat mirrors `sky_env` and, on the stock PBR lane,
+    /// paints a treeline band along its horizon (`coat_treeline`: the
+    /// analytic sky has none). An IBL program mirrors the map, which has a
+    /// horizon of its own: there `coat_treeline` is the identity, so no
+    /// analytic ridge covers the map's reflection, and the rest of the
+    /// coat is the stock coat line for line. The stock lane's band is the
+    /// one it was, statement for statement (no environment, no change).
+    #[test]
+    fn an_ibl_programs_coat_mirrors_the_maps_horizon_and_the_stock_coat_keeps_its_treeline() {
+        use crate::shaders::lowered_fn_body;
+        with_vm(|vm| {
+            let m = DrawSceneCustom::build(vm, &MaterialDesc { ibl: true, ..Default::default() }, &HookSet::new(), HookMask::ALL, Vec4f::default()).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(m.plan.builtins, vec![Builtin::Ibl]);
+            let ibl_program = m.program.as_ref().unwrap().as_object();
+            let stock_program = script_eval!(vm, { mod.draw.DrawScenePbr }).as_object().unwrap();
+            // Both programs lower for every backend.
+            for backend in [ShaderBackend::Metal, ShaderBackend::Hlsl, ShaderBackend::Glsl, ShaderBackend::Wgsl] {
+                for (name, program) in [("the IBL program", ibl_program), ("the stock PBR program", stock_program)] {
+                    let errors = frontend_errors_for(vm, program, backend);
+                    assert!(errors.is_empty(), "{name}, {backend:?}: {errors:?}");
+                }
+            }
+            for glsl in [true, false] {
+                let (ibl, stock) = (lowered(vm, ibl_program, glsl), lowered(vm, stock_program, glsl));
+                for (name, source) in [("the IBL program", &ibl), ("the stock PBR program", &stock)] {
+                    assert!(!source.is_empty() && !source.starts_with("ERRORS:"), "glsl {glsl}, {name}: {source}");
+                }
+                let body = |source: &str, name: &str, function: &str| lowered_fn_body(source, function).unwrap_or_else(|| panic!("glsl {glsl}: {name} has no {function}"));
+                // Under a map: no noise ridge and no analytic horizon
+                // colour in the coat, and the function it calls for car
+                // paint returns the reflection as it took it.
+                let coat = body(&ibl, "the IBL program", "clear_coat");
+                assert!(!coat.contains("tn_noise(") && !coat.contains("sun_ground"), "glsl {glsl}: an IBL program's coat paints the analytic treeline over the map's reflection: {coat}");
+                assert_eq!(body(&ibl, "the IBL program", "coat_treeline").trim(), "return p_env;", "glsl {glsl}: under a map the treeline is the identity");
+                // The stock lane: the band it had, every constant of it,
+                // over the reflection it is handed.
+                let band = body(&stock, "the stock PBR program", "coat_treeline");
+                // The tree's share, splat to the colour's three channels.
+                let splat = if glsl { "fog_color * 0.12)), vec3((l_tree * 0.85)));" } else { "fog_color * 0.12)), ((float3)((l_tree * 0.85))));" };
+                for part in [
+                    "(p_r.z, p_r.x);",
+                    "((0.035 + (0.05 * ", "((l_az * 9", "), 0.5)))) + (0.03 * ", "((l_az * 37", "), 1.5))));",
+                    "((1.0 - smoothstep((l_ridge - 0.01), (l_ridge + 0.01), p_r.y)) * smoothstep(-0.02, 0.0, p_r.y));",
+                    "(p_env, ((", "sun_ground * 0.28) + (", splat,
+                ] {
+                    assert!(band.contains(part), "glsl {glsl}: the stock lane's treeline is the band it was, `{part}`: {band}");
+                }
+                assert_eq!((band.matches("tn_noise(").count(), band.trim().lines().count()), (2, 4), "glsl {glsl}: two noise taps, four statements: {band}");
+                // Car paint only (a toy's rim skips it), and the IBL
+                // program's coat is this coat: only the function differs.
+                let stock_coat = body(&stock, "the stock PBR program", "clear_coat");
+                // GLSL and HLSL name a shader function alike (`io_<name>`).
+                let call = "if ((l_rim < 0.5)) {\nl_env = io_coat_treeline(l_env, l_r);\n}\n";
+                assert!(stock_coat.contains(call) && !stock_coat.contains("tn_noise("), "glsl {glsl}: the coat paints the band through the function, on car paint: {stock_coat}");
+                assert_eq!(coat, stock_coat, "glsl {glsl}: an IBL program's coat is the stock coat");
+            }
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_plain_opaque_material_gets_a_discard_free_variant_with_the_stock_layout() {
+        with_vm(|vm| {
+            let obj = spec(vm, "test://finish.splash", "finish: fn(c: vec4) -> vec4 { return vec4(c.xyz * 0.5, c.w) }");
+            let hooks = HookSet::from_spec(vm, obj, HookMask::ALL).unwrap();
+            let m = DrawSceneCustom::build(vm, &MaterialDesc::default(), &hooks, HookMask::ALL, Vec4f::default()).unwrap();
+            assert!(m.cuts_no_pixel(vm.cx()), "no hook can cut");
+            let stock = m.stock_shader().unwrap();
+            let program = m.program.as_ref().unwrap().as_object();
+            // Every feature on but `clip`, and every feature off: each has
+            // the stock layout (build_variant checks it).
+            let all = Features { clip: false, gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true };
+            for features in [all, Features::default()] {
+                let variant = build_variant(vm, program, stock, features, true).expect("the stock layout");
+                assert_ne!(stock, variant);
+            }
+            assert_eq!(m.shadow, None, "no displacement, no mask: the stock caster");
+            assert!(m.plan.builtins.is_empty(), "no lighting hook: the stock composition");
+        });
+    }
+
+    #[test]
+    fn masks_arity_and_engine_owned_keys_are_refused_before_compiling() {
+        with_vm(|vm| {
+            let obj = spec(vm, "test://v.splash", "vertex: fn(p: vec3, n: vec3, uv: vec2) -> vec3 { return p }");
+            let e = HookSet::from_spec(vm, obj, HookMask::ALBEDO).unwrap_err();
+            assert!(e.to_string().contains("does not accept the `vertex` hook"), "{e}");
+            let obj = spec(vm, "test://p.splash", "pixel: fn() { return vec4(1.0) }");
+            let e = HookSet::from_spec(vm, obj, HookMask::ALL).unwrap_err();
+            assert!(e.to_string().contains("`pixel` is engine-owned"), "{e}");
+            let obj = spec(vm, "test://a.splash", "finish: fn(c: vec4, extra: float) -> vec4 { return c }");
+            let e = HookSet::from_spec(vm, obj, HookMask::ALL).unwrap_err();
+            assert!(e.to_string().contains("takes 1 parameter"), "{e}");
+            let obj = spec(vm, "test://u.splash", "lighting: fn(direct: vec3, ambient: vec3) -> vec3 { return direct }");
+            let hooks = HookSet::from_spec(vm, obj, HookMask::ALL).unwrap();
+            let desc = MaterialDesc { lighting: LightingModel::Unlit, ..Default::default() };
+            assert!(DrawSceneCustom::build(vm, &desc, &hooks, HookMask::ALL, Vec4f::default()).is_err());
+            let desc = MaterialDesc { blend: Blend::Add, ..Default::default() };
+            assert!(DrawSceneCustom::build(vm, &desc, &HookSet::new(), HookMask::ALL, Vec4f::default()).is_err());
+        });
+    }
+
+    #[test]
+    fn compile_errors_name_the_hook_and_the_document_line() {
+        with_vm(|vm| {
+            let obj = spec(vm, "test://broken.splash", "surface: fn(base: vec4) -> vec4 { return base }\nfinish: fn(c: vec4) -> vec4 {\n    return no_such_function(c)\n}");
+            let hooks = HookSet::from_spec(vm, obj, HookMask::ALL).unwrap();
+            let e = match DrawSceneCustom::build(vm, &MaterialDesc::default(), &hooks, HookMask::ALL, Vec4f::default()) {
+                Err(e) => e,
+                Ok(_) => panic!("a call to an undefined function must not build"),
+            };
+            let d = e.diagnostics.iter().find(|d| d.file.is_some()).unwrap_or_else(|| panic!("no located diagnostic: {e}"));
+            assert_eq!(d.file.as_deref(), Some("test://broken.splash"), "{e}");
+            assert_eq!(d.line, 5, "the call's line (the spec opens with two wrapper lines): {e}");
+            assert_eq!(d.hook, Some(Hook::Finish), "{e}");
+            let _ = vm.take_errors();
+        });
+    }
+
+    #[test]
+    fn unlit_error_and_albedo_materials_build() {
+        with_vm(|vm| {
+            let unlit = DrawSceneCustom::unlit(vm, &HookSet::new(), HookMask::ALL, 2.0).unwrap();
+            assert_eq!(unlit.plan.builtins, vec![Builtin::Unlit]);
+            assert_eq!(unlit.draw.params(vm.cx()).w, 2.0);
+            let error = DrawSceneCustom::error_material(vm).unwrap();
+            assert!(error.draw.draw_vars.can_instance());
+            assert_ne!(error.draw.draw_vars.draw_shader_id, unlit.draw.draw_vars.draw_shader_id);
+            let obj = spec(vm, "test://albedo.splash", "surface: fn(base: vec4) -> vec4 { return vec4(base.xyz * 0.5, base.w) }");
+            let surface = HookSet::from_spec(vm, obj, HookMask::ALBEDO).unwrap().get(Hook::Surface).unwrap();
+            let albedo = DrawSceneCustom::from_surface(vm, surface, vec4(1.0, 2.0, 3.0, 4.0)).unwrap();
+            assert_eq!(albedo.draw.params(vm.cx()), vec4(1.0, 2.0, 3.0, 4.0));
+            let stock = DrawSceneCustom::script_new_with_default(vm).draw_vars.draw_shader_id;
+            assert_ne!(albedo.draw.draw_vars.draw_shader_id, stock);
+            // The unlit programs' variants drop the lighting with the
+            // features; the lit one keeps it.
+            assert!(!unlit.lit() && !error.lit() && albedo.lit());
+            for m in [&unlit, &error] {
+                let program = m.program.as_ref().unwrap().as_object();
+                let lit_on = Features { clip: true, csm: true, cluster: true, local_shadows: true, ..Default::default() };
+                assert!(build_variant(vm, program, m.stock_shader().unwrap(), lit_on, m.lit()).is_some_and(|v| Some(v) != m.stock_shader()));
+            }
+            assert!(vm.take_errors().is_empty());
+        });
     }
 }

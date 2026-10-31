@@ -596,36 +596,23 @@ fn clip_samples_bake_interpolated_joints_and_morphs_and_preserve_source() {
 
 #[test]
 fn malformed_motion_requests_are_rejected() {
-    for text in [
-        "[]",
-        "{}",
-        r#"{"kind":"unknown"}"#,
-        r#"{"kind":"vehicle","steer":0,"suspension":0,"extra":true}"#,
-        r#"{"kind":"vehicle","steer":0}"#,
-        r#"{"kind":"vehicle","steer":"left","suspension":0}"#,
-        r#"{"kind":"vehicle","steer":1.21,"suspension":0}"#,
-        r#"{"kind":"vehicle","steer":0,"suspension":5.01}"#,
-        r#"{"kind":"pose","name":""}"#,
-        r#"{"kind":"clip","name":"wave","time":-0.1}"#,
-        r#"{"kind":"clip","name":"wave","time":3601}"#,
-        r#"{"kind":"clip","name":"wave"}"#,
+    let car = vehicle();
+    let person = character(true);
+    for pose in [
+        ReviewPose::Vehicle { steer: 1.21, suspension: 0. },
+        ReviewPose::Vehicle { steer: 0., suspension: 5.01 },
+        ReviewPose::Vehicle { steer: f64::NAN, suspension: 0. },
     ] {
-        assert!(
-            ReviewPose::from_json(&json::parse(text.as_bytes()).unwrap()).is_err(),
-            "accepted {text}"
-        );
+        assert!(car.compile_review_pose(&pose, None).is_err(), "accepted {pose:?}");
     }
-    let bad = json::obj(vec![
-        ("kind", json::s("vehicle")),
-        ("steer", json::Value::F64(f64::NAN)),
-        ("suspension", json::Value::Int(0)),
-    ]);
-    assert!(ReviewPose::from_json(&bad).is_err());
-    let bad_name = json::obj(vec![
-        ("kind", json::s("pose")),
-        ("name", json::s(&"p".repeat(97))),
-    ]);
-    assert!(ReviewPose::from_json(&bad_name).is_err());
+    for pose in [
+        ReviewPose::Pose { name: "".into() },
+        ReviewPose::Pose { name: "p".repeat(97) },
+        ReviewPose::Clip { name: "wave".into(), time: -0.1 },
+        ReviewPose::Clip { name: "wave".into(), time: 3601. },
+    ] {
+        assert!(person.compile_review_pose(&pose, None).is_err(), "accepted {pose:?}");
+    }
 }
 
 #[test]

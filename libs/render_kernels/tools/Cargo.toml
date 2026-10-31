@@ -1,0 +1,11 @@
+[package]
+name = "makepad-kernel-tools"
+version = "0.1.0"
+edition = "2021"
+description = "The compute-kernel tools' text and shape (kernel_guide, kernel_check): one definition in every app's AI registry; running them is makepad-render-kernels' tools module"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[dev-dependencies]
+makepad-strict-json = { path = "../../strict_json" }

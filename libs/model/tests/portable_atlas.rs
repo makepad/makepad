@@ -72,7 +72,7 @@ fn compare_first_image(doc: &Document, compiled: &CompiledModel) {
         assert_eq!(primitive.material,Some(0));
         assert!(primitive.attributes.contains_key("JOINTS_0") && primitive.attributes.contains_key("WEIGHTS_0"));
         let decoded=makepad_gltf::decode_mesh_primitive(&loaded,0,index).unwrap();
-        let exported=decoded.texcoords0.unwrap();
+        let uvs=decoded.texcoords0.unwrap();let exported:Vec<[f32;2]>=decoded.indices.iter().map(|&i|uvs[i as usize]).collect();
         let original=original_uvs(doc,&source.object);
         let material=&doc.materials()[&source.material];
         let source_image=Texture::from_png(&material.base_color_png,doc.limits()).unwrap();
@@ -113,7 +113,7 @@ fn single_material_keeps_arbitrary_repeat_uvs_and_bakes_linear_color_factor() {
     let compiled=doc.compile(None).unwrap();
     compare_first_image(&doc,&compiled);
     let loaded=makepad_gltf::load_gltf_from_bytes(&compiled.glb,None).unwrap();
-    let actual=makepad_gltf::decode_mesh_primitive(&loaded,0,0).unwrap().texcoords0.unwrap();
+    let decoded=makepad_gltf::decode_mesh_primitive(&loaded,0,0).unwrap();let uvs=decoded.texcoords0.unwrap();let actual:Vec<[f32;2]>=decoded.indices.iter().map(|&i|uvs[i as usize]).collect();
     assert_eq!(actual,original_uvs(&doc,"a").iter().map(|uv|[uv[0] as f32,uv[1] as f32]).collect::<Vec<_>>());
     let image=Texture::from_png(&makepad_gltf::load_image_bytes(&loaded,0).unwrap(),doc.limits()).unwrap();
     assert_eq!((image.width,image.height),(2,2));

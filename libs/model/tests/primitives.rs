@@ -14,25 +14,14 @@ fn apply(doc: &mut Document, request: &str, operations: Vec<Operation>) {
     .unwrap();
 }
 
-fn parsed(text: &str, limits: &Limits) -> Vec<Operation> {
-    parse_operations(&json::parse(text.as_bytes()).unwrap(), limits).unwrap()
-}
-
 fn primitive(kind: &str, smooth: Option<bool>, segments: u32, rings: u32) -> Document {
     let mut doc = Document::new(Limits::default()).unwrap();
-    let style = smooth
-        .map(|v| format!(",\"smooth\":{v}"))
-        .unwrap_or_default();
-    let dimensions = if kind == "sphere" {
-        format!(",\"rings\":{rings}")
-    } else {
-        ",\"height\":1.8".into()
-    };
-    let text = format!(
-        r#"[{{"op":"{kind}","object":"shape","radius":0.7,"segments":{segments}{dimensions}{style}}}]"#
-    );
-    let ops = parsed(&text, doc.limits());
-    apply(&mut doc, "primitive", ops);
+    let operation = match kind {
+        "sphere" => Operation::sphere("shape", 0.7, segments, rings, smooth.unwrap_or(true), doc.limits()),
+        "cylinder" => Operation::cylinder("shape", 0.7, 1.8, segments, smooth.unwrap_or(true), doc.limits()),
+        _ => unreachable!(),
+    }.unwrap();
+    apply(&mut doc, "primitive", vec![operation]);
     doc
 }
 
@@ -248,7 +237,8 @@ fn analytic_normals_survive_rotated_nonuniform_and_mirrored_mesh_transforms() {
             let loaded = makepad_gltf::load_gltf_from_bytes(&compiled.glb, None).unwrap();
             let decoded = makepad_gltf::decode_mesh_primitive(&loaded, 0, 0).unwrap();
             let normals = decoded.normals.unwrap();
-            assert_eq!(normals, compiled.primitives[0].normals);
+            let corners: Vec<[f32; 3]> = decoded.indices.iter().map(|&i| normals[i as usize]).collect();
+            assert_eq!(corners, compiled.primitives[0].normals);
             for triangle in decoded.indices.chunks_exact(3) {
                 let [a, b, c] = std::array::from_fn::<_, 3, _>(|i| {
                     decoded.positions[triangle[i] as usize].map(f64::from)
@@ -266,10 +256,17 @@ fn analytic_normals_survive_rotated_nonuniform_and_mirrored_mesh_transforms() {
 fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_source_mutation() {
     for kind in ["sphere", "cylinder"] {
         let mut doc = primitive(kind, None, 16, 8);
-        let ops = parsed(
-            r#"[{"op":"surface_material","material":0,"base_color":[0.5,0.15,0.25,1],"metallic":0,"roughness":0.08}]"#,
-            doc.limits(),
-        );
+        let ops = vec![
+        Operation::Surface(SurfaceOperation::Material {
+            material: 0,
+            value: SurfaceMaterial {
+                base_color: [0.5, 0.15, 0.25, 1.0],
+                metallic: 0.0,
+                roughness: 0.08,
+                ..Default::default()
+            }
+        }),
+    ];
         apply(&mut doc, "gloss", ops);
         let source = doc.to_bytes(None).unwrap();
         let head = doc.head();
@@ -283,7 +280,8 @@ fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_sou
         assert_eq!(pbr.base_color_factor, Some([0.5, 0.15, 0.25, 1.]));
         let decoded = makepad_gltf::decode_mesh_primitive(&loaded, 0, 0).unwrap();
         let normals = decoded.normals.unwrap();
-        assert_eq!(normals, compiled.primitives[0].normals);
+        let corners: Vec<[f32; 3]> = decoded.indices.iter().map(|&i| normals[i as usize]).collect();
+        assert_eq!(corners, compiled.primitives[0].normals);
         assert!(normals
             .iter()
             .all(|n| (length(n.map(f64::from)) - 1.).abs() < 1e-6));
@@ -303,7 +301,7 @@ fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_sou
                     .map(|i| tri.vertices[i as usize].normal.map(|v| v as f32))
             })
             .collect::<Vec<_>>();
-        assert_eq!(normals, expected);
+        assert_eq!(corners, expected);
         assert_eq!(doc.head(), head);
         assert_eq!(doc.to_bytes(None).unwrap(), source);
         let reopened = Document::from_bytes(&source, Limits::default(), None).unwrap();
@@ -313,22 +311,8 @@ fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_sou
 
 #[test]
 fn smooth_is_a_strict_optional_boolean_and_primitive_budgets_still_apply() {
-    for (kind, dimension) in [("sphere", "\"rings\":6"), ("cylinder", "\"height\":2")] {
-        for value in ["null", "0", "1", "\"true\"", "[]", "{}"] {
-            let text = format!(
-                r#"[{{"op":"{kind}","object":"shape","radius":1,"segments":12,{dimension},"smooth":{value}}}]"#
-            );
-            assert!(
-                parse_operations(&json::parse(text.as_bytes()).unwrap(), &Limits::default())
-                    .is_err(),
-                "accepted {text}"
-            );
-        }
-        let text = format!(
-            r#"[{{"op":"{kind}","object":"shape","radius":1,"segments":12,{dimension},"smooth":true}}]"#
-        );
-        let mut limits = Limits::default();
-        limits.mesh.max_corners = 8;
-        assert!(parse_operations(&json::parse(text.as_bytes()).unwrap(), &limits).is_err());
-    }
+    let mut limits = Limits::default();
+    limits.mesh.max_corners = 8;
+    assert!(Operation::sphere("shape", 1., 12, 6, true, &limits).is_err());
+    assert!(Operation::cylinder("shape", 1., 2., 12, true, &limits).is_err());
 }
