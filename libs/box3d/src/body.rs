@@ -5,7 +5,7 @@
 
 use crate::b3_assert;
 use crate::b3_validate;
-use crate::constants::{huge, speculative_distance, BODY_NAME_LENGTH};
+use crate::constants::{huge, BODY_NAME_LENGTH};
 use crate::container::array_remove_swap;
 use crate::core::{NULL_INDEX, SECRET_COOKIE};
 use crate::id::{BodyId, ContactId, JointId, ShapeId, WorldId, NULL_BODY_ID};
@@ -731,6 +731,16 @@ pub fn body_get_closest_point(world: &World, body_id: BodyId, result: &mut Vec3,
         let shape = &world.shapes[shape_id as usize];
         shape_id = shape.next_shape_id;
 
+        if let crate::shape::ShapeGeometry::Tube(tube) = &shape.geom {
+            let local_target = crate::math_functions::inv_transform_point(transform, target);
+            let (point, distance) = crate::tube::closest_point_on_tube(tube, local_target, false);
+            if distance < closest_distance {
+                closest_distance = distance;
+                closest_point = crate::math_functions::transform_point(transform, point);
+            }
+            continue;
+        }
+
         let shape_type = shape.shape_type();
         if shape_type != ShapeType::Sphere && shape_type != ShapeType::Capsule && shape_type != ShapeType::Hull {
             continue;
@@ -961,6 +971,21 @@ pub fn body_collide_mover(
         shape_id = shape.next_shape_id;
 
         if !crate::shape::should_query_collide(shape.filter, filter) {
+            continue;
+        }
+
+        if let crate::shape::ShapeGeometry::Tube(tube) = &shape.geom {
+            let mut planes = [PlaneResult::default(); 64];
+            let capacity = (plane_capacity - result_count).min(tube.points.len() as i32);
+            let count = crate::shape::collide_mover(&mut planes, capacity, shape, transform, mover);
+            let id = ShapeId { index1: shape.id + 1, world0: body_id.world0, generation: shape.generation };
+            for i in 0..count {
+                body_planes[result_count as usize] = BodyPlaneResult { shape_id: id, result: planes[i as usize] };
+                result_count += 1;
+            }
+            if result_count == plane_capacity {
+                return result_count;
+            }
             continue;
         }
 
@@ -1222,7 +1247,7 @@ pub fn body_set_transform(world: &mut World, body_id: BodyId, position: Pos, rot
         transform = body_sim.transform;
     }
 
-    let speculative_distance = speculative_distance();
+    let speculative_distance = world.speculative_distance;
 
     let mut shape_id = world.bodies[body_index as usize].head_shape_id;
     while shape_id != NULL_INDEX {

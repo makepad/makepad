@@ -1,0 +1,368 @@
+//! The scene pass's late layers: dynamic shadow meshes and SDF quads,
+//! the MR shadow catcher, fireworks, lamp flares, bullet decals and screens/sprites.
+
+use super::*;
+
+impl Renderer {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_late_layers(
+        &mut self,
+        cx: &mut Cx3d,
+        draws: &mut SceneDraws,
+        world: &World,
+        frustum: Option<&Frustum>,
+        camera_pos: Vec3f,
+        shows_environment: bool,
+        stats: &mut RenderStats,
+        smoke_light: (SunLight, (Vec3f, f32), (Vec3f, Vec3f)),
+    ) {
+        // 4.5 The dynamic shadow-mesh layer (entity hull drapes + the blob
+        // fallbacks accumulated above), rebuilt and uploaded per frame —
+        // small by construction: statics live in the baked lightmap and
+        // characters + cars ride the SDF quads below. Drawn after the alpha
+        // batches so it lies over the ground it darkens; depth test on /
+        // depth write off means overlapping shadows can never fight for the
+        // buffer.
+        if let Some(shadow) = draws.shadow.as_deref_mut() {
+            let t0 = Cx::monotonic_now();
+            self.last_dynamic_shadow_tris = self.shadow_mesh.triangle_count();
+            if !self.shadow_mesh.is_empty() {
+                let geometry = self.shadow_geometry.get_or_insert_with(|| Geometry::new(cx.cx));
+                geometry.update(
+                    cx.cx,
+                    std::mem::take(&mut self.shadow_mesh.indices),
+                    std::mem::take(&mut self.shadow_mesh.vertices),
+                );
+                shadow.draw_vars.geometry_id = Some(geometry.geometry_id());
+                if shadow.draw_vars.can_instance() {
+                    let new_area = cx.add_instance(&shadow.draw_vars);
+                    shadow.draw_vars.area = cx.update_area_refs(shadow.draw_vars.area, new_area);
+                }
+            }
+            stats.dyn_shadow_us += perf_us(t0);
+        }
+
+        // 4.6 SDF silhouette shadows — the dynamic casters (characters +
+        // driven cars): one shared quad, one five-vec4 record per caster,
+        // the silhouette morphed per PIXEL from the caster's SDF atlas.
+        // Sorted by atlas so each rig's crowd (and each car model's fleet)
+        // shares a draw item — the atlas bind is what splits items.
+        if let Some(sd) = draws.shadow_sdf.as_deref_mut() {
+            if !self.sdf_instances.is_empty() {
+                let t0 = Cx::monotonic_now();
+                let geometry_id = self.ensure_flare_geometry(cx.cx);
+                sd.draw_vars.geometry_id = Some(geometry_id);
+                sd.depth_clip = 1.0;
+                self.sdf_instances.sort_by(|a, b| a.atlas.cmp(&b.atlas));
+                let mut bound: Option<&SdfAtlasKey> = None;
+                for inst in &self.sdf_instances {
+                    if bound != Some(&inst.atlas) {
+                        let tex = match &inst.atlas {
+                            SdfAtlasKey::Rig(rig) => self
+                                .sdf_atlas_tex
+                                .iter()
+                                .find(|(r, _)| r == rig)
+                                .and_then(|(_, p)| p.as_ref()),
+                            SdfAtlasKey::Model(key) => {
+                                self.model_sdf_tex.get(key).and_then(|p| p.as_ref())
+                            }
+                        };
+                        let Some((tex, _)) = tex else { continue };
+                        sd.draw_vars.set_texture(0, tex);
+                        bound = Some(&inst.atlas);
+                    }
+                    sd.sdf_a = inst.a;
+                    sd.sdf_b = inst.b;
+                    sd.sdf_c = inst.c;
+                    sd.sdf_d = inst.d;
+                    sd.sdf_e = inst.e;
+                    if sd.draw_vars.can_instance() {
+                        let new_area = cx.add_instance(&sd.draw_vars);
+                        sd.draw_vars.area =
+                            cx.update_area_refs(sd.draw_vars.area, new_area);
+                    }
+                }
+                stats.dyn_shadow_us += perf_us(t0);
+            }
+        }
+        self.sdf_instances.clear();
+
+        // 5. MR shadow catcher: a dark translucent slab just under the
+        // diorama's footprint. Without it the world reads as floating
+        // stickers over the passthrough feed; with it, planted on the floor.
+        // Drawn last so it blends over everything it sits beneath.
+        if !shows_environment {
+            if let Some(footprint) = Self::world_footprint(world) {
+                let (center, radius) = footprint;
+                let mut transform = Mat4f::identity();
+                transform.v[12] = center.x;
+                transform.v[13] = center.y - 0.02 / self.stage.scale.max(1.0e-4);
+                transform.v[14] = center.z;
+                draws.alpha.cube.cube.transform = transform;
+                draws.alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                // Flat slab: thin in y, footprint-sized in x/z.
+                let thickness = 0.04 / self.stage.scale.max(1.0e-4);
+                draws.alpha.cube.cube.cube_size =
+                    vec3(radius * 2.0, thickness, radius * 2.0);
+                draws.alpha.cube.cube.color = vec4(0.0, 0.0, 0.0, 0.25);
+                draws.alpha.cube.cube.depth_clip = 1.0;
+                draws.alpha.cube.glow = 0.0;
+                draws.alpha.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
+                draws.alpha.cube.cube.draw(cx);
+                stats.dyn_instances += 1;
+                stats.shadow_catcher_drawn = true;
+            }
+        }
+
+        // 5.2 An MR box stage's box: its twelve edges as thin light bars, just inside the box
+        // (the scene list clips to it), so the box reads as a glass case over the room.
+        if let (Some(b), StageMode::MrBox) = (self.clip_box, self.stage.mode) {
+            const BAR: f32 = 0.003;
+            let (s, c) = (b.yaw.sin(), b.yaw.cos());
+            // the box's own frame in the room (turn + centre), then into the world the scene
+            // draws in (the stage's inverse: the XR eye views carry the stage)
+            let mut box_frame = Mat4f::identity();
+            box_frame.v[0] = c;
+            box_frame.v[2] = -s;
+            box_frame.v[8] = s;
+            box_frame.v[10] = c;
+            box_frame.v[12] = b.center.x;
+            box_frame.v[13] = b.center.y;
+            box_frame.v[14] = b.center.z;
+            let transform = Mat4f::mul(&self.stage.matrix().invert(), &box_frame);
+            let h = vec3(b.half.x - BAR, b.half.y - BAR, b.half.z - BAR);
+            draws.alpha.cube.cube.transform = transform;
+            draws.alpha.cube.cube.color = vec4(0.72, 0.86, 1.0, 0.55);
+            draws.alpha.cube.cube.depth_clip = 1.0;
+            draws.alpha.cube.glow = 0.8;
+            draws.alpha.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
+            for axis in 0..3 {
+                for a in [-1.0f32, 1.0] {
+                    for d in [-1.0f32, 1.0] {
+                        let (pos, size) = match axis {
+                            0 => (vec3(0.0, a * h.y, d * h.z), vec3(h.x * 2.0, BAR, BAR)),
+                            1 => (vec3(a * h.x, 0.0, d * h.z), vec3(BAR, h.y * 2.0, BAR)),
+                            _ => (vec3(a * h.x, d * h.y, 0.0), vec3(BAR, BAR, h.z * 2.0)),
+                        };
+                        draws.alpha.cube.cube.cube_pos = pos;
+                        draws.alpha.cube.cube.cube_size = size;
+                        draws.alpha.cube.cube.draw(cx);
+                        stats.dyn_instances += 1;
+                    }
+                }
+            }
+        }
+
+        // 5.5 Volumetric smoke clouds: raymarched spheres, depth-tested
+        // against the world, never depth-written.
+        if !self.smoke_volumes.is_empty() {
+            if self.smoke_draw.is_none() {
+                self.smoke_draw = cx.cx.try_with_vm(|vm| Box::new(crate::smoke::DrawSceneSmoke::script_new_with_default(vm)));
+            }
+            if let Some(mut smoke) = self.smoke_draw.take() {
+                let geometry_id = self.ensure_flare_geometry(cx.cx);
+                smoke.draw_vars.geometry_id = Some(geometry_id);
+                smoke.depth_clip = 1.0;
+                let sun = &smoke_light.0;
+                let dv = &mut smoke.draw_vars;
+                dv.set_uniform(cx.cx, live_id!(eye), &[camera_pos.x, camera_pos.y, camera_pos.z, 0.0]);
+                dv.set_uniform(cx.cx, live_id!(light_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
+                dv.set_uniform(cx.cx, live_id!(sun_color), &[sun.color.x, sun.color.y, sun.color.z]);
+                dv.set_uniform(cx.cx, live_id!(sun_sky), &[sun.sky.x, sun.sky.y, sun.sky.z]);
+                let (fog_color, fog_density) = smoke_light.1;
+                dv.set_uniform(cx.cx, live_id!(fog_color), &[fog_color.x, fog_color.y, fog_color.z]);
+                dv.set_uniform(cx.cx, live_id!(fog_density), &[fog_density]);
+                let (right, up) = smoke_light.2;
+                dv.set_uniform(cx.cx, live_id!(cam_right), &[right.x, right.y, right.z, 0.0]);
+                dv.set_uniform(cx.cx, live_id!(cam_up), &[up.x, up.y, up.z, 0.0]);
+                for v in std::mem::take(&mut self.smoke_volumes) {
+                    if let Some(frustum) = frustum {
+                        if !frustum.intersects_sphere(v.center, v.radius) {
+                            continue;
+                        }
+                    }
+                    smoke.smoke_a = vec4(v.center.x, v.center.y, v.center.z, v.radius.max(0.05));
+                    smoke.smoke_b = vec4(v.density.clamp(0.0, 4.0), v.age, v.seed, 0.0);
+                    if smoke.draw_vars.can_instance() {
+                        let new_area = cx.add_instance(&smoke.draw_vars);
+                        smoke.draw_vars.area = cx.update_area_refs(smoke.draw_vars.area, new_area);
+                    }
+                }
+                self.smoke_draw = Some(smoke);
+            }
+        }
+
+        // 6. Fireworks, last of all: additive and depth-write-off, so they
+        // must come after every opaque surface has laid down the depth they
+        // test against. ONE instance per shell — the GPU expands each into
+        // SPARKS_PER_SHELL sparks from a closed form (firework.rs).
+        if let Some(fw) = draws.firework.as_deref_mut() {
+            if !self.firework_instances.is_empty() && shows_environment {
+                let geometry_id = self.ensure_spark_geometry(cx.cx);
+                fw.draw_vars.geometry_id = Some(geometry_id);
+                fw.depth_clip = 1.0;
+                for f in &self.firework_instances {
+                    fw.origin_age = vec4(f.origin.x, f.origin.y, f.origin.z, f.age);
+                    fw.launch_life = vec4(f.launch.x, f.launch.y, f.launch.z, f.life);
+                    // Roomy quad; the sprite core occupies only its middle fifth
+                    // (see spark_pixel), so this is streak headroom, not dot size.
+                    fw.params = vec4(f.speed, f.seed, 1.1, 0.0);
+                    fw.color = f.color;
+                    fw.color_tail = f.color_tail;
+                    if fw.draw_vars.can_instance() {
+                        let new_area = cx.add_instance(&fw.draw_vars);
+                        fw.draw_vars.area = cx.update_area_refs(fw.draw_vars.area, new_area);
+                    }
+                }
+                stats.firework_shells = self.firework_instances.len() as u64;
+            }
+        }
+
+        // 6.5 Old-school lamp flares: one additive camera-facing billboard
+        // pin-glow per visible street lamp, positions straight off the
+        // harvested lamp list. Depth-tested (a wall between you and the lamp
+        // eats the glow — that IS the old-school behaviour) but never
+        // depth-written, drawn with the other late transparents.
+        if let Some(fl) = draws.flare.as_deref_mut() {
+            if shows_environment && !self.lamp_cache.is_empty() {
+                let geometry_id = self.ensure_flare_geometry(cx.cx);
+                fl.draw_vars.geometry_id = Some(geometry_id);
+                fl.depth_clip = 1.0;
+                for l in &self.lamp_cache {
+                    if let Some(frustum) = frustum {
+                        if !frustum.intersects_sphere(l.pos, 1.5) {
+                            continue;
+                        }
+                    }
+                    // Nudge toward the camera so the fixture's own head — the
+                    // bulb sits INSIDE it — cannot eclipse its flare.
+                    let to_cam = camera_pos - l.pos;
+                    let d = to_cam.length().max(1.0e-4);
+                    let pos = l.pos + to_cam * (0.35 / d).min(0.5);
+                    // ~0.8-1.4 units across, scaled by the lamp's intensity
+                    // (lamp colours cap at 2.0 for the atlas encode).
+                    let intensity = light_intensity(l) * 0.5;
+                    let size = (1.4 * intensity).clamp(0.8, 1.4);
+                    fl.flare_pos = vec4(pos.x, pos.y, pos.z, size);
+                    fl.flare_col = vec4(
+                        l.color.x * 0.5,
+                        l.color.y * 0.5,
+                        l.color.z * 0.5,
+                        1.0,
+                    );
+                    if fl.draw_vars.can_instance() {
+                        let new_area = cx.add_instance(&fl.draw_vars);
+                        fl.draw_vars.area = cx.update_area_refs(fl.draw_vars.area, new_area);
+                    }
+                    stats.flares += 1;
+                }
+            }
+        }
+
+        // 6.55 Engine-default bullet holes: one bounded, instanced procedural
+        // quad per live mark. The producer has resolved every mark to its
+        // current world-space pose, including the surface offset.
+        // Nothing in this path keys the static slabs or allocates per frame.
+        if !world.decals.is_empty() {
+            if self.decal_draw.is_none() {
+                self.decal_draw = cx
+                    .cx
+                    .try_with_vm(|vm| Box::new(DrawSceneDecal::script_new_with_default(vm)));
+            }
+            if let Some(mut decal) = self.decal_draw.take() {
+                let geometry_id = self.ensure_flare_geometry(cx.cx);
+                decal.draw_vars.geometry_id = Some(geometry_id);
+                decal.depth_clip = 1.0;
+                for mark in &world.decals {
+                    let (pos, normal) = (mark.pos, mark.normal);
+                    if let Some(frustum) = frustum {
+                        if !frustum.intersects_sphere(pos, mark.size) {
+                            continue;
+                        }
+                    }
+                    decal.decal_pos = vec4(pos.x, pos.y, pos.z, mark.size);
+                    let roll = (mark.serial as f32 * 2.399_963_1).rem_euclid(std::f32::consts::TAU);
+                    decal.decal_normal = vec4(normal.x, normal.y, normal.z, roll);
+                    decal.decal_color = vec4(
+                        mark.color.x,
+                        mark.color.y,
+                        mark.color.z,
+                        mark.kind.shader_id(),
+                    );
+                    if decal.draw_vars.can_instance() {
+                        let new_area = cx.add_instance(&decal.draw_vars);
+                        decal.draw_vars.area = cx.update_area_refs(decal.draw_vars.area, new_area);
+                        stats.bullet_decals += 1;
+                    }
+                }
+                self.decal_draw = Some(decal);
+            }
+        }
+
+        // 6.6 In-world video screen: one textured quad on the shared flare
+        // geometry. The host owns placement and the per-frame texture; this
+        // just issues the instance. Opaque + depth-written, so ordering
+        // against the transparents above doesn't matter.
+        if let Some(sc) = draws.screen.as_deref_mut() {
+            let geometry_id = self.ensure_flare_geometry(cx.cx);
+            sc.draw_vars.geometry_id = Some(geometry_id);
+            let lin = self.lin_ctl();
+            sc.draw_vars.set_uniform(cx.cx, live_id!(lin_ctl), &lin);
+            // The sprite lane below BORROWS this draw — one shader serves both
+            // the video screen and every billboard — so it overwrites the pose
+            // and texture the host owns. Remember them here and hand them back
+            // when the lane is done: otherwise the last sprite of the frame
+            // leaves its pose behind, next frame the "is there a screen?" test
+            // (a zero `screen_size` draws nothing) reads THAT and passes, and
+            // the sprite's whole sheet is drawn as one opaque quad with full
+            // 0..1 UVs — an atlas standing in the world under the unit that
+            // happened to be drawn last, and still standing there after the
+            // level that owned it is gone.
+            let host_pos = sc.screen_pos;
+            let host_size = sc.screen_size;
+            let host_texture = sc.draw_vars.texture_slots[0].clone();
+            sc.depth_clip = 1.0;
+            sc.cutout = 0.0;
+            sc.pixelated = 0.0;
+            sc.uv_rect = vec4(0.0, 0.0, 1.0, 1.0);
+            sc.tint = vec4(1.0, 1.0, 1.0, 1.0);
+            sc.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
+            if sc.screen_size.x.abs() > 0.0
+                && sc.screen_size.y > 0.0
+                && sc.draw_vars.can_instance()
+            {
+                let new_area = cx.add_instance(&sc.draw_vars);
+                sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
+            }
+            // Sprite billboards are cut-out artwork, always: the quad is a
+            // bounding box around a figure and everything outside it is
+            // transparent. Without the alpha test every actor is a black
+            // rectangle. The video screen above keeps cutout 0.
+            sc.cutout = 1.0;
+            // Every ScreenInstance in this lane is sprite-sheet artwork:
+            // monsters, props/map items, and one-shot impact/burst clips all
+            // take the same exact level-0 nearest path. The shared video
+            // screen above deliberately keeps ordinary smooth sampling.
+            sc.pixelated = 1.0;
+            for inst in draws.screen_instances {
+                if inst.size.x <= 0.0 || inst.size.y <= 0.0 {
+                    continue;
+                }
+                sc.draw_vars.set_texture(0, &inst.texture);
+                sc.screen_pos = inst.pos;
+                sc.screen_size = inst.size;
+                sc.uv_rect = inst.uv;
+                sc.tint = inst.tint;
+                sc.color_adjust_ctl = inst.color_adjust;
+                if sc.draw_vars.can_instance() {
+                    let new_area = cx.add_instance(&sc.draw_vars);
+                    sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
+                }
+            }
+            // The borrow ends here: the host's screen is exactly as it left it.
+            sc.screen_pos = host_pos;
+            sc.screen_size = host_size;
+            sc.draw_vars.texture_slots[0] = host_texture;
+        }
+    }
+}

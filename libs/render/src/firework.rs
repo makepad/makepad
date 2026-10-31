@@ -129,7 +129,7 @@ impl FireworkSystem {
             // screen-filling blob and the sky whites out. The launcher, the
             // trajectory and the whole style-hook surface are finished and
             // tested — this is one unresolved plumbing bug away from working.
-            // Set `enabled = true` (or SANDBOX_FIREWORKS=1) to work on it.
+            // Set `enabled = true` to work on it.
             enabled: true,
             // Tuned against where the third-person camera actually looks.
             // The camera sits behind the player pitched DOWN at the street, so

@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 use crate::{context::invalid,geometry::*,mesh::check_position,modifiers::invalidate_normals,*};
 use std::collections::BTreeMap;
 
@@ -19,10 +20,10 @@ impl Mesh {
         Ok(self.edit(ctx,vertices.len().saturating_mul(128),|m,ctx|{
             for v in &mut m.vertices{ctx.checkpoint(1)?;if !selected.contains(&v.id){continue;}let p=v.position;let t=((p[axis]-range[0])/span).clamp(0.,1.);let mut q=p;
                 match deformation{
-                    Deformation::Twist{angle,..}=>{let(s,c)=(t*angle).sin_cos();q[radial]=c*p[radial]-s*p[other];q[other]=s*p[radial]+c*p[other];}
+                    Deformation::Twist{angle,..}=>{let(s,c)=(t*angle).psin_cos();q[radial]=c*p[radial]-s*p[other];q[other]=s*p[radial]+c*p[other];}
                     Deformation::Taper{scales,..}=>{let scale=scales[0]*(1.-t)+scales[1]*t;q[radial]*=scale;q[other]*=scale;}
-                    Deformation::Bend{angle,..}=>{if *angle!=0.{let theta=t*angle;let(s,c)=theta.sin_cos();let radius=span/angle;let tail=p[axis]-p[axis].clamp(range[0],range[1]);
-                        q[radial]=p[radial]*c+radius*2.*(theta*0.5).sin().powi(2)+tail*s;q[axis]=range[0]+(radius-p[radial])*s+tail*c;}}
+                    Deformation::Bend{angle,..}=>{if *angle!=0.{let theta=t*angle;let(s,c)=theta.psin_cos();let radius=span/angle;let tail=p[axis]-p[axis].clamp(range[0],range[1]);
+                        q[radial]=p[radial]*c+radius*2.*(theta*0.5).psin().powi(2)+tail*s;q[axis]=range[0]+(radius-p[radial])*s+tail*c;}}
                 }check_position(q)?;v.position=q;
             }invalidate_normals(m,&selected);Ok(((),Vec::new()))
         })?.1)

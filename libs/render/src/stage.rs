@@ -33,20 +33,35 @@ pub enum StageMode {
     /// Mixed reality: the world shrunk onto the real floor. The room is the
     /// environment, so the game's sky and terrain are suppressed.
     MrDiorama,
+    /// Mixed reality: a piece of the world, ground included, inside a box in the room
+    /// ([`ClipBox`]); everything outside the box is clipped away and the room shows where
+    /// the sky would be. The XR passes draw the scene in world coordinates with the stage in
+    /// their eye views (`Cx::xr_set_scene_to_room`), so lighting and shadows stay the
+    /// world's however the stage moves.
+    MrBox,
 }
 
 impl StageMode {
-    /// Whether the game draws its own environment. False in MR — the room
-    /// already has one, and a sky dome would paint over the passthrough.
+    /// Whether the game draws its own ground (terrain, water, lamps). False in the MR
+    /// diorama — the room already has a floor.
     pub fn shows_environment(self) -> bool {
         !matches!(self, StageMode::MrDiorama)
     }
 
+    /// Whether the game draws its sky (the dome, an environment background). False in MR:
+    /// a sky would paint over the passthrough feed.
+    pub fn shows_sky(self) -> bool {
+        !matches!(self, StageMode::MrDiorama | StageMode::MrBox)
+    }
+
     /// Whether this mode wants passthrough enabled on the headset.
     pub fn wants_passthrough(self) -> bool {
-        matches!(self, StageMode::MrDiorama)
+        matches!(self, StageMode::MrDiorama | StageMode::MrBox)
     }
 }
+
+/// The box an [`StageMode::MrBox`] stage shows the world in (the shared XR navigation's).
+pub use makepad_xr_nav::ClipBox;
 
 /// Default diorama scale: a 40-unit race track lands at ~2m across, which
 /// sits on a living-room floor without the player having to back away.
@@ -107,6 +122,10 @@ impl Stage {
 
     pub fn shows_environment(&self) -> bool {
         self.mode.shows_environment()
+    }
+
+    pub fn shows_sky(&self) -> bool {
+        self.mode.shows_sky()
     }
 
     /// The world→room matrix: translate(origin) · rotate_y(yaw) · scale.

@@ -24,7 +24,6 @@ pub mod clustered;
 pub mod fast_gi;
 pub mod entity_lights;
 pub mod local_shadows;
-pub mod level;
 pub mod ao_atlas;
 pub mod ao_lightmapper;
 pub mod aobaker_port;
@@ -32,32 +31,43 @@ pub mod bakerboy;
 pub mod bake;
 pub mod firework;
 pub mod geometry;
+pub mod grass;
+pub mod impostor;
 pub mod gpu_lightmap;
-pub mod hud;
 pub mod light_grid;
 pub mod lightmap;
 pub mod model;
 pub mod material_surface;
-pub mod player_nav;
+pub mod texture_pack;
+pub use makepad_texcomp;
 pub mod renderer;
 pub mod scene;
 pub mod shaders;
 pub mod skin;
 pub mod stage;
 pub mod particles;
+pub mod quality_tier;
 pub mod play;
 pub mod preview;
 pub mod shadow;
 pub mod shadow_mesh;
 pub mod shadow_csm;
 pub mod shadow_sdf;
+// Procedural HDRI environments (outdoor sky, studio lights) as the engine's
+// linear equirect `EnvMap`s.
+pub mod hdri;
 pub mod sky;
+pub mod smoke;
+pub mod vfx;
 pub mod ssao;
+pub mod stream;
 pub mod sun;
 pub mod thermometer;
+pub mod world_lights;
 
 pub use bake::*;
-pub use custom_material::DrawSceneCustom;
+pub use custom_material::{DrawSceneCustom, DrawMaterialShadow};
+pub use makepad_render_material;
 pub use clustered::{ClusterConfig, ClusterStats};
 pub use fast_gi::{GiMode, GiConfig, GiStats, GiDebug};
 pub use local_shadows::{LocalShadowConfig, LocalShadowStats};
@@ -66,7 +76,6 @@ pub use gpu_lightmap::{
     GpuLmSkin, DEFAULT_CSM_CONFIG,
 };
 pub use geometry::*;
-pub use hud::*;
 pub use model::*;
 pub use renderer::*;
 pub use scene::*;
@@ -78,6 +87,7 @@ pub use preview::*;
 pub use shadow::*;
 pub use shadow_mesh::*;
 pub use ssao::*;
+pub use smoke::SmokeVolume;
 pub use sun::*;
 // `sun::solar_dir` (axis-mapped game-space wrapper) and
 // `makepad_draw::solar_dir` (the underlying shared solar model, pulled in
@@ -92,6 +102,8 @@ use makepad_draw::*;
 /// `makepad_widgets::script_mod` (the shader block uses the widgets prelude)
 /// and before any widget that declares these draw types.
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+    // The shared Splash stdlib (`mod.shared`: sRGB, hashes) the shaders use.
+    makepad_render_graph::pass_stdlib(vm);
     local_shadows::sampling::script_mod(vm);
     if local_shadows::hardware_shadow_maps() {
         local_shadows::hardware_sampling::script_mod(vm);
@@ -99,6 +111,9 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     clustered::script_mod(vm);
     fast_gi::script_mod(vm);
     ssao::script_mod(vm);
+    makepad_render_graph::script_mod(vm);
+    smoke::script_mod(vm);
+    vfx::shader::script_mod(vm);
     shaders::script_mod(vm);
     local_shadows::script_mod(vm)
 }

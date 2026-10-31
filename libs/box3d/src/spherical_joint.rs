@@ -310,7 +310,7 @@ pub fn get_spherical_joint_torque(world: &World, base: &JointSim) -> Vec3 {
     let swing_axis = normalize(cross(cone_axis, twist_axis));
 
     let joint = get_spherical_ref(base);
-    let mut impulse = add(joint.spring_impulse, joint.motor_impulse);
+    let mut impulse = add(add(joint.spring_impulse, joint.motor_impulse), base.friction_impulse);
     impulse = mul_add(impulse, joint.lower_twist_impulse - joint.upper_twist_impulse, twist_axis);
     impulse = mul_add(impulse, joint.swing_impulse, swing_axis);
     mul_sv(world.inv_h, impulse)
@@ -400,6 +400,9 @@ pub fn prepare_spherical_joint(base: &mut JointSim, world: &World, context: &Ste
         joint.lower_twist_impulse = 0.0;
         joint.upper_twist_impulse = 0.0;
     }
+    if !context.enable_warm_starting || !base.friction.is_enabled() {
+        base.friction_impulse = Vec3::ZERO;
+    }
 }
 
 pub fn warm_start_spherical_joint(base: &mut JointSim, states: &StateAccess, _context: &StepContext) {
@@ -409,6 +412,7 @@ pub fn warm_start_spherical_joint(base: &mut JointSim, states: &StateAccess, _co
     let m_b = base.inv_mass_b;
     let i_a = base.inv_i_a;
     let i_b = base.inv_i_b;
+    let friction_impulse = base.friction_impulse;
 
     let joint = get_spherical(base);
 
@@ -431,7 +435,7 @@ pub fn warm_start_spherical_joint(base: &mut JointSim, states: &StateAccess, _co
     let r_a = rotate_vector(dq_a, joint.frame_a.p);
     let r_b = rotate_vector(dq_b, joint.frame_b.p);
 
-    let mut angular_impulse = add(joint.spring_impulse, joint.motor_impulse);
+    let mut angular_impulse = add(add(joint.spring_impulse, joint.motor_impulse), friction_impulse);
     angular_impulse = mul_sub(angular_impulse, joint.swing_impulse, joint.swing_axis);
     angular_impulse = mul_add(angular_impulse, joint.lower_twist_impulse - joint.upper_twist_impulse, joint.twist_jacobian);
 
@@ -460,6 +464,8 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
     let inv_i_b = base.inv_i_b;
     let fixed_rotation = base.fixed_rotation;
     let constraint_softness = base.constraint_softness;
+    let friction = base.friction;
+    let mut friction_impulse = base.friction_impulse;
 
     let joint = get_spherical(base);
 
@@ -517,6 +523,24 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
 
         lambda = sub(new_impulse, joint.motor_impulse);
         joint.motor_impulse = new_impulse;
+
+        w_a = sub(w_a, mul_mv(i_a, lambda));
+        w_b = add(w_b, mul_mv(i_b, lambda));
+    }
+
+    // Dry friction (port extension): the relative rotation is resisted by an impulse whose
+    // magnitude is limited by the ball's reaction force times radius times the coefficient.
+    if friction.is_enabled() && !fixed_rotation {
+        let cdot = sub(w_b, w_a);
+        let mut lambda = neg(mul_mv(joint.rotation_mass, cdot));
+        let mut new_impulse = add(friction_impulse, lambda);
+        let max_impulse = friction.torque * context.h + friction.coefficient * friction.radius * length(joint.linear_impulse);
+        let len = length(new_impulse);
+        if len > max_impulse {
+            new_impulse = mul_sv(max_impulse / len, new_impulse);
+        }
+        lambda = sub(new_impulse, friction_impulse);
+        friction_impulse = new_impulse;
 
         w_a = sub(w_a, mul_mv(i_a, lambda));
         w_b = add(w_b, mul_mv(i_b, lambda));
@@ -665,4 +689,5 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
     if index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
         states.set_velocities(index_b as usize, v_b, w_b);
     }
+    base.friction_impulse = friction_impulse;
 }

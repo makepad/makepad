@@ -431,7 +431,7 @@ use crate::body::{
 use crate::broad_phase::{
     broad_phase_enlarge_proxy, buffer_move, proxy_id, proxy_type, validate_broad_phase, validate_no_enlarged,
 };
-use crate::constants::{speculative_distance, GRAPH_COLOR_COUNT, MAX_ROTATION, TIME_TO_SLEEP};
+use crate::constants::{GRAPH_COLOR_COUNT, MAX_ROTATION, TIME_TO_SLEEP};
 use crate::constraint_graph::OVERFLOW_INDEX;
 use crate::core::NULL_INDEX;
 use crate::ctz::ctz64;
@@ -972,7 +972,7 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
                 let sweep_a = make_relative_sweep(body_sim, base);
 
                 // Time of impact versus shape. Supports all shape types
-                let output = shape_time_of_impact(shape, fast_shape, &sweep_a, &sweep, ctx_fraction);
+                let output = shape_time_of_impact(shape, fast_shape, &sweep_a, &sweep, ctx_fraction, ctx.world.speculative_distance);
                 if is_sensor {
                     // Only accept a sensor hit that is sooner than the current solid hit.
                     if output.fraction <= ctx_fraction && sensor_count < MAX_CONTINUOUS_SENSOR_HITS {
@@ -1044,7 +1044,7 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
         }
     }
 
-    let speculative_scalar = speculative_distance();
+    let speculative_scalar = ctx.world.speculative_distance;
 
     if ctx_fraction < 1.0 {
         // Handle time of impact event. The sweep is relative to the base, so re-add the base
@@ -1151,7 +1151,7 @@ fn finalize_bodies_range(ctx: &FinalizeCtx, start_index: i32, end_index: i32, wo
     let inv_time_step = ctx.inv_dt;
     let world_id = ctx.world_id;
 
-    let speculative_scalar = speculative_distance();
+    let speculative_scalar = ctx.world.speculative_distance;
 
     for sim_index in start_index..end_index {
         // C uses pointers into the state/sim arrays; the port copies the PODs out

@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 // Corefinement-based boolean operations.
 //
 // - Preserves original triangles away from the intersection
@@ -9,8 +10,8 @@
 // 2. Classify each triangle as inside/outside the other mesh
 // 3. Select faces based on the boolean operation
 
-use crate::classify::{classify_triangles, MeshAccel, TriLocation};
-use crate::corefine::corefine;
+use crate::classify::{classify_triangles_in, MeshAccel, TriLocation};
+use crate::corefine::corefine_in;
 use crate::thread_pool;
 use makepad_csg_math::{dvec3, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
@@ -35,16 +36,11 @@ pub enum BoolOp {
 pub struct FinishParams {
     /// Weld / T-junction snapping tolerance for the intersection region.
     pub tolerance: f64,
-    /// Minimum triangle altitude below which a triangle is dropped as a sliver.
-    pub min_altitude: f64,
 }
 
 impl Default for FinishParams {
     fn default() -> Self {
-        FinishParams {
-            tolerance: 1e-4,
-            min_altitude: 1e-4,
-        }
+        FinishParams { tolerance: 1e-4 }
     }
 }
 
@@ -60,15 +56,32 @@ pub fn mesh_boolean_with(
     op: BoolOp,
     finish: FinishParams,
 ) -> TriMesh {
+    let (prep_a, prep_b) = (MeshAccel::build(mesh_a), MeshAccel::build(mesh_b));
+    mesh_boolean_in(mesh_a, &prep_a, mesh_b, &prep_b, op, finish)
+}
+
+/// [`mesh_boolean_with`] of prepared meshes: each operand's triangles and
+/// tree serve the overlap search, the classification of the other operand's
+/// triangles (against the operand as given: the same surface as its
+/// corefined copy) and the coplanar checks, so a mesh used in several
+/// booleans is prepared once.
+pub fn mesh_boolean_in(
+    mesh_a: &TriMesh,
+    prep_a: &MeshAccel,
+    mesh_b: &TriMesh,
+    prep_b: &MeshAccel,
+    op: BoolOp,
+    finish: FinishParams,
+) -> TriMesh {
     // Step 1: Corefine both meshes
-    let coref = corefine(mesh_a, mesh_b);
+    let coref = corefine_in(mesh_a, prep_a, mesh_b, prep_b);
     if thread_pool::cancelled() {
         return TriMesh::new();
     }
 
     // Step 2: Classify triangles
-    let class_a = classify_triangles(&coref.mesh_a, &coref.mesh_b, &coref.on_boundary_a);
-    let class_b = classify_triangles(&coref.mesh_b, &coref.mesh_a, &coref.on_boundary_b);
+    let class_a = classify_triangles_in(&coref.mesh_a, prep_b, &coref.on_boundary_a);
+    let class_b = classify_triangles_in(&coref.mesh_b, prep_a, &coref.on_boundary_b);
     if thread_pool::cancelled()
         || class_a.len() != coref.mesh_a.triangle_count()
         || class_b.len() != coref.mesh_b.triangle_count()
@@ -93,20 +106,9 @@ pub fn mesh_boolean_with(
     // has nothing to repair.
     let untouched = coref.num_segments == 0;
 
-    // Build acceleration structures once for point-in-mesh queries during
-    // selection. They are only consulted for boundary (surface-coplanar)
-    // faces, so skip the builds entirely when nothing was cut.
-    let (accel_b, accel_a): (Option<MeshAccel>, Option<MeshAccel>) = if untouched {
-        (None, None)
-    } else {
-        let mb_clone = coref.mesh_b.clone();
-        let ma_clone = coref.mesh_a.clone();
-        let (b, a) = thread_pool::parallel_do2(
-            move || MeshAccel::build(&mb_clone),
-            move || MeshAccel::build(&ma_clone),
-        );
-        (Some(b), Some(a))
-    };
+    // Point-in-mesh queries for the coplanar checks during selection go to
+    // the prepared operands; they are only consulted for boundary faces.
+    let (accel_b, accel_a): (Option<&MeshAccel>, Option<&MeshAccel>) = if untouched { (None, None) } else { (Some(prep_b), Some(prep_a)) };
 
     let mut result = TriMesh::new();
     // Per-result-vertex flag: is this vertex referenced by any boundary
@@ -153,9 +155,11 @@ pub fn mesh_boolean_with(
             return TriMesh::new();
         }
         let c = class_a[ti];
+        // A face of A touching B face to face: inside a union (dropped), no
+        // volume of an intersection (dropped), still A's surface after A - B.
         let mut keep = match op {
             BoolOp::Union => c == TriLocation::Outside,
-            BoolOp::Difference => c == TriLocation::Outside,
+            BoolOp::Difference => c == TriLocation::Outside || c == TriLocation::Touching,
             BoolOp::Intersection => c == TriLocation::Inside || c == TriLocation::OnBoundary,
         };
 
@@ -208,7 +212,8 @@ pub fn mesh_boolean_with(
         }
         let c = class_b[ti];
 
-        // Base selection
+        // Base selection (a face of B touching A face to face is kept by no
+        // operation: inside a union, not inside A for the others).
         let keep = match op {
             BoolOp::Union => c == TriLocation::Outside,
             BoolOp::Intersection => c == TriLocation::Inside || c == TriLocation::OnBoundary,
@@ -284,6 +289,11 @@ pub fn mesh_boolean_with(
     }
     let mut active = welded_active;
 
+    // Slivers (a triangle thinner than the tolerance: a corner within it of
+    // its longest edge) go by flipping that edge with the triangle across, the
+    // triangles the weld collapsed with them: the mesh stays as closed as it was.
+    remove_slivers(&mut result, finish.tolerance);
+
     // A boundary vertex from an earlier boolean becomes an ordinary source
     // vertex in the next boolean, so restricting repair to the *latest*
     // boundary would miss cascading seams from staged unions (the reviewed
@@ -293,26 +303,12 @@ pub fn mesh_boolean_with(
     // instead of re-scanning the whole mesh.
     mark_open_edge_endpoints(&result, &mut active);
 
-    // Fix T-junctions iteratively, restricted to the active region.
-    // Splitting inserts no new vertices and no degenerate triangles, so the
-    // historical re-weld between rounds was a no-op and is gone.
-    for _ in 0..5 {
-        let before = result.triangles.len();
-        fix_mesh_t_junctions(&mut result, finish.tolerance, &active);
-        if result.triangles.len() == before {
-            break;
-        }
-    }
+    // Close the seams: split every edge at the active vertices lying on it,
+    // all of them at once (one pass, not a pass per inserted vertex).
+    fix_mesh_t_junctions(&mut result, finish.tolerance, &active);
 
-    // Final cleanup: remove sliver triangles from floating-point imprecision.
-    // Uses minimum altitude criterion: h_min = 2*area / max_edge.
-    // Slivers from cascaded booleans have altitudes ~1e-6 (e.g., area=2e-5,
-    // base=10 → altitude=4e-6). Real thin triangles from small overlaps or
-    // slight radius differences have altitudes >= ~1e-3. Threshold 1e-4 is
-    // well within this gap.
-    // Metre-scale callers with sub-millimetre detail (LocalGen) pass finer
-    // values through `FinishParams` — see its docs.
-    remove_degenerate_triangles(&mut result, finish.min_altitude);
+    // Final cleanup: the triangles the repair collapsed.
+    remove_collapsed_triangles(&mut result);
     remove_duplicate_triangles(&mut result);
 
     result
@@ -323,31 +319,65 @@ pub fn mesh_boolean_with(
 /// unstitched T-junction gaps plus any seam inherited from an earlier
 /// boolean's marginal output.
 fn mark_open_edge_endpoints(mesh: &TriMesh, active: &mut [bool]) {
-    let mut count: std::collections::HashMap<(u32, u32), u32> =
-        std::collections::HashMap::new();
+    let mut keys: Vec<u64> = Vec::with_capacity(mesh.triangles.len() * 3);
     for &[a, b, c] in &mesh.triangles {
-        for (u, v) in [(a, b), (b, c), (c, a)] {
-            let key = if u < v { (u, v) } else { (v, u) };
-            *count.entry(key).or_insert(0) += 1;
-        }
+        keys.extend([edge_key(a, b), edge_key(b, c), edge_key(c, a)]);
     }
-    for (&(u, v), &n) in &count {
-        if n == 1 {
-            active[u as usize] = true;
-            active[v as usize] = true;
+    keys.sort_unstable();
+    let mut i = 0;
+    while i < keys.len() {
+        let mut j = i + 1;
+        while j < keys.len() && keys[j] == keys[i] {
+            j += 1;
         }
+        if j - i == 1 {
+            active[(keys[i] >> 32) as usize] = true;
+            active[keys[i] as u32 as usize] = true;
+        }
+        i = j;
     }
 }
 
-/// Coplanar corefinement can select the same tiny face through both source
-/// meshes. Once vertices are welded those are byte-identical index triples;
-/// retaining both makes their three edges non-manifold.
+/// Triangles on one vertex triple after the weld. Coplanar corefinement can select the same
+/// tiny face through both source meshes (same winding): one stays, two would make its edges
+/// non-manifold. A fold (the weld pressing two faces of opposite winding onto one triple)
+/// is no surface: the pair goes, so the edges around it stay paired. In general the net
+/// winding of a triple stays: none, or one triangle of the winding in excess.
 fn remove_duplicate_triangles(mesh: &mut TriMesh) {
-    let mut seen = std::collections::HashSet::new();
-    mesh.triangles.retain(|triangle| {
-        let mut key = *triangle;
+    use makepad_csg_math::fast_hash::FastMap;
+    // Per sorted triple: (net winding, the first triangle of each winding).
+    let mut net: FastMap<[u32; 3], (i32, Option<usize>, Option<usize>)> = FastMap::default();
+    let winding = |t: [u32; 3]| -> bool {
+        // Even rotation of the sorted triple: + ; odd: -.
+        let mut s = t;
+        s.sort_unstable();
+        let r = t.iter().position(|v| *v == s[0]).unwrap();
+        t[(r + 1) % 3] == s[1]
+    };
+    for (ti, t) in mesh.triangles.iter().enumerate() {
+        let mut key = *t;
         key.sort_unstable();
-        seen.insert(key)
+        let e = net.entry(key).or_insert((0, None, None));
+        if winding(*t) {
+            e.0 += 1;
+            e.1.get_or_insert(ti);
+        } else {
+            e.0 -= 1;
+            e.2.get_or_insert(ti);
+        }
+    }
+    let mut keep = vec![false; mesh.triangles.len()];
+    for (_, (n, plus, minus)) in net {
+        match n {
+            0 => {}
+            n if n > 0 => keep[plus.unwrap()] = true,
+            _ => keep[minus.unwrap()] = true,
+        }
+    }
+    let mut i = 0;
+    mesh.triangles.retain(|_| {
+        i += 1;
+        keep[i - 1]
     });
 }
 
@@ -368,109 +398,78 @@ pub fn intersection(mesh_a: &TriMesh, mesh_b: &TriMesh) -> TriMesh {
 
 // --- T-junction resolution for triangle meshes ---
 //
-// After corefinement + face selection, the result mesh may have T-junctions:
-// a vertex from one mesh's CDT retriangulation lies on an edge of a triangle
-// from the other mesh. This creates boundary edges (gaps).
+// After corefinement + face selection + weld, the result may have
+// T-junctions: a vertex from one side's CDT retriangulation lies on an edge
+// of a triangle from the other side, or a near-degenerate triangle has its
+// apex on its long edge, whose neighbour across that edge must be split too
+// or removing the sliver later opens a hole.
 //
-// Fix: for each vertex in the mesh, check if it lies on any triangle edge
-// (not at an endpoint). If so, split that triangle into two by inserting
-// the vertex.
+// Fix: per edge of the region (each undirected edge once), find every active
+// vertex lying on it with a grid walk along the edge, and split every
+// triangle on that edge at all of them at once (except a triangle's own
+// apex): a fan from the opposite corner, nested when several edges of one
+// triangle are split. That is the triangulation repeated single splits
+// converge to, in one pass over the region instead of one pass per inserted
+// vertex.
 
-/// Fix T-junctions in a welded mesh by splitting triangles at vertices
-/// that lie on their edges.
+/// Fix T-junctions in a welded mesh by splitting triangles at the active
+/// vertices that lie on their edges.
 fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64, active: &[bool]) {
-    // May need multiple passes since splitting can create new T-junctions.
-    // Each pass can expose new T-junctions where a split triangle edge
-    // now has a vertex on it.
-    for _ in 0..10 {
+    // A split inserts no vertex and every active vertex on a split edge
+    // becomes a corner, so a later round can only find one on a new fan
+    // diagonal (degenerate input): it looks at the new triangles only.
+    let mut from = 0;
+    for _ in 0..4 {
         if thread_pool::cancelled() {
             return;
         }
-        if !fix_t_junctions_pass(mesh, tol, active) {
-            break;
+        match fix_t_junctions_pass(mesh, tol, active, from) {
+            Some(first_new) => from = first_new,
+            None => return,
         }
     }
 }
 
-/// Single pass of T-junction fixing. Returns true if any splits were made.
-///
-/// Uses a spatial grid to avoid O(n*m) brute-force vertex-edge checks.
-/// Only ACTIVE vertices (the intersection region: corefinement boundary
-/// vertices plus weld-moved ones) go into the grid, the grid is sized from
-/// the active region's bbox, and triangles away from that region are
-/// rejected with one bbox test — the pass is local to the cut.
-fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool]) -> bool {
-    let num_verts = mesh.vertices.len();
+fn edge_key(u: u32, v: u32) -> u64 {
+    let (a, b) = if u < v { (u, v) } else { (v, u) };
+    ((a as u64) << 32) | b as u64
+}
+
+/// One pass over the triangles from index `from` on: returns, if any was
+/// split, the index of the first new triangle (they go at the end).
+fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool], from: usize) -> Option<usize> {
     let num_tris = mesh.triangles.len();
-    if num_tris == 0 || num_verts == 0 {
-        return false;
+    let seam: Vec<u32> = (0..mesh.vertices.len() as u32).filter(|&v| active.get(v as usize).copied().unwrap_or(true)).collect();
+    if num_tris <= from || seam.is_empty() {
+        return None;
     }
 
-    // Bounding box and population of the active (intersection-region)
-    // vertices. Only these can be T-junction vertices: corefinement's boundary
-    // vertices plus anything the weld moved.
-    let mut n_active = 0usize;
-    let mut act_min = dvec3(f64::MAX, f64::MAX, f64::MAX);
-    let mut act_max = dvec3(f64::MIN, f64::MIN, f64::MIN);
-    for (i, v) in mesh.vertices.iter().enumerate() {
-        if active.get(i).copied().unwrap_or(true) {
-            n_active += 1;
-            act_min.x = act_min.x.min(v.x);
-            act_min.y = act_min.y.min(v.y);
-            act_min.z = act_min.z.min(v.z);
-            act_max.x = act_max.x.max(v.x);
-            act_max.y = act_max.y.max(v.y);
-            act_max.z = act_max.z.max(v.z);
-        }
+    // Grid over the active vertices, about one per cell, sized from their
+    // own bounds (not the mesh's: far-apart operands would crowd it).
+    let mut lo = mesh.vertices[seam[0] as usize];
+    let mut hi = lo;
+    for &v in &seam {
+        let p = mesh.vertices[v as usize];
+        lo = dvec3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = dvec3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
     }
-    if n_active == 0 {
-        return false;
-    }
-
-    // Choose cell size from the ACTIVE region's extent and population, so we
-    // get about one active vertex per cell there. Sizing from the whole-mesh
-    // bbox made far-apart operands collapse every vertex into a handful of
-    // cells, degenerating each pass toward O(V*E).
-    let extent = (act_max - act_min).length();
-    let cells_per_axis = (n_active as f64).cbrt().max(4.0);
-    let cell = (extent / cells_per_axis).max(tol * 2.0);
+    let cells_per_axis = (seam.len() as f64).pcbrt().max(4.0);
+    let cell = ((hi - lo).length() / cells_per_axis).max(tol * 2.0);
     let inv_cell = 1.0 / cell;
-
-    // Active-region bounds grown by tol, for cheap per-triangle rejection.
-    let reg_min = act_min - dvec3(tol, tol, tol);
-    let reg_max = act_max + dvec3(tol, tol, tol);
-
-    let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<u32>> =
-        std::collections::HashMap::new();
-    for (i, v) in mesh.vertices.iter().enumerate() {
-        if !active.get(i).copied().unwrap_or(true) {
-            continue;
-        }
-        let cx = (v.x * inv_cell).floor() as i64;
-        let cy = (v.y * inv_cell).floor() as i64;
-        let cz = (v.z * inv_cell).floor() as i64;
-        grid.entry((cx, cy, cz)).or_default().push(i as u32);
+    let cell_of = |p: Vec3d| -> (i64, i64, i64) {
+        ((p.x * inv_cell).floor() as i64, (p.y * inv_cell).floor() as i64, (p.z * inv_cell).floor() as i64)
+    };
+    let mut grid: makepad_csg_math::fast_hash::FastMap<(i64, i64, i64), Vec<u32>> = Default::default();
+    for &v in &seam {
+        grid.entry(cell_of(mesh.vertices[v as usize])).or_default().push(v);
     }
+    let (reg_min, reg_max) = (lo - dvec3(tol, tol, tol), hi + dvec3(tol, tol, tol));
 
-    // For each triangle edge, query nearby vertices from the grid.
-    let mut new_triangles: Vec<[u32; 3]> = Vec::new();
-    let mut removed = vec![false; num_tris];
-    let mut any_split = false;
-
-    for ti in 0..num_tris {
-        if thread_pool::cancelled() {
-            return false;
-        }
-        if removed[ti] {
-            continue;
-        }
-        let [ia, ib, ic] = mesh.triangles[ti];
-        let va = mesh.vertices[ia as usize];
-        let vb = mesh.vertices[ib as usize];
-        let vc = mesh.vertices[ic as usize];
-
-        // Cheap reject: a triangle whose bbox misses the active region cannot
-        // have an active vertex on any of its edges.
+    // The half-edges (triangle * 3 + slot, slot k = corner k -> corner k+1)
+    // of triangles reaching the active region, grouped by undirected edge.
+    let mut half: Vec<(u64, u32)> = Vec::new();
+    for (ti, &[a, b, c]) in mesh.triangles.iter().enumerate().skip(from) {
+        let (va, vb, vc) = (mesh.vertices[a as usize], mesh.vertices[b as usize], mesh.vertices[c as usize]);
         if va.x.max(vb.x).max(vc.x) < reg_min.x
             || va.x.min(vb.x).min(vc.x) > reg_max.x
             || va.y.max(vb.y).max(vc.y) < reg_min.y
@@ -480,69 +479,139 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool]) -> bool {
         {
             continue;
         }
-
-        let edges = [
-            (ia, ib, ic, va, vb),
-            (ib, ic, ia, vb, vc),
-            (ic, ia, ib, vc, va),
-        ];
-
-        let mut split_found = false;
-        for &(e0, e1, opp, v0, v1) in &edges {
-            if split_found {
-                break;
+        // Only an edge between two active vertices can carry one: a vertex
+        // lies on an edge of a triangle that meets the cut (all of whose
+        // corners are active), of an inherited seam (open: its ends are
+        // active) or of a sliver next to them.
+        let t = ti as u32 * 3;
+        for (k, (u, v)) in [(a, b), (b, c), (c, a)].into_iter().enumerate() {
+            if active.get(u as usize).copied().unwrap_or(true) && active.get(v as usize).copied().unwrap_or(true) {
+                half.push((edge_key(u, v), t + k as u32));
             }
-            // Compute AABB of edge expanded by tolerance, query grid cells
-            let min_x = v0.x.min(v1.x) - tol;
-            let min_y = v0.y.min(v1.y) - tol;
-            let min_z = v0.z.min(v1.z) - tol;
-            let max_x = v0.x.max(v1.x) + tol;
-            let max_y = v0.y.max(v1.y) + tol;
-            let max_z = v0.z.max(v1.z) + tol;
+        }
+    }
+    half.sort_unstable();
 
-            let c_min_x = (min_x * inv_cell).floor() as i64;
-            let c_min_y = (min_y * inv_cell).floor() as i64;
-            let c_min_z = (min_z * inv_cell).floor() as i64;
-            let c_max_x = (max_x * inv_cell).floor() as i64;
-            let c_max_y = (max_y * inv_cell).floor() as i64;
-            let c_max_z = (max_z * inv_cell).floor() as i64;
-
-            'edge_search: for gx in c_min_x..=c_max_x {
-                for gy in c_min_y..=c_max_y {
-                    for gz in c_min_z..=c_max_z {
+    // Per half-edge, the active vertices strictly inside it, ordered from
+    // its start.
+    let mut splits: Vec<(u32, Vec<u32>)> = Vec::new();
+    let mut near: Vec<u32> = Vec::new();
+    let mut i = 0;
+    while i < half.len() {
+        if thread_pool::cancelled() {
+            return None;
+        }
+        let mut j = i + 1;
+        while j < half.len() && half[j].0 == half[i].0 {
+            j += 1;
+        }
+        let (u, v) = ((half[i].0 >> 32) as u32, half[i].0 as u32);
+        let (pu, pv) = (mesh.vertices[u as usize], mesh.vertices[v as usize]);
+        // Walk the edge in steps of at most one cell: a point within `tol` of
+        // the edge is within `cell / 2 + tol` (per axis) of a step point.
+        // A short edge (the usual case near a cut) takes the cells of its
+        // grown bounds directly.
+        near.clear();
+        let scan = |a: Vec3d, b: Vec3d, near: &mut Vec<u32>| {
+            let (x0, y0, z0) = cell_of(a);
+            let (x1, y1, z1) = cell_of(b);
+            for gx in x0..=x1 {
+                for gy in y0..=y1 {
+                    for gz in z0..=z1 {
                         if let Some(bucket) = grid.get(&(gx, gy, gz)) {
-                            for &vi32 in bucket {
-                                if vi32 == e0 || vi32 == e1 || vi32 == opp {
-                                    continue;
-                                }
-                                if point_on_edge(mesh.vertices[vi32 as usize], v0, v1, tol) {
-                                    removed[ti] = true;
-                                    new_triangles.push([e0, vi32, opp]);
-                                    new_triangles.push([vi32, e1, opp]);
-                                    split_found = true;
-                                    any_split = true;
-                                    break 'edge_search;
-                                }
-                            }
+                            near.extend_from_slice(bucket);
                         }
                     }
                 }
             }
+        };
+        let (bmin, bmax) = (pu.min(pv) - dvec3(tol, tol, tol), pu.max(pv) + dvec3(tol, tol, tol));
+        let span = (bmax - bmin) * inv_cell;
+        let steps = ((pv - pu).length() * inv_cell).ceil().max(1.0) as usize;
+        if (span.x + 2.0) * (span.y + 2.0) * (span.z + 2.0) <= 27.0 * (steps + 1) as f64 {
+            scan(bmin, bmax, &mut near);
+        } else {
+            let reach = dvec3(cell * 0.5 + tol, cell * 0.5 + tol, cell * 0.5 + tol);
+            for s in 0..=steps {
+                let p = pu + (pv - pu) * (s as f64 / steps as f64);
+                scan(p - reach, p + reach, &mut near);
+            }
         }
+        near.sort_unstable();
+        near.dedup();
+        let uv = pv - pu;
+        let mut on: Vec<(f64, u32)> = near
+            .iter()
+            .filter(|&&w| w != u && w != v && point_on_edge(mesh.vertices[w as usize], pu, pv, tol))
+            .map(|&w| ((mesh.vertices[w as usize] - pu).dot(uv), w))
+            .collect();
+        if !on.is_empty() {
+            on.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
+            for &(_, h) in &half[i..j] {
+                let t = mesh.triangles[(h / 3) as usize];
+                let k = (h % 3) as usize;
+                // Ordered from this half-edge's start. Every half-edge of the edge splits at
+                // every vertex on it, its own triangle's apex included (that triangle is a
+                // sliver: its pieces collapse and go), so the edge's two sides stay paired.
+                let forward = t[k] == u;
+                let mut list: Vec<u32> = on.iter().map(|x| x.1).collect();
+                if !forward {
+                    list.reverse();
+                }
+                if !list.is_empty() {
+                    splits.push((h, list));
+                }
+            }
+        }
+        i = j;
     }
-
-    if !any_split {
-        return false;
+    if splits.is_empty() {
+        return None;
     }
+    splits.sort_unstable_by_key(|s| s.0);
 
+    // Retriangulate each split triangle; a triangle's split edges are adjacent.
+    let mut removed = vec![false; num_tris];
+    let mut new_triangles: Vec<[u32; 3]> = Vec::new();
+    let mut i = 0;
+    while i < splits.len() {
+        let ti = (splits[i].0 / 3) as usize;
+        let mut on_edge: [&[u32]; 3] = [&[], &[], &[]];
+        while i < splits.len() && (splits[i].0 / 3) as usize == ti {
+            on_edge[(splits[i].0 % 3) as usize] = &splits[i].1;
+            i += 1;
+        }
+        removed[ti] = true;
+        split_triangle(mesh.triangles[ti], on_edge, &mut new_triangles);
+    }
     let old_tris = std::mem::take(&mut mesh.triangles);
-    for (i, tri) in old_tris.into_iter().enumerate() {
-        if !removed[i] {
-            mesh.triangles.push(tri);
-        }
-    }
+    mesh.triangles = old_tris.into_iter().zip(removed).filter(|(_, r)| !r).map(|(t, _)| t).collect();
+    let first_new = mesh.triangles.len();
     mesh.triangles.extend(new_triangles);
-    true
+    Some(first_new)
+}
+
+/// Split triangle `[a, b, c]` at the points on its edges (`on[0]` on a->b,
+/// `on[1]` on b->c, `on[2]` on c->a, each ordered from the edge's start):
+/// the first split edge fans from the opposite corner, and the fan's end
+/// triangles, which carry the other two edges, are split in turn.
+fn split_triangle(t: [u32; 3], on: [&[u32]; 3], out: &mut Vec<[u32; 3]>) {
+    let Some(k) = (0..3).find(|&k| !on[k].is_empty()) else {
+        out.push(t);
+        return;
+    };
+    // Rotate so the split edge is a->b; windings are kept.
+    let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+    let (pts, on_bc, on_ca) = (on[k], on[(k + 1) % 3], on[(k + 2) % 3]);
+    let n = pts.len();
+    for j in 0..=n {
+        let u = if j == 0 { a } else { pts[j - 1] };
+        let v = if j == n { b } else { pts[j] };
+        // The first fan triangle keeps edge c->a, the last keeps b->c.
+        let ca: &[u32] = if j == 0 { on_ca } else { &[] };
+        let bc: &[u32] = if j == n { on_bc } else { &[] };
+        split_triangle([u, v, c], [&[], bc, ca], out);
+    }
 }
 
 /// Check if point p lies on the line segment a->b (not at endpoints), within tolerance.
@@ -570,44 +639,74 @@ fn point_on_edge(p: Vec3d, a: Vec3d, b: Vec3d, tol: f64) -> bool {
     (p - proj).length() < tol
 }
 
-/// Remove degenerate/sliver triangles produced by floating-point imprecision.
-///
-/// Uses the minimum altitude criterion: `h_min = 2 * area / max_edge_length`.
-/// Slivers from cascaded boolean imprecision typically have altitudes ~1e-6
-/// (e.g., area=2e-5 with base=10), while real thin triangles from overlap
-/// regions have altitudes on the order of the overlap (e.g., ~0.01).
-/// A threshold of 1e-3 cleanly separates these.
-fn remove_degenerate_triangles(mesh: &mut TriMesh, min_altitude: f64) {
-    let mut keep = Vec::with_capacity(mesh.triangles.len());
-    for &[a, b, c] in &mesh.triangles {
-        if thread_pool::cancelled() {
-            return;
+/// Slivers: a corner within `tol` of its triangle's longest edge (cascaded booleans leave
+/// them at altitudes ~1e-6; real thin faces of overlap regions stand ~0.01 off). Each goes
+/// by flipping that longest edge with the triangle across it: the sliver's apex then splits
+/// the neighbour in two, closing in the same step the T-junction a deleted sliver would
+/// leave, so a closed mesh stays closed. A sliver with no single triangle across (an open
+/// or non-manifold edge) stays for the T-junction repair. Triangles with a repeated corner
+/// (an edge the weld collapsed) go first.
+fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
+    use makepad_csg_math::fast_hash::FastMap;
+    let thin = |m: &TriMesh, t: [u32; 3]| -> Option<usize> {
+        let p = t.map(|i| m.vertices[i as usize]);
+        let len = [(p[1] - p[0]).length(), (p[2] - p[1]).length(), (p[0] - p[2]).length()];
+        let k = (0..3).max_by(|a, b| len[*a].total_cmp(&len[*b])).unwrap();
+        let area2 = (p[1] - p[0]).cross(p[2] - p[0]).length();
+        // Edge k runs from corner k to corner k + 1; its apex is corner k + 2.
+        (len[k] > 0.0 && area2 / len[k] < tol).then_some(k)
+    };
+    mesh.triangles.retain(|&[a, b, c]| a != b && b != c && c != a);
+    for _round in 0..8 {
+        let mut half: FastMap<(u32, u32), Vec<usize>> = FastMap::default();
+        for (ti, t) in mesh.triangles.iter().enumerate() {
+            for k in 0..3 {
+                half.entry((t[k], t[(k + 1) % 3])).or_default().push(ti);
+            }
         }
-        if a == b || b == c || c == a {
-            continue;
+        let mut done = vec![false; mesh.triangles.len()];
+        let mut drop = vec![false; mesh.triangles.len()];
+        let mut changed = false;
+        for ti in 0..mesh.triangles.len() {
+            if done[ti] {
+                continue;
+            }
+            let t = mesh.triangles[ti];
+            let Some(k) = thin(mesh, t) else { continue };
+            let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+            let Some(across) = half.get(&(b, a)).filter(|n| n.len() == 1).map(|n| n[0]) else { continue };
+            if across == ti || done[across] {
+                continue;
+            }
+            let n = mesh.triangles[across];
+            let Some(j) = (0..3).find(|&j| n[j] == b && n[(j + 1) % 3] == a) else { continue };
+            let d = n[(j + 2) % 3];
+            done[ti] = true;
+            done[across] = true;
+            changed = true;
+            if d == c {
+                // The two fold onto each other: both go.
+                drop[ti] = true;
+                drop[across] = true;
+            } else {
+                mesh.triangles[ti] = [a, d, c];
+                mesh.triangles[across] = [d, b, c];
+            }
         }
-        let va = mesh.vertices[a as usize];
-        let vb = mesh.vertices[b as usize];
-        let vc = mesh.vertices[c as usize];
-        // Compute area via cross product
-        let cross = (vb - va).cross(vc - va);
-        let area2 = cross.length(); // = 2 * area
-                                    // Find longest edge
-        let lab = (vb - va).length();
-        let lbc = (vc - vb).length();
-        let lca = (va - vc).length();
-        let max_edge = lab.max(lbc).max(lca);
-        if max_edge < 1e-15 {
-            continue; // zero-size triangle
+        if !changed {
+            break;
         }
-        // Minimum altitude = 2 * area / max_edge = area2 / max_edge
-        let h_min = area2 / max_edge;
-        if h_min < min_altitude {
-            continue;
-        }
-        keep.push([a, b, c]);
+        let mut i = 0;
+        mesh.triangles.retain(|_| {
+            i += 1;
+            !drop[i - 1]
+        });
     }
-    mesh.triangles = keep;
+}
+
+/// Drop the triangles with a repeated corner (an edge the weld collapsed).
+fn remove_collapsed_triangles(mesh: &mut TriMesh) {
+    mesh.triangles.retain(|&[a, b, c]| a != b && b != c && c != a);
 }
 
 #[cfg(test)]
@@ -711,3 +810,4 @@ mod tests {
         );
     }
 }
+

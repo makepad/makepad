@@ -1,0 +1,788 @@
+//! Realm lifecycle, stage/quality, effects, placed models and custom materials.
+
+use super::*;
+
+impl Renderer {
+    /// Begin rendering a different realm into this view.
+    ///
+    /// World-local revision counters restart when a script game is loaded,
+    /// so they cannot by themselves distinguish (for example) town terrain
+    /// at revision 1 from FPS terrain at revision 1. Call this exactly once
+    /// at the successful world-replacement boundary, before submitting the
+    /// new realm's first frame. It invalidates every cache derived from the
+    /// old world while retaining uploaded asset geometry/textures, shader
+    /// and pass pools, stage policy, bake settings, shadow budget, and the
+    /// adaptive-quality history owned by this device.
+    pub fn enter_realm(&mut self) {
+        self.custom_draws.clear();
+        // The stock IBL program went with them: a build of it that failed
+        // may be made again (renderer/stock_ibl.rs).
+        self.stock_ibl_forget_failure();
+        self.static_chunks.clear();
+        self.chunk_visible.clear();
+        self.slab_key = None;
+        self.slab_instance_count = 0;
+
+        self.terrain_tiles.clear();
+        self.terrain_revision = 0;
+        self.voxel_tiles.clear();
+        self.water.enter_realm();
+
+        // Keep resident rig geometry and the palette texture allocation;
+        // only their frame-to-instance mapping belongs to the old realm.
+        self.skin_joint_bases.clear();
+        self.placed_models.clear();
+        self.placed_prefix = None;
+        self.csm_static_casters.clear();
+        self.csm_static_blocks.clear();
+        self.grass = None;
+        self.world_attachments.clear();
+        self.view_models.clear();
+        self.placed_scene_signature = None;
+        self.vfx.records.clear();
+        self.vfx.decals.clear();
+        self.firework_instances.clear();
+        self.smoke_volumes.clear();
+
+        self.shadow_mesh.clear();
+        self.receiver_boxes.clear();
+        self.occluder_boxes.clear();
+        self.shadow_geometry = None;
+        self.last_dynamic_shadow_tris = 0;
+        self.shadow_points.clear();
+        self.shadow_gate = ShadowRebuildGate::default();
+        self.sky_hour = None;
+        self.sky_clock = false;
+
+        self.lightmap = None;
+        self.lm_remaps.clear();
+        self.lm_ground = None;
+        self.lm_top = None;
+        self.gpu_baker.enter_realm();
+        self.csm_scene_bounds = None;
+        self.lm_lights.clear();
+        self.frame_lights.clear();
+        self.frame_baked_count = 0;
+        self.host_lights.clear();self.host_asset_lights.clear();self.asset_light_error=None;
+        self.lamp_cache.clear();
+        self.lamp_cache_rev = None;
+        self.light_grid = LightGrid::default();
+        let cluster_config = self.clustered.config();
+        let shadow_config = self.clustered.shadows.config();
+        let soft_filter = self.clustered.shadows.soft_filter;
+        let shadow_source_radius = self.clustered.shadows.source_radius;
+        self.clustered = crate::clustered::ClusteredLights::default();
+        self.clustered.set_config(cluster_config);
+        self.clustered.shadows.set_config(shadow_config);
+        self.clustered.shadows.soft_filter=soft_filter;
+        self.clustered.shadows.source_radius=shadow_source_radius;
+        self.clustered_frames = 0;
+        self.light_rank.clear();
+        self.gi.reset();
+        // A fixed volume belongs to the departing world, not device quality.
+        self.gi.set_config(crate::GiConfig{anchor:None,..self.gi.config()});
+        self.light_sel.clear();
+        self.light_block_scratch.fill(0.0);
+        self.light_cell_memory.clear();
+        self.char_ground.clear();
+        self.model_ground.clear();
+        self.world_attachment_ground.clear();
+        self.sdf_instances.clear();
+        self.lm_kick_key = None;
+        self.lm_kick_sun = None;
+
+        // Keep the counter monotonic even though all its consumers above
+        // were cleared; this prevents a future cache from reintroducing the
+        // same cross-realm numeric-alias bug.
+        self.models_rev = self.models_rev.wrapping_add(1);
+        self.bake.enter_realm();
+    }
+
+    /// How this device projects the world. Changing it is free — the stage
+    /// is a draw-list uniform, so nothing cached needs rebuilding, and the
+    /// simulation never learns it happened.
+    pub fn stage(&self) -> Stage {
+        self.stage
+    }
+
+    pub fn set_stage(&mut self, stage: Stage) {
+        self.stage = stage;
+    }
+
+    /// The room box an `MrBox` stage clips the world to (other stages ignore it).
+    pub fn set_clip_box(&mut self, clip_box: Option<crate::stage::ClipBox>) {
+        self.clip_box = clip_box;
+    }
+
+    /// The stage the scene draw list carries as its view transform: the stage itself, or
+    /// identity on an `MrBox` stage (the XR eye views carry it, `Cx::xr_set_scene_to_room`).
+    pub(crate) fn draw_stage_matrix(&self) -> Mat4f {
+        if self.stage.mode == StageMode::MrBox { Mat4f::identity() } else { self.stage.matrix() }
+    }
+
+    /// An `MrBox` stage's box, world -> the unit box.
+    pub(crate) fn clip_box_from_world(&self) -> Option<Mat4f> {
+        let b = self.clip_box.filter(|_| self.stage.mode == StageMode::MrBox)?;
+        Some(Mat4f::mul(&b.unit_from_room(), &self.stage.matrix()))
+    }
+
+    /// How many casters may use the projected-silhouette tier. Lower it on
+    /// mobile/standalone XR; see apps/commercial/sandbox/BUDGETS.md.
+    pub fn shadow_budget(&self) -> usize {
+        self.shadow_budget
+    }
+
+    pub fn set_shadow_budget(&mut self, casters: usize) {
+        self.shadow_budget = casters;
+    }
+
+    /// Feed the governor one frame's cost, in milliseconds. Returns true on
+    /// the frames where the quality level actually moved, so a host can log
+    /// or surface it without polling.
+    ///
+    /// This is OPT-IN: a host that never calls it never gets cut, which is
+    /// the right default for a tool that removes scenery. Pass the platform's
+    /// real frame time — an XR runtime hands you one, and it is the number
+    /// that matters because the Quest is fill-bound, not CPU-bound.
+    ///
+    /// One trap worth naming: do not pass a vsync-locked frame-to-frame
+    /// interval. That signal is quantised to the refresh rate, so it reads
+    /// ~16.6ms whether the frame took 3ms or 16ms of real work, and a
+    /// governor targeting 80% of budget would cut forever without ever
+    /// seeing an improvement. If a real measurement is unavailable, leave
+    /// this uncalled rather than feeding it a quantised one.
+    pub fn report_frame_ms(&mut self, ms: f32) -> bool {
+        self.thermometer.frame(ms)
+    }
+
+    /// Tell the governor what this device's display budget is. Call on
+    /// startup and whenever the refresh changes — a Quest at 72Hz and the
+    /// same Quest at 120Hz want budgets nearly twice apart.
+    pub fn set_refresh_hz(&mut self, hz: f32) {
+        self.thermometer.set_refresh_hz(hz);
+    }
+
+    /// The current cuts. The renderer applies `particle_scale`,
+    /// `shadow_caster_scale` and `projected_shadows` itself; the remaining
+    /// dials (`decor_distance_scale`, `foliage_scale`, `draw_distance_scale`)
+    /// describe scenery only the world builder can identify, so a host that
+    /// places decoration should read them when deciding what to emit.
+    pub fn quality(&self) -> Quality {
+        self.thermometer.quality()
+    }
+
+    /// 0 = everything on. Higher = leaner. Pair with [`Self::quality_reason`]
+    /// when showing this to a player, so a suddenly emptier world reads as a
+    /// deliberate trade rather than a bug.
+    pub fn quality_level(&self) -> usize {
+        self.thermometer.level()
+    }
+
+    /// One line describing what the current level gave up.
+    pub fn quality_reason(&self) -> &'static str {
+        self.thermometer.reason()
+    }
+
+    /// Measured p90 frame time, once enough frames have been seen. `None`
+    /// while the window is still filling.
+    pub fn frame_p90_ms(&self) -> Option<f32> {
+        self.thermometer.p90_ms()
+    }
+
+    /// This frame's volumetric smoke clouds (drawn once, in the late
+    /// transparent layer, then consumed: push them every frame).
+    pub fn set_smoke_volumes(&mut self, volumes: Vec<crate::smoke::SmokeVolume>) {
+        self.smoke_volumes = volumes;
+    }
+
+    /// This frame's firework shells: one instance per shell, expanded into
+    /// sparks on the GPU (firework.rs).
+    pub fn set_fireworks(&mut self, instances: Vec<crate::firework::FireworkInstance>) {
+        self.firework_instances = instances;
+    }
+
+    /// Build the spark sheet once. Its size is fixed by SPARKS_PER_SHELL, so
+    /// it never needs rebuilding the way the terrain mesh does.
+    pub(super) fn ensure_spark_geometry(&mut self, cx: &mut Cx) -> GeometryId {
+        if let Some(g) = &self.spark_geometry {
+            return g.geometry_id();
+        }
+        let (indices, vertices) = crate::firework::spark_sheet_vertices();
+        let geometry = Geometry::new(cx);
+        geometry.update(cx, indices, vertices);
+        let id = geometry.geometry_id();
+        self.spark_geometry = Some(geometry);
+        id
+    }
+
+    /// The flares' shared billboard: ONE quad in the CubeVertex layout
+    /// (geom_pos.xy = corner, geom_uv = 0..1), built once — the per-lamp
+    /// data rides in the instance stream.
+    pub(super) fn ensure_flare_geometry(&mut self, cx: &mut Cx) -> GeometryId {
+        if let Some(g) = &self.flare_geometry {
+            return g.geometry_id();
+        }
+        let mut vertices: Vec<f32> = Vec::with_capacity(4 * 12);
+        for (qx, qy) in [(-0.5f32, -0.5f32), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+            // geom_pos(3), geom_id(1), geom_normal(3), geom_pad(1),
+            // geom_uv(2), tail_pad(2) — the spark-sheet layout.
+            vertices.extend_from_slice(&[
+                qx,
+                qy,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                qx + 0.5,
+                qy + 0.5,
+                0.0,
+                0.0,
+            ]);
+        }
+        let indices = vec![0u32, 1, 2, 0, 2, 3];
+        let geometry = Geometry::new(cx);
+        geometry.update(cx, indices, vertices);
+        let id = geometry.geometry_id();
+        self.flare_geometry = Some(geometry);
+        id
+    }
+
+    /// A pack's prebaked `ao_atlas.png`, uploaded as a texture.
+    ///
+    /// Looked up beside the pack's models, which is where `tools/ao_bake`
+    /// writes it. Greyscale is expanded to RGBA because the texture path is
+    /// 32-bit; the shader reads .x.
+    pub(super) fn models_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../apps/commercial/sandbox/resources/models"
+        ))
+    }
+
+    pub(super) fn load_pack_ao(cx: &mut Cx, pack: &str) -> Option<Texture> {
+        let png = std::fs::read(Self::models_root().join(pack).join("ao_atlas.png")).ok()?;
+        Self::gray_png_texture(cx, &png).map(|(t, _, _)| t)
+    }
+
+    /// This model's OWN AO atlas, from `tools/ao_bake`, if one was baked.
+    /// The dimensions ride along: they are the shape of the model's chart
+    /// layout, which is what sizes its lightmap region.
+    pub(super) fn load_model_ao(cx: &mut Cx, id: &str) -> Option<(Texture, usize, usize)> {
+        let png = std::fs::read(Self::models_root().join(format!("{id}.ao.png"))).ok()?;
+        Self::gray_png_texture(cx, &png)
+    }
+
+    /// Decode ao_bake's greyscale PNG straight into an R8 texture.
+    ///
+    /// Single channel on the GPU, where the old path inflated grey to RGBA —
+    /// 4x the memory for three copies of the same byte, on the device (Quest)
+    /// where texture memory is the scarce resource. The shader reads `.x`
+    /// either way. The decoder handles exactly what the baker writes — 8-bit
+    /// greyscale, filter 0, zlib IDAT — and rejects anything else, which is
+    /// how a foreign or corrupt file falls back to "no AO" rather than to a
+    /// scrambled one.
+    pub(super) fn gray_png_texture(cx: &mut Cx, png: &[u8]) -> Option<(Texture, usize, usize)> {
+        if png.len() < 8 + 25 || &png[..8] != b"\x89PNG\r\n\x1a\n" {
+            return None;
+        }
+        let (mut o, mut w, mut h, mut idat) = (8usize, 0usize, 0usize, Vec::new());
+        while o + 8 <= png.len() {
+            let len = u32::from_be_bytes(png[o..o + 4].try_into().ok()?) as usize;
+            let kind = &png[o + 4..o + 8];
+            let body = png.get(o + 8..o + 8 + len)?;
+            match kind {
+                b"IHDR" => {
+                    w = u32::from_be_bytes(body.get(..4)?.try_into().ok()?) as usize;
+                    h = u32::from_be_bytes(body.get(4..8)?.try_into().ok()?) as usize;
+                    // 8-bit greyscale, no interlace: bit depth 8, colour type
+                    // 0, compression 0, filter 0, interlace 0.
+                    if body.get(8..13)? != [8, 0, 0, 0, 0] {
+                        return None;
+                    }
+                }
+                b"IDAT" => idat.extend_from_slice(body),
+                b"IEND" => break,
+                _ => {}
+            }
+            o += 8 + len + 4;
+        }
+        if w == 0 || h == 0 || w > 8192 || h > 8192 {
+            return None;
+        }
+        let raw = makepad_fast_inflate::zlib_decompress_vec(&idat).ok()?;
+        if raw.len() != (w + 1) * h {
+            return None;
+        }
+        let mut pixels = Vec::with_capacity(w * h);
+        for row in raw.chunks_exact(w + 1) {
+            if row[0] != 0 {
+                return None;
+            }
+            pixels.extend_from_slice(&row[1..]);
+        }
+        Some((
+            Texture::new_with_format(
+                cx,
+                TextureFormat::VecRu8 {
+                    width: w,
+                    height: h,
+                    data: Some(pixels),
+                    unpack_row_length: None,
+                    updated: TextureUpdated::Full,
+                },
+            ),
+            w,
+            h,
+        ))
+    }
+
+    /// The prebaked mesh for `id`, if `tools/ao_bake` has produced one.
+    pub(super) fn load_aomesh(id: &str) -> Option<StaticModel> {
+        let path = Self::models_root().join(format!("{id}.aomesh"));
+        StaticModel::from_aomesh(&std::fs::read(path).ok()?)
+    }
+
+    /// Rebuild the static half of Realtime's CSM caster list.
+    ///
+    /// With a world atlas, charted models already become `BakeState` meshes;
+    /// without one this list owns those casters too, including every layer. Keeping it
+    /// next to placed-scene identity makes a scene upload the registration
+    /// boundary instead of turning static architecture into a per-frame
+    /// "mover" merely to get a shadow.
+    pub(super) fn rebuild_csm_static_casters(&mut self) {
+        self.csm_static_casters.clear();
+        // First entry per id, as the linear find it replaces (a forest is
+        // thousands of copies of a few models; every model install rebuilds).
+        let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(self.static_models.len());
+        for (i, (id, _)) in self.static_models.iter().enumerate() {
+            by_id.entry(id.as_str()).or_insert(i);
+        }
+        for inst in self.placed_models.iter().filter(|instance| !instance.dynamic) {
+            let Some((_, model)) = by_id.get(inst.model.as_str()).map(|&i| &self.static_models[i]) else {
+                continue;
+            };
+            if model.morph.is_some(){continue;}
+            if model.lm_source.is_some() && self.world_atlas_required() {
+                continue;
+            }
+            let (min, max) = crate::lightmap::world_bounds(&inst.transform, (model.min, model.max));
+            if model.lm_source.is_none() && !casts_as_caster_only(
+                self.model_casts_shadow.get(&inst.model).copied(),
+                model.prelit,
+                min,
+                max,
+            ) {
+                continue;
+            }
+            if self.model_casts_shadow.get(&inst.model) == Some(&false) { continue; }
+            // A model with a far stand-in casts its own layers into the near
+            // cascade and the stand-in into the others
+            // (gpu_lightmap::CasterBand). A masked layer (leaf cards, the
+            // stand-in) casts through its texture's alpha.
+            let stand_in = |m: &LayerMaterial| m.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
+            let masked = |m: &LayerMaterial| m.surface.as_ref().is_some_and(|s| s.definition.alpha_mode == 1);
+            let layers = || std::iter::once((model.geometry.as_ref(), &model.texture, &model.material))
+                .chain(model.extra_draws.iter().map(|(geometry, texture, _, _, m)| (geometry.as_ref(), texture, m)));
+            let has_stand_in = layers().any(|(_, _, m)| stand_in(m));
+            for (geometry, texture, material) in layers() {
+                use crate::gpu_lightmap::CasterBand;
+                let band = if !has_stand_in { CasterBand::All } else if stand_in(material) { CasterBand::Far } else { CasterBand::Near };
+                self.csm_static_casters.push(crate::gpu_lightmap::GpuBakeMesh {
+                    geometry: geometry.geometry_id(),
+                    transform: inst.transform,
+                    min,
+                    max,
+                    cutout: masked(material).then(|| texture.clone()),
+                    band,
+                });
+            }
+        }
+        // Equal geometry adjacent, opaque first: a cascade then appends a
+        // forest's copies of one layer into ONE instanced draw instead of
+        // alternating trunk, crown, trunk, crown (a draw each). Within a
+        // layer the copies go in spatial order (a Z-order of 32 m cells),
+        // so the blocks of consecutive casters that the cascades cull
+        // first are small patches of ground (depth is order-free).
+        let mut first: std::collections::HashMap<GeometryId, usize> = std::collections::HashMap::new();
+        for (i, m) in self.csm_static_casters.iter().enumerate() { first.entry(m.geometry).or_insert(i); }
+        let cell = |m: &crate::gpu_lightmap::GpuBakeMesh| {
+            let c = (m.min + m.max) * 0.5;
+            let spread = |v: f32| {
+                let mut x = ((v / 32.0).floor() as i64 + (1 << 15)).clamp(0, (1 << 16) - 1) as u64;
+                x = (x | (x << 8)) & 0x00ff_00ff;
+                x = (x | (x << 4)) & 0x0f0f_0f0f;
+                x = (x | (x << 2)) & 0x3333_3333;
+                (x | (x << 1)) & 0x5555_5555
+            };
+            spread(c.x) | spread(c.z) << 1
+        };
+        // Keys once per caster (a lookup per comparison was seconds of a
+        // city's load: every model install rebuilds this list).
+        self.csm_static_casters.sort_by_cached_key(|m| (m.cutout.is_some(), first[&m.geometry], cell(m)));
+        self.csm_static_blocks = crate::gpu_lightmap::caster_blocks(&self.csm_static_casters);
+    }
+
+    /// Hand this frame's stock props to the renderer. Draw submission is
+    /// batched by model, but list order is still scene identity: lightmap
+    /// remaps are indexed by placed slot. Producers should therefore keep a
+    /// stable order so a harmless reorder does not request a new bake.
+    /// [`Self::set_models`] for a host that rebuilds its list every frame:
+    /// `fill` gets last frame's list to overwrite in place (with
+    /// `clone_from`, which keeps each copy's strings), and the result is
+    /// set exactly as `set_models` would.
+    pub fn rebuild_models(&mut self, fill: impl FnOnce(&mut Vec<ModelInstance>)) {
+        let mut instances = std::mem::take(&mut self.placed_models);
+        fill(&mut instances);
+        self.set_models(instances);
+    }
+
+    /// [`Self::rebuild_models`] for a host whose list starts with copies it
+    /// can vouch for: while `prefix_key` is last frame's, last frame's
+    /// leading copies are kept as they are (neither refilled nor hashed
+    /// again) and only `tail` appends this frame's rest; otherwise `prefix`
+    /// fills the list first. A level's placed forest is thousands of copies
+    /// that change only when the level does. The tail is refilled in place
+    /// over last frame's ([`ModelTail::push`]), so a stable tail allocates
+    /// nothing either.
+    pub fn rebuild_models_with_prefix(&mut self, prefix_key: u64, prefix: impl FnOnce(&mut Vec<ModelInstance>), tail: impl FnOnce(&mut ModelTail)) {
+        let mut instances = std::mem::take(&mut self.placed_models);
+        let (len, signature) = match self.placed_prefix {
+            Some((key, len, signature)) if key == prefix_key && instances.len() >= len => {
+                (len, signature)
+            }
+            _ => {
+                instances.clear();
+                prefix(&mut instances);
+                (instances.len(), placed_scene_signature(&instances))
+            }
+        };
+        self.placed_prefix = Some((prefix_key, len, signature));
+        let mut t = ModelTail { list: &mut instances, start: len, at: len };
+        tail(&mut t);
+        let end = t.at;
+        instances.truncate(end);
+        let signature = signature.rotate_left(17) ^ (len as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ placed_scene_signature(&instances[len..]);
+        if let Err(error) = self.try_set_models_signed(instances, signature) {
+            self.report_asset_light_error(error);
+        }
+    }
+
+    /// This frame's placed list (as last set).
+    pub fn placed_models(&self) -> &[ModelInstance] {
+        &self.placed_models
+    }
+
+    pub fn set_models(&mut self, instances: Vec<ModelInstance>) {
+        if let Err(error)=self.try_set_models(instances){self.report_asset_light_error(error);}
+    }
+    pub fn asset_light_error(&self)->Option<&str>{self.asset_light_error.as_deref()}
+    pub(super) fn report_asset_light_error(&mut self,error:String){if self.asset_light_error.as_ref()!=Some(&error){log!("asset lights degraded: {error}");}self.asset_light_error=Some(error);}
+    /// Authored punctual lights never refuse a scene. Past
+    /// [`crate::asset_lights::MAX_ASSET_FRAME_LIGHTS`] the frame keeps the
+    /// ones that matter most at the eye and fades the tail out
+    /// (`budget_authored_lights`); without the clustered renderer they are
+    /// skipped. This only reports the degradation, once per change.
+    pub fn check_asset_light_count(&self,count:usize)->Result<(),String>{
+        if count>crate::asset_lights::MAX_ASSET_FRAME_LIGHTS{return Err(format!("{count} authored lights: the {} that matter most at the eye are lit, the rest fade out",crate::asset_lights::MAX_ASSET_FRAME_LIGHTS))}
+        if count>0&&!self.clustered_enabled{return Err("authored punctual lights need the clustered renderer; they are skipped".into())}Ok(())
+    }
+    pub fn try_set_models(&mut self, instances: Vec<ModelInstance>)->Result<(),String> {
+        let signature = placed_scene_signature(&instances);
+        self.placed_prefix = None;
+        self.try_set_models_signed(instances, signature)
+    }
+
+    fn try_set_models_signed(&mut self, instances: Vec<ModelInstance>, signature: u64) -> Result<(), String> {
+        let scene_changed = self.placed_scene_signature != Some(signature);
+        // Statics are cached against a key; any meaningful placed-scene
+        // change must break it or an equal-length replacement would retain
+        // the previous realm's lamps, lightmap remaps, and shadows.
+        if scene_changed {
+            self.models_rev = self.models_rev.wrapping_add(1);
+            // The lightmap remaps are indexed by placed position — a changed
+            // list makes them point at the wrong props. Drop them; the
+            // models_rev bump re-kicks the bake once the world settles.
+            self.lm_remaps.clear();
+            self.placed_scene_signature = Some(signature);
+            // Per-slot door commands are indexed the same way and go stale
+            // the same way. Per-model ones do not — an imported level keeps
+            // its doors open across a harmless list rebuild.
+            self.model_anim_state.forget_slots();
+        }
+        self.placed_models = instances;
+        if scene_changed {
+            self.rebuild_csm_static_casters();
+        }
+        Ok(())
+    }
+
+    /// Independent camera/lighting caches for an on-demand scene review.
+    /// Meshes, textures and immutable metadata share resident handles; the
+    /// live renderer's GI, camera and simulation state remain untouched.
+    /// The environment is the live renderer's (I4): the fork is born
+    /// mirroring it ([`Self::mirror_environment_from`]) and never prepares
+    /// one of its own, so a `game.environment` world draws with its map in
+    /// every view; a fork kept across frames mirrors it again each frame.
+    pub fn fork_scene_for_review(&self) -> Self {
+        let mut review = Self::default();
+        review.static_models = self.static_models.clone();
+        review.model_casts_shadow = self.model_casts_shadow.clone();
+        review.model_anim_state = self.model_anim_state.clone();
+        review.ao_textures = self.ao_textures.clone();
+        review.model_pack = self.model_pack.clone();
+        review.skin_rig_geometries = self.skin_rig_geometries.clone();
+        review.skin_material_draws = self.skin_material_draws.clone();
+        review.skin_lods = self.skin_lods.clone();
+        review.skin_morphs = self.skin_morphs.clone();
+        review.skin_prepared_sdf = self.skin_prepared_sdf.clone();
+        review.set_models(self.placed_models.clone());
+        review.set_world_attachments(self.world_attachments.clone());
+        review.host_lights = self.host_lights.clone();
+        review.host_asset_lights = self.host_asset_lights.clone();
+        review.sky_time = self.sky_time;
+        review.set_gpu_lightmap_mode(crate::GpuLightmapMode::Realtime);
+        review.set_clustered_lighting(true);
+        review.set_gi_mode(crate::GiMode::Off);
+        review.mirror_environment_from(self);
+        review
+    }
+
+    /// Custom draw handles stay UI-owned; lend them only while encoding a
+    /// review pass, then restore them before encoding the player's pass.
+    pub fn swap_review_materials(&mut self, other: &mut Self) {
+        std::mem::swap(&mut self.custom_draws, &mut other.custom_draws);
+    }
+
+    pub fn review_models_ready(&self) -> bool {
+        self.placed_models.iter().chain(&self.world_attachments).all(|instance|self.model_is_loaded(&instance.model))
+    }
+
+    /// Visible resident model bounds, including rotation and instance scale.
+    pub fn placed_scene_bounds(&self) -> Option<(Vec3f, Vec3f)> {
+        let mut min = vec3f(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut max = vec3f(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for instance in self.placed_models.iter().chain(&self.world_attachments) {
+            let Some((a,b)) = self.model_bounds(&instance.model) else { continue; };
+            for x in [a.x,b.x] { for y in [a.y,b.y] { for z in [a.z,b.z] {
+                let p = instance.transform.transform_vec4(vec4(x,y,z,1.));
+                min.x=min.x.min(p.x);min.y=min.y.min(p.y);min.z=min.z.min(p.z);
+                max.x=max.x.max(p.x);max.y=max.y.max(p.y);max.z=max.z.max(p.z);
+            }}}
+        }
+        min.x.is_finite().then_some((min,max))
+    }
+
+    /// Install only a successfully frontend-compiled material. Failure keeps
+    /// the previous draw (or the stock fallback), never a blank model.
+    pub fn install_custom_material(&mut self, name: String, material: impl Into<CustomMaterial>) -> bool {
+        let material = material.into();
+        if !material.draw.draw_vars.can_instance() { return false; }
+        self.custom_draws.insert(name, Box::new(material));
+        true
+    }
+
+    /// Bind `texture` on the `detail_map` of the custom material `name`
+    /// (the program samples it as `self.detail_map`: a planar reflection, a
+    /// screen) until changed; `None` unbinds it. It replaces the IBL there.
+    pub fn set_custom_material_texture(&mut self, name: &str, texture: Option<Texture>) {
+        if let Some(m) = self.custom_draws.get_mut(name) {
+            m.texture = texture;
+        }
+    }
+
+    /// Install the error material (hatched magenta) under `name`: what a
+    /// preview shows for a material that did not compile. A host that
+    /// keeps the last good material instead (Sandbox) never calls this.
+    pub fn install_error_material(&mut self, cx: &mut Cx, name: String) -> bool {
+        match cx.try_with_vm(crate::custom_material::DrawSceneCustom::error_material) {
+            Some(Ok(material)) => self.install_custom_material(name, material),
+            _ => false,
+        }
+    }
+
+    /// The installed material by name (its plan, variants and warnings).
+    pub fn custom_material(&self, name: &str) -> Option<&CustomMaterial> {
+        self.custom_draws.get(name).map(|m| &**m)
+    }
+
+    /// Keep only the installed materials `names` lists (a host's reload:
+    /// the ones it still declares). The stock IBL program goes with the
+    /// rest and the next frame under an environment builds it again, also
+    /// when its last build failed (renderer/stock_ibl.rs).
+    pub fn retain_custom_materials(&mut self, names: &[String]) {
+        self.custom_draws.retain(|name, _| names.contains(name));
+        self.stock_ibl_forget_failure();
+    }
+
+    pub fn custom_material_shader(&self, name: &str) -> Option<DrawShaderId> {
+        self.custom_draws.get(name).and_then(|m| m.stock_shader())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// The swaying-foliage pass (shaders/foliage.rs): the same instance
+    /// list, taking only the models with a wind layer. Until its pipeline
+    /// exists (Metal compiles asynchronously) they stay on the PBR lane.
+    pub(super) fn draw_foliage_models(
+        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
+        frustum: Option<&Frustum>, stats: &mut RenderStats,
+    ) {
+        if !self.foliage_ready { return; }
+        let Some(mut draw) = self.foliage_draw.take() else { return };
+        self.draw_models_inner(cx, ModelDraw::Foliage(&mut draw), eye, instances, lane, fog, sun, frustum, stats);
+        self.foliage_draw = Some(draw);
+    }
+
+    /// The terrain paint pass (shaders/splat.rs): the same instance list,
+    /// taking only the models with a painted layer. Until its pipeline
+    /// exists they stay on the PBR lane (their main layer).
+    pub(super) fn draw_splat_models(
+        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
+        frustum: Option<&Frustum>, stats: &mut RenderStats,
+    ) {
+        if !self.splat_ready { return; }
+        let Some(mut draw) = self.splat_draw.take() else { return };
+        self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), eye, instances, lane, fog, sun, frustum, stats);
+        self.splat_draw = Some(draw);
+    }
+
+    /// Decide once per frame, before any model pass, whether painted
+    /// terrain takes its own lane this frame.
+    pub(super) fn prepare_splat_lane(&mut self, cx: &mut Cx) {
+        if self.splat_draw.is_none() {
+            self.splat_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneSplat::script_new_with_default(vm)));
+        }
+        let hdr = self.hdr_output;
+        let stock = self.splat_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
+        let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Splat, stock).0 } else { None };
+        self.splat_ready = self.pbr_materials_enabled && shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
+    }
+
+    /// Decide once per frame, before any model pass, whether foliage takes
+    /// its own lane this frame.
+    pub(super) fn prepare_foliage_lane(&mut self, cx: &mut Cx) {
+        if self.foliage_draw.is_none() {
+            self.foliage_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneFoliageLit::script_new_with_default(vm)));
+        }
+        let hdr = self.hdr_output;
+        // Ready: the foliage lane's shader for this frame's features (variants.rs).
+        let stock = self.foliage_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
+        let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Foliage, stock).0 } else { None };
+        self.foliage_ready = self.pbr_materials_enabled
+            && std::env::var_os("MAKEPAD_FOLIAGE_LANE").is_none_or(|v| v != "0")
+            && shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
+    }
+
+    pub(super) fn draw_custom_models(
+        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
+        frustum: Option<&Frustum>, stats: &mut RenderStats,
+    ) {
+        // The stock IBL program draws when the frame routes through it and
+        // a shiny stock model is in the list, whether or not an instance
+        // names it (renderer/stock_ibl.rs). The list check is the name scan
+        // of draw_pbr_models' early-out without its fast path (the diffuse
+        // lane's model_orders): while the frame routes, each call hashes
+        // the resident shiny models' names and scans the list, and a list
+        // with no shiny stock model draws nothing through the program.
+        // While the frame does not route (no environment) nothing is
+        // scanned.
+        let stock_ibl_on = self.stock_ibl_active() && self.lists_a_stock_ibl_model(instances);
+        // Blended programs after every opaque one (they neither write depth
+        // nor hide what is behind them), each group in name order.
+        let mut names: Vec<(bool, String)> = self.custom_draws.iter().filter(|(name, _)| {
+            (stock_ibl_on && name.as_str() == stock_ibl::STOCK_IBL_MATERIAL)
+                || instances.iter().any(|i| i.custom_material.as_ref().is_some_and(|m| &m.name == *name))
+        }).map(|(name, m)| {
+            // The stock IBL program stands in for the PBR lane: opaque models, their blended
+            // layers drawn inside it, before every blended program. set_material leaves the
+            // last layer's blend state on its draw, so that state must not sort it.
+            let blended = m.draw.draw_vars.options.alpha_blend && name.as_str() != stock_ibl::STOCK_IBL_MATERIAL;
+            (blended, name.clone())
+        }).collect();
+        names.sort();
+        let names = names.into_iter().map(|(_, name)| name);
+        for name in names {
+            let Some(mut draw) = self.custom_draws.remove(&name) else { continue; };
+            self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), eye,
+                instances, lane, fog, sun, frustum, stats);
+            self.custom_draws.insert(name, draw);
+        }
+    }
+
+    /// Hand this frame's actor-attached world props to the renderer.
+    ///
+    /// Attachments receive ordinary world depth, fog, sunlight, AO and
+    /// dynamic lights. Their transforms may change every frame without
+    /// touching placed-scene identity, lightmap scheduling, CSM caster
+    /// capture, shadow-mesh generation, lamp harvesting or replication.
+    /// They are always lit as dynamic geometry regardless of the supplied
+    /// [`ModelInstance::dynamic`] value; that flag remains meaningful only
+    /// in the placed-model lane.
+    /// Returns the previous frame's list, so a caller that rebuilds it every
+    /// frame can reuse its buffers.
+    pub fn set_world_attachments(&mut self, instances: Vec<ModelInstance>) -> Vec<ModelInstance> {
+        self.model_anim_state.clips.retain(|target,_|!matches!(target,StateTarget::Attachment(_)));
+        std::mem::replace(&mut self.world_attachments, instances)
+    }
+
+    /// Hand this view's transient presentation meshes to the renderer.
+    /// These are visible geometry only: unlike [`Self::set_models`], this
+    /// list never participates in scene revision, baking, CSM mover capture,
+    /// blob/SDF shadows, collision, or replication.
+    /// Whether the sun reaches the first-person camera. The held model has
+    /// no shadow map, so the host ray-tests the eye; eased over a few frames
+    /// so stepping into shade does not pop.
+    pub fn set_view_model_sun(&mut self, lit: bool) {
+        let target = if lit { 1.0 } else { 0.0 };
+        self.view_model_sun += (target - self.view_model_sun) * 0.25;
+    }
+    pub fn set_view_models(&mut self, instances: Vec<ModelInstance>) {
+        self.view_models = instances;
+    }
+
+    /// How much CPU the light bake may spend (bake.rs). Lower `ao_rays` and
+    /// `max_probes` on standalone XR; see apps/commercial/sandbox/BUDGETS.md. Setting
+    /// `ao_strength` and `shadow_strength` to 0 turns the bake off visually
+    /// while leaving the rest of the pipeline untouched.
+    pub fn bake_settings(&self) -> BakeSettings {
+        self.bake.settings()
+    }
+
+    pub fn set_bake_settings(&mut self, settings: BakeSettings) {
+        self.bake.set_settings(settings);
+    }
+
+    /// Baked shade multiplier for a moving object, from the probe lattice.
+    /// Public so a host can tint something the renderer does not own (the
+    /// skinned characters go through this).
+    pub fn dynamic_shade(&self, p: Vec3f) -> f32 {
+        self.bake.dynamic_shade(p)
+    }
+}
+
+/// The placed list past its kept prefix, refilled in place by
+/// [`Renderer::rebuild_models_with_prefix`]: each push overwrites last
+/// frame's copy at that position (`clone_from`, reusing its strings).
+pub struct ModelTail<'a> {
+    list: &'a mut Vec<ModelInstance>,
+    start: usize,
+    at: usize,
+}
+
+impl ModelTail<'_> {
+    pub fn push(&mut self, m: &ModelInstance) {
+        match self.list.get_mut(self.at) {
+            Some(slot) => slot.clone_from(m),
+            None => self.list.push(m.clone()),
+        }
+        self.at += 1;
+    }
+    /// This frame's tail so far.
+    pub fn pushed(&mut self) -> &mut [ModelInstance] {
+        &mut self.list[self.start..self.at]
+    }
+}

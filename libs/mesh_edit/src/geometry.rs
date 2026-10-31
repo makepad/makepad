@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 use crate::*;
 use makepad_csg_math::robust::orient2d;
 use std::collections::BTreeSet;
@@ -22,7 +23,7 @@ pub(crate) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 pub(crate) fn length(a: [f64; 3]) -> f64 {
-    a[0].hypot(a[1]).hypot(a[2])
+    a[0].phypot(a[1]).phypot(a[2])
 }
 pub(crate) fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
     orient2d(a[0], a[1], b[0], b[1], c[0], c[1])

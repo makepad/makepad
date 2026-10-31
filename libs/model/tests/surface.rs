@@ -531,17 +531,35 @@ fn normal_ao_color_transfer_projected_stroke_and_reconcile() {
 #[test]
 fn strict_surface_json_unknown_fields_bad_payloads_and_all_operation_codecs() {
     let l = Limits::default();
-    for text in [
-        r#"{"op":"surface_material","material":0,"metallic":2}"#,
-        r#"{"op":"surface_layer","material":0,"channel":"base_color","layer":"x","width":2,"height":2,"rgba_hex":"FF"}"#,
-        r#"{"op":"surface_mips","material":0,"channel":"base_color","layer":"x","surprise":1}"#,
-        r#"{"op":"surface_unknown"}"#,
-    ] {
-        let value = json::parse(text.as_bytes()).unwrap();
-        assert!(SurfaceOperation::parse(&value, &l).is_err());
-    }
+    assert!(SurfaceOperation::Material { material:0,value:SurfaceMaterial {metallic:2.,..Default::default()} }.check(&l).is_err());
+    assert!(SurfaceOperation::Layer { material:0,channel:SurfaceChannel::BaseColor,
+        layer:SurfaceLayer::new("x",RgbaImage {width:2,height:2,pixels:vec![255]}) }.check(&l).is_err());
     let mut d = document();
-    for (i,text) in [r#"{"op":"surface_material","material":0,"metallic":0.5,"alpha":"blend"}"#,r#"{"op":"surface_layer","material":0,"channel":"base_color","layer":"x","width":2,"height":2,"color":[1,0,0,0.5]}"#,r#"{"op":"surface_pattern","material":0,"channel":"base_color","layer":"x","pattern":{"kind":"noise","color_a":[1,0,0,1],"color_b":[0,1,0,1],"seed":"42"}}"#,r#"{"op":"surface_mask","material":0,"channel":"base_color","layer":"x","mask_hex":"ff0080ff"}"#,r#"{"op":"surface_dilate","material":0,"channel":"base_color","layer":"x","iterations":1}"#,r#"{"op":"surface_mips","material":0,"channel":"base_color","layer":"x"}"#].iter().enumerate() {let value=json::parse(text.as_bytes()).unwrap();apply(&mut d,&format!("json{i}"),vec![SurfaceOperation::parse(&value,&l).unwrap().unwrap()]);}
+    for (i,operation) in [
+        SurfaceOperation::Material { material: 0, value: SurfaceMaterial { metallic: 0.5, alpha: SurfaceAlpha::Blend, ..Default::default() } },
+        SurfaceOperation::Layer {
+            material: 0,
+            channel: SurfaceChannel::BaseColor,
+            layer: SurfaceLayer::new("x", RgbaImage::new(2, 2, [255, 0, 0, 128], &l).unwrap())
+        },
+        SurfaceOperation::Pattern {
+            material: 0,
+            channel: SurfaceChannel::BaseColor,
+            layer: "x".into(),
+            pattern: SurfacePattern {
+                kind: PatternKind::Noise,
+                color_a: [1.0, 0.0, 0.0, 1.0],
+                color_b: [0.0, 1.0, 0.0, 1.0],
+                scale: [8.0, 8.0],
+                seed: 42
+            }
+        },
+        SurfaceOperation::Mask { material: 0, channel: SurfaceChannel::BaseColor, layer: "x".into(), mask: Some(vec![255, 0, 128, 255]) },
+        SurfaceOperation::Dilate { material: 0, channel: SurfaceChannel::BaseColor, layer: "x".into(), iterations: 1, preserve_alpha: true },
+        SurfaceOperation::Mips { material: 0, channel: SurfaceChannel::BaseColor, layer: "x".into() },
+    ].into_iter().enumerate() {
+        apply(&mut d,&format!("surface{i}"),vec![operation]);
+    }
     let bytes = d.to_bytes(None).unwrap();
     assert_eq!(
         Document::from_bytes(&bytes, l, None)
@@ -759,9 +777,10 @@ fn bitmap_procedural_stack_derives_pbr_snapshots_and_roundtrips_export() {
     let mut d = document();
     let limits = d.limits().clone();
     let png = RgbaImage::new(16, 16, [180, 140, 90, 255], &limits).unwrap().to_png(&limits).unwrap();
-    let hex: String = png.iter().map(|byte| format!("{byte:02x}")).collect();
-    let bitmap = json::parse(format!(r#"{{"op":"surface_layer","material":0,"channel":"base_color","layer":"generated-paint","png_hex":"{hex}"}}"#).as_bytes()).unwrap();
-    apply(&mut d, "bitmap", vec![SurfaceOperation::parse(&bitmap, &limits).unwrap().unwrap()]);
+    apply(&mut d, "bitmap", vec![SurfaceOperation::Layer {
+        material:0,channel:SurfaceChannel::BaseColor,
+        layer:SurfaceLayer::new("generated-paint",RgbaImage::from_png(&png,&limits).unwrap()),
+    }]);
     for (index, kind) in [PatternKind::Gradient, PatternKind::Perlin, PatternKind::Fbm, PatternKind::Yarn].into_iter().enumerate() {
         let id = format!("detail-{index}");
         let mut layer = SurfaceLayer::new(&id, RgbaImage::new(16, 16, [255; 4], &limits).unwrap());
@@ -775,9 +794,11 @@ fn bitmap_procedural_stack_derives_pbr_snapshots_and_roundtrips_export() {
     }
     let original_layers = d.surface().materials[&0].channels[&SurfaceChannel::BaseColor].clone();
     let mut derivations = Vec::new();
-    for (channel, layer) in [("normal", "height-normal"), ("metallic_roughness", "height-roughness")] {
-        let json = json::parse(format!(r#"{{"op":"surface_derive","material":0,"source_channel":"base_color","channel":"{channel}","layer":"{layer}","strength":0.05,"metallic":0.7}}"#).as_bytes()).unwrap();
-        derivations.push(SurfaceOperation::parse(&json, &limits).unwrap().unwrap());
+    for (channel, layer) in [(SurfaceChannel::Normal, "height-normal"), (SurfaceChannel::MetallicRoughness, "height-roughness")] {
+        derivations.push(SurfaceOperation::Derive { material:0,channel,layer:layer.into(),
+            recipe:SurfaceDerivation {source_channel:SurfaceChannel::BaseColor,source_layer:None,strength:0.05,
+                roughness_min:0.2,roughness_max:0.9,metallic:0.7,wrap:true},
+        });
     }
     apply(&mut d, "derive", derivations.clone());
     let m = &d.surface().materials[&0];
@@ -811,14 +832,19 @@ fn bitmap_procedural_stack_derives_pbr_snapshots_and_roundtrips_export() {
 #[test]
 fn derive_rejects_invalid_recipes_and_rolls_back_unknown_sources() {
     let limits = Limits::default();
-    for extra in ["\"strength\":17", "\"roughness_min\":0.9,\"roughness_max\":0.2", "\"wrap\":\"yes\"", "\"source_layer\":\"\"", "\"unexpected\":1"] {
-        let json = json::parse(format!(r#"{{"op":"surface_derive","material":0,"source_channel":"base_color","channel":"normal","layer":"n",{extra}}}"#).as_bytes()).unwrap();
-        assert!(SurfaceOperation::parse(&json, &limits).is_err());
+    let recipe=SurfaceDerivation {source_channel:SurfaceChannel::BaseColor,source_layer:None,
+        strength:1.,roughness_min:0.2,roughness_max:0.9,metallic:0.,wrap:true};
+    for invalid in [
+        SurfaceDerivation {strength:17.,..recipe.clone()},
+        SurfaceDerivation {roughness_min:0.9,roughness_max:0.2,..recipe.clone()},
+        SurfaceDerivation {source_layer:Some("".into()),..recipe.clone()},
+    ] {
+        assert!(SurfaceOperation::Derive {material:0,channel:SurfaceChannel::Normal,layer:"n".into(),recipe:invalid}.check(&limits).is_err());
     }
     let mut d = document();
     let before = d.to_bytes(None).unwrap();
-    let json = json::parse(br#"{"op":"surface_derive","material":0,"source_channel":"base_color","source_layer":"missing","channel":"normal","layer":"n"}"#).unwrap();
-    let operation = SurfaceOperation::parse(&json, &limits).unwrap().unwrap();
+    let operation=SurfaceOperation::Derive {material:0,channel:SurfaceChannel::Normal,layer:"n".into(),
+        recipe:SurfaceDerivation {source_layer:Some("missing".into()),..recipe}};
     assert!(d.apply(Transaction { request_id: "bad-source".into(), expected: d.head(), operations: vec![Operation::Surface(operation)] }, None).is_err());
     assert_eq!(d.to_bytes(None).unwrap(), before);
 }

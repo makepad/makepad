@@ -229,3 +229,78 @@ impl Operation {
             .saturating_add(self.object_name().map_or(0, str::len).saturating_mul(2))
     }
 }
+
+impl Operation {
+    /// The family or kind of an operation, for messages.
+    pub fn family_name(&self) -> &'static str {
+        match self {
+            Self::SoftBody(_) | Self::SoftBodyUnbind => "soft_body",
+            Self::Selection(_) => "selection",
+            Self::Construction(_) => "construction",
+            Self::Rig(_) => "rig",
+            Self::Scene(_) => "scene",
+            Self::Surface(_) => "surface",
+            Self::MeshEditing(_) => "mesh_edit",
+            _ => "operation",
+        }
+    }
+}
+
+impl Operation {
+    /// Everything an operation must satisfy before it executes, however it was made: built
+    /// in Rust or decoded from a binary source. Execution checks
+    /// against the document (missing objects, stale ids) come later.
+    pub fn check(&self, limits: &crate::Limits) -> crate::Result<()> {
+        use crate::Error;
+        let budget = |n: usize, max: usize, what: &'static str| if n > max { Err(Error::Budget(what)) } else { Ok(()) };
+        let axis = |a: u8| if a > 2 { Err(Error::Invalid("axis must be 0, 1 or 2")) } else { Ok(()) };
+        match self {
+            Self::SoftBody(op) => return op.check(limits),
+            Self::Selection(op) => return op.check(limits),
+            Self::Construction(op) => return op.check(limits),
+            Self::Rig(op) => return op.check(limits),
+            Self::Scene(op) => return op.check(limits),
+            Self::Surface(op) => return op.check(limits),
+            Self::MeshEditing(op) => return op.check(limits),
+            _ => {}
+        }
+        if let Some(object) = self.object_name() {
+            budget(object.len(), limits.max_name_bytes, "object name")?;
+        }
+        match self {
+            Self::Transform { vertices, .. } | Self::Weld { vertices, .. } | Self::Smooth { vertices, .. } | Self::Brush { vertices, .. } => budget(vertices.len(), limits.mesh.max_vertices, "selection size"),
+            Self::DeleteFaces { faces, .. } | Self::AssignMaterial { faces, .. } => budget(faces.len(), limits.mesh.max_faces, "selection size"),
+            Self::ProjectUv { faces, axis: a, .. } => { budget(faces.len(), limits.mesh.max_faces, "selection size")?; axis(*a) }
+            Self::Mirror { axis: a, .. } => axis(*a),
+            Self::SetWeights { weights, .. } => budget(weights.len(), limits.mesh.max_weights_per_vertex, "joint influences"),
+            Self::SetSkeleton { skeleton } => {
+                budget(skeleton.joints.len(), limits.max_joints, "joints")?;
+                skeleton.joints.iter().try_for_each(|j| budget(j.name.len(), limits.max_name_bytes, "joint name"))
+            }
+            Self::SetClip { clip } => {
+                budget(clip.name.len(), limits.max_name_bytes, "clip name")?;
+                budget(clip.channels.len(), limits.max_joints.saturating_mul(3), "clip channels")?;
+                budget(clip.channels.iter().map(|c| c.keys.len()).sum(), limits.max_keyframes, "keyframes")
+            }
+            Self::ImportMesh { source, .. } => budget(source.len(), limits.max_transaction_bytes, "generated transaction bytes"),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Operation {
+    /// A typed import operation for a UV sphere mesh.
+    pub fn sphere(object: impl Into<String>, radius: f64, segments: u32, rings: u32, smooth: bool, limits: &crate::Limits) -> crate::Result<Self> {
+        Ok(Self::ImportMesh { object: object.into(), source: crate::primitives::sphere(radius, segments, rings, smooth, limits)? })
+    }
+    /// A typed import operation for a capped cylinder mesh.
+    pub fn cylinder(object: impl Into<String>, radius: f64, height: f64, segments: u32, smooth: bool, limits: &crate::Limits) -> crate::Result<Self> {
+        Ok(Self::ImportMesh { object: object.into(), source: crate::primitives::cylinder(radius, height, segments, smooth, limits)? })
+    }
+    /// A typed import operation for a mesh built from positions and polygons.
+    pub fn polygon_mesh(object: impl Into<String>, positions: &[[f64; 3]], polygons: &[crate::mesh::Polygon], limits: &crate::Limits) -> crate::Result<Self> {
+        if positions.len() > limits.mesh.max_vertices || polygons.len() > limits.mesh.max_faces { return Err(crate::Error::Budget("polygon mesh size")); }
+        let mut ctx = crate::mesh::Context::new(limits.mesh.clone(), None);
+        Ok(Self::ImportMesh { object: object.into(), source: crate::mesh::Mesh::from_polygons(positions, polygons, &mut ctx)?.to_bytes(&mut ctx)? })
+    }
+}

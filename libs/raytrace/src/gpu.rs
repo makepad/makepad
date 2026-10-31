@@ -2786,12 +2786,11 @@ impl RayTracer {
                     if let Some(d) = $depth {
                         st.pass.set_depth_texture(cx, d, DrawPassClearDepth::ClearWith(1.0));
                     } else {
-                        cx.cx.passes[st.pass.draw_pass_id()].depth_texture = None;
+                        st.pass.clear_depth_texture(cx.cx);
                     }
                     match chain_parent.or(self.parent_pass) {
                         Some(parent_id) => {
-                            let child_id = st.pass.draw_pass_id();
-                            cx.cx.passes[child_id].parent = CxDrawPassParent::DrawPass(parent_id);
+                            st.pass.set_pass_parent(cx.cx, parent_id);
                         }
                         None => cx.make_child_pass(&st.pass),
                     }

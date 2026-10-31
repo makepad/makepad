@@ -1,0 +1,205 @@
+// The pixel of a fused pass (pass.rs `fuse`): the colour at the pixel
+// through its members' pixels, in order. A member's pixel takes the colour
+// so far (`self.f<k>_pixel(c)`, see the shader compiler's fn namespaces).
+use mod.pod.*
+use mod.math.*
+use mod.shader.*
+use mod.shared.*
+use mod.draw
+{
+    fuse_2: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        return c
+    }
+    fuse_3: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        return c
+    }
+    fuse_4: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        return c
+    }
+    fuse_5: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        return c
+    }
+    fuse_6: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        return c
+    }
+    fuse_7: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        return c
+    }
+    fuse_8: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        return c
+    }
+    fuse_9: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        c = self.f8_pixel(c)
+        return c
+    }
+    fuse_10: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        c = self.f8_pixel(c)
+        c = self.f9_pixel(c)
+        return c
+    }
+    fuse_11: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        c = self.f8_pixel(c)
+        c = self.f9_pixel(c)
+        c = self.f10_pixel(c)
+        return c
+    }
+    fuse_12: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        c = self.f8_pixel(c)
+        c = self.f9_pixel(c)
+        c = self.f10_pixel(c)
+        c = self.f11_pixel(c)
+        return c
+    }
+    fuse_13: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        c = self.f8_pixel(c)
+        c = self.f9_pixel(c)
+        c = self.f10_pixel(c)
+        c = self.f11_pixel(c)
+        c = self.f12_pixel(c)
+        return c
+    }
+    fuse_14: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        c = self.f8_pixel(c)
+        c = self.f9_pixel(c)
+        c = self.f10_pixel(c)
+        c = self.f11_pixel(c)
+        c = self.f12_pixel(c)
+        c = self.f13_pixel(c)
+        return c
+    }
+    fuse_15: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        c = self.f8_pixel(c)
+        c = self.f9_pixel(c)
+        c = self.f10_pixel(c)
+        c = self.f11_pixel(c)
+        c = self.f12_pixel(c)
+        c = self.f13_pixel(c)
+        c = self.f14_pixel(c)
+        return c
+    }
+    fuse_16: fn() -> vec4 {
+        var c = self.color.sample(self.uv())
+        c = self.f0_pixel(c)
+        c = self.f1_pixel(c)
+        c = self.f2_pixel(c)
+        c = self.f3_pixel(c)
+        c = self.f4_pixel(c)
+        c = self.f5_pixel(c)
+        c = self.f6_pixel(c)
+        c = self.f7_pixel(c)
+        c = self.f8_pixel(c)
+        c = self.f9_pixel(c)
+        c = self.f10_pixel(c)
+        c = self.f11_pixel(c)
+        c = self.f12_pixel(c)
+        c = self.f13_pixel(c)
+        c = self.f14_pixel(c)
+        c = self.f15_pixel(c)
+        return c
+    }
+}

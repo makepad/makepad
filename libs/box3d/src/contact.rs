@@ -44,6 +44,8 @@ pub const SIM_ENABLE_PRE_SOLVE_EVENTS: u32 = 0x00200000;
 // This is a mesh contact
 pub const SIM_MESH_CONTACT: u32 = 0x00400000;
 pub const RELATIVE_TRANSFORM_VALID: u32 = 0x00800000;
+/// A tube contact can hold multiple segment-pair manifolds and uses no mesh cache.
+pub const SIM_TUBE_CONTACT: u32 = 0x01000000;
 
 /// A contact edge is used to connect bodies and contacts together
 /// in a contact graph where each body is a node and each contact
@@ -68,7 +70,7 @@ pub struct ConvexContact {
 
 /// Manifold storage for a contact. Convex contacts have exactly 0 or 1
 /// manifold — stored inline so the hot paths (collide recycle, prepare,
-/// store impulses) reach it without a heap dereference. Mesh contacts with
+/// store impulses) reach it without a heap dereference. Mesh and tube contacts with
 /// two or more manifolds spill to a Vec. This deviates from C's
 /// `b3Manifold*` block allocation on purpose: the inline single manifold is
 /// the Rust equivalent of C's arena locality (see the README's intentional
@@ -159,7 +161,7 @@ impl<'a> IntoIterator for &'a mut Manifolds {
 
 /// Represents the persistent interaction between two shapes.
 /// The C union of {convexContact, meshContact} is stored as two fields;
-/// SIM_MESH_CONTACT in flags selects which one is active.
+/// SIM_MESH_CONTACT selects the mesh cache. Tube contacts use neither cache.
 // repr(C) with `manifolds` LAST: the enum is 272 bytes; letting the compiler
 // place it (or declaring it mid-struct) pushes the hot header and recycle
 // cache fields across extra cache lines for the passes that never touch the
@@ -206,9 +208,9 @@ pub struct Contact {
     /// Mixed friction
     pub friction: f32,
 
-    /// Usage determined by SIM_MESH_CONTACT in flags (C union member).
+    /// Cache for convex contacts; unused by mesh and tube contacts.
     pub convex_contact: ConvexContact,
-    /// Usage determined by SIM_MESH_CONTACT in flags (C union member).
+    /// Cache used only when SIM_MESH_CONTACT is set.
     pub mesh_contact: MeshContact,
 
     pub restitution: f32,
@@ -332,7 +334,7 @@ pub(crate) fn mix_restitution(
 // b3AddType calls in b3InitializeContactRegisters.
 fn contact_register(type_a: ShapeType, type_b: ShapeType) -> (bool, bool) {
     use ShapeType::*;
-    const PAIRS: [(ShapeType, ShapeType); 15] = [
+    const PAIRS: [(ShapeType, ShapeType); 19] = [
         (Sphere, Sphere),
         (Capsule, Sphere),
         (Capsule, Capsule),
@@ -348,6 +350,10 @@ fn contact_register(type_a: ShapeType, type_b: ShapeType) -> (bool, bool) {
         (Height, Sphere),
         (Height, Capsule),
         (Height, Hull),
+        (Tube, Tube),
+        (Tube, Sphere),
+        (Tube, Capsule),
+        (Tube, Hull),
     ];
 
     for &(t1, t2) in PAIRS.iter() {
@@ -389,6 +395,7 @@ pub fn create_contact(world: &mut World, shape_id_a: i32, shape_id_b: i32, child
         let radius_a = match &shape_a.geom {
             ShapeGeometry::Sphere(sphere) => sphere.radius,
             ShapeGeometry::Capsule(capsule) => capsule.radius,
+            ShapeGeometry::Tube(tube) => tube.radius,
             _ => 0.0,
         };
         (
@@ -405,6 +412,7 @@ pub fn create_contact(world: &mut World, shape_id_a: i32, shape_id_b: i32, child
         let radius_b = match &shape_b.geom {
             ShapeGeometry::Sphere(sphere) => sphere.radius,
             ShapeGeometry::Capsule(capsule) => capsule.radius,
+            ShapeGeometry::Tube(tube) => tube.radius,
             _ => 0.0,
         };
         (
@@ -471,7 +479,9 @@ pub fn create_contact(world: &mut World, shape_id_a: i32, shape_id_b: i32, child
         }
     }
 
-    if type_a == ShapeType::Mesh || type_a == ShapeType::Height {
+    if type_a == ShapeType::Tube {
+        world.contacts[contact_id as usize].flags |= SIM_TUBE_CONTACT;
+    } else if type_a == ShapeType::Mesh || type_a == ShapeType::Height {
         world.contacts[contact_id as usize].flags |= SIM_MESH_CONTACT;
     } else if type_a == ShapeType::Compound {
         let child = {
@@ -484,7 +494,7 @@ pub fn create_contact(world: &mut World, shape_id_a: i32, shape_id_b: i32, child
     }
 
     // todo impose these restrictions to make life easier
-    b3_assert!(type_b == ShapeType::Sphere || type_b == ShapeType::Capsule || type_b == ShapeType::Hull);
+    b3_assert!(type_b == ShapeType::Sphere || type_b == ShapeType::Capsule || type_b == ShapeType::Hull || type_b == ShapeType::Tube);
 
     // Is either body static?
     // Note: it is possible to have a dynamic mesh collide with a static convex shape.
@@ -552,7 +562,7 @@ pub fn create_contact(world: &mut World, shape_id_a: i32, shape_id_b: i32, child
 
     // Assuming the rolling resistance doesn't change
     world.contacts[contact_id as usize].rolling_resistance =
-        max_float(rolling_resistance_a, rolling_resistance_b) * max_radius;
+        if type_a == ShapeType::Tube { 0.0 } else { max_float(rolling_resistance_a, rolling_resistance_b) * max_radius };
 
     if enable_pre_solve_events_a || enable_pre_solve_events_b {
         world.contacts[contact_id as usize].flags |= SIM_ENABLE_PRE_SOLVE_EVENTS;
@@ -668,8 +678,8 @@ pub fn destroy_contact(world: &mut World, contact_id: i32, wake_bodies: bool) {
     if color_index != NULL_INDEX {
         // contact is an active constraint
         b3_assert!(set_index == AWAKE_SET);
-        let mesh_contact = (flags & SIM_MESH_CONTACT) != 0;
-        crate::constraint_graph::remove_contact_from_graph(world, body_id_a, body_id_b, color_index, local_index, mesh_contact);
+        let multi_manifold = (flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0;
+        crate::constraint_graph::remove_contact_from_graph(world, body_id_a, body_id_b, color_index, local_index, multi_manifold);
     } else {
         // contact is non-touching or is sleeping or is a sensor
         b3_assert!(set_index != AWAKE_SET || (flags & CONTACT_TOUCHING_FLAG) == 0);
@@ -746,6 +756,7 @@ fn compute_convex_manifold(
             shape_a.as_sphere(),
             shape_b.as_sphere(),
             transform_b_to_a,
+            world.speculative_distance,
         );
     } else if type_a == ShapeType::Capsule {
         if type_b == ShapeType::Sphere {
@@ -755,6 +766,7 @@ fn compute_convex_manifold(
                 shape_a.as_capsule(),
                 shape_b.as_sphere(),
                 transform_b_to_a,
+                world.speculative_distance,
             );
         } else {
             b3_assert!(type_b == ShapeType::Capsule);
@@ -764,6 +776,7 @@ fn compute_convex_manifold(
                 shape_a.as_capsule(),
                 shape_b.as_capsule(),
                 transform_b_to_a,
+                world.speculative_distance,
             );
         }
     } else {
@@ -777,6 +790,7 @@ fn compute_convex_manifold(
                 shape_b.as_sphere(),
                 transform_b_to_a,
                 &mut cache.simplex_cache,
+                world.speculative_distance,
             );
         } else if type_b == ShapeType::Capsule {
             crate::convex_manifold::collide_hull_and_capsule(
@@ -786,6 +800,7 @@ fn compute_convex_manifold(
                 shape_b.as_capsule(),
                 transform_b_to_a,
                 &mut cache.simplex_cache,
+                world.speculative_distance,
             );
         } else {
             b3_assert!(type_b == ShapeType::Hull);
@@ -804,6 +819,7 @@ fn compute_convex_manifold(
                     &mut cache.sat_cache,
                     world.contact_recycle_distance,
                     was_touching,
+                    world.speculative_distance,
                 );
                 match handled {
                     1 => task_context.feature_separated_skip_count += 1,
@@ -819,6 +835,7 @@ fn compute_convex_manifold(
                     shape_b.as_hull(),
                     transform_b_to_a,
                     &mut cache.sat_cache,
+                    world.speculative_distance,
                 );
                 task_context.sat_call_count += 1;
                 task_context.sat_cache_hit_count += cache.sat_cache.hit as i32;
@@ -953,6 +970,7 @@ fn update_convex_contact(
         let radius_a = match &shape_a.geom {
             ShapeGeometry::Sphere(sphere) => sphere.radius,
             ShapeGeometry::Capsule(capsule) => capsule.radius,
+            ShapeGeometry::Tube(tube) => tube.radius,
             ShapeGeometry::Hull(hull) => 0.25 * hull.inner_radius,
             _ => 0.0,
         };
@@ -960,6 +978,7 @@ fn update_convex_contact(
         let radius_b = match &shape_b.geom {
             ShapeGeometry::Sphere(sphere) => sphere.radius,
             ShapeGeometry::Capsule(capsule) => capsule.radius,
+            ShapeGeometry::Tube(tube) => tube.radius,
             ShapeGeometry::Hull(hull) => 0.25 * hull.inner_radius,
             _ => 0.0,
         };
@@ -1129,6 +1148,8 @@ pub fn update_contact(
         // this update (materials keeps its capacity for the next contact).
         child_shape_a.geom = ShapeGeometry::default();
         task_context.child_shape_scratch = child_shape_a;
+    } else if shape_a.shape_type() == ShapeType::Tube {
+        touching = crate::tube_contact::update_tube_contact(world, task_context, contact, shape_a, xf_a, shape_b, xf_b);
     } else if shape_a.shape_type() == ShapeType::Mesh || shape_a.shape_type() == ShapeType::Height {
         // Does this contact touch a mesh or height-field?
 

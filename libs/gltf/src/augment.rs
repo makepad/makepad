@@ -5,7 +5,7 @@
 //! same preservation, validation, deterministic serialization and chunk
 //! handling contract.
 
-use crate::{parse_glb_bytes, GlbChunk, GltfDocument, GltfError};
+use crate::{assemble_glb_with_rest, parse_glb_bytes, parse_gltf_json, split_glb, GltfDocument, GltfError};
 use makepad_micro_serde::{DeJson, JsonValue};
 use std::collections::HashMap;
 
@@ -102,31 +102,30 @@ pub(crate) struct GlbRewrite {
     pub(crate) document: GltfDocument,
     root: HashMap<String, JsonValue>,
     pub(crate) bin: Vec<u8>,
-    extra_chunks: Vec<GlbChunk>,
+    rest: Vec<u8>,
 }
 
 impl GlbRewrite {
     pub(crate) fn begin(input: &[u8]) -> Result<Self, GltfError> {
-        let parsed = parse_glb_bytes(input)?;
-        if parsed.document.buffers_slice().len() != 1
-            || parsed.document.buffers_slice()[0].uri.is_some()
+        let chunks = split_glb(input)?;
+        let json = chunks.json.trim_end_matches(['\0', ' ', '\n', '\r', '\t']);
+        let document = parse_gltf_json(json)?;
+        if document.buffers_slice().len() != 1
+            || document.buffers_slice()[0].uri.is_some()
         {
             return Err(GltfError::Unsupported(
                 "GLB augmentation requires one embedded buffer".to_string(),
             ));
         }
-        let json_len = u32::from_le_bytes(input[12..16].try_into().unwrap()) as usize;
-        let json = std::str::from_utf8(&input[20..20 + json_len])?
-            .trim_end_matches(['\0', ' ', '\n', '\r', '\t']);
         let root = JsonValue::deserialize_json_lenient(json).map_err(GltfError::Json)?;
         let JsonValue::Object(root) = root else {
             return Err(validation("glTF JSON root is not an object"));
         };
         Ok(Self {
-            document: parsed.document,
+            document,
             root,
-            bin: parsed.bin_chunk.unwrap_or_default(),
-            extra_chunks: parsed.extra_chunks,
+            bin: chunks.bin.to_vec(),
+            rest: chunks.rest.to_vec(),
         })
     }
 
@@ -225,33 +224,79 @@ impl GlbRewrite {
 
         let mut json = String::new();
         write_json(&JsonValue::Object(self.root), &mut json)?;
-        let mut json_bytes = json.into_bytes();
-        while json_bytes.len() % 4 != 0 {
-            json_bytes.push(b' ');
-        }
-        let extra_len: usize = self
-            .extra_chunks
-            .iter()
-            .map(|chunk| 8 + chunk.data.len())
-            .sum();
-        let total = 12 + 8 + json_bytes.len() + 8 + self.bin.len() + extra_len;
-        let mut output = Vec::with_capacity(total);
-        output.extend_from_slice(b"glTF");
-        output.extend_from_slice(&2u32.to_le_bytes());
-        output.extend_from_slice(&(total as u32).to_le_bytes());
-        output.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-        output.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
-        output.extend_from_slice(&json_bytes);
-        output.extend_from_slice(&(self.bin.len() as u32).to_le_bytes());
-        output.extend_from_slice(&0x004E_4942u32.to_le_bytes());
-        output.extend_from_slice(&self.bin);
-        for chunk in self.extra_chunks {
-            output.extend_from_slice(&(chunk.data.len() as u32).to_le_bytes());
-            output.extend_from_slice(&chunk.chunk_type.to_le_bytes());
-            output.extend_from_slice(&chunk.data);
-        }
+        let output = assemble_glb_with_rest(&json, Some(&self.bin), &self.rest);
         // Run the normal structural/index validator over our own output.
         parse_glb_bytes(&output)?;
         Ok(output)
     }
 }
+
+/// Rewrite a GLB's embedded image payloads: `replace(image_index, bytes)`
+/// returns the new payload (for example a small reference to a texture stored
+/// elsewhere). The BIN chunk is rebuilt compactly: every buffer view keeps its
+/// place in order, image views shrink or grow, the rest are copied as they were.
+/// Images without a buffer view are left alone.
+pub fn rewrite_glb_images(input: &[u8], mut replace: impl FnMut(usize, &[u8]) -> Vec<u8>) -> Result<Vec<u8>, GltfError> {
+    rewrite_images(input, &mut |index, bytes| Some(replace(index, bytes)), None)
+}
+
+/// Replace embedded images with KTX2 (Basis Universal) payloads, the glTF
+/// `KHR_texture_basisu` way: `encode(image_index, bytes)` returns the KTX2 or
+/// `None` to keep the image as it is. A replaced image gets mimeType
+/// `image/ktx2`, each texture using it the extension (its `source` stays, so
+/// readers that follow `source` read the KTX2 bytes), and the extension is
+/// listed as used and required.
+pub fn embed_ktx2_images(input: &[u8], mut encode: impl FnMut(usize, &[u8]) -> Option<Vec<u8>>) -> Result<Vec<u8>, GltfError> {
+    rewrite_images(input, &mut encode, Some("image/ktx2"))
+}
+
+fn rewrite_images(input: &[u8], replace: &mut dyn FnMut(usize, &[u8]) -> Option<Vec<u8>>, mime: Option<&str>) -> Result<Vec<u8>, GltfError> {
+    let mut glb = GlbRewrite::begin(input)?;
+    let mut images = glb.take_array("images")?;
+    let mut views = glb.take_array("bufferViews")?;
+    let index_of = |value: Option<&JsonValue>| match value { Some(JsonValue::U64(v)) => Some(*v as usize), Some(JsonValue::I64(v)) => Some(*v as usize), Some(JsonValue::F64(v)) => Some(*v as usize), _ => None };
+    // Which buffer view holds which image.
+    let mut image_of_view = HashMap::new();
+    for (i, image) in images.iter().enumerate() {
+        if let Some(v) = index_of(image.key("bufferView")) { image_of_view.insert(v, i); }
+    }
+    let old_bin = std::mem::take(&mut glb.bin);
+    let field = |view: &JsonValue, key: &str| -> usize { index_of(view.key(key)).unwrap_or(0) };
+    let mut bin = Vec::with_capacity(old_bin.len());
+    let mut replaced = Vec::new();
+    for (index, view) in views.iter_mut().enumerate() {
+        let (offset, length) = (field(view, "byteOffset"), field(view, "byteLength"));
+        let bytes = old_bin.get(offset..offset + length).ok_or_else(|| validation("buffer view outside the BIN chunk"))?;
+        let payload = match image_of_view.get(&index).and_then(|&image| replace(image, bytes).map(|p| (image, p))) {
+            Some((image, payload)) => { replaced.push(image); payload }
+            None => bytes.to_vec(),
+        };
+        // Views keep their original stride alignment (accessor data needs 4).
+        while bin.len() % 4 != 0 { bin.push(0); }
+        let JsonValue::Object(view) = view else { return Err(validation("buffer view is not an object")) };
+        view.insert("byteOffset".to_string(), number(bin.len()));
+        view.insert("byteLength".to_string(), number(payload.len()));
+        bin.extend_from_slice(&payload);
+    }
+    glb.bin = bin;
+    glb.put_array("bufferViews", views);
+    if let (Some(mime), false) = (mime, replaced.is_empty()) {
+        for &image in &replaced {
+            if let Some(JsonValue::Object(image)) = images.get_mut(image) { image.insert("mimeType".to_string(), string(mime)); }
+        }
+        const EXT: &str = "KHR_texture_basisu";
+        for texture in glb.array_mut("textures")? {
+            let JsonValue::Object(texture) = texture else { continue };
+            let Some(source) = index_of(texture.get("source")).filter(|s| replaced.contains(s)) else { continue };
+            let extensions = texture.entry("extensions".to_string()).or_insert_with(|| JsonValue::Object(HashMap::new()));
+            if let JsonValue::Object(extensions) = extensions { extensions.insert(EXT.to_string(), object([("source", number(source))])); }
+        }
+        for list in ["extensionsUsed", "extensionsRequired"] {
+            let list = glb.array_mut(list)?;
+            if !list.iter().any(|e| matches!(e, JsonValue::String(s) if s == EXT)) { list.push(string(EXT)); }
+        }
+    }
+    glb.put_array("images", images);
+    glb.finish()
+}
+

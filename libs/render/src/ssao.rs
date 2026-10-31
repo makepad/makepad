@@ -48,25 +48,46 @@ script_mod! {
     // =====================================================================
     // RAW — a dozen hemisphere taps against the reconstructed surface
     // =====================================================================
+    // One AO core, two ways to rebuild a surface point from the input:
+    //   distance mode (`u_mode.x` 0): the input's red channel is the
+    //     VIEW-SPACE DISTANCE in metres (0 = nothing); the point is
+    //     unprojected along the pixel's ray from `u_proj`'s terms.
+    //   matrix mode (`u_mode.x` 1): the input is a HARDWARE depth buffer
+    //     (ndc z, 1 = nothing drawn); the point is the world position the
+    //     caller's inverse clip matrix gives. Radius and bias are in that
+    //     world frame's units. Depth is measured from the eye when the
+    //     matrix has one (a perspective, a homography), along the view
+    //     axis when it has none (an orthographic view).
+    // Either way "in front" is `depth(sample) - depth(occluder)`.
     mod.draw.DrawSsaoRaw = mod.std.set_type_default() do #(DrawSsaoRaw::script_shader(vm)){
         ..mod.draw.DrawQuad
-        // (ao, view distance) — the depth rides along so the blur reads ONE
+        // (ao, depth) — the depth rides along so the blur reads ONE
         // 8-byte texture per tap instead of this pass's 16-byte G-buffer;
         // that halved the blur's GPU time. f16 depth is for blur WEIGHTS
         // only (0.1% relative is plenty for a sigma), never for the taps.
         color_format: @Rgba16F
-        // r = view-space distance in metres, 0 = background.
         depth_tex: texture_2d(float)
         // xy = 1 / pass pixels, zw = pass pixels
         u_texel: uniform(vec4(0.001, 0.001, 1000.0, 1000.0))
-        // Camera terms for unproject/reproject:
+        // Distance mode's camera terms for unproject/reproject:
         //   x = tan(fov_x / 2)   (perspective)   or half width in metres (ortho)
         //   y = tan(fov_y / 2)   (perspective)   or half height in metres (ortho)
         //   z = 1 for orthographic
         u_proj: uniform(vec4(0.5773, 0.5773, 0.0, 0.0))
-        // x = radius (m), y = bias floor (m), z = bias slope per metre of
-        // view distance, w unused
-        u_ao: uniform(vec4(0.3, 0.015, 0.002, 0.0))
+        // x = radius, y = bias floor, z = bias slope per unit of depth
+        u_ao: uniform(vec4(0.6, 0.03, 0.002, 0.0))
+        // x = 0 distance mode, 1 matrix mode
+        u_mode: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // Matrix mode: clip from world and its inverse (column-major)
+        u_clip_from_world: uniform(mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+        u_world_from_clip: uniform(mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+        // The eye in world space (w = 1; distance mode: the origin, w = 1;
+        // matrix mode of an orthographic view: w = 0)
+        u_eye: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        // Matrix mode without an eye: the unit view axis toward the
+        // camera, and a point on the near side to measure depth from
+        u_axis: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        u_ref: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // Nothing to clip against: the quad IS the pass. Straight to clip
         // space, exactly like a CAD composite quad — the pass keeps no
         // camera of its own.
@@ -83,8 +104,9 @@ script_mod! {
             )
         }
 
-        // uv + stored distance → view-space position. View space is metric
-        // (the view matrix is rigid), camera at the origin looking down -z.
+        // Distance mode: uv + stored distance → view-space position. View
+        // space is metric (the view matrix is rigid), camera at the origin
+        // looking down -z.
         view_pos: fn(uv: vec2f, d: float) -> vec3f {
             let nx = uv.x * 2.0 - 1.0
             let ny = 1.0 - uv.y * 2.0
@@ -98,8 +120,46 @@ script_mod! {
             return normalize(ray) * d
         }
 
-        // view-space position → uv, the inverse of view_pos.
+        // Depth of a point: its distance from the eye, or along the axis.
+        depth_of: fn(p: vec3f) -> float {
+            if self.u_mode.x < 0.5 {
+                return length(p)
+            }
+            if self.u_eye.w > 0.5 {
+                return length(p - self.u_eye.xyz)
+            }
+            return dot(p - self.u_ref.xyz, vec3(0.0, 0.0, 0.0) - self.u_axis.xyz) + 0.0001
+        }
+        // The ray from the eye through a point (distance mode: from the
+        // origin).
+        ray_of: fn(p: vec3f) -> vec3f {
+            if self.u_eye.w > 0.5 {
+                return p - self.u_eye.xyz
+            }
+            return vec3(0.0, 0.0, 0.0) - self.u_axis.xyz
+        }
+
+        // The surface at uv: xyz = position, w = depth (0 = nothing there).
+        fetch: fn(uv: vec2f) -> vec4f {
+            let raw = self.depth_tex.sample_nearest(uv).x
+            if self.u_mode.x < 0.5 {
+                let p = self.view_pos(uv, raw)
+                return vec4(p.x, p.y, p.z, raw)
+            }
+            if raw >= 0.99999 {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+            let h = self.u_world_from_clip * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, raw, 1.0)
+            let p = h.xyz / h.w
+            return vec4(p.x, p.y, p.z, self.depth_of(p))
+        }
+
+        // view/world-space position → uv, the inverse of the reconstruction.
         project_uv: fn(p: vec3f) -> vec2f {
+            if self.u_mode.x > 0.5 {
+                let c = self.u_clip_from_world * vec4(p.x, p.y, p.z, 1.0)
+                return vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5)
+            }
             var nx = 0.0
             var ny = 0.0
             if self.u_proj.z > 0.5 {
@@ -115,11 +175,12 @@ script_mod! {
 
         pixel: fn() -> vec4f {
             let uv = self.pos
-            let d = self.depth_tex.sample_nearest(uv).x
+            let c0 = self.fetch(uv)
+            let d = c0.w
             if d <= 0.0 {
                 return vec4(1.0, 0.0, 0.0, 1.0)
             }
-            let p = self.view_pos(uv, d)
+            let p = c0.xyz
 
             // ---- normal from depth differences -------------------------
             // Four neighbour taps; per axis, the side whose depth is CLOSER
@@ -127,26 +188,26 @@ script_mod! {
             // false slope across the edge.
             let tx = self.u_texel.x
             let ty = self.u_texel.y
-            let dl = self.depth_tex.sample_nearest(uv + vec2(0.0 - tx, 0.0)).x
-            let dr = self.depth_tex.sample_nearest(uv + vec2(tx, 0.0)).x
-            let du = self.depth_tex.sample_nearest(uv + vec2(0.0, 0.0 - ty)).x
-            let dd = self.depth_tex.sample_nearest(uv + vec2(0.0, ty)).x
-            var ddx = self.view_pos(uv + vec2(tx, 0.0), dr) - p
-            if dr <= 0.0 || (dl > 0.0 && abs(dl - d) < abs(dr - d)) {
-                ddx = p - self.view_pos(uv + vec2(0.0 - tx, 0.0), dl)
+            let cl = self.fetch(uv + vec2(0.0 - tx, 0.0))
+            let cr = self.fetch(uv + vec2(tx, 0.0))
+            let cu = self.fetch(uv + vec2(0.0, 0.0 - ty))
+            let cd = self.fetch(uv + vec2(0.0, ty))
+            var ddx = cr.xyz - p
+            if cr.w <= 0.0 || (cl.w > 0.0 && abs(cl.w - d) < abs(cr.w - d)) {
+                ddx = p - cl.xyz
             }
-            var ddy = self.view_pos(uv + vec2(0.0, ty), dd) - p
-            if dd <= 0.0 || (du > 0.0 && abs(du - d) < abs(dd - d)) {
-                ddy = p - self.view_pos(uv + vec2(0.0, 0.0 - ty), du)
+            var ddy = cd.xyz - p
+            if cd.w <= 0.0 || (cu.w > 0.0 && abs(cu.w - d) < abs(cd.w - d)) {
+                ddy = p - cu.xyz
             }
             var n = cross(ddy, ddx)
             if length(n) < 0.0000001 {
                 // A one-pixel sliver: face the camera rather than divide by
                 // zero — its occlusion is meaningless either way.
-                n = 0.0 - normalize(p)
+                n = 0.0 - normalize(self.ray_of(p))
             }
             n = normalize(n)
-            if dot(n, p) > 0.0 {
+            if dot(n, self.ray_of(p)) > 0.0 {
                 n = 0.0 - n
             }
 
@@ -183,13 +244,13 @@ script_mod! {
                 let s = p + (t * (cos(ang) * r) + b * (sin(ang) * r) + n * z) * scale
                 let suv = self.project_uv(s)
                 if suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0 {
-                    let sd = self.depth_tex.sample_nearest(suv).x
+                    let sd = self.fetch(suv).w
                     if sd > 0.0 {
                         // How far the geometry there stands IN FRONT of the
-                        // sample point, metres. tap_occlusion in ssao.rs is
-                        // this exact pair of lines; the tests hold it to the
+                        // sample point. tap_occlusion in ssao.rs is this
+                        // exact pair of lines; the tests hold it to the
                         // coincident-plane and range laws.
-                        let ahead = length(s) - sd
+                        let ahead = self.depth_of(s) - sd
                         let range = 1.0 - smoothstep(radius, radius * 2.0, abs(d - sd))
                         occ = occ + smoothstep(bias, bias * 2.0, ahead) * range
                     }
@@ -216,6 +277,9 @@ script_mod! {
         src_tex: texture_2d(float)
         // xy = one-texel step along the blur axis, zw unused
         u_dir: uniform(vec4(0.001, 0.0, 0.0, 0.0))
+        // The depth sigma of the bilateral weight: x * distance + y, in the
+        // units of the distance channel.
+        u_sigma: uniform(vec4(0.03, 0.04, 0.0, 0.0))
         depth_clip: 0.0
 
         vertex: fn() {
@@ -240,7 +304,7 @@ script_mod! {
             // question, not a screen one; the blur never averages across a
             // silhouette or a step, which is what keeps the noise from
             // bleeding a halo off every edge.
-            let sigma = 0.03 * d + 0.02
+            let sigma = self.u_sigma.x * d + self.u_sigma.y
             var sum = 0.0
             var wsum = 0.0
             var k = 0.0 - 4.0
@@ -299,10 +363,14 @@ pub struct SsaoParams {
 }
 
 impl Default for SsaoParams {
+    /// 0.6 m and 3 cm: what Sandbox's look was tuned with (the pass then
+    /// read hardware depth at half its distance, so its 0.3 m and 1.5 cm
+    /// were these in metres; the bilateral blur's depth sigma is doubled
+    /// to match).
     fn default() -> Self {
         Self {
-            radius: 0.3,
-            bias: 0.015,
+            radius: 0.6,
+            bias: 0.03,
             bias_slope: 0.002,
             strength: 0.7,
         }
@@ -320,24 +388,98 @@ pub struct SsaoProjection {
     pub half_y: f32,
 }
 
+/// A depth buffer drawn through any projection: the matrices of the world
+/// frame the caller measures radius and bias in, both column-major as
+/// Makepad's `Mat4f::v`. `clip_from_world` takes (x, y, z, 1) to clip space
+/// (the depth buffer holds clip z / w); `world_from_clip` is its inverse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SsaoGeneral {
+    pub clip_from_world: [f32; 16],
+    pub world_from_clip: [f32; 16],
+}
+
+/// What the shader needs besides the matrices: where the eye is (w = 1), or,
+/// for a view that has none (orthographic), the unit view axis toward the
+/// camera and a point on the near side to measure depth from.
+pub struct SsaoTerms {
+    pub eye: [f32; 4],
+    pub axis: [f32; 4],
+    pub reference: [f32; 4],
+}
+
+impl SsaoGeneral {
+    /// The matrices of a clip matrix (and its inverse, made here).
+    pub fn from_clip(clip_from_world: Mat4f) -> Self {
+        Self { clip_from_world: clip_from_world.v, world_from_clip: clip_from_world.invert().v }
+    }
+
+    fn mul(m: &[f32; 16], v: [f64; 4]) -> [f64; 4] {
+        let mut out = [0.0; 4];
+        for (r, o) in out.iter_mut().enumerate() {
+            *o = (0..4).map(|c| m[c * 4 + r] as f64 * v[c]).sum();
+        }
+        out
+    }
+
+    /// The eye is the world point whose clip position is (0, 0, z, 0), the
+    /// inverse's third column dehomogenised; a view without one (w of that
+    /// column near zero) is orthographic.
+    pub fn terms(&self) -> SsaoTerms {
+        let col = Self::mul(&self.world_from_clip, [0.0, 0.0, 1.0, 0.0]);
+        let scale = col[0].abs().max(col[1].abs()).max(col[2].abs()).max(1e-30);
+        let unproject = |depth: f64| {
+            let h = Self::mul(&self.world_from_clip, [0.0, 0.0, depth, 1.0]);
+            [h[0] / h[3], h[1] / h[3], h[2] / h[3]]
+        };
+        let near = unproject(0.25);
+        let far = unproject(0.75);
+        let mut axis = [near[0] - far[0], near[1] - far[1], near[2] - far[2]];
+        let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt().max(1e-30);
+        for a in &mut axis {
+            *a /= len;
+        }
+        let reference = [near[0] as f32, near[1] as f32, near[2] as f32, 0.0];
+        let axis = [axis[0] as f32, axis[1] as f32, axis[2] as f32, 0.0];
+        if col[3].abs() > 1e-5 * scale {
+            let eye = [(col[0] / col[3]) as f32, (col[1] / col[3]) as f32, (col[2] / col[3]) as f32, 1.0];
+            SsaoTerms { eye, axis, reference }
+        } else {
+            SsaoTerms { eye: [0.0, 0.0, 0.0, 0.0], axis, reference }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SsaoInput {
+    View(SsaoProjection),
+    General(SsaoGeneral),
+}
+
 struct SsaoStage {
     pass: DrawPass,
     list: DrawList,
 }
 
-/// The chain. Owns its passes, draw lists and both RGBA16F ping-pong
-/// targets (x = occlusion, y = view distance);
+/// The chain. Owns its passes, draw lists and three RGBA16F targets (x =
+/// occlusion, y = view distance): no pass writes a texture an earlier pass
+/// of the chain sampled, and each blur has its own draw, so a painted
+/// chain stays painted (a write-back made the blurs dirty each other on
+/// every paint, and a locked-time host waiting for a clean frame never
+/// got one);
 /// the host parents it between its depth-producing pass and the pass that
 /// consumes [`SsaoPass::output`].
 #[derive(Default)]
 pub struct SsaoPass {
     stages: Vec<SsaoStage>,
-    /// raw target, and the final blurred output (the v blur writes back).
+    /// raw target.
     tex_a: Option<Texture>,
     /// h-blur intermediate.
     tex_b: Option<Texture>,
+    /// The blurred output (v blur).
+    tex_c: Option<Texture>,
     draw_raw: Option<Box<DrawSsaoRaw>>,
     draw_blur: Option<Box<DrawSsaoBlur>>,
+    draw_blur_v: Option<Box<DrawSsaoBlur>>,
     /// Latest GPU duration per stage (raw, blur h, blur v), milliseconds.
     /// Metal command-buffer times, arriving a frame or two behind.
     pub stage_gpu_ms: [f64; 3],
@@ -379,6 +521,9 @@ impl SsaoPass {
         if self.tex_b.is_none() {
             self.tex_b = Some(rgba16f(cx));
         }
+        if self.tex_c.is_none() {
+            self.tex_c = Some(rgba16f(cx));
+        }
         if self.draw_raw.is_none() {
             self.draw_raw = cx.try_with_vm(|vm| Box::new(DrawSsaoRaw::script_new_with_default(vm)));
         }
@@ -386,7 +531,11 @@ impl SsaoPass {
             self.draw_blur =
                 cx.try_with_vm(|vm| Box::new(DrawSsaoBlur::script_new_with_default(vm)));
         }
-        self.draw_raw.is_some() && self.draw_blur.is_some()
+        if self.draw_blur_v.is_none() {
+            self.draw_blur_v =
+                cx.try_with_vm(|vm| Box::new(DrawSsaoBlur::script_new_with_default(vm)));
+        }
+        self.draw_raw.is_some() && self.draw_blur.is_some() && self.draw_blur_v.is_some()
     }
 
     /// The deepest pass of the chain — the host parents its depth-producing
@@ -399,7 +548,7 @@ impl SsaoPass {
     /// unoccluded, y = view distance). Valid after [`SsaoPass::run`] in the
     /// same frame.
     pub fn output(&self) -> Option<&Texture> {
-        self.tex_a.as_ref()
+        self.tex_c.as_ref()
     }
 
     /// Sum of the latest per-stage GPU times, ms.
@@ -425,11 +574,41 @@ impl SsaoPass {
         params: SsaoParams,
         parent: DrawPassId,
     ) {
+        self.run_impl(cx, size, depth_src, SsaoInput::View(proj), params, parent)
+    }
+
+    /// As [`SsaoPass::run`] for a depth buffer drawn through any projection
+    /// (see [`SsaoGeneral`]): `depth_src` is the hardware depth (ndc z, 1 =
+    /// nothing drawn), `params` are in the units of the matrices' world
+    /// frame.
+    pub fn run_general(
+        &mut self,
+        cx: &mut Cx2d,
+        size: DVec2,
+        depth_src: &Texture,
+        general: SsaoGeneral,
+        params: SsaoParams,
+        parent: DrawPassId,
+    ) {
+        self.run_impl(cx, size, depth_src, SsaoInput::General(general), params, parent)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_impl(
+        &mut self,
+        cx: &mut Cx2d,
+        size: DVec2,
+        depth_src: &Texture,
+        input: SsaoInput,
+        params: SsaoParams,
+        parent: DrawPassId,
+    ) {
         if !self.ensure(cx.cx) {
             return;
         }
         let tex_a = self.tex_a.clone().unwrap();
         let tex_b = self.tex_b.clone().unwrap();
+        let tex_c = self.tex_c.clone().unwrap();
         let dpi = cx.current_dpi_factor() as f32;
         let px = vec2(
             (size.x as f32 * dpi).max(1.0),
@@ -452,9 +631,8 @@ impl SsaoPass {
                 st.pass.clear_color_textures(cx.cx);
                 st.pass
                     .set_color_texture(cx, target, DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 1.0, 1.0)));
-                let id = st.pass.draw_pass_id();
-                cx.cx.passes[id].depth_texture = None;
-                cx.cx.passes[id].parent = CxDrawPassParent::DrawPass(parent_id);
+                st.pass.clear_depth_texture(cx.cx);
+                st.pass.set_pass_parent(cx.cx, parent_id);
                 cx.begin_pass(&st.pass, None);
                 st.pass.set_size(cx, size);
                 st.list.begin_always(cx);
@@ -488,19 +666,34 @@ impl SsaoPass {
             );
             dv.set_uniform(
                 cx.cx,
-                live_id!(u_proj),
-                &[
-                    proj.half_x,
-                    proj.half_y,
-                    if proj.ortho { 1.0 } else { 0.0 },
-                    0.0,
-                ],
-            );
-            dv.set_uniform(
-                cx.cx,
                 live_id!(u_ao),
                 &[params.radius, params.bias, params.bias_slope, 0.0],
             );
+            match input {
+                SsaoInput::View(proj) => {
+                    dv.set_uniform(
+                        cx.cx,
+                        live_id!(u_proj),
+                        &[
+                            proj.half_x,
+                            proj.half_y,
+                            if proj.ortho { 1.0 } else { 0.0 },
+                            0.0,
+                        ],
+                    );
+                    dv.set_uniform(cx.cx, live_id!(u_mode), &[0.0, 0.0, 0.0, 0.0]);
+                    dv.set_uniform(cx.cx, live_id!(u_eye), &[0.0, 0.0, 0.0, 1.0]);
+                }
+                SsaoInput::General(general) => {
+                    let terms = general.terms();
+                    dv.set_uniform(cx.cx, live_id!(u_mode), &[1.0, 0.0, 0.0, 0.0]);
+                    dv.set_uniform(cx.cx, live_id!(u_clip_from_world), &general.clip_from_world);
+                    dv.set_uniform(cx.cx, live_id!(u_world_from_clip), &general.world_from_clip);
+                    dv.set_uniform(cx.cx, live_id!(u_eye), &terms.eye);
+                    dv.set_uniform(cx.cx, live_id!(u_axis), &terms.axis);
+                    dv.set_uniform(cx.cx, live_id!(u_ref), &terms.reference);
+                }
+            }
             run_stage(cx, &mut self.stages, 0, &tex_a, &mut |cx, r| {
                 draw_raw.draw_abs(cx, r)
             });
@@ -509,15 +702,20 @@ impl SsaoPass {
         // ---- blur h / v ---------------------------------------------------
         for (i, (src, dst, dir)) in [
             (&tex_a, &tex_b, [1.0 / px.x, 0.0]),
-            (&tex_b, &tex_a, [0.0, 1.0 / px.y]),
+            (&tex_b, &tex_c, [0.0, 1.0 / px.y]),
         ]
         .into_iter()
         .enumerate()
         {
-            let draw_blur = self.draw_blur.as_mut().unwrap();
+            let draw_blur = if i == 0 { self.draw_blur.as_mut().unwrap() } else { self.draw_blur_v.as_mut().unwrap() };
             let dv = &mut draw_blur.draw_super.draw_vars;
             dv.set_texture(0, src);
             dv.set_uniform(cx.cx, live_id!(u_dir), &[dir[0], dir[1], 0.0, 0.0]);
+            if matches!(input, SsaoInput::General(_)) {
+                // The distance channel is a world length: a fifth of the
+                // radius is the step the blur must not average across.
+                dv.set_uniform(cx.cx, live_id!(u_sigma), &[0.0, 0.2 * params.radius, 0.0, 0.0]);
+            }
             run_stage(cx, &mut self.stages, 1 + i, dst, &mut |cx, r| {
                 draw_blur.draw_abs(cx, r)
             });
@@ -586,13 +784,14 @@ mod tests {
         assert!(occ > 0.95, "a 10 cm ledge at 3 m reads {occ}");
     }
 
-    /// Law 4: an occluder far in front of the surface is a different
-    /// object, and contributes nothing.
+    /// Law 4: an occluder far in front of the surface (past twice the
+    /// radius) is a different object, and contributes nothing.
     #[test]
     fn distant_occluders_contribute_nothing() {
         let p = SsaoParams::default();
-        let occ = tap_occlusion(1.0, 1.0, &p, 10.0);
-        assert_eq!(occ, 0.0, "an occluder a metre in front must not shade");
+        let far = p.radius * 2.0 + 0.05;
+        let occ = tap_occlusion(far, far, &p, 10.0);
+        assert_eq!(occ, 0.0, "an occluder {far} m in front must not shade");
     }
 
     /// The defaults ARE the law: the bias floor stays above coplanar gaps

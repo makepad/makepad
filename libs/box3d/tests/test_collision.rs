@@ -2,6 +2,7 @@
 // The BOX3D_DOUBLE_PRECISION blocks are not ported (single precision build).
 
 use makepad_box3d::aabb::ray_cast_aabb;
+use makepad_box3d::constants::speculative_distance;
 use makepad_box3d::convex_manifold::collide_hulls;
 use makepad_box3d::hull::make_box_hull;
 use makepad_box3d::math_functions::*;
@@ -215,6 +216,7 @@ fn large_world_manifold_test() {
         &box_b,
         inv_mul_world_transforms(xf_ao, xf_bo),
         &mut cache_origin,
+        speculative_distance(),
     );
 
     // Two cube faces overlap, so the clipped manifold has four points
@@ -264,6 +266,7 @@ fn large_world_manifold_double_precision_test() {
         &box_b,
         inv_mul_world_transforms(xf_ao, xf_bo),
         &mut cache_origin,
+        speculative_distance(),
     );
     ensure!(m_origin.point_count() == 4);
 
@@ -280,6 +283,7 @@ fn large_world_manifold_double_precision_test() {
         &box_b,
         inv_mul_world_transforms(xf_al, xf_bl),
         &mut cache_large,
+        speculative_distance(),
     );
 
     ensure!(m_large.point_count() == m_origin.point_count());

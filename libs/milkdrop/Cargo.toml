@@ -1,0 +1,30 @@
+# MilkDrop preset rendering for makepad: the .milk reader, an EEL2 subset
+# compiled to a small register VM for the per-frame / per-vertex / per-point
+# equations, a translator from MilkDrop's HLSL dialect into makepad shader
+# source, and the GPU frame (warp, blur, waves, shapes, composite).
+#
+# Shared by the VJ app and the music app. Presets are never bundled: the
+# library downloads a preset pack on demand into a directory the host names.
+
+[package]
+name = "makepad-milkdrop"
+version = "0.1.0"
+edition = "2021"
+description = "MilkDrop (projectM-compatible) preset renderer for makepad"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["data"] }
+makepad-zip-file = { path = "../../libs/zip_file" }
+makepad-audio-picture = { path = "../../libs/audio_picture" }
+makepad-search = { path = "../../libs/search" }
+
+[[example]]
+name = "milkdrop_explorer"
+path = "examples/explorer.rs"
+
+[[example]]
+name = "milkdrop_render_check"
+path = "examples/render_check.rs"

@@ -1,0 +1,136 @@
+//! GSAP 3.15.0 golden stagger delays, generated from `stagger.json`
+//! (`gsap.utils.distribute(config)(i, targets[i], targets)` and the sub-tween start
+//! times of staggered `gsap.to`). Generated file: do not edit by hand.
+
+use makepad_tween::{Stagger, StaggerAxis, StaggerFrom};
+
+/// One `distribute` case.
+pub struct Case {
+    /// Case id.
+    pub id: &'static str,
+    /// The GSAP config, as JSON.
+    pub config: &'static str,
+    /// Number of targets.
+    pub n: u32,
+    /// The config as a `Stagger` (without its ease).
+    pub stagger: Stagger,
+    /// The GSAP ease string of the config, if any.
+    pub ease: Option<&'static str>,
+    /// GSAP's delay per target index.
+    pub delays: &'static [f64],
+    /// GSAP's tween duration (duration 1 + largest delay); 0 for plain `distribute` cases.
+    pub tween_duration: f64,
+}
+
+/// Plain `distribute` cases.
+#[rustfmt::skip]
+pub const DISTRIBUTE: [Case; 97] = [
+    Case { id: "number_0_1_n1", config: r#"0.1"#, n: 1, stagger: Stagger::each(0.1), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "number_0_1_n2", config: r#"0.1"#, n: 2, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1], tween_duration: 0.0 },
+    Case { id: "number_0_1_n3", config: r#"0.1"#, n: 3, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1, 0.2], tween_duration: 0.0 },
+    Case { id: "number_0_1_n5", config: r#"0.1"#, n: 5, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1, 0.2, 0.3, 0.4], tween_duration: 0.0 },
+    Case { id: "number_0_1_n8", config: r#"0.1"#, n: 8, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], tween_duration: 0.0 },
+    Case { id: "number_0_1_n12", config: r#"0.1"#, n: 12, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1], tween_duration: 0.0 },
+    Case { id: "each_0_1_n1", config: r#"{"each":0.1}"#, n: 1, stagger: Stagger::each(0.1), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_n2", config: r#"{"each":0.1}"#, n: 2, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1], tween_duration: 0.0 },
+    Case { id: "each_0_1_n3", config: r#"{"each":0.1}"#, n: 3, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1, 0.2], tween_duration: 0.0 },
+    Case { id: "each_0_1_n5", config: r#"{"each":0.1}"#, n: 5, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1, 0.2, 0.3, 0.4], tween_duration: 0.0 },
+    Case { id: "each_0_1_n8", config: r#"{"each":0.1}"#, n: 8, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], tween_duration: 0.0 },
+    Case { id: "each_0_1_n12", config: r#"{"each":0.1}"#, n: 12, stagger: Stagger::each(0.1), ease: None, delays: &[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1], tween_duration: 0.0 },
+    Case { id: "amount_1_n1", config: r#"{"amount":1}"#, n: 1, stagger: Stagger::amount(1.0), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_n2", config: r#"{"amount":1}"#, n: 2, stagger: Stagger::amount(1.0), ease: None, delays: &[0.0, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_n3", config: r#"{"amount":1}"#, n: 3, stagger: Stagger::amount(1.0), ease: None, delays: &[0.0, 0.5, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_n5", config: r#"{"amount":1}"#, n: 5, stagger: Stagger::amount(1.0), ease: None, delays: &[0.0, 0.25, 0.5, 0.75, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_n8", config: r#"{"amount":1}"#, n: 8, stagger: Stagger::amount(1.0), ease: None, delays: &[0.0, 0.1428571, 0.2857143, 0.4285714, 0.5714286, 0.7142857, 0.8571429, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_n12", config: r#"{"amount":1}"#, n: 12, stagger: Stagger::amount(1.0), ease: None, delays: &[0.0, 0.0909091, 0.1818182, 0.2727273, 0.3636364, 0.4545455, 0.5454545, 0.6363636, 0.7272727, 0.8181818, 0.9090909, 1.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_center_n1", config: r#"{"each":0.1,"from":"center"}"#, n: 1, stagger: Stagger::each(0.1).from(StaggerFrom::Center), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_center_n2", config: r#"{"each":0.1,"from":"center"}"#, n: 2, stagger: Stagger::each(0.1).from(StaggerFrom::Center), ease: None, delays: &[0.0, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_center_n3", config: r#"{"each":0.1,"from":"center"}"#, n: 3, stagger: Stagger::each(0.1).from(StaggerFrom::Center), ease: None, delays: &[0.2, 0.0, 0.2], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_center_n5", config: r#"{"each":0.1,"from":"center"}"#, n: 5, stagger: Stagger::each(0.1).from(StaggerFrom::Center), ease: None, delays: &[0.4, 0.2, 0.0, 0.2, 0.4], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_center_n8", config: r#"{"each":0.1,"from":"center"}"#, n: 8, stagger: Stagger::each(0.1).from(StaggerFrom::Center), ease: None, delays: &[0.7, 0.4666667, 0.2333333, 0.0, 0.0, 0.2333333, 0.4666667, 0.7], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_center_n12", config: r#"{"each":0.1,"from":"center"}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Center), ease: None, delays: &[1.1, 0.88, 0.66, 0.44, 0.22, 0.0, 0.0, 0.22, 0.44, 0.66, 0.88, 1.1], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_end_n1", config: r#"{"each":0.1,"from":"end"}"#, n: 1, stagger: Stagger::each(0.1).from(StaggerFrom::End), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_end_n2", config: r#"{"each":0.1,"from":"end"}"#, n: 2, stagger: Stagger::each(0.1).from(StaggerFrom::End), ease: None, delays: &[0.1, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_end_n3", config: r#"{"each":0.1,"from":"end"}"#, n: 3, stagger: Stagger::each(0.1).from(StaggerFrom::End), ease: None, delays: &[0.2, 0.1, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_end_n5", config: r#"{"each":0.1,"from":"end"}"#, n: 5, stagger: Stagger::each(0.1).from(StaggerFrom::End), ease: None, delays: &[0.4, 0.3, 0.2, 0.1, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_end_n8", config: r#"{"each":0.1,"from":"end"}"#, n: 8, stagger: Stagger::each(0.1).from(StaggerFrom::End), ease: None, delays: &[0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_end_n12", config: r#"{"each":0.1,"from":"end"}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::End), ease: None, delays: &[1.1, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_edges_n1", config: r#"{"each":0.1,"from":"edges"}"#, n: 1, stagger: Stagger::each(0.1).from(StaggerFrom::Edges), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_edges_n2", config: r#"{"each":0.1,"from":"edges"}"#, n: 2, stagger: Stagger::each(0.1).from(StaggerFrom::Edges), ease: None, delays: &[0.1, 0.1], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_edges_n3", config: r#"{"each":0.1,"from":"edges"}"#, n: 3, stagger: Stagger::each(0.1).from(StaggerFrom::Edges), ease: None, delays: &[0.0, 0.2, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_edges_n5", config: r#"{"each":0.1,"from":"edges"}"#, n: 5, stagger: Stagger::each(0.1).from(StaggerFrom::Edges), ease: None, delays: &[0.0, 0.2, 0.4, 0.2, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_edges_n8", config: r#"{"each":0.1,"from":"edges"}"#, n: 8, stagger: Stagger::each(0.1).from(StaggerFrom::Edges), ease: None, delays: &[0.0, 0.2333333, 0.4666667, 0.7, 0.7, 0.4666667, 0.2333333, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_edges_n12", config: r#"{"each":0.1,"from":"edges"}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Edges), ease: None, delays: &[0.0, 0.22, 0.44, 0.66, 0.88, 1.1, 1.1, 0.88, 0.66, 0.44, 0.22, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_2_n1", config: r#"{"each":0.1,"from":2}"#, n: 1, stagger: Stagger::each(0.1).from(StaggerFrom::Index(2)), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_2_n2", config: r#"{"each":0.1,"from":2}"#, n: 2, stagger: Stagger::each(0.1).from(StaggerFrom::Index(2)), ease: None, delays: &[0.1, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_2_n3", config: r#"{"each":0.1,"from":2}"#, n: 3, stagger: Stagger::each(0.1).from(StaggerFrom::Index(2)), ease: None, delays: &[0.2, 0.1, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_2_n5", config: r#"{"each":0.1,"from":2}"#, n: 5, stagger: Stagger::each(0.1).from(StaggerFrom::Index(2)), ease: None, delays: &[0.4, 0.2, 0.0, 0.2, 0.4], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_2_n8", config: r#"{"each":0.1,"from":2}"#, n: 8, stagger: Stagger::each(0.1).from(StaggerFrom::Index(2)), ease: None, delays: &[0.28, 0.14, 0.0, 0.14, 0.28, 0.42, 0.56, 0.7], tween_duration: 0.0 },
+    Case { id: "each_0_1_from_2_n12", config: r#"{"each":0.1,"from":2}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Index(2)), ease: None, delays: &[0.2444444, 0.1222222, 0.0, 0.1222222, 0.2444444, 0.3666667, 0.4888889, 0.6111111, 0.7333333, 0.8555556, 0.9777778, 1.1], tween_duration: 0.0 },
+    Case { id: "amount_1_from_center_n1", config: r#"{"amount":1,"from":"center"}"#, n: 1, stagger: Stagger::amount(1.0).from(StaggerFrom::Center), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_center_n2", config: r#"{"amount":1,"from":"center"}"#, n: 2, stagger: Stagger::amount(1.0).from(StaggerFrom::Center), ease: None, delays: &[0.0, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_center_n3", config: r#"{"amount":1,"from":"center"}"#, n: 3, stagger: Stagger::amount(1.0).from(StaggerFrom::Center), ease: None, delays: &[1.0, 0.0, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_center_n5", config: r#"{"amount":1,"from":"center"}"#, n: 5, stagger: Stagger::amount(1.0).from(StaggerFrom::Center), ease: None, delays: &[1.0, 0.5, 0.0, 0.5, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_center_n8", config: r#"{"amount":1,"from":"center"}"#, n: 8, stagger: Stagger::amount(1.0).from(StaggerFrom::Center), ease: None, delays: &[1.0, 0.6666667, 0.3333333, 0.0, 0.0, 0.3333333, 0.6666667, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_center_n12", config: r#"{"amount":1,"from":"center"}"#, n: 12, stagger: Stagger::amount(1.0).from(StaggerFrom::Center), ease: None, delays: &[1.0, 0.8, 0.6, 0.4, 0.2, 0.0, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_edges_n1", config: r#"{"amount":1,"from":"edges"}"#, n: 1, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: None, delays: &[1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_edges_n2", config: r#"{"amount":1,"from":"edges"}"#, n: 2, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: None, delays: &[1.0, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_edges_n3", config: r#"{"amount":1,"from":"edges"}"#, n: 3, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: None, delays: &[0.0, 1.0, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_edges_n5", config: r#"{"amount":1,"from":"edges"}"#, n: 5, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: None, delays: &[0.0, 0.5, 1.0, 0.5, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_edges_n8", config: r#"{"amount":1,"from":"edges"}"#, n: 8, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: None, delays: &[0.0, 0.3333333, 0.6666667, 1.0, 1.0, 0.6666667, 0.3333333, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_edges_n12", config: r#"{"amount":1,"from":"edges"}"#, n: 12, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: None, delays: &[0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.0, 0.8, 0.6, 0.4, 0.2, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_0_25_n1", config: r#"{"amount":1,"from":0.25}"#, n: 1, stagger: Stagger::amount(1.0).from(StaggerFrom::Ratio(0.25, 0.25)), ease: None, delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_0_25_n2", config: r#"{"amount":1,"from":0.25}"#, n: 2, stagger: Stagger::amount(1.0).from(StaggerFrom::Ratio(0.25, 0.25)), ease: None, delays: &[0.0, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_0_25_n3", config: r#"{"amount":1,"from":0.25}"#, n: 3, stagger: Stagger::amount(1.0).from(StaggerFrom::Ratio(0.25, 0.25)), ease: None, delays: &[0.0, 0.3333333, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_0_25_n5", config: r#"{"amount":1,"from":0.25}"#, n: 5, stagger: Stagger::amount(1.0).from(StaggerFrom::Ratio(0.25, 0.25)), ease: None, delays: &[0.1666667, 0.0, 0.3333333, 0.6666667, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_0_25_n8", config: r#"{"amount":1,"from":0.25}"#, n: 8, stagger: Stagger::amount(1.0).from(StaggerFrom::Ratio(0.25, 0.25)), ease: None, delays: &[0.2, 0.0, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_from_0_25_n12", config: r#"{"amount":1,"from":0.25}"#, n: 12, stagger: Stagger::amount(1.0).from(StaggerFrom::Ratio(0.25, 0.25)), ease: None, delays: &[0.25, 0.125, 0.0, 0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_ease_power2_in_n1", config: r#"{"each":0.1,"ease":"power2.in"}"#, n: 1, stagger: Stagger::each(0.1), ease: Some("power2.in"), delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_ease_power2_in_n2", config: r#"{"each":0.1,"ease":"power2.in"}"#, n: 2, stagger: Stagger::each(0.1), ease: Some("power2.in"), delays: &[0.0, 0.1], tween_duration: 0.0 },
+    Case { id: "each_0_1_ease_power2_in_n3", config: r#"{"each":0.1,"ease":"power2.in"}"#, n: 3, stagger: Stagger::each(0.1), ease: Some("power2.in"), delays: &[0.0, 0.025, 0.2], tween_duration: 0.0 },
+    Case { id: "each_0_1_ease_power2_in_n5", config: r#"{"each":0.1,"ease":"power2.in"}"#, n: 5, stagger: Stagger::each(0.1), ease: Some("power2.in"), delays: &[0.0, 0.00625, 0.05, 0.16875, 0.4], tween_duration: 0.0 },
+    Case { id: "each_0_1_ease_power2_in_n8", config: r#"{"each":0.1,"ease":"power2.in"}"#, n: 8, stagger: Stagger::each(0.1), ease: Some("power2.in"), delays: &[0.0, 0.0020408, 0.0163265, 0.055102, 0.1306122, 0.255102, 0.4408163, 0.7], tween_duration: 0.0 },
+    Case { id: "each_0_1_ease_power2_in_n12", config: r#"{"each":0.1,"ease":"power2.in"}"#, n: 12, stagger: Stagger::each(0.1), ease: Some("power2.in"), delays: &[0.0, 0.0008264, 0.0066116, 0.022314, 0.0528926, 0.1033058, 0.1785124, 0.2834711, 0.4231405, 0.6024793, 0.8264463, 1.1], tween_duration: 0.0 },
+    Case { id: "amount_2_ease_power1_out_from_center_n1", config: r#"{"amount":2,"ease":"power1.out","from":"center"}"#, n: 1, stagger: Stagger::amount(2.0).from(StaggerFrom::Center), ease: Some("power1.out"), delays: &[0.0], tween_duration: 0.0 },
+    Case { id: "amount_2_ease_power1_out_from_center_n2", config: r#"{"amount":2,"ease":"power1.out","from":"center"}"#, n: 2, stagger: Stagger::amount(2.0).from(StaggerFrom::Center), ease: Some("power1.out"), delays: &[0.0, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_2_ease_power1_out_from_center_n3", config: r#"{"amount":2,"ease":"power1.out","from":"center"}"#, n: 3, stagger: Stagger::amount(2.0).from(StaggerFrom::Center), ease: Some("power1.out"), delays: &[2.0, 0.0, 2.0], tween_duration: 0.0 },
+    Case { id: "amount_2_ease_power1_out_from_center_n5", config: r#"{"amount":2,"ease":"power1.out","from":"center"}"#, n: 5, stagger: Stagger::amount(2.0).from(StaggerFrom::Center), ease: Some("power1.out"), delays: &[2.0, 1.5, 0.0, 1.5, 2.0], tween_duration: 0.0 },
+    Case { id: "amount_2_ease_power1_out_from_center_n8", config: r#"{"amount":2,"ease":"power1.out","from":"center"}"#, n: 8, stagger: Stagger::amount(2.0).from(StaggerFrom::Center), ease: Some("power1.out"), delays: &[2.0, 1.7777778, 1.1111111, 0.0, 0.0, 1.1111111, 1.7777778, 2.0], tween_duration: 0.0 },
+    Case { id: "amount_2_ease_power1_out_from_center_n12", config: r#"{"amount":2,"ease":"power1.out","from":"center"}"#, n: 12, stagger: Stagger::amount(2.0).from(StaggerFrom::Center), ease: Some("power1.out"), delays: &[2.0, 1.92, 1.68, 1.28, 0.72, 0.0, 0.0, 0.72, 1.28, 1.68, 1.92, 2.0], tween_duration: 0.0 },
+    Case { id: "amount_1_ease_power2_in_from_edges_n1", config: r#"{"amount":1,"ease":"power2.in","from":"edges"}"#, n: 1, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: Some("power2.in"), delays: &[1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_ease_power2_in_from_edges_n2", config: r#"{"amount":1,"ease":"power2.in","from":"edges"}"#, n: 2, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: Some("power2.in"), delays: &[1.0, 1.0], tween_duration: 0.0 },
+    Case { id: "amount_1_ease_power2_in_from_edges_n3", config: r#"{"amount":1,"ease":"power2.in","from":"edges"}"#, n: 3, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: Some("power2.in"), delays: &[0.0, 1.0, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_ease_power2_in_from_edges_n5", config: r#"{"amount":1,"ease":"power2.in","from":"edges"}"#, n: 5, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: Some("power2.in"), delays: &[0.0, 0.125, 1.0, 0.125, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_ease_power2_in_from_edges_n8", config: r#"{"amount":1,"ease":"power2.in","from":"edges"}"#, n: 8, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: Some("power2.in"), delays: &[0.0, 0.037037, 0.2962963, 1.0, 1.0, 0.2962963, 0.037037, 0.0], tween_duration: 0.0 },
+    Case { id: "amount_1_ease_power2_in_from_edges_n12", config: r#"{"amount":1,"ease":"power2.in","from":"edges"}"#, n: 12, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges), ease: Some("power2.in"), delays: &[0.0, 0.008, 0.064, 0.216, 0.512, 1.0, 1.0, 0.512, 0.216, 0.064, 0.008, 0.0], tween_duration: 0.0 },
+    Case { id: "each_0_1_base_0_5_n1", config: r#"{"each":0.1,"base":0.5}"#, n: 1, stagger: Stagger::each(0.1).base(0.5), ease: None, delays: &[0.5], tween_duration: 0.0 },
+    Case { id: "each_0_1_base_0_5_n2", config: r#"{"each":0.1,"base":0.5}"#, n: 2, stagger: Stagger::each(0.1).base(0.5), ease: None, delays: &[0.5, 0.6], tween_duration: 0.0 },
+    Case { id: "each_0_1_base_0_5_n3", config: r#"{"each":0.1,"base":0.5}"#, n: 3, stagger: Stagger::each(0.1).base(0.5), ease: None, delays: &[0.5, 0.6, 0.7], tween_duration: 0.0 },
+    Case { id: "each_0_1_base_0_5_n5", config: r#"{"each":0.1,"base":0.5}"#, n: 5, stagger: Stagger::each(0.1).base(0.5), ease: None, delays: &[0.5, 0.6, 0.7, 0.8, 0.9], tween_duration: 0.0 },
+    Case { id: "each_0_1_base_0_5_n8", config: r#"{"each":0.1,"base":0.5}"#, n: 8, stagger: Stagger::each(0.1).base(0.5), ease: None, delays: &[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2], tween_duration: 0.0 },
+    Case { id: "each_0_1_base_0_5_n12", config: r#"{"each":0.1,"base":0.5}"#, n: 12, stagger: Stagger::each(0.1).base(0.5), ease: None, delays: &[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_center_axis_none_each_0_1_n12", config: r#"{"grid":[3,4],"from":"center","each":0.1}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Center).grid(3, 4), ease: None, delays: &[0.4, 0.1897591, 0.1897591, 0.4, 0.3070368, 0.0, 0.0, 0.3070368, 0.4, 0.1897591, 0.1897591, 0.4], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_center_axis_none_amount_1_n12", config: r#"{"grid":[3,4],"from":"center","amount":1}"#, n: 12, stagger: Stagger::amount(1.0).from(StaggerFrom::Center).grid(3, 4), ease: None, delays: &[1.0, 0.4743979, 0.4743979, 1.0, 0.7675919, 0.0, 0.0, 0.7675919, 1.0, 0.4743979, 0.4743979, 1.0], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_center_axis_x_each_0_1_n12", config: r#"{"grid":[3,4],"from":"center","each":0.1,"axis":"x"}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Center).grid(3, 4).axis(StaggerAxis::X), ease: None, delays: &[0.4, 0.0, 0.0, 0.4, 0.4, 0.0, 0.0, 0.4, 0.4, 0.0, 0.0, 0.4], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_center_axis_x_amount_1_n12", config: r#"{"grid":[3,4],"from":"center","amount":1,"axis":"x"}"#, n: 12, stagger: Stagger::amount(1.0).from(StaggerFrom::Center).grid(3, 4).axis(StaggerAxis::X), ease: None, delays: &[1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_center_axis_y_each_0_1_n12", config: r#"{"grid":[3,4],"from":"center","each":0.1,"axis":"y"}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Center).grid(3, 4).axis(StaggerAxis::Y), ease: None, delays: &[0.3, 0.3, 0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0.3], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_center_axis_y_amount_1_n12", config: r#"{"grid":[3,4],"from":"center","amount":1,"axis":"y"}"#, n: 12, stagger: Stagger::amount(1.0).from(StaggerFrom::Center).grid(3, 4).axis(StaggerAxis::Y), ease: None, delays: &[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], tween_duration: 0.0 },
+    Case { id: "grid_2x3_from_edges_each_0_1_n6", config: r#"{"grid":[2,3],"from":"edges","each":0.1}"#, n: 6, stagger: Stagger::each(0.1).from(StaggerFrom::Edges).grid(2, 3), ease: None, delays: &[0.0, 0.3, 0.0, 0.0, 0.3, 0.0], tween_duration: 0.0 },
+    Case { id: "grid_2x3_from_edges_amount_1_n6", config: r#"{"grid":[2,3],"from":"edges","amount":1}"#, n: 6, stagger: Stagger::amount(1.0).from(StaggerFrom::Edges).grid(2, 3), ease: None, delays: &[0.0, 1.0, 0.0, 0.0, 1.0, 0.0], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_0_each_0_1_n12", config: r#"{"grid":[3,4],"from":0,"each":0.1}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Index(0)).grid(3, 4), ease: None, delays: &[0.0, 0.11094, 0.2218801, 0.3328201, 0.11094, 0.1568929, 0.2480695, 0.3508232, 0.2218801, 0.2480695, 0.3137858, 0.4], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_end_each_0_1_n12", config: r#"{"grid":[3,4],"from":"end","each":0.1}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::End).grid(3, 4), ease: None, delays: &[0.4, 0.3147894, 0.2457802, 0.20505, 0.3451009, 0.2457802, 0.1573947, 0.0972753, 0.3147894, 0.20505, 0.0972753, 0.0], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_5_each_0_1_n12", config: r#"{"grid":[3,4],"from":5,"each":0.1}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Index(5)).grid(3, 4), ease: None, delays: &[0.2529822, 0.1788854, 0.2529822, 0.4, 0.1788854, 0.0, 0.1788854, 0.3577709, 0.2529822, 0.1788854, 0.2529822, 0.4], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_ratio_0_0_each_0_1_n12", config: r#"{"grid":[3,4],"from":[0,0],"each":0.1}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Ratio(0.0, 0.0)).grid(3, 4), ease: None, delays: &[0.0, 0.0972753, 0.20505, 0.3147894, 0.0972753, 0.1573947, 0.2457802, 0.3451009, 0.20505, 0.2457802, 0.3147894, 0.4], tween_duration: 0.0 },
+    Case { id: "grid_3x4_from_ratio_1_1_each_0_1_n12", config: r#"{"grid":[3,4],"from":[1,1],"each":0.1}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Ratio(1.0, 1.0)).grid(3, 4), ease: None, delays: &[0.4, 0.3147894, 0.2457802, 0.20505, 0.3451009, 0.2457802, 0.1573947, 0.0972753, 0.3147894, 0.20505, 0.0972753, 0.0], tween_duration: 0.0 },
+];
+
+/// Staggered tweens (duration 1): sub-tween start times by target index.
+#[rustfmt::skip]
+pub const IN_TWEEN: [Case; 6] = [
+    Case { id: "tween_stagger_each_0_1_from_center_n5", config: r#"{"each":0.1,"from":"center"}"#, n: 5, stagger: Stagger::each(0.1).from(StaggerFrom::Center), ease: None, delays: &[0.4, 0.2, 0.0, 0.2, 0.4], tween_duration: 1.4 },
+    Case { id: "tween_stagger_each_0_1_from_center_n8", config: r#"{"each":0.1,"from":"center"}"#, n: 8, stagger: Stagger::each(0.1).from(StaggerFrom::Center), ease: None, delays: &[0.7, 0.4666667, 0.2333333, 0.0, 0.0, 0.2333333, 0.4666667, 0.7], tween_duration: 1.7 },
+    Case { id: "tween_stagger_number_0_2_n5", config: r#"0.2"#, n: 5, stagger: Stagger::each(0.2), ease: None, delays: &[0.0, 0.2, 0.4, 0.6, 0.8], tween_duration: 1.8 },
+    Case { id: "tween_stagger_amount_1_n5", config: r#"{"amount":1}"#, n: 5, stagger: Stagger::amount(1.0), ease: None, delays: &[0.0, 0.25, 0.5, 0.75, 1.0], tween_duration: 2.0 },
+    Case { id: "tween_stagger_each_0_1_from_edges_ease_n8", config: r#"{"each":0.1,"from":"edges","ease":"power2.in"}"#, n: 8, stagger: Stagger::each(0.1).from(StaggerFrom::Edges), ease: Some("power2.in"), delays: &[0.0, 0.0259259, 0.2074074, 0.7, 0.7, 0.2074074, 0.0259259, 0.0], tween_duration: 1.7 },
+    Case { id: "tween_stagger_grid_3x4_center_n12", config: r#"{"each":0.1,"from":"center","grid":[3,4]}"#, n: 12, stagger: Stagger::each(0.1).from(StaggerFrom::Center).grid(3, 4), ease: None, delays: &[0.4, 0.1897591, 0.1897591, 0.4, 0.3070368, 0.0, 0.0, 0.3070368, 0.4, 0.1897591, 0.1897591, 0.4], tween_duration: 1.4 },
+];

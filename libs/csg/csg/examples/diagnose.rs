@@ -1,6 +1,6 @@
 // Validate all showcase pieces for manifoldness
 
-use makepad_csg::{dvec3, Solid};
+use makepad_csg::Solid;
 use makepad_csg_mesh::validate::validate_mesh;
 use std::f64::consts::PI;
 

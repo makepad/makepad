@@ -1934,7 +1934,7 @@ mod orientation_forensics {
 
     fn scan(name: &str) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(bytes) = std::fs::read(root.join(name)) else {
             eprintln!("{name}: asset absent — skipped");
             return;
@@ -2043,7 +2043,7 @@ mod gate_face_forensics {
     #[test]
     fn gate_dark_faces() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(bytes) = std::fs::read(root.join("gate.glb")) else {
             eprintln!("asset absent — skipped");
             return;
@@ -2129,7 +2129,7 @@ mod gate_face_forensics {
     #[test]
     fn metal_bars_pillar_slot_strips() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(bytes) = std::fs::read(root.join("gate-metal-bars.glb")) else {
             eprintln!("asset absent — skipped");
             return;
@@ -2244,7 +2244,7 @@ mod gate_quad_forensics {
     #[test]
     fn pillar_quads() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(bytes) = std::fs::read(root.join("gate.glb")) else {
             eprintln!("asset absent — skipped");
             return;
@@ -2330,7 +2330,7 @@ mod edge_continuity {
     ///   skipped.
     pub(super) fn scan(name: &str) -> (usize, f32) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(bytes) = std::fs::read(root.join(name)) else {
             eprintln!("{name}: absent");
             return (0, 0.0);
@@ -2549,7 +2549,7 @@ mod edge_continuity {
     /// Violations = (max(escape_front, escape_back) >= 0.15, mean < 0.30).
     pub(super) fn scan_open_groups(name: &str) -> usize {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(bytes) = std::fs::read(root.join(name)) else {
             eprintln!("{name}: absent");
             return 0;
@@ -2791,7 +2791,7 @@ mod edge_continuity {
         use crate::model::{StaticModel, MODEL_VERTEX_FLOATS};
         for name in ["gate.glb", "gate-metal-bars.glb"] {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+                .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
             let Ok(bytes) = std::fs::read(root.join(name)) else {
                 eprintln!("{name}: absent");
                 continue;
