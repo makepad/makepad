@@ -2321,7 +2321,7 @@ impl Cache {
         let t0 = std::time::Instant::now();
         let prog = &u.prog;
         let ncr = self.iface.len();
-        let valid = self.with_full_fps(|full| deps::Deps::valid(prog, self.cfg, full));
+        let (valid, own_late) = self.with_full_fps_and_late(|full, own_late| (deps::Deps::valid(prog, self.cfg, full), own_late.to_vec()));
         let root = self.manifest_root.unwrap_or(ncr.saturating_sub(1) as u32);
         let key = self.deps_key(root);
         let stored = key.and_then(|k| {
@@ -2354,17 +2354,17 @@ impl Cache {
         };
         // (a graph whose component ids ran far is not built over: the next one starts them again)
         let stored = stored.filter(|g| g.ids_left());
-        let clean = deps::Deps::clean_crates(prog, &self.iface_plain, stored.as_ref());
+        let clean = deps::Deps::clean_crates(prog, &self.iface_plain, &own_late, stored.as_ref());
         let mut digested = digest(&clean, &mut self.digests);
         let t_dg = t0.elapsed();
-        let built = deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, stored.as_ref());
+        let built = deps::Deps::build(prog, &self.digests, &self.iface_plain, &own_late, valid, stored.as_ref());
         let over = built.is_some() && clean.iter().any(|&c| c);
         let g = match built {
             Some(g) => g,
             None => {
                 // the alias or macro names changed: every crate is walked
                 digested += digest(&[], &mut self.digests);
-                deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch")
+                deps::Deps::build(prog, &self.digests, &self.iface_plain, &own_late, valid, None).expect("a graph built from scratch")
             }
         };
         if self.verbose {
@@ -2374,7 +2374,7 @@ impl Cache {
         }
         if over && std::env::var("MAKEPAD_RUN_DEPS_VERIFY").is_ok_and(|v| v == "1") {
             digest(&[], &mut self.digests);
-            let scratch = deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch");
+            let scratch = deps::Deps::build(prog, &self.digests, &self.iface_plain, &own_late, valid, None).expect("a graph built from scratch");
             match g.same_closures(&scratch) {
                 Ok(()) => eprintln!("makepad-run cache: item graph verified: built over the stored graph = built from scratch"),
                 Err(e) => eprintln!("makepad-run cache: item graph verify FAILED: {e}"),
@@ -3229,21 +3229,20 @@ impl Cache {
     }
 
     pub(super) fn with_full_fps<R>(&self, f: impl FnOnce(&[u128]) -> R) -> R {
+        self.with_full_fps_and_late(|full, _| f(full))
+    }
+
+    fn with_full_fps_and_late<R>(&self, f: impl FnOnce(&[u128], &[u128]) -> R) -> R {
         let late_gen = crate::sip::late_gen();
         let mut g = self.full_fps_memo.lock().unwrap_or_else(|e| e.into_inner());
         if g.0 != late_gen || g.2.len() != self.fps.len() {
             self.refresh_full_fps(&mut g, late_gen);
         }
-        f(&g.2)
+        f(&g.2, &g.1)
     }
 
     fn crate_late_fp(&self, ci: usize) -> u128 {
-        let late_gen = crate::sip::late_gen();
-        let mut g = self.full_fps_memo.lock().unwrap_or_else(|e| e.into_inner());
-        if g.0 != late_gen || g.2.len() != self.fps.len() {
-            self.refresh_full_fps(&mut g, late_gen);
-        }
-        g.1.get(ci).copied().unwrap_or(0)
+        self.with_full_fps_and_late(|_, late| late.get(ci).copied().unwrap_or(0))
     }
 
     /// A hash of crates `idents`' whole fingerprints (certificate fast path). None: one is

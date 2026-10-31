@@ -377,7 +377,7 @@ pub(crate) struct Deps {
 }
 
 const DEPS_MAGIC: &[u8; 4] = b"DEP2";
-const DEPS_VERSION: u32 = 4;
+const DEPS_VERSION: u32 = 5;
 
 fn bit(set: &[u64], c: u32) -> bool { set.get(c as usize / 64).is_some_and(|w| w >> (c % 64) & 1 == 1) }
 
@@ -628,13 +628,24 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
     // bodies'; Deps::build parses the parts the graph needs first, so the graph never depends on
     // when it is built)
     let regions = file_regions(pf);
-    // what the expansions called from within `segs` (and the expansions called from those) name;
-    // and the invocations in `segs` that have none (their names are unknown: the node is coarse)
-    let expanded = |segs: &[(u32, u32)], invoked: &mut Vec<Name>, at: &mut Vec<u32>, names: &mut Vec<Name>| {
-        for (x, y) in region_closure(&regions, segs) {
-            let t = pf.bytes(x, y);
-            scan(t, &[(0, t.len() as u32)], &[], names, &mut Vec::new());
-        }
+    // what the expansions called from within `segs` (and the expansions called from those) name,
+    // their piece digest, and the invocations in `segs` that have none (their names are unknown:
+    // the node is coarse)
+    let expanded = |segs: &[(u32, u32)], invoked: &mut Vec<Name>, at: &mut Vec<u32>, names: &mut Vec<Name>| -> u128 {
+        let mut exp = region_closure(&regions, segs);
+        let exp_piece = if exp.is_empty() {
+            0
+        } else {
+            exp.sort_unstable();
+            let mut eh = Sip128::new();
+            eh.str("dep-exp");
+            for (x, y) in exp {
+                let t = pf.bytes(x, y);
+                eh.u128(piece_hash(t, 0, &[(0, t.len() as u32)]));
+                scan(t, &[(0, t.len() as u32)], &[], names, &mut Vec::new());
+            }
+            eh.finish128()
+        };
         // an invocation's expansion is called from its path's start (at most a long path before
         // the name the scan saw)
         // an invocation inside the arguments of an expanded one is expanded within that expansion
@@ -652,6 +663,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         }
         *invoked = keep;
         *at = keep_at;
+        exp_piece
     };
     // the tokens of the file, for brace positions
     let brace_at_or_after = |from: u32, to: u32, last: bool| -> Option<u32> {
@@ -672,9 +684,13 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         let root_attrs: Vec<crate::ast::Attr> = ast.root_attrs.iter().copied().collect();
         attr_segs(pf, &root_attrs, &mut segs);
         if !segs.is_empty() {
-            let (mut names, mut invoked) = (Vec::new(), Vec::new());
-            scan(src, &segs, &[], &mut names, &mut invoked);
-            out.push(Raw { items: Vec::new(), piece: piece_hash(src, 0, &segs), names, keys: Vec::new(), invoked, invoked_at: Vec::new(), always: true, mac: false, rules: false, header: None, trait_name: None, named_head: true });
+            let (mut names, mut invoked, mut at) = (Vec::new(), Vec::new(), Vec::new());
+            scan_at(src, &segs, &[], &mut names, &mut invoked, &mut at);
+            let exp_piece = expanded(&segs, &mut invoked, &mut at, &mut names);
+            let mut ph = Sip128::new();
+            ph.u128(piece_hash(src, 0, &segs));
+            ph.u128(exp_piece);
+            out.push(Raw { items: Vec::new(), piece: ph.finish128(), names, keys: Vec::new(), invoked, invoked_at: at, always: true, mac: false, rules: false, header: None, trait_name: None, named_head: true });
         }
     }
     let items = reached(pf);
@@ -815,7 +831,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         let segs = minus(segs, &mut cut);
         let (mut names, mut invoked, mut at) = (Vec::new(), Vec::new(), Vec::new());
         scan_at(src, &segs, &skip, &mut names, &mut invoked, &mut at);
-        if !rules { expanded(&segs, &mut invoked, &mut at, &mut names); }
+        let exp_piece = if rules { 0 } else { expanded(&segs, &mut invoked, &mut at, &mut names) };
         names.sort_unstable();
         names.dedup();
         keys.sort_unstable();
@@ -823,6 +839,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         let mut ph = Sip128::new();
         ph.u128(ident(i));
         ph.u128(piece_hash(src, kind_code(&it.kind), &segs));
+        ph.u128(exp_piece);
         out.push(Raw { items: members, piece: ph.finish128(), names, keys, invoked, invoked_at: at, always, mac, rules, header, trait_name, named_head });
     }
     out
@@ -840,7 +857,7 @@ fn kind_code(k: &ItemKind) -> u32 {
 impl Deps {
     /// Per crate: what its rows are built from, besides the crates it can see (CrateRow without its
     /// own lists and always hash).
-    fn crate_inputs(prog: &Program, iface: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
+    fn crate_inputs(prog: &Program, iface: &[u128], own_late: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
         let mut files: Vec<Sip128> = (0..prog.crates.len()).map(|_| { let mut h = Sip128::new(); h.str("deps-crate-files"); h }).collect();
         let mut place = vec![0u32; prog.crates.len()];
         for f in 0..prog.boot_files.min(prog.files.len()) {
@@ -854,7 +871,11 @@ impl Deps {
             h.str(prog.file_paths.get(f).map_or("", |p| p.as_str()));
             h.u32(prog.files[f].ast.items.len() as u32);
         }
-        files.into_iter().enumerate().map(|(c, files)| {
+        files.into_iter().enumerate().map(|(c, mut files)| {
+            if let Some(&late) = own_late.get(c).filter(|&&l| l != 0) {
+                files.str("deps-crate-late");
+                files.u128(late);
+            }
             let ci = &prog.crates[c];
             let mut ident = Sip128::new();
             ident.str("crate-ident");
@@ -893,9 +914,9 @@ impl Deps {
     }
 
     /// The crates whose rows a build over `prev` takes over (`build`): their files need no digests.
-    pub(crate) fn clean_crates(prog: &Program, iface: &[u128], prev: Option<&Deps>) -> Vec<bool> {
+    pub(crate) fn clean_crates(prog: &Program, iface: &[u128], own_late: &[u128], prev: Option<&Deps>) -> Vec<bool> {
         let atomic = atomic_crates(prog, iface.len());
-        Self::clean_with(prev, &Self::crate_inputs(prog, iface, &atomic), &universes(prog))
+        Self::clean_with(prev, &Self::crate_inputs(prog, iface, own_late, &atomic), &universes(prog))
     }
 
     /// Builds the graph of the program's boot files; `iface`: the crates' interface fingerprints
@@ -906,12 +927,12 @@ impl Deps {
     /// closures and components are known. The result is the graph a build from scratch makes (the
     /// component ids aside). None: over `prev`, the names that decide clean crates' nodes (the
     /// program's alias and macro names) changed -- build without it.
-    pub(crate) fn build(prog: &Program, digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
+    pub(crate) fn build(prog: &Program, digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], own_late: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
         let t0 = std::time::Instant::now();
         let n_crates = prog.crates.len();
         let atomic = atomic_crates(prog, iface.len());
         let universe = universes(prog);
-        let mut crates = Self::crate_inputs(prog, iface, &atomic);
+        let mut crates = Self::crate_inputs(prog, iface, own_late, &atomic);
         let clean = Self::clean_with(prev, &crates, &universe);
         let prev = prev.filter(|_| clean.iter().any(|&c| c));
         let file_crate = Self::file_crates(prog);
@@ -950,7 +971,7 @@ impl Deps {
             let needs = pf.ast.items.iter().enumerate().any(|(i, it)| {
                 matches!(it.kind, ItemKind::Fn(sig, None, _) if pf.ast.fn_sig(sig).lazy_body.is_some())
                     && dg.body_span(crate::ast::ItemId(i as u32)).is_none()
-                    && { let (mut n, mut inv) = (Vec::new(), Vec::new()); scan(&pf.src, &[(it.lo, it.hi)], &[], &mut n, &mut inv); inv.iter().any(|m| m & QUIET_BIT == 0) }
+                    && { let (mut n, mut inv) = (Vec::new(), Vec::new()); scan(&pf.src, &[(it.lo, it.hi)], &[], &mut n, &mut inv); inv.iter().any(|&m| m & QUIET_BIT == 0 || late_builtin(m)) }
             });
             if needs {
                 if let Some(&c) = prog.file_crate.get(f) { let _ = pf.part(&prog.crates[c as usize].cfg); }
