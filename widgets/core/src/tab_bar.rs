@@ -680,6 +680,11 @@ impl TabBar {
         Some(ghost)
     }
 
+    /// Drops all of this bar's tab widgets, so the next draw creates them from scratch.
+    pub fn clear_tabs(&mut self) {
+        self.tabs.clear();
+    }
+
     pub fn active_tab_id(&self) -> Option<LiveId> {
         self.active_tab_id
     }
