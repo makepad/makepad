@@ -54,7 +54,7 @@ pub struct Span {
 
 thread_local! {
     /// The span of the macro invocation being expanded (`Span::call_site()`).
-    static CALL_SITE: std::cell::Cell<Span> = std::cell::Cell::new(Span::DUMMY);
+    static CALL_SITE: std::cell::Cell<Span> = const { std::cell::Cell::new(Span::DUMMY) };
 }
 
 impl Span {

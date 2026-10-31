@@ -196,7 +196,7 @@ const NUMBER_SUFFIXES: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize", "
 fn fix_base_capitalisation(suffix: &str) -> bool {
     let mut chars = suffix.chars();
     let base = match chars.next() { Some('B') => 2, Some('O') => 8, Some('X') => 16, _ => return false };
-    chars.filter(|c| *c != '_').take_while(|c| *c != 'i' && *c != 'u').all(|c| c.to_digit(base).is_some())
+    chars.filter(|c| *c != '_').take_while(|c| *c != 'i' && *c != 'u').all(|c| c.is_digit(base))
 }
 
 /// The checks rustc makes when the parser cooks a number literal (its suffix and value), for a
@@ -208,9 +208,8 @@ pub fn cooked_number(text: &[u8], float: bool) -> Result<(), String> {
 fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> Result<(), VErr> {
     let b = &src[lo..hi];
     // the digits of the literal (suffix excluded) and, for an integer, its value
-    let body_end;
     let mut radix = 10u32;
-    if b.len() >= 2 && b[0] == b'0' && matches!(b[1], b'b' | b'o' | b'x') {
+    let body_end = if b.len() >= 2 && b[0] == b'0' && matches!(b[1], b'b' | b'o' | b'x') {
         radix = match b[1] {
             b'b' => 2,
             b'o' => 8,
@@ -230,7 +229,7 @@ fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> R
         if digits == 0 {
             return err(lo, "E0768: no valid digits found for number");
         }
-        body_end = j;
+        j
     } else {
         // decimal: digits, optional fraction and exponent, then the suffix; a suffix that starts
         // with `e`/`E` is an exponent without digits
@@ -260,8 +259,8 @@ fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> R
             }
             j = k;
         }
-        body_end = j;
-    }
+        j
+    };
     // (an integer's digits are all the literal holds before the suffix)
     let suffix = std::str::from_utf8(&b[body_end..]).unwrap_or("?");
     if parse_level && !suffix.is_empty() && !NUMBER_SUFFIXES.contains(&suffix) {

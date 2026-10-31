@@ -44,17 +44,16 @@ fn block(h: &mut [u32; 8], b: &[u8]) {
 /// The SHA-256 digest of `data`.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-    let mut chunks = data.chunks_exact(64);
-    for c in &mut chunks {
+    let (chunks, rest) = data.as_chunks::<64>();
+    for c in chunks {
         block(&mut h, c);
     }
-    let rest = chunks.remainder();
     let mut tail = [0u8; 128];
     tail[..rest.len()].copy_from_slice(rest);
     tail[rest.len()] = 0x80;
     let n = if rest.len() < 56 { 64 } else { 128 };
     tail[n - 8..n].copy_from_slice(&((data.len() as u64) * 8).to_be_bytes());
-    for c in tail[..n].chunks_exact(64) {
+    for c in tail[..n].as_chunks::<64>().0 {
         block(&mut h, c);
     }
     let mut out = [0u8; 32];

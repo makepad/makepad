@@ -3,7 +3,7 @@ fn walk(d: &std::path::Path, out: &mut Vec<Vec<u8>>) {
     let Ok(rd) = std::fs::read_dir(d) else { return };
     for e in rd.flatten() {
         let p = e.path();
-        if p.is_dir() { walk(&p, out); } else if p.extension().map_or(false, |x| x == "rs") {
+        if p.is_dir() { walk(&p, out); } else if p.extension().is_some_and(|x| x == "rs") {
             let mut b = Vec::new();
             if std::fs::File::open(&p).and_then(|mut f| f.read_to_end(&mut b)).is_ok() { out.push(b); }
         }
