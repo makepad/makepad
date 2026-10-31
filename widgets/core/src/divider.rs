@@ -241,7 +241,7 @@ pub struct Divider {
     walk: Walk,
     #[layout]
     layout: Layout,
-    /// The whole widget, rule and label: what `/snap` and the pick see.
+    /// The whole widget, rule and label: what `ui find` and the pick see.
     #[redraw]
     #[area]
     area: Area,
@@ -357,6 +357,11 @@ impl Divider {
 }
 
 impl Widget for Divider {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Separator;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.push_shader_state();
         let horizontal = self.horizontal();

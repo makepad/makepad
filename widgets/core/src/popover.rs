@@ -309,6 +309,53 @@ script_mod! {
             }
         }
     }
+
+    /** A label with an (i) mark beside it that opens a hover card of
+     * explanation. Set `label.text` for the word and `content.info.text`
+     * for the explanation. */
+    mod.widgets.InfoLabel = mod.widgets.PopoverHover{
+        flow: Right
+        spacing: theme.space_1
+        align: Align{x: 0.0, y: 0.5}
+        /** the word */
+        label := Label{
+            text: "Label"
+        }
+        /** the (i) mark */
+        glyph := View{
+            width: 14
+            height: 14
+            show_bg: true
+            align: Center
+            draw_bg +: {
+                color: theme.color_outline
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.5 - 1.0)
+                    sdf.stroke(self.color, 1.0)
+                    return sdf.result
+                }
+            }
+            mark := Label{
+                padding: 0
+                text: "i"
+                draw_text +: {
+                    color: theme.color_outline
+                    text_style: theme.font_bold{
+                        font_size: 8
+                    }
+                }
+            }
+        }
+        content := View{
+            width: Fit
+            height: Fit
+            /** the explanation */
+            info := Label{
+                text: "Information"
+            }
+        }
+    }
 }
 
 /// What opens a popover.
@@ -914,6 +961,13 @@ impl Popover {
 }
 
 impl Widget for Popover {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::MODAL, true);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // The anchor, in layout, exactly as it would be without the wrapper.
         self.view.draw_walk(cx, scope, walk)?;
@@ -925,7 +979,7 @@ impl Widget for Popover {
         let Some(mut draw_list) = self.draw_list.take() else {
             return DrawStep::done();
         };
-        draw_list.begin_overlay_reuse(cx);
+        draw_list.begin_popup_overlay(cx);
         let pass = cx.current_pass_size();
         cx.begin_root_turtle(
             pass,
@@ -1324,6 +1378,13 @@ impl WidgetNode for ConfirmPopover {
 }
 
 impl Widget for ConfirmPopover {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::MODAL, true);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.popover.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {

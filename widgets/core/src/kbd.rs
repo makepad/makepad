@@ -660,6 +660,12 @@ impl Kbd {
 }
 
 impl Widget for Kbd {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::StaticText;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -801,6 +807,14 @@ impl KbdGroup {
 }
 
 impl Widget for KbdGroup {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.caps().join(&self.separator)) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -828,9 +842,7 @@ impl Widget for KbdGroup {
         self.set_shortcut(cx, v);
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.caps().join(&self.separator))
-    }
+
 }
 
 impl KbdGroupRef {
@@ -958,6 +970,14 @@ impl ShortcutHelp {
 }
 
 impl Widget for ShortcutHelp {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(self.visible_rows().to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1117,10 +1137,7 @@ impl Widget for ShortcutHelp {
         self.set_query(cx, v);
     }
 
-    /// How many rows the search leaves.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.visible_rows().to_string())
-    }
+
 }
 
 impl ShortcutHelpRef {

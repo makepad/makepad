@@ -221,15 +221,12 @@ fn ink_y(rect: Rect, font_size: f64) -> f64 {
 
 /// How far a drawn run advances the pen.
 ///
-/// This is `crate::badge::measure` without its slack. The slack is there so
-/// a box drawn AROUND a run clears the last glyph's side bearing; the runs of
-/// one label are drawn end to end, and adding it between them would open a
-/// two-pixel hole in the middle of every marked word.
+/// The slack [`crate::badge::measure`] adds is there so a box drawn AROUND a run
+/// clears the last glyph's side bearing; the runs of one label are drawn end to
+/// end, and adding it between them would open a two-pixel hole in the middle of
+/// every marked word.
 fn run_width(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
-    draw_text
-        .prepare_single_line_run(cx, text)
-        .map(|run| run.width_in_lpxs as f64)
-        .unwrap_or_else(|| text.chars().count() as f64 * draw_text.text_style.font_size as f64 * 0.62)
+    crate::badge::advance(draw_text, cx, text)
 }
 
 /// Where the search letters landed in a label, and what that alignment
@@ -955,6 +952,15 @@ impl CommandPalette {
 }
 
 impl Widget for CommandPalette {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::MODAL, true);
+        node.value = (|| -> Option<String> { Some(self.highlighted().unwrap_or_default()) })()
+            .unwrap_or_default();
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -1083,11 +1089,7 @@ impl Widget for CommandPalette {
         self.set_query(cx, v);
     }
 
-    /// The command the cursor is on, which is what the palette is being asked
-    /// for.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.highlighted().unwrap_or_default())
-    }
+
 }
 
 impl CommandPaletteRef {

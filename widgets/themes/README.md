@@ -1,8 +1,36 @@
 # Application styles
 
-These Splash files define the shared widget styles used by the window manager:
-`omarchy`, `macos`, `macos-dark`, `windows`, `windows-dark`, `windows-2000`,
-`nextstep`, `ios`, `ios-dark`, `android`, and `android-dark`.
+These Splash files are the library's own sheets, one per desktop family the
+window manager lays out: `omarchy`, `black-orange`, `macos`, `macos-dark`,
+`windows`, `windows-dark`, `windows-2000`, `nextstep`, `ios`, `ios-dark`,
+`android` and `android-dark`.
+
+## The sheet catalogue
+
+Every style is a sheet in one catalogue (`widgets/core/src/desktop_style.rs`):
+a `SheetEntry` holds its id, its label, the desktop family it lays out as
+(`DesktopStyle`: floating or tiled, shelf, title bar, icons, the WM's style
+tween), the id of its dark variant, both Splash halves embedded, the source
+directory a checkout hotloads them from, and the crate its
+`crate_resource("self:...")` resolves against. The sheets above are the
+catalogue's first entries, made with `sheet_entry!`. An app brings its own
+sheets the same way and adds them at startup, before the first style load:
+
+```rust
+static SHEETS: [SheetEntry; 1] = [makepad_widgets::sheet_entry!(
+    dir: "themes", id: "harbour", label: "Harbour",
+    family: DesktopStyle::Omarchy, dark: None, resources: makepad_widgets::widgets_dir,
+)];
+desktop_style::register(&SHEETS);
+```
+
+Every list of styles -- the pickers, the WM's style menu, the theme lab and
+store, the storybook's theme list -- reads the catalogue
+(`desktop_style::catalogue`, `picks`, `find`), so a registered sheet turns up
+everywhere without being named anywhere else. Sheets that belong to one app
+live with that app, in a crate of its own, not here. The
+checks every sheet is held to are `sheet_checks` in widgets-core (the
+`sheet-checks` feature for an app's own tests).
 
 Each style has two phases:
 
@@ -12,8 +40,37 @@ Each style has two phases:
   It can replace a widget's shader as well as its properties. Windows 2000's
   raised buttons and sunken edit fields are examples.
 
+A replaced button face still shows the colour an app paints on it: apps light
+a latch (the page they are on, a mute that is down) by setting `draw_bg.color`.
+Each `Button*` face a sheet draws goes through `self.host_over(face, m)` (`m`
+the room the sheet grew its quad by) or fills with `self.host_face(...)` or
+`self.face_fill()`. At the variant's own `color_default` these return the
+sheet's face unchanged; `sheet_checks::button_faces_take_the_host_colour`
+holds every sheet to it.
+
+## The surface material
+
+The rounded view, the panel, the button, the check box, the toggle, the
+slider and the knob carry a moulded material behind one uniform, `material`,
+whose default is the theme's `material_level`. Every stock theme leaves it at
+0, so those shaders draw exactly what they always did; a sheet built on it
+raises it in its `theme.splash` before any widget registers (1 relief, 2
+relief with rim, gloss and specular), and the `material_*` tokens beside it
+set the key light, the shoulder, the finish, the cast and inner shadows, the
+glow and the press. The shading is `mod.sdf.Material` in
+`draw/src/shader/surface.rs`, the library `ReliefView` is lit by too.
+
+A material control keeps its quad and insets its face by
+`theme.material_margin`: the room its cast shadow falls into, which a sheet
+pays for again in the control's padding. The press is one signed number,
+`material_press_depth`: past `-material_raise` a held face inverts, short of
+it the cap deepens, near zero the glow carries the state (with
+`material_ink_glow` lighting the label). The storybook's Containers >
+Material page shows all three.
+
 The loader embeds both files for installed/wasm builds. In a native source
-checkout it reads `widgets/themes/<style>/` on each selection. Edit either file
+checkout it reads the sheet's source directory (`widgets/themes/<style>/` for
+these) on each selection. Edit either file
 and choose the same style again from the WM's style picker to hotload it.
 End a generated assignment-only Splash module with `true` so its last
 assignment is evaluated as a statement.
@@ -35,10 +92,11 @@ Embedded `Splash` widgets inherit the stylesheet and reapply their existing
 widget tree in their own isolate.
 
 Applications should inherit the stock component styles and read `theme.*` for
-custom drawing. Apps using the older WM palette adapter can read
-`makepad_wm_theme::current_for_vm` during registration, or from their owning VM
-through `Cx::with_vm`. Avoid process-wide immutable palette caches: appearances
-can change while an app is open. Explicit app overrides still take precedence.
+custom drawing. Rust drawing reads `makepad_widgets::theme_tokens::color(vm, role)`
+during registration or through the owning VM with `Cx::with_vm`. Re-read these
+roles after each style reload: appearances can change while an app is open.
+The WM provides `MAKEPAD_WIDGET_STYLE` at spawn and the `makepad_style` sheet
+event for live changes; apps do not read the WM's desk palette file.
 
 The framebuffer crossfade lives in `apps/wm/src/scene.rs`. It freezes the old
 GPU render target while the live scene renders the new style; it does not take
@@ -54,8 +112,9 @@ focused/unfocused); text and ANSI cell colors remain crisp. Their foreground and
 background follow the active light/dark stylesheet without restarting the PTY.
 `color_terminal_bg` and `color_terminal_text` are separate semantic roles:
 Windows 2000 and Android use opaque black consoles, while NeXTSTEP uses white.
-The palette adapter exports them as `term.background` and `term.foreground`.
-Declare both in each style so a reload resets the previous console palette.
+Rust terminal drawing reads these tokens directly, using `color_bg_app` and
+`color_text` when the terminal-specific roles are absent. Declare both in each
+style so a reload resets the previous console palette.
 The terminal opts into `Window.body.keyboard_resize: true`; this KeyboardView
 mode reflows content above the animated keyboard instead of panning the whole
 terminal out of view. Its grid and PTY resize with the available space.
@@ -70,8 +129,8 @@ unused deeper passes are skipped. Explicit producer/consumer links preserve GPU
 ordering when pass IDs are recycled. `MAKEPAD_WM_TRACE_BLUR=1` logs stack and pass
 counts when they change; normal operation does not log each frame.
 
-In a checkout, build with `cargo build --release -p makepad-wm`, then launch
-`./target/release/wm --remote` from the checkout root.
+In a checkout, build with `cargo build --release -p makepad-app-wm`, then launch
+`./target/release/makepad-app-wm --remote` from the checkout root.
 Applications launch on demand with `cargo run --release -p <package>`; there is
 no binary collection to prepare. The app's window shows Cargo's compiling or
 build-wait stage before the process connects, then fades into its first frame.

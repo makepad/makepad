@@ -101,6 +101,11 @@ impl HostedView {
 }
 
 impl Widget for HostedView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Custom(json) = event {
             if let Some(mode) = HostedViewMode::parse(json) { self.set_mode(cx, mode); }

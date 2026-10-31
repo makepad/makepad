@@ -679,7 +679,8 @@ impl GeometryGen {
 
     // requires pos:vec2 normalized layout
     pub fn add_quad_2d(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
-        let vertex_offset = self.vertices.len() as u32;
+        // (vertices of two floats each: a second quad's indices pointed at the vertices after it)
+        let vertex_offset = (self.vertices.len() / 2) as u32;
         self.vertices.push(x1);
         self.vertices.push(y1);
         self.vertices.push(x2);

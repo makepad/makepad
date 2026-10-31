@@ -2070,6 +2070,12 @@ fn pop_marks(tf: &mut TextFlow, pushed: Pushed) {
 }
 
 impl Widget for RichTextEditor {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TextArea;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.parsed_from != self.text {
             self.doc = RichDoc::from_markup(&self.text);

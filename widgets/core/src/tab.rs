@@ -1,12 +1,13 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     event::DigitId,
     makepad_derive_widget::*,
     makepad_draw::*,
     tab_close_button::{TabCloseButton, TabCloseButtonAction},
+    tip::TipAction,
 };
 
-use crate::makepad_draw::DrawSvgGlyph;
+use crate::makepad_draw::DrawSvg;
 use crate::widget::*;
 
 script_mod! {
@@ -298,7 +299,7 @@ pub struct Tab {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_icon: DrawSvgGlyph,
+    draw_icon: DrawSvg,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -312,6 +313,11 @@ pub struct Tab {
 
     #[live]
     closeable: bool,
+    /// Icon only: the name shows as a hover tip, so a bar of icon tabs
+    /// holds more tabs and keeps its layout when the selection changes.
+    /// Give the template a `draw_icon` svg.
+    #[live]
+    compact: bool,
     #[live]
     hover: f32,
     #[live]
@@ -395,9 +401,17 @@ impl Tab {
         }
 
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text
-            .draw_walk(cx, Walk::fit(), Align::default(), name);
+        if !self.hides_name() {
+            self.draw_text
+                .draw_walk(cx, Walk::fit(), Align::default(), name);
+        }
         self.draw_bg.end(cx);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+    }
+
+    /// A compact tab shows its icon alone.
+    fn hides_name(&self) -> bool {
+        self.compact
     }
 
     pub fn area(&self) -> Area {
@@ -407,6 +421,7 @@ impl Tab {
     /// Sets the draw depth on all draw primitives of this tab.
     pub fn set_draw_depth(&mut self, depth: f32) {
         self.draw_bg.draw_depth = depth;
+        self.draw_icon.draw_depth = depth;
         self.draw_text.draw_depth = depth;
         self.close_button.set_draw_depth(depth);
     }
@@ -432,11 +447,18 @@ impl Tab {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
+                if self.hides_name() {
+                    let rect = self.draw_bg.area().rect(cx);
+                    cx.widget_action(self.uid, TipAction::HoverIn(self.name.clone(), rect));
+                }
                 cx.set_cursor(self.hover_cursor(true));
             }
             Hit::FingerHoverOut(_) => {
                 if !block_hover_out {
                     self.animator_play(cx, ids!(hover.off));
+                }
+                if self.compact {
+                    cx.widget_action(self.uid, TipAction::HoverOut);
                 }
             }
             Hit::FingerMove(e) => {
@@ -543,6 +565,21 @@ impl Tab {
 }
 
 impl Widget for Tab {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tab;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SELECT;
+        node.name.clone_from(&self.name);
+        node.states.set(
+            a11y_tree::States::SELECTED,
+            self.animator_in_state(cx, ids!(active.on)),
+        );
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
         // Driven by `TabBar::handle_event` through `handle_event_with`, which
         // needs the bar's action sink; nothing to do on the plain seam.

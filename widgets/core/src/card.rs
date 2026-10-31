@@ -26,9 +26,13 @@
 //! the `padding` a caller writes belongs to the header, body and footer
 //! together, which are laid out inside it. The band's own top corners are
 //! rounded by [`CardMedia`], which draws its children into a texture and
-//! samples that inside the curve; nothing else in the library clips a
-//! child to anything but a rectangle. The card pushes its own radius into
-//! that band every draw, so there is one radius and one place to change it.
+//! samples that inside the curve. A picture cuts itself to a corner now —
+//! an `Image` takes a radius of its own — but to ONE corner, repeated on
+//! all four sides, and the band's four are not alike: the top two follow
+//! the card and the bottom two stay square, because the body sits
+//! directly under them. Two radii in one shape is what the texture is
+//! still there for. The card pushes its own radius into that band every
+//! draw, so there is one radius and one place to change it.
 //!
 //! **What it is not.** It does not scroll: a card whose body scrolls is a
 //! panel, and the widget for that already exists. It carries no title or
@@ -46,7 +50,7 @@
 //! mean a card is not a way to make its footer bigger.
 
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     view::ViewWidgetRefExt,
@@ -454,10 +458,16 @@ script_mod! {
      *
      * It reaches the card's edges and rounds its own top corners to match,
      * by drawing its children into a texture and sampling that inside the
-     * curve — nothing else in the library clips a child to anything but a
-     * rectangle. The bottom corners stay square because the body of the
-     * card is directly under them. `border_radius` is written by the card
-     * on every draw, so a caller changes one radius, not two. */
+     * curve. The bottom corners stay square because the body of the card
+     * is directly under them, and that asymmetry is the whole reason the
+     * texture is still here. Which case is which: a band rounded the SAME
+     * on every side wants no texture at all — hand the picture the radius
+     * and it cuts itself, which is what an `Image` does with a
+     * `border_radius` of its own. A band rounded on two sides and square
+     * on the other two is not a shape one radius can ask for, and drawing
+     * the children into a texture is what draws it. `border_radius` is
+     * written by the card on every draw, so a caller changes one radius,
+     * not two. */
     mod.widgets.CardMedia = mod.widgets.CachedRoundedView{
         width: Fill
         height: Fit
@@ -690,6 +700,13 @@ impl Card {
 }
 
 impl Widget for Card {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::DISABLED, self.disabled);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();

@@ -382,6 +382,12 @@ impl WidgetNode for PdfPageView {
 }
 
 impl Widget for PdfPageView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Document;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     /// A page is paper, not a control, and saying so is what keeps a PDF
     /// draggable. The list above it scrolls under a drag, a gesture that
     /// starts from a raw press and may therefore only take a press on bare
@@ -1138,6 +1144,12 @@ pub struct PdfView {
 }
 
 impl Widget for PdfView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Document;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
     }

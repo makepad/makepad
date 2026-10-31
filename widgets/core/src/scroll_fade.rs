@@ -327,6 +327,11 @@ impl ScrollShadowView {
 }
 
 impl Widget for ScrollShadowView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, Phase::Content) {
             // The default layout is the whole point: this turtle is a window

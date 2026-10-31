@@ -117,9 +117,9 @@ script_mod! {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 // Keep it fairly sharp so the magnified green reads as glass, not frost.
-                return self.scene_texture.sample_as_bgra(safe_uv) * 0.55
-                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.30
-                    + self.mip1_texture.sample_as_bgra(safe_uv) * 0.15
+                return self.scene_texture.sample(safe_uv) * 0.55
+                    + self.mip0_texture.sample(safe_uv) * 0.30
+                    + self.mip1_texture.sample(safe_uv) * 0.15
             }
 
             // Re-create the switch underneath (track capsule + sliding knob) so the lens can refract
@@ -387,9 +387,9 @@ script_mod! {
             sample_blur: fn(uv: vec2) -> vec4 {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                return self.mip1_texture.sample_as_bgra(safe_uv) * 0.46
-                    + self.mip2_texture.sample_as_bgra(safe_uv) * 0.34
-                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.20
+                return self.mip1_texture.sample(safe_uv) * 0.46
+                    + self.mip2_texture.sample(safe_uv) * 0.34
+                    + self.mip0_texture.sample(safe_uv) * 0.20
             }
 
             pixel: fn() {
@@ -502,18 +502,18 @@ script_mod! {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 if level < 0.5 {
-                    return self.scene_texture.sample_as_bgra(safe_uv)
+                    return self.scene_texture.sample(safe_uv)
                 }
                 if level < 1.5 {
-                    return self.mip0_texture.sample_as_bgra(safe_uv)
+                    return self.mip0_texture.sample(safe_uv)
                 }
                 if level < 2.5 {
-                    return self.mip1_texture.sample_as_bgra(safe_uv)
+                    return self.mip1_texture.sample(safe_uv)
                 }
                 if level < 3.5 {
-                    return self.mip2_texture.sample_as_bgra(safe_uv)
+                    return self.mip2_texture.sample(safe_uv)
                 }
-                return self.mip3_texture.sample_as_bgra(safe_uv)
+                return self.mip3_texture.sample(safe_uv)
             }
 
             sample_blur: fn(level: float, uv: vec2) -> vec4 {
@@ -1256,6 +1256,11 @@ impl ScriptHook for GlassLayer {
 }
 
 impl Widget for GlassLayer {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
     }
@@ -1432,6 +1437,16 @@ impl GlassRadio {
 }
 
 impl Widget for GlassRadio {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Radio;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SELECT;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
@@ -1811,6 +1826,16 @@ impl GlassButton {
 }
 
 impl Widget for GlassButton {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Button;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             // Hidden mid-press, it will not hear the release: put the lens at
@@ -1976,18 +2001,14 @@ impl Widget for GlassButton {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            let str_val = vm.new_string(self.text.as_ref());
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying glass button text")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying glass button text")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);
@@ -2148,6 +2169,16 @@ impl GlassSlider {
 }
 
 impl Widget for GlassSlider {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
@@ -2444,6 +2475,16 @@ impl GlassSegmented {
 }
 
 impl Widget for GlassSegmented {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ToggleButton;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::TOGGLE;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
@@ -3305,6 +3346,12 @@ impl GlassFloatingSurface {
 }
 
 impl Widget for GlassFloatingSurface {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.shown {
             return;

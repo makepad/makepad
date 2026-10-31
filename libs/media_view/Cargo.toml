@@ -1,0 +1,19 @@
+# Media viewers: images, video, audio, meshes, PBR previews and splats, the
+# faces the Flow app (and the apps that embed its pages) show results with.
+
+[package]
+name = "makepad-media-view"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Media viewers for images, video, audio, meshes, PBR previews and splats"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["media"] }
+makepad-render = { path = "../render" }
+makepad-render-graph = { path = "../render_graph" }
+makepad-gltf = { path = "../gltf" }
+makepad-xr = { path = "../../xr" }
+makepad-audio-decode = { path = "../audio_decode" }
+makepad-zune-core = { path = "../zune/zune-core" }
+makepad-zune-png = { path = "../zune/zune-png" }

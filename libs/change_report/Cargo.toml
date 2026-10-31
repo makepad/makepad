@@ -1,0 +1,12 @@
+[package]
+name = "makepad-change-report"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Change reports: what someone changed in a Makepad app, as concepts, checked before it is sent"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-strict-json = { path = "../strict_json" }
+makepad-zip-file = { path = "../zip_file" }
+makepad-fast-inflate = { path = "../fast_inflate" }

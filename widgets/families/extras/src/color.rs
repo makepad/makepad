@@ -1,11 +1,11 @@
 //! The colour picker family: one colour, and the several ways a person
 //! reaches for it.
 //!
-//! A swatch that shows a colour and can be pressed; a hue ring; a
-//! saturation/value square; an alpha strip; a strip of palette cells; a text
-//! field that takes a colour written down and repairs itself when you leave
-//! it; and a picker panel that puts them together, either standing inline on
-//! a page or hanging off a swatch that opens it.
+//! A swatch that shows a colour and can be pressed; a hue ring, and a hue
+//! strip; a saturation/value square; an alpha strip; a strip of palette
+//! cells; a text field that takes a colour written down and repairs itself
+//! when you leave it; and a picker panel that puts them together, either
+//! standing inline on a page or hanging off a swatch that opens it.
 //!
 //! The geometry is not new. The ring's radii, the square's mapping and the
 //! two-tone pucks are carried over from the node editor's picker, constants
@@ -13,6 +13,12 @@
 //! colours the controls are DRAWN in: every one of them reads `theme.*`. The
 //! table they used to read was a single fixed dark grade with no light and no
 //! skeleton variant, so those controls stayed dark on a light page.
+//!
+//! **A number row is a track.** The six channel rows under the wheel are
+//! filled bars, and a filled bar the width of a panel column reads as a
+//! slider: a press lands the channel where it fell and the drag keeps it
+//! there. The hex line below them is the one row that is still a text field,
+//! because a colour written down is typed, not aimed at.
 //!
 //! **Hue is the state, not red-green-blue.** Every control here keeps an
 //! [`Hsva`] and derives the RGBA from it. Round-tripping through RGBA loses
@@ -30,8 +36,8 @@
 //! only to the host that filled the strip.
 
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, text_input::*, value_input::*, widget::*,
-    CxWidgetExt,
+    family_api::orphan_sweep_locks, makepad_derive_widget::*, makepad_draw::*, text_input::*,
+    value_input::*, widget::*, CxWidgetExt,
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -705,6 +711,52 @@ script_mod! {
         }
     }
 
+    // ---- the hue strip ----------------------------------------------------
+
+    mod.widgets.DrawHueStripBase = #(DrawHueStrip::script_component(vm))
+    set_type_default() do #(DrawHueStrip::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
+
+    mod.widgets.ColorHueBase = #(ColorHue::register_widget(vm))
+
+    /** The hue strip: a full turn of hue from red at the left, through
+     * green and blue, back to red at the right. The ring's job laid flat,
+     * for a panel that has a row to spare and not a square: beside a
+     * saturation/value square it makes the classic plane-and-strip picker. */
+    mod.widgets.ColorHue = set_type_default() do mod.widgets.ColorHueBase{
+        width: Fill
+        height: 14
+        /** the colour whose hue is being chosen */
+        color: #xFF0000FF
+        draw_bg +: {
+            hue: 0.0
+            /** border thickness in pixels 0..4 step 0.5 */
+            border_size: theme.size_border
+            /** corner rounding 0..24 step 0.5 */
+            border_radius: theme.radius_xs
+            border_color: theme.color_outline_variant
+            puck_dark: #x0A0A0AE6
+            puck_light: #xFFFFFFF2
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                sdf.box(0.5, 0.5, w - 1.0, h - 1.0, self.border_radius)
+                sdf.fill_keep(Pal.hsv2rgb(vec4(clamp(self.pos.x, 0.0, 1.0), 1.0, 1.0, 1.0)))
+                sdf.stroke(self.border_color, self.border_size)
+                // A bar, as on the alpha strip: the strip is shorter than a
+                // puck is wide.
+                let hx = self.hue * w
+                sdf.box(hx - 2.5, -1.0, 5.0, h + 2.0, 2.0)
+                sdf.stroke(self.puck_dark, 1.4)
+                sdf.box(hx - 1.5, 0.5, 3.0, h - 1.0, 1.5)
+                sdf.stroke(self.puck_light, 1.6)
+                return sdf.result
+            }
+        }
+    }
+
     // ---- the palette strip ------------------------------------------------
 
     mod.widgets.DrawPaletteCellBase = #(DrawPaletteCell::script_component(vm))
@@ -782,10 +834,17 @@ script_mod! {
         align: Align{y: 0.5}
     }
 
+    // A channel row is a filled bar the width of a third of the panel, and a
+    // bar that wide reads as a slider whatever it is made of. `track` makes
+    // it behave the way it reads: the press lands the channel where it fell,
+    // and the drag keeps it under the pointer. As a scrub these rows looked
+    // movable and were not — crossing 0..255 at a step per pixel is most of
+    // a screen of travel, and a press on its own did nothing at all.
     let ChannelField = mod.widgets.ValueInput{
         width: Fill
         height: 20
         precision: 0.
+        track: true
     }
 
     // ---- the picker -------------------------------------------------------
@@ -1000,6 +1059,19 @@ impl ColorSwatch {
 }
 
 impl Widget for ColorSwatch {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(format_color_hex(
+                [self.color.x, self.color.y, self.color.z, self.color.w],
+                true,
+            ))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1058,12 +1130,7 @@ impl Widget for ColorSwatch {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format_color_hex(
-            [self.color.x, self.color.y, self.color.z, self.color.w],
-            true,
-        ))
-    }
+
 }
 
 impl ColorSwatchRef {
@@ -1182,6 +1249,18 @@ impl ColorWheel {
 }
 
 impl Widget for ColorWheel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+        node.value = (|| -> Option<String> { Some(format!("hue {:.0}", self.hsva.h * 360.0)) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1263,9 +1342,7 @@ impl Widget for ColorWheel {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("hue {:.0}", self.hsva.h * 360.0))
-    }
+
 }
 
 impl ColorWheelRef {
@@ -1377,6 +1454,20 @@ impl ColorArea {
 }
 
 impl Widget for ColorArea {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(format!(
+                "s {:.0} v {:.0}",
+                self.hsva.s * 100.0,
+                self.hsva.v * 100.0
+            ))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1439,16 +1530,20 @@ impl Widget for ColorArea {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!(
-            "s {:.0} v {:.0}",
-            self.hsva.s * 100.0,
-            self.hsva.v * 100.0
-        ))
-    }
+
 }
 
 impl ColorAreaRef {
+    pub fn set_hsva(&self, cx: &mut Cx, hsva: Hsva) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_hsva(cx, hsva);
+        }
+    }
+
+    pub fn hsva(&self) -> Option<Hsva> {
+        self.borrow().map(|inner| inner.hsva())
+    }
+
     pub fn set_color(&self, cx: &mut Cx, color: Vec4f) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_color(cx, color);
@@ -1564,6 +1659,18 @@ impl ColorAlpha {
 }
 
 impl Widget for ColorAlpha {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+        node.value = (|| -> Option<String> { Some(format!("alpha {:.2}", self.hsva.a)) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1622,12 +1729,20 @@ impl Widget for ColorAlpha {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("alpha {:.2}", self.hsva.a))
-    }
+
 }
 
 impl ColorAlphaRef {
+    pub fn set_hsva(&self, cx: &mut Cx, hsva: Hsva) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_hsva(cx, hsva);
+        }
+    }
+
+    pub fn hsva(&self) -> Option<Hsva> {
+        self.borrow().map(|inner| inner.hsva())
+    }
+
     pub fn set_color(&self, cx: &mut Cx, color: Vec4f) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_color(cx, color);
@@ -1636,6 +1751,189 @@ impl ColorAlphaRef {
 
     pub fn changed(&self, actions: &Actions) -> Option<Vec4f> {
         changed_in(actions, self.widget_uid())
+    }
+
+    pub fn ended(&self, actions: &Actions) -> Option<Vec4f> {
+        ended_in(actions, self.widget_uid())
+    }
+}
+
+// ===========================================================================
+// The hue strip
+// ===========================================================================
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawHueStrip {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    pub hue: f32,
+    #[live]
+    pub border_size: f32,
+    #[live]
+    pub border_radius: f32,
+    #[live]
+    pub border_color: Vec4f,
+    #[live]
+    pub puck_dark: Vec4f,
+    #[live]
+    pub puck_light: Vec4f,
+}
+
+/// The hue of a colour, chosen along a strip. It keeps the hue it was given
+/// through greys and black (the [`Hsva`] it holds), like the ring.
+#[derive(Script, ScriptHook, Widget)]
+pub struct ColorHue {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawHueStrip,
+    #[live]
+    pub color: Vec4f,
+    #[live(true)]
+    #[visible]
+    visible: bool,
+    #[rust(Hsva::white())]
+    hsva: Hsva,
+    #[rust]
+    adopted: Vec4f,
+    #[rust]
+    dragging: bool,
+}
+
+impl ColorHue {
+    fn adopt(&mut self) {
+        if self.color != self.adopted {
+            let h = self.hsva.h;
+            self.hsva = Hsva::from_vec4(self.color);
+            // A grey has no hue of its own: it keeps the one it had.
+            if self.hsva.s <= 0.0 || self.hsva.v <= 0.0 {
+                self.hsva.h = h;
+            }
+            self.adopted = self.color;
+        }
+    }
+
+    fn store(&mut self, cx: &mut Cx) {
+        self.color = self.hsva.to_vec4();
+        self.adopted = self.color;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn hsva(&self) -> Hsva {
+        self.hsva
+    }
+
+    pub fn set_hsva(&mut self, cx: &mut Cx, hsva: Hsva) {
+        if self.hsva != hsva {
+            self.hsva = hsva;
+            self.store(cx);
+        }
+    }
+
+    fn track(&mut self, cx: &mut Cx, uid: WidgetUid, abs: DVec2, ended: bool) {
+        let rect = self.draw_bg.area().rect(cx);
+        // The right end is red again: kept just short of a full turn, so the
+        // strip's last pixel does not jump back to its first.
+        self.hsva.h = alpha_at(abs.x - rect.pos.x, rect.size.x).min(0.9999);
+        self.store(cx);
+        report(cx, uid, self.color, ended);
+    }
+}
+
+impl Widget for ColorHue {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+        node.value = (|| -> Option<String> { Some(format!("hue {:.0}", self.hsva.h * 360.0)) })()
+            .unwrap_or_default();
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+        self.adopt();
+        self.draw_bg.hue = self.hsva.h;
+        self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
+            return;
+        }
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+            }
+            Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
+                cx.set_key_focus(self.draw_bg.area());
+                self.dragging = true;
+                self.track(cx, uid, fe.abs, false);
+            }
+            Hit::FingerMove(fe) => {
+                if self.dragging {
+                    self.track(cx, uid, fe.abs, false);
+                }
+            }
+            Hit::FingerUp(fe) => {
+                if self.dragging {
+                    self.dragging = false;
+                    if fe.cancelled {
+                        report(cx, uid, self.color, true);
+                    } else {
+                        self.track(cx, uid, fe.abs, true);
+                    }
+                }
+            }
+            Hit::KeyDown(ke) => {
+                let step = if ke.modifiers.shift { 1.0 / 360.0 } else { 5.0 / 360.0 };
+                let delta = match ke.key_code {
+                    KeyCode::ArrowLeft | KeyCode::ArrowDown => -step,
+                    KeyCode::ArrowRight | KeyCode::ArrowUp => step,
+                    _ => return,
+                };
+                self.hsva.h = (self.hsva.h + delta).rem_euclid(1.0);
+                self.store(cx);
+                report(cx, uid, self.color, true);
+            }
+            _ => {}
+        }
+    }
+
+
+}
+
+impl ColorHueRef {
+    pub fn set_hsva(&self, cx: &mut Cx, hsva: Hsva) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_hsva(cx, hsva);
+        }
+    }
+
+    pub fn hsva(&self) -> Option<Hsva> {
+        self.borrow().map(|inner| inner.hsva())
+    }
+
+    pub fn changed(&self, actions: &Actions) -> Option<Vec4f> {
+        changed_in(actions, self.widget_uid())
+    }
+
+    pub fn ended(&self, actions: &Actions) -> Option<Vec4f> {
+        ended_in(actions, self.widget_uid())
     }
 }
 
@@ -1805,6 +2103,14 @@ impl PaletteStrip {
 }
 
 impl Widget for PaletteStrip {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(format!("{} colours", self.cells.len())) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1878,9 +2184,7 @@ impl Widget for PaletteStrip {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("{} colours", self.cells.len()))
-    }
+
 }
 
 impl PaletteStripRef {
@@ -1996,6 +2300,21 @@ pub struct ColorPicker {
     /// redraw, which is a repaint that never settles.
     #[rust]
     pushed: Option<Hsva>,
+    /// The area the open popover holds the pointer with (the sweep lock,
+    /// `hold_pointer`), let go when it closes.
+    #[rust]
+    locked: Option<Area>,
+}
+
+/// A picker dropped with its popover open cannot let go of the pointer
+/// itself (a drop has no `Cx`): the area is left for the window to release
+/// on the next event, as `DropSlider` and `Modal` do.
+impl Drop for ColorPicker {
+    fn drop(&mut self) {
+        if let Some(area) = self.locked {
+            orphan_sweep_locks(&[area]);
+        }
+    }
 }
 
 impl ScriptHook for ColorPicker {
@@ -2122,6 +2441,7 @@ impl ColorPicker {
         }
         self.open = true;
         self.opened_with = self.hsva;
+        self.hold_pointer(cx);
         let uid = self.widget_uid();
         cx.widget_action(uid, ColorAction::Opened);
         if let Some(list) = &self.overlay {
@@ -2142,6 +2462,9 @@ impl ColorPicker {
         }
         self.publish(cx, true);
         self.open = false;
+        if let Some(area) = self.locked.take() {
+            cx.sweep_unlock(area);
+        }
         let uid = self.widget_uid();
         cx.widget_action(uid, ColorAction::Closed);
         if let Some(list) = &self.overlay {
@@ -2150,6 +2473,26 @@ impl ColorPicker {
         // The panel was painted in an overlay above every clip; nothing else
         // knows the room it occupied is free again.
         cx.redraw_all();
+    }
+
+    /// The open popover holds the pointer (the sweep lock), as a drop-down's
+    /// menu does: `hits` answers nothing to any other area while it is up,
+    /// and `handle_event` lets go of it for the picker's own controls. A view
+    /// hands an event to its children last to first, so the controls laid
+    /// out after the swatch hear a press before the picker, and a panel that
+    /// opened below the swatch lies over exactly those: without the lock they
+    /// took every press meant for the panel. Held with the swatch's area,
+    /// drawn in the host's own list, so a host that stops drawing the picker
+    /// while it is open leaves a lock the window lets go of as stale; each
+    /// draw moves it to the swatch's fresh area, in place (`sweep_lock`
+    /// keeps an owner's entry where it is in the stack).
+    fn hold_pointer(&mut self, cx: &mut Cx) {
+        let area = self.swatch.area();
+        if !self.open || area.is_empty() {
+            return;
+        }
+        cx.sweep_lock(area);
+        self.locked = Some(area);
     }
 
     /// The open panel's rect, or an empty one. A host that gives an open
@@ -2300,6 +2643,14 @@ impl WidgetNode for ColorPicker {
 }
 
 impl Widget for ColorPicker {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(format_color_hex(self.hsva.to_rgba(), true)) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -2326,6 +2677,7 @@ impl Widget for ColorPicker {
         cx.end_turtle_with_area(&mut self.whole);
 
         if self.open {
+            self.hold_pointer(cx.cx.cx);
             let anchor = self.whole.rect(cx);
             let width = self.panel_width;
             // The height guess only decides which way the first frame opens;
@@ -2372,6 +2724,17 @@ impl Widget for ColorPicker {
             return;
         }
 
+        // The pointer lock (`hold_pointer`) is a wall against everything but
+        // the picker's own controls: let go of it for their dispatch when it
+        // is on top (an overlay opened over the panel keeps them turned
+        // away), and take it again at the end while the panel stays open.
+        let lifted = self
+            .locked
+            .filter(|area| cx.sweep_lock_area().is_some_and(|top| same_slot(top, *area)));
+        if let Some(area) = lifted {
+            cx.sweep_unlock(area);
+        }
+
         if self.popover && self.open {
             if let Event::KeyDown(ke) = event {
                 if ke.key_code == KeyCode::Escape {
@@ -2384,7 +2747,9 @@ impl Widget for ColorPicker {
                 if !self.panel_rect.contains(me.abs) && !anchor.contains(me.abs) {
                     self.close_panel(cx, false);
                     // Not a return: the press still belongs to whatever is
-                    // under it.
+                    // under it and hears it after the picker (laid out
+                    // before it); the lock is gone now. What heard it
+                    // before the picker was turned away by the lock.
                 }
             }
         }
@@ -2479,7 +2844,17 @@ impl Widget for ColorPicker {
                     if wa.widget_uid != num_uid {
                         continue;
                     }
+                    // A row is dragged now, so the two reports are two
+                    // different moments: the move is what the wheel, the
+                    // square and the hex follow, and the release is the one
+                    // a host writes down and the recent strip remembers. A
+                    // panel that ended on every move would file a hundred
+                    // commits across one drag of the R row.
                     if let ValueInputAction::Changed(v) = wa.cast::<ValueInputAction>() {
+                        self.hsva = channel_hsva(self.hsva, which, v);
+                        changed = true;
+                    }
+                    if let ValueInputTrackAction::Ended(v) = wa.cast::<ValueInputTrackAction>() {
                         self.hsva = channel_hsva(self.hsva, which, v);
                         changed = true;
                         ended = true;
@@ -2510,6 +2885,12 @@ impl Widget for ColorPicker {
                 }
             }
         }
+
+        if let Some(area) = lifted {
+            if self.open && self.locked == Some(area) {
+                cx.sweep_lock(area);
+            }
+        }
     }
 
     fn text(&self) -> String {
@@ -2522,8 +2903,21 @@ impl Widget for ColorPicker {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format_color_hex(self.hsva.to_rgba(), true))
+
+}
+
+/// Whether two handles name the same drawn slot, whatever redraw they were
+/// handed out in (the sweep lock's own notion of one owner).
+fn same_slot(a: Area, b: Area) -> bool {
+    match (a, b) {
+        (Area::Instance(a), Area::Instance(b)) => {
+            a.draw_list_id == b.draw_list_id
+                && a.draw_item_id == b.draw_item_id
+                && a.instance_offset == b.instance_offset
+        }
+        (Area::Rect(a), Area::Rect(b)) => a.draw_list_id == b.draw_list_id && a.rect_id == b.rect_id,
+        (Area::Empty, Area::Empty) => true,
+        _ => false,
     }
 }
 
@@ -2760,6 +3154,18 @@ impl WidgetNode for ColorField {
 }
 
 impl Widget for ColorField {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+        node.value = (|| -> Option<String> { Some(self.formatted()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -2864,9 +3270,7 @@ impl Widget for ColorField {
         self.commit(cx, v);
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.formatted())
-    }
+
 }
 
 impl ColorFieldRef {
@@ -3129,17 +3533,17 @@ mod pointer_capture_tests {
     const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
     const WINDOW: WindowId = WindowId(1, 1);
 
-    struct Target {
+    pub(super) struct Target {
         pass: DrawPass,
         draw_list: DrawList2d,
     }
 
     impl Target {
-        fn new(cx: &mut Cx) -> Self {
+        pub(super) fn new(cx: &mut Cx) -> Self {
             Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
         }
 
-        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+        pub(super) fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
             self.pass.set_size(cx, SIZE);
             let event = DrawEvent::default();
             let mut draw = CxDraw::new(cx, &event);
@@ -3154,7 +3558,7 @@ mod pointer_capture_tests {
         }
     }
 
-    fn press(abs: Vec2d) -> Event {
+    pub(super) fn press(abs: Vec2d) -> Event {
         Event::MouseDown(MouseDownEvent {
             abs,
             button: MouseButton::PRIMARY,
@@ -3165,7 +3569,38 @@ mod pointer_capture_tests {
         })
     }
 
-    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+    pub(super) fn moved(abs: Vec2d) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: Vec2d::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.1,
+        })
+    }
+
+    pub(super) fn release(abs: Vec2d) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 0.2,
+        })
+    }
+
+    /// With no event loop here to end a capture on the release, the area a
+    /// press captured is let go by hand, or it takes every later press.
+    pub(super) fn claimed(event: &Event) -> Area {
+        match event {
+            Event::MouseDown(e) => e.handled.get(),
+            Event::MouseMove(e) => e.handled.get(),
+            _ => Area::Empty,
+        }
+    }
+
+    pub(super) fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
         cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
     }
 
@@ -3266,5 +3701,390 @@ mod pointer_capture_tests {
         let Event::MouseDown(e) = &event else { unreachable!() };
         assert!(e.handled.get().is_empty(), "nor was it marked as spoken for");
         cx.fingers.first_mouse_button = None;
+    }
+}
+
+/// One colour, four views of it, and a hand on the number rows.
+///
+/// The rows are tracks now, so a press on one is a place to put the channel
+/// rather than the start of a scrub that never got going. What the panel owes
+/// the rest of itself is unchanged and easy to break while changing how a row
+/// is driven: every other view of the colour follows on the same frame, the
+/// hue survives a trip through grey and through black, and the panel says
+/// what it holds while the row moves and commits once when it stops.
+#[cfg(test)]
+mod channel_rows {
+    use super::pointer_capture_tests::{claimed, moved, press, release, send, Target};
+    use super::*;
+
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    pick := ColorPicker{color: #xFF0000FF}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let pick = root.widget(cx, ids!(pick));
+        assert!(!pick.is_empty(), "the scene has a picker in it");
+        (root, pick)
+    }
+
+    fn field(pick: &WidgetRef, row: LiveId, id: LiveId) -> WidgetRef {
+        pick.borrow::<ColorPicker>().unwrap().field(row, id)
+    }
+
+    fn num(pick: &WidgetRef, id: LiveId) -> WidgetRef {
+        let row = if id == live_id!(num_r) || id == live_id!(num_g) || id == live_id!(num_b) {
+            live_id!(row_rgb)
+        } else {
+            live_id!(row_hsv)
+        };
+        field(pick, row, id)
+    }
+
+    fn row_value(pick: &WidgetRef, id: LiveId) -> f64 {
+        num(pick, id)
+            .borrow::<ValueInput>()
+            .expect("the panel has that row")
+            .value()
+    }
+
+    /// A window point `t` (0..1) along a row's fill — the span the row paints
+    /// across and reads a press against.
+    fn along(cx: &Cx, pick: &WidgetRef, id: LiveId, t: f64) -> Vec2d {
+        let f = num(pick, id).area().rect(cx);
+        assert!(f.size.x > 10.0, "the row was drawn wide enough to press");
+        let (lo, hi) = crate::value_input::track_span(f.size.x);
+        dvec2(f.pos.x + lo + t * (hi - lo), f.pos.y + f.size.y * 0.5)
+    }
+
+    /// One press on a row and its release, with the capture let go by hand.
+    fn drag_row(cx: &mut Cx, root: &WidgetRef, pick: &WidgetRef, id: LiveId, t: f64) -> ActionsBuf {
+        let at = along(cx, pick, id, t);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let mut actions = send(cx, root, &down);
+        actions.extend(send(cx, root, &release(at)));
+        down.unhandle(cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        actions
+    }
+
+    fn wheel_hue(pick: &WidgetRef) -> f32 {
+        pick.borrow::<ColorPicker>()
+            .unwrap()
+            .wheel
+            .borrow::<ColorWheel>()
+            .expect("the panel has a wheel")
+            .hsva()
+            .h
+    }
+
+    fn square_sv(pick: &WidgetRef) -> (f32, f32) {
+        let inner = pick.borrow::<ColorPicker>().unwrap();
+        let area = inner.square.borrow::<ColorArea>().expect("the panel has a square");
+        (area.hsva().s, area.hsva().v)
+    }
+
+    fn hex_text(pick: &WidgetRef) -> String {
+        field(pick, live_id!(row_hex), live_id!(hex)).text()
+    }
+
+    fn said(actions: &ActionsBuf, pick: &WidgetRef) -> Vec<ColorAction> {
+        actions
+            .filter_widget_actions_cast::<ColorAction>(pick.widget_uid())
+            .collect()
+    }
+
+    /// The six number rows are tracks, and the hex line is not: a colour
+    /// written down is typed, not aimed at.
+    #[test]
+    fn the_number_rows_are_tracks_and_the_hex_row_is_a_text_field() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (_root, pick) = start(&mut cx);
+        for id in [
+            live_id!(num_r),
+            live_id!(num_g),
+            live_id!(num_b),
+            live_id!(num_h),
+            live_id!(num_s),
+            live_id!(num_v),
+        ] {
+            assert!(
+                num(&pick, id).borrow::<ValueInput>().expect("the panel has that row").track,
+                "a number row of the panel is not a track"
+            );
+        }
+        let hex = field(&pick, live_id!(row_hex), live_id!(hex));
+        assert!(hex.borrow::<TextInput>().is_some(), "the hex row stopped being a text field");
+    }
+
+    /// A move on the H row reaches the bytes, the hex, the wheel and the
+    /// square, and does it on the same frame.
+    #[test]
+    fn moving_the_hue_row_carries_the_bytes_the_hex_and_the_wheel_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 0.0, "the panel opened on red");
+        // A third of the way along 0..360 is green.
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 1.0 / 3.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 120.0);
+        assert_eq!(row_value(&pick, live_id!(num_r)), 0.0, "R never heard the hue move");
+        assert_eq!(row_value(&pick, live_id!(num_g)), 255.0);
+        assert_eq!(row_value(&pick, live_id!(num_b)), 0.0);
+        assert_eq!(hex_text(&pick), "#00ff00ff", "the hex field never heard it");
+        assert!((wheel_hue(&pick) - 1.0 / 3.0).abs() < 1e-4, "the wheel never heard it");
+    }
+
+    /// And the other way: a byte reaches H S V, the hex, the wheel and the
+    /// square.
+    #[test]
+    fn moving_a_byte_row_carries_the_hsv_rows_the_hex_and_the_wheel_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        // Half way along G: 128 of 255, which is orange at 30 degrees.
+        drag_row(&mut cx, &root, &pick, live_id!(num_g), 0.5);
+        assert_eq!(row_value(&pick, live_id!(num_g)), 128.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 30.0, "H never heard the byte move");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 100.0);
+        assert_eq!(hex_text(&pick), "#ff8000ff", "the hex field never heard it");
+        let hue = wheel_hue(&pick);
+        assert!((hue - 30.0 / 360.0).abs() < 1e-3, "the wheel never heard it: {hue}");
+        assert_eq!(square_sv(&pick), (1.0, 1.0), "the square never heard it");
+    }
+
+    /// Saturation down to nothing and back up again keeps the hue.
+    ///
+    /// The panel holds HSVA and derives the rest; a grey has no hue to read
+    /// back out of RGB, so a state kept as bytes would answer red the moment
+    /// S touched the floor, and the colour would come back red.
+    #[test]
+    fn saturation_to_zero_and_back_keeps_the_hue() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 200.0 / 360.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0);
+        drag_row(&mut cx, &root, &pick, live_id!(num_s), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_s)), 0.0);
+        assert_eq!(
+            row_value(&pick, live_id!(num_h)),
+            200.0,
+            "the hue jumped when the colour went grey"
+        );
+        drag_row(&mut cx, &root, &pick, live_id!(num_s), 1.0);
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "the hue did not come back");
+    }
+
+    /// And value down to black and back up again keeps both.
+    #[test]
+    fn value_to_zero_and_back_keeps_the_hue_and_the_saturation() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 200.0 / 360.0);
+        drag_row(&mut cx, &root, &pick, live_id!(num_v), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "black lost the hue");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0, "black lost the saturation");
+        drag_row(&mut cx, &root, &pick, live_id!(num_v), 1.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "the hue did not come back");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0, "the saturation did not come back");
+    }
+
+    /// A colour that went in as a hex comes back out of the hex field
+    /// unchanged, however far round the HSVA state it travelled.
+    #[test]
+    fn a_hex_comes_back_out_of_the_field_unchanged() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (_root, pick) = start(&mut cx);
+        for text in ["#3a7bd5ff", "#ff8000ff", "#808080ff", "#000000ff", "#ffffffff", "#01020380"] {
+            let (rgba, _) = parse_hex_color(text).expect("a hex this test wrote");
+            pick.borrow_mut::<ColorPicker>()
+                .unwrap()
+                .set_color(&mut cx, vec4(rgba[0], rgba[1], rgba[2], rgba[3]));
+            assert_eq!(hex_text(&pick), text, "the colour did not survive the round trip");
+        }
+    }
+
+    /// The panel follows the row while it moves and commits once when it
+    /// stops. A panel that ended on every move would write a hundred commits
+    /// across one drag and fill the recent strip with the way there.
+    #[test]
+    fn the_panel_follows_a_row_and_commits_once_at_the_end() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        let changes = |actions: &ActionsBuf| {
+            said(actions, &pick).iter().filter(|a| matches!(a, ColorAction::Changed(_))).count()
+        };
+        let ends = |actions: &ActionsBuf| {
+            said(actions, &pick).iter().filter(|a| matches!(a, ColorAction::Ended(_))).count()
+        };
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = along(&cx, &pick, live_id!(num_h), 0.25);
+        let down = press(at);
+        let actions = send(&mut cx, &root, &down);
+        assert_eq!(changes(&actions), 1, "the press said its colour more than once");
+        assert_eq!(ends(&actions), 0, "the press committed a gesture it had just begun");
+
+        let to = along(&cx, &pick, live_id!(num_h), 0.5);
+        let actions = send(&mut cx, &root, &moved(to));
+        assert_eq!(changes(&actions), 1, "the move said its colour more than once");
+        assert_eq!(ends(&actions), 0, "the move committed mid-drag");
+        assert_eq!(row_value(&pick, live_id!(num_h)), 180.0, "the drag did not follow");
+
+        let actions = send(&mut cx, &root, &release(to));
+        assert_eq!(ends(&actions), 1, "the release did not commit, or committed twice");
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+    }
+}
+
+/// A popover is drawn over the page, so a press on it is the panel's alone.
+///
+/// A view hands an event to its children last to first, so whatever is laid
+/// out after the swatch hears a press before the picker does. A panel that
+/// opened below its swatch lies over exactly those controls, and without
+/// the pointer held they took every press meant for it: the square never
+/// moved, and the slider or the tick under it changed instead.
+#[cfg(test)]
+mod popover_pointer {
+    use super::pointer_capture_tests::{claimed, press, release, send};
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    /// `pointer_capture_tests::Target` with an overlay, which a popover
+    /// draws its panel into.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef, WidgetRef, Target) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    pick := ColorPickerButton{color: #xFF0000FF}
+                    under := Button{width: Fill height: 560 text: "under"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let pick = root.widget(cx, ids!(pick));
+        let under = root.widget(cx, ids!(under));
+        assert!(!pick.is_empty() && !under.is_empty(), "the scene has a picker and a button");
+        (root, pick, under, target)
+    }
+
+    fn click(cx: &mut Cx, root: &WidgetRef, at: Vec2d) -> (ActionsBuf, Area) {
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let mut actions = send(cx, root, &down);
+        let taken = claimed(&down);
+        actions.extend(send(cx, root, &release(at)));
+        down.unhandle(cx, &taken);
+        cx.fingers.first_mouse_button = None;
+        (actions, taken)
+    }
+
+    fn heard(actions: &ActionsBuf, widget: &WidgetRef) -> bool {
+        actions.iter().filter_map(|a| a.as_widget_action()).any(|a| a.widget_uid == widget.widget_uid())
+    }
+
+    fn square_sv(pick: &WidgetRef) -> (f32, f32) {
+        let inner = pick.borrow::<ColorPicker>().unwrap();
+        let area = inner.square.borrow::<ColorArea>().expect("the panel has a square");
+        (area.hsva().s, area.hsva().v)
+    }
+
+    #[test]
+    fn a_press_on_a_popover_that_opened_below_is_the_pickers() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick, under, mut target) = start(&mut cx);
+        let swatch = pick.area().rect(&cx);
+        let (_, _) = click(&mut cx, &root, swatch.pos + swatch.size * 0.5);
+        assert!(pick.borrow::<ColorPicker>().unwrap().is_open(), "the swatch opened the panel");
+        // The first frame places the panel by a guess at its height, the
+        // second by its measured rect.
+        target.draw(&mut cx, &root);
+        target.draw(&mut cx, &root);
+        let panel = pick.borrow::<ColorPicker>().unwrap().panel_rect();
+        assert!(panel.pos.y >= swatch.pos.y + swatch.size.y, "the panel opened below its swatch: {panel:?}");
+        let button = under.area().rect(&cx);
+        assert!(
+            button.contains(panel.pos + panel.size * 0.5),
+            "the button lies under the panel, so a press there is a fair test"
+        );
+
+        let square = pick.borrow::<ColorPicker>().unwrap().square.area().rect(&cx);
+        assert_eq!(square_sv(&pick), (1.0, 1.0), "red to start with");
+        let (actions, taken) = click(&mut cx, &root, square.pos + square.size * 0.25);
+        assert!(!heard(&actions, &under), "the button under the panel took the press");
+        assert_ne!(taken, under.area(), "the button under the panel holds the press");
+        let (s, v) = square_sv(&pick);
+        assert!(s < 0.5 && v > 0.5, "the square never moved: s {s} v {v}");
+        assert!(pick.borrow::<ColorPicker>().unwrap().is_open(), "a press on the panel closed it");
+
+        // A press beside the panel and the swatch closes it, and lets the
+        // pointer go: the next press on the button is the button's.
+        let beside = dvec2(button.pos.x + button.size.x - 4.0, button.pos.y + button.size.y - 4.0);
+        assert!(!panel.contains(beside));
+        click(&mut cx, &root, beside);
+        assert!(!pick.borrow::<ColorPicker>().unwrap().is_open(), "a press beside the panel closes it");
+        assert_eq!(cx.sweep_lock_area(), None, "the closed panel gives the pointer back");
+        target.draw(&mut cx, &root);
+        let (actions, _) = click(&mut cx, &root, beside);
+        assert!(heard(&actions, &under), "the button takes a press once the panel is shut");
     }
 }

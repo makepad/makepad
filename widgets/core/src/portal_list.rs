@@ -1,3 +1,4 @@
+use crate::scan::ScanSpawned;
 use {
     crate::{
         animator::AnimatorImpl,
@@ -918,7 +919,7 @@ pub struct PortalList {
     #[live(false)]
     keep_invisible: bool,
     #[live(true)]
-    skip_widget_tree_search: bool,
+    search_scope: bool,
 
     #[rust]
     draw_state: DrawStateWrap<ListDrawState>,
@@ -995,6 +996,10 @@ pub struct PortalList {
     // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
     #[rust]
     templates: HashMap<LiveId, ScriptObjectRef>,
+    /// A collect run's variants of this list (its `scan:` list, else every
+    /// template), drawn with it until the run ends (see `crate::scan`).
+    #[rust]
+    scan_spawned: ScanSpawned,
     #[rust]
     items: ComponentMap<usize, WidgetItem>,
     #[rust]
@@ -1028,6 +1033,10 @@ pub struct PortalList {
     /// Auto-scroll state during selection
     #[rust]
     select_scroll_state: Option<SelectScrollState>,
+    /// A double- or triple-click selected this range (a word, a whole
+    /// entry): a drag from it keeps it whole and extends past it.
+    #[rust]
+    select_unit: Option<((usize, usize), (usize, usize))>,
 
     // Pixel-based scrollbar support
     /// Height tree for O(log n) scroll position lookups
@@ -1069,7 +1078,7 @@ impl ScriptHook for PortalList {
                             if let Some(template_obj) = kv.value.as_object() {
                                 // Root the template object so it survives GC
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }
@@ -1102,6 +1111,13 @@ impl ScriptHook for PortalList {
 }
 
 impl PortalList {
+    /// Whether this list was scrolling when the most recent finger hit
+    /// occurred -- a press that stopped a coast, which the list keeps
+    /// from its rows, so nothing on them has had it.
+    pub fn was_scrolling(&self) -> bool {
+        self.was_scrolling
+    }
+
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         // The outer turtle wraps the inner item turtle (Fill cross-axis, Fit
         // main-axis). If we let `self.layout.align` apply here, a non-zero
@@ -1536,7 +1552,7 @@ impl PortalList {
         cx.end_turtle_with_area(&mut self.area);
         self.visible_items = visible_items;
         self.last_visible_id = last_visible_id;
-    
+
         // The coast is over the instant the list is drawn at the edge it was headed
         // toward; the rest of the OS stream (which can outlive the edge by a second
         // or more) must not keep moving it. A bouncing edge takes the remaining
@@ -1952,6 +1968,40 @@ impl PortalList {
         entry_id: usize,
         template: LiveId,
     ) -> (WidgetRef, bool) {
+        let (widget, existed) = self.item_with_existed_raw(cx, entry_id, template);
+        // A new or recycled row takes this entry's part of the selection
+        // (none, part or all), never what its widget showed before.
+        if !existed && self.selectable {
+            self.apply_selection_to(entry_id, &widget);
+        }
+        (widget, existed)
+    }
+
+    fn apply_selection_to(&self, item_id: usize, widget: &WidgetRef) {
+        let Some((start, end)) = self.get_selection_range() else {
+            widget.selection_clear();
+            return;
+        };
+        let len = widget.selection_text_len();
+        if item_id < start.0 || item_id > end.0 {
+            widget.selection_clear();
+        } else if item_id == start.0 && item_id == end.0 {
+            widget.selection_set(start.1.min(len), end.1.min(len));
+        } else if item_id == start.0 {
+            widget.selection_set(start.1.min(len), len);
+        } else if item_id == end.0 {
+            widget.selection_set(0, end.1.min(len));
+        } else {
+            widget.selection_select_all();
+        }
+    }
+
+    fn item_with_existed_raw(
+        &mut self,
+        cx: &mut Cx,
+        entry_id: usize,
+        template: LiveId,
+    ) -> (WidgetRef, bool) {
         use std::collections::hash_map::Entry;
 
         if let Some(template_ref) = self.templates.get(&template) {
@@ -2063,6 +2113,36 @@ impl PortalList {
     /// This excludes widgets in the reusable pool.
     pub fn items(&self) -> &ComponentMap<usize, WidgetItem> {
         &self.items
+    }
+
+    /// Move one item's ink after the list has laid it out: `offset` slides
+    /// it, `lift` raises it out of the paint order so it draws over the
+    /// items the list painted after it. `false` when that entry drew
+    /// nothing this pass.
+    ///
+    /// For a list that carries a row under a pointer. The list's own layout
+    /// knows nothing of it: this runs once the draw pass is done, the item
+    /// ranges are still the ones this pass recorded, and the next pass
+    /// starts from an untouched list. The areas move with the ink, so an
+    /// offset item hit-tests where it is drawn — a caller that needs the
+    /// unmoved geometry takes it before it calls this.
+    pub fn offset_drawn_item(
+        &self,
+        cx: &mut Cx2d,
+        entry_id: usize,
+        offset: DVec2,
+        lift: f32,
+    ) -> bool {
+        let Some(item) = self.draw_align_list.iter().find(|item| item.index == entry_id) else {
+            return false;
+        };
+        if offset.x != 0.0 || offset.y != 0.0 {
+            cx.shift_align_range(&item.align_range, offset);
+        }
+        if lift != 0.0 {
+            cx.lift_align_range(&item.align_range, lift);
+        }
+        true
     }
 
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
@@ -2308,7 +2388,10 @@ impl PortalList {
     /// rubber-band overshoot, and any OS momentum stream — returning the list to its
     /// resting state. Explicit navigation (keyboard, programmatic scrolls) calls this
     /// first, so no leftover motion resumes from wherever the viewport lands.
-    fn stop_all_scroll_motion(&mut self) {
+    /// Give up every scroll this list has in flight, the drag a press just
+    /// began included: for a widget built on this one whose own gesture
+    /// takes a press over once the rows have had it.
+    pub(crate) fn stop_all_scroll_motion(&mut self) {
         self.scroll_state = ScrollState::Stopped;
         self.momentum = MomentumStream::Idle;
         self.bounce_overshoot = 0.0;
@@ -3046,51 +3129,134 @@ impl PortalList {
     }
 
     fn get_selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
-        let anchor = self.selection_anchor?;
-        let cursor = self.selection_cursor?;
-
-        // Sort by item_id first, then by char_index
-        if anchor.0 < cursor.0 || (anchor.0 == cursor.0 && anchor.1 <= cursor.1) {
-            Some((anchor, cursor))
-        } else {
-            Some((cursor, anchor))
-        }
+        selection_range(self.selection_anchor, self.selection_cursor)
     }
+}
+
+/// The selection between `anchor` and `cursor` (item, byte index), in
+/// reading order.
+fn selection_range(
+    anchor: Option<(usize, usize)>,
+    cursor: Option<(usize, usize)>,
+) -> Option<((usize, usize), (usize, usize))> {
+    let anchor = anchor?;
+    let cursor = cursor?;
+    // Reading order: by entry, then by index in it.
+    Some(if anchor <= cursor { (anchor, cursor) } else { (cursor, anchor) })
+}
+
+/// A drag that started on a double/triple-click unit keeps the unit whole:
+/// the anchor is the unit's far end from the pointer.
+fn extend_from_unit(
+    unit: Option<((usize, usize), (usize, usize))>,
+    anchor: Option<(usize, usize)>,
+    at: (usize, usize),
+) -> (Option<(usize, usize)>, (usize, usize)) {
+    match unit {
+        Some((start, end)) if at < start => (Some(end), at),
+        Some((start, end)) if at > end => (Some(start), at),
+        Some((start, end)) => (Some(start), end),
+        None => (anchor, at),
+    }
+}
+
+/// The word around byte `at` of `text`: a run of letters, digits and `_`,
+/// else a run of whitespace, else the one character there. `at` is a caret
+/// position (the nearest character boundary to the pointer), so a word
+/// ending right there is the word clicked.
+fn word_bounds(text: &str, at: usize) -> (usize, usize) {
+    let mut at = at.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    let Some(c) = text[at..].chars().next().or_else(|| text[..at].chars().next_back()) else {
+        return (0, 0);
+    };
+    if at == text.len() {
+        at -= c.len_utf8();
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let class = |x: char| if word(x) { 0 } else if x.is_whitespace() { 1 } else { 2 };
+    let (at, c) = match text[..at].chars().next_back() {
+        Some(prev) if !word(c) && word(prev) => (at - prev.len_utf8(), prev),
+        _ => (at, c),
+    };
+    let k = class(c);
+    if k == 2 {
+        return (at, at + c.len_utf8());
+    }
+    let start = text[..at].char_indices().rev().take_while(|(_, x)| class(*x) == k).last().map_or(at, |(i, _)| i);
+    let end = text[at..].char_indices().find(|(_, x)| class(*x) != k).map_or(text.len(), |(i, _)| at + i);
+    (start, end)
+}
+
+#[cfg(test)]
+mod selection_unit_tests {
+    use super::{extend_from_unit, selection_range, word_bounds};
+
+    #[test]
+    fn words_whitespace_and_punctuation() {
+        let t = "read apps/code/src/main.rs:1-80";
+        assert_eq!(word_bounds(t, 1), (0, 4));
+        // A caret right after a word is on that word.
+        assert_eq!(word_bounds(t, 4), (0, 4));
+        assert_eq!(word_bounds(t, 6), (5, 9));
+        assert_eq!(word_bounds(t, 9), (5, 9));
+        assert_eq!(word_bounds(t, 10), (10, 14));
+        assert_eq!(word_bounds("a  b", 2), (1, 3));
+        assert_eq!(word_bounds("x->y", 2), (2, 3));
+        assert_eq!(word_bounds(t, t.len()), (29, 31));
+        assert_eq!(word_bounds("", 0), (0, 0));
+        assert_eq!(word_bounds("héllo wörld", 8), (7, 13));
+    }
+
+    #[test]
+    fn ranges_read_in_order_and_units_stay_whole() {
+        assert_eq!(selection_range(Some((5, 3)), Some((2, 9))), Some(((2, 9), (5, 3))));
+        assert_eq!(selection_range(Some((4, 9)), Some((4, 2))), Some(((4, 2), (4, 9))));
+        assert_eq!(selection_range(None, Some((1, 1))), None);
+        let word = Some(((3, 5), (3, 9)));
+        assert_eq!(extend_from_unit(word, Some((3, 5)), (6, 2)), (Some((3, 5)), (6, 2)));
+        assert_eq!(extend_from_unit(word, Some((3, 5)), (1, 0)), (Some((3, 9)), (1, 0)));
+        assert_eq!(extend_from_unit(word, Some((3, 5)), (3, 7)), (Some((3, 5)), (3, 9)));
+        assert_eq!(extend_from_unit(None, Some((2, 2)), (4, 4)), (Some((2, 2)), (4, 4)));
+    }
+}
+
+impl PortalList {
 
     /// Collect selected text from all items in the selection range
     pub fn get_selected_text(&self) -> String {
+        self.selected_text_with(&|_| None)
+    }
+
+    /// The selected text, one line per entry; `undrawn` gives the plain
+    /// text of an entry that has no widget right now (scrolled away), or
+    /// `None` to leave it out.
+    pub fn selected_text_with(&self, undrawn: &dyn Fn(usize) -> Option<String>) -> String {
         let Some((start, end)) = self.get_selection_range() else {
             return String::new();
         };
-
-        let mut result = String::new();
-
-        // Iterate through items in order
+        let mut parts: Vec<String> = Vec::new();
         for item_id in start.0..=end.0 {
-            if let Some(item) = self.items.get(&item_id) {
-                let text = if item_id == start.0 && item_id == end.0 {
-                    // Single item selection
-                    item.widget.selection_get_text_for_range(start.1, end.1)
-                } else if item_id == start.0 {
-                    // First item - from start char to end
-                    item.widget
-                        .selection_get_text_for_range(start.1, item.widget.selection_text_len())
-                } else if item_id == end.0 {
-                    // Last item - from beginning to end char
-                    item.widget.selection_get_text_for_range(0, end.1)
-                } else {
-                    // Middle item - full text
-                    item.widget.selection_get_full_text()
-                };
-
-                if !result.is_empty() && !text.is_empty() {
-                    result.push('\n');
+            let text = match self.items.get(&item_id) {
+                Some(item) => {
+                    let len = item.widget.selection_text_len();
+                    let a = if item_id == start.0 { start.1.min(len) } else { 0 };
+                    let b = if item_id == end.0 { end.1.min(len) } else { len };
+                    if a == 0 && b == len {
+                        item.widget.selection_get_full_text()
+                    } else {
+                        item.widget.selection_get_text_for_range(a, b)
+                    }
                 }
-                result.push_str(&text);
+                None => undrawn(item_id).unwrap_or_default(),
+            };
+            if !text.is_empty() {
+                parts.push(text);
             }
         }
-
-        result
+        parts.join("\n")
     }
 
     fn selection_clipboard_rect(&self, cx: &Cx) -> Rect {
@@ -3123,49 +3289,32 @@ impl PortalList {
         out.unwrap_or_else(|| self.area.rect(cx))
     }
 
-    fn select_all_visible(&mut self, cx: &mut Cx) {
-        let Some((&first_id, _)) = self.items.iter().min_by_key(|(id, _)| *id) else {
-            return;
+    /// Every entry of the list, drawn or not: rows drawn later show it, and
+    /// a copy asks the owner for the text of rows never drawn
+    /// (`selected_text_with`).
+    fn select_all(&mut self, cx: &mut Cx) {
+        let first = self.range_start;
+        let last = if self.range_end == usize::MAX {
+            self.items.keys().copied().max().unwrap_or(first)
+        } else {
+            self.range_end.saturating_sub(1).max(first)
         };
-        let Some((&last_id, last_item)) = self.items.iter().max_by_key(|(id, _)| *id) else {
-            return;
-        };
-
-        self.selection_anchor = Some((first_id, 0));
-        self.selection_cursor = Some((last_id, last_item.widget.selection_text_len()));
+        self.selection_anchor = Some((first, 0));
+        self.selection_cursor = Some((last, usize::MAX));
         self.update_item_selections(cx);
         self.area.redraw(cx);
     }
 
-    /// Update selection visuals on TextFlow items based on current selection state
     fn update_item_selections(&mut self, cx: &mut Cx) {
-        let Some((start, end)) = self.get_selection_range() else {
+        if self.get_selection_range().is_none() {
             return;
-        };
+        }
         for (item_id, item) in self.items.iter() {
-            let item_id = *item_id;
-            if item_id < start.0 || item_id > end.0 {
-                // Not in selection range
-                item.widget.selection_clear();
-            } else if item_id == start.0 && item_id == end.0 {
-                // Single item selection
-                item.widget.selection_set(start.1, end.1);
-            } else if item_id == start.0 {
-                // First item - from start char to end of text
-                let len = item.widget.selection_text_len();
-                item.widget.selection_set(start.1, len);
-            } else if item_id == end.0 {
-                // Last item - from beginning to end char
-                item.widget.selection_set(0, end.1);
-            } else {
-                // Middle item - select all
-                item.widget.selection_select_all();
-            }
+            self.apply_selection_to(*item_id, &item.widget);
             // Required for cached item templates (e.g. View with new_batch),
             // where selection mutations do not automatically invalidate draw caches.
             item.widget.redraw(cx);
         }
-
         self.area.redraw(cx);
     }
 
@@ -3222,8 +3371,8 @@ impl WidgetNode for PortalList {
         true
     }
 
-    fn skip_widget_tree_search(&self) -> bool {
-        self.skip_widget_tree_search
+    fn search_scope(&self) -> bool {
+        self.search_scope
     }
 
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
@@ -3234,6 +3383,83 @@ impl WidgetNode for PortalList {
 }
 
 impl Widget for PortalList {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        if action.action == a11y_tree::Actions::SCROLL {
+            let a11y_tree::ActionArg::Scroll(x, y) = action.arg else {
+                return a11y_tree::ActionResult::Unsupported;
+            };
+            let delta = if self.vec_index == Vec2Index::X { x } else { y } as f64;
+            if !delta.is_finite() {
+                return a11y_tree::ActionResult::Unsupported;
+            }
+            self.stop_all_scroll_motion();
+            self.delta_top_scroll(cx, -delta, true, false, 0.0, false, true);
+            self.redraw(cx);
+            return a11y_tree::ActionResult::Handled;
+        }
+        if action.action != a11y_tree::Actions::SCROLL_INTO_VIEW {
+            return a11y_tree::ActionResult::Unhandled;
+        }
+        let a11y_tree::ActionArg::Number(index) = action.arg else {
+            return a11y_tree::ActionResult::Unsupported;
+        };
+        if !index.is_finite()
+            || index.fract() != 0.0
+            || index < self.range_start as f64
+            || index >= self.range_end as f64
+        {
+            return a11y_tree::ActionResult::Unsupported;
+        }
+        self.set_first_id_and_scroll(index as usize, 0.0);
+        self.redraw(cx);
+        a11y_tree::ActionResult::Handled
+    }
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        for (index, item) in self.items.iter() {
+            if !item.widget.area().is_valid(cx) {
+                continue;
+            }
+            out.push((
+                *index as u64,
+                None,
+                a11y_tree::Node {
+                    id: a11y_tree::NodeId::widget(item.widget.widget_uid().0),
+                    role: a11y_tree::Role::ListItem,
+                    pos_in_set: index.saturating_sub(self.range_start).saturating_add(1) as u32,
+                    set_size: u32::try_from(self.range_end.saturating_sub(self.range_start))
+                        .unwrap_or(u32::MAX),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.set_size =
+            u32::try_from(self.range_end.saturating_sub(self.range_start)).unwrap_or(u32::MAX);
+        node.actions = a11y_tree::Actions::SCROLL_INTO_VIEW | a11y_tree::Actions::SCROLL;
+    }
+
+    fn clips_content(&self) -> bool {
+        true
+    }
+
+    /// Spawns the rows it can show: its `scan:` list, else every template.
+    fn scan(&mut self, cx: &mut Cx, scan: &ScanEvent, scope: &mut Scope) {
+        let mut templates: Vec<(LiveId, ScriptObject)> = self.templates.iter().map(|(id, t)| (*id, t.as_object())).collect();
+        templates.sort_by_key(|(id, _)| id.0);
+        let source = self.source.as_object();
+        self.scan_spawned.spawn(cx, scan, scope, source, &templates);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 
@@ -3884,7 +4110,7 @@ impl Widget for PortalList {
                     }
                     KeyCode::KeyA => {
                         if self.selectable && ke.modifiers.is_primary() {
-                            self.select_all_visible(cx);
+                            self.select_all(cx);
                             let selection_rect = self.selection_clipboard_rect(cx);
                             cx.show_clipboard_actions(true, selection_rect, cx.keyboard_shift);
                         }
@@ -3984,8 +4210,32 @@ impl Widget for PortalList {
                             if fe.device.is_touch() {
                                 cx.hide_clipboard_actions();
                             }
-                            self.selection_anchor = Some((item_id, char_idx));
-                            self.selection_cursor = Some((item_id, char_idx));
+                            // Shift extends what is selected; a double click
+                            // takes the word, a triple click the whole entry
+                            // (a message, a tool line); a press starts afresh.
+                            let text = || self.items.get(&item_id).map(|i| i.widget.selection_get_full_text()).unwrap_or_default();
+                            let unit = match fe.tap_count {
+                                2 => {
+                                    let (a, b) = word_bounds(&text(), char_idx);
+                                    Some(((item_id, a), (item_id, b)))
+                                }
+                                n if n >= 3 => Some(((item_id, 0), (item_id, text().len()))),
+                                _ => None,
+                            };
+                            self.select_unit = unit;
+                            match unit {
+                                Some((a, b)) => {
+                                    self.selection_anchor = Some(a);
+                                    self.selection_cursor = Some(b);
+                                }
+                                None if fe.modifiers.shift && self.selection_anchor.is_some() => {
+                                    self.selection_cursor = Some((item_id, char_idx));
+                                }
+                                None => {
+                                    self.selection_anchor = Some((item_id, char_idx));
+                                    self.selection_cursor = Some((item_id, char_idx));
+                                }
+                            }
                             self.is_selecting = true;
                             self.select_scroll_state = Some(SelectScrollState {
                                 next_frame: cx.new_next_frame(),
@@ -3994,7 +4244,10 @@ impl Widget for PortalList {
                             self.update_item_selections(cx);
                         }
                     } else if press_starts_drag_scroll(
-                        self.drag_scrolling && (!fe.device.is_mouse() || cx.fingers.can_mouse_drag_scroll()),
+                        // On a selectable list the mouse selects; only touch drags it.
+                        self.drag_scrolling
+                            && !(self.selectable && !fe.device.is_touch())
+                            && (!fe.device.is_mouse() || cx.fingers.can_mouse_drag_scroll()),
                         fe.is_primary_hit(),
                         cx.is_scrolling_allowed_within(&self.area),
                         fe.device.is_touch(),
@@ -4056,8 +4309,10 @@ impl Widget for PortalList {
 
                         // Update cursor position
                         let hit = self.hit_test_selection(cx, e.abs);
-                        if let Some((item_id, char_idx)) = hit {
-                            self.selection_cursor = Some((item_id, char_idx));
+                        if let Some(at) = hit {
+                            let (anchor, cursor) = extend_from_unit(self.select_unit, self.selection_anchor, at);
+                            self.selection_anchor = anchor;
+                            self.selection_cursor = Some(cursor);
                             self.update_item_selections(cx);
                         }
                     } else {
@@ -4353,8 +4608,9 @@ impl Widget for PortalList {
                     }
                 }
                 Hit::TextCopy(tc) => {
-                    // Handle copy when selectable
-                    if self.selectable && self.has_selection() {
+                    // Handle copy when selectable (unless the list's owner
+                    // already answered with the text of undrawn rows)
+                    if self.selectable && self.has_selection() && tc.response.borrow().is_none() {
                         let text = self.get_selected_text();
                         if !text.is_empty() {
                             *tc.response.borrow_mut() = Some(text);
@@ -4375,12 +4631,13 @@ impl Widget for PortalList {
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
             return DrawStep::make_step();
         }
         if self.draw_state.get().is_some() {
+            self.scan_spawned.draw(cx, scope);
             self.end(cx);
             self.draw_state.end();
         }
@@ -4389,6 +4646,30 @@ impl Widget for PortalList {
 }
 
 impl PortalListRef {
+    /// Part of the list is selected.
+    pub fn has_selection(&self) -> bool {
+        self.borrow().is_some_and(|list| list.has_selection())
+    }
+
+    /// The selected text; `undrawn` supplies entries with no widget now.
+    pub fn selected_text_with(&self, undrawn: &dyn Fn(usize) -> Option<String>) -> String {
+        self.borrow().map_or(String::new(), |list| list.selected_text_with(undrawn))
+    }
+
+    /// The entry whose drawn row is under `abs`, if any.
+    pub fn item_at(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
+        let list = self.borrow()?;
+        list.items
+            .iter()
+            .find(|(_, item)| item.widget.area().clipped_rect(cx).contains(abs))
+            .map(|(id, _)| *id)
+    }
+
+    /// The selected entry range, first and last (inclusive).
+    pub fn selected_entries(&self) -> Option<(usize, usize)> {
+        self.borrow().and_then(|list| list.get_selection_range().map(|(a, b)| (a.0, b.0)))
+    }
+
     /// See [`PortalList::set_skipped_ranges()`].
     pub fn set_skipped_ranges(&self, ranges: &[Range<usize>]) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -4465,7 +4746,7 @@ impl PortalListRef {
 
     /// Returns whether this PortalList was scrolling when the most recent finger hit occurred.
     pub fn was_scrolling(&self) -> bool {
-        self.borrow().is_some_and(|inner| inner.was_scrolling)
+        self.borrow().is_some_and(|inner| inner.was_scrolling())
     }
 
     /// Returns whether the given `actions` contain an action indicating that this PortalList
@@ -5764,6 +6045,97 @@ mod tests {
         assert!(!cx.fingers.any_areas_captured());
         });
     }
+
+    /// A selectable list of three kinds of row: a bare label, a row of two
+    /// labels, a column of two. A mouse drag from the first row into the
+    /// third selects across all of them (and never scrolls), and a copy
+    /// gives their text, rows on their own lines, a row's labels joined by a
+    /// space and a column's by a newline. Cmd+A then takes every row.
+    #[test]
+    fn a_mouse_drag_selects_across_rows_of_labels_and_copies_their_text() {
+        let mut cx = test_cx();
+        let cx: &mut Cx = &mut cx;
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill height: Fill flow: Down
+                    list := PortalList{
+                        width: Fill height: Fill flow: Down
+                        selectable: true
+                        Plain := Label{width: Fill text: "first row"}
+                        Pair := View{width: Fill height: Fit flow: Right
+                            a := Label{text: "left"}
+                            b := Label{text: "right"}
+                        }
+                        Column := View{width: Fill height: Fit flow: Down
+                            a := Label{text: "top"}
+                            b := Label{text: "bottom"}
+                        }
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let pass = DrawPass::new(cx);
+        let mut draw_list = DrawList2d::new(cx);
+        let mut draw = |cx: &mut Cx| {
+            pass.set_size(cx, PANE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(PANE, Layout::flow_down());
+            let mut scope = Scope::empty();
+            while let Some(step) = root.draw_walk(&mut cx2d, &mut scope, Walk::fill()).step() {
+                if let Some(mut list) = step.borrow_mut::<PortalList>() {
+                    list.set_item_range(&mut cx2d, 0, 3);
+                    while let Some(row) = list.next_visible_item(&mut cx2d) {
+                        let Some(&template) = [id!(Plain), id!(Pair), id!(Column)].get(row) else { continue };
+                        let item = list.item(&mut cx2d, row, template);
+                        item.draw_all(&mut cx2d, &mut Scope::empty());
+                    }
+                }
+            }
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        };
+        for _ in 0..3 {
+            draw(cx);
+        }
+        let list = root.portal_list(cx, ids!(list));
+        let row_rect = |cx: &Cx, row: usize| list.borrow().unwrap().items.get(&row).expect("row drawn").widget.area().rect(cx);
+        let first = row_rect(cx, 0);
+        let last = row_rect(cx, 2);
+        assert!(first.size.y > 0.0 && last.size.y > 0.0, "rows not laid out");
+        let start = first.pos + dvec2(1.0, first.size.y * 0.5);
+        let end = last.pos + last.size - dvec2(1.0, 1.0);
+        let win = WindowId(1, 1);
+        let send = |cx: &mut Cx, e: Event| {
+            root.handle_event(cx, &e, &mut Scope::empty());
+        };
+        // The platform marks the button held for the drag, as its loop does.
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, win));
+        send(cx, Event::MouseDown(MouseDownEvent { abs: start, button: MouseButton::PRIMARY, window_id: win, modifiers: KeyModifiers::default(), handled: Cell::new(Area::Empty), time: 1.0 }));
+        for k in 1..=8 {
+            let at = start + (end - start) * (k as f64 / 8.0);
+            send(cx, Event::MouseMove(MouseMoveEvent { abs: at, lock_delta: Vec2d::default(), window_id: win, modifiers: KeyModifiers::default(), time: 1.0 + k as f64 * 0.02, handled: Cell::new(Area::Empty) }));
+        }
+        cx.fingers.first_mouse_button = None;
+        send(cx, Event::MouseUp(MouseUpEvent { abs: end, button: MouseButton::PRIMARY, window_id: win, modifiers: KeyModifiers::default(), time: 1.3 }));
+        draw(cx);
+        assert!(list.has_selection(), "the drag selected nothing");
+        // What Cmd+C puts on the clipboard (the TextCopy answer).
+        assert_eq!(list.borrow().unwrap().get_selected_text(), "first row\nleft right\ntop\nbottom");
+        assert_eq!(row_rect(cx, 0).pos, first.pos, "a mouse drag must not scroll a selectable list");
+        // Cmd+A: every row; rows the list never drew come from the owner.
+        list.borrow_mut().unwrap().select_all(cx);
+        assert_eq!(list.borrow().unwrap().get_selected_text(), "first row\nleft right\ntop\nbottom");
+    }
+
 }
 
 #[cfg(test)]

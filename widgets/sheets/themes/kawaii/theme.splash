@@ -1,0 +1,280 @@
+mod.theme = mod.themes.light
+
+// Kawaii: a candy box. The ground is a soft pink tartan woven on the
+// diagonal, framed at the window's edge by a puffy pink cushion with a lace
+// trim and a few hearts, bows, stars and a strawberry at its corners. Every control is
+// a glossy pastel trinket of jelly or pearl -- pink, lavender, mint, peach,
+// lemon and baby blue -- outlined in a deeper shade of its own colour, lit
+// from the upper left with a bright glint, glowing where the light comes
+// back through the jelly, and throwing a soft pink shadow. The ink is a dark
+// plum, the captions a raspberry. The faces are drawn in widgets.splash;
+// this file holds the tokens every face and every stock widget reads. Every
+// state of a family is spelled out, because the base derived its states
+// once, from its own colours.
+use mod.res.*
+use mod.text.*
+
+// The ground: candy pink.
+mod.theme.color_bg_app = #fab5d3
+mod.theme.color_fg_app = #fcc6dc
+mod.theme.color_bg_container = #fab5d3
+mod.theme.color_bg_even = #00000000
+mod.theme.color_bg_odd = #00000000
+// The surface ladder in the ground's pinks; a plain container is a baby-blue
+// sweet, its plum words well over 5:1 on it.
+mod.theme.color_surface = #fcc6dc
+mod.theme.color_surface_dim = #f9bdd6
+mod.theme.color_surface_bright = #ffe6f1
+mod.theme.color_surface_container_lowest = #fff2f8
+mod.theme.color_surface_container_low = #ffe3ef
+mod.theme.color_surface_container = #c9dcfd
+mod.theme.color_surface_container_high = #fbc6dc
+mod.theme.color_surface_container_highest = #f8b8d3
+mod.theme.color_highlight = #ff5fa2
+mod.theme.color_inverse_surface = #4a1844
+mod.theme.color_inverse_on_surface = #fff0f7
+
+// Raised parts a stock face draws without a face of this sheet's: pink
+// candy a step lighter than the ground.
+mod.theme.color_outset = #fcc4de
+mod.theme.color_outset_1 = #fdcfe4
+mod.theme.color_outset_2 = #f9b4d4
+mod.theme.color_outset_hover = #fdd2e7
+mod.theme.color_outset_1_hover = #fedbeb
+mod.theme.color_outset_2_hover = #fbbfdb
+mod.theme.color_outset_focus = #fcc4de
+mod.theme.color_outset_1_focus = #fdcfe4
+mod.theme.color_outset_2_focus = #f9b4d4
+mod.theme.color_outset_active = #f472b0
+mod.theme.color_outset_1_active = #f472b0
+mod.theme.color_outset_2_active = #e85d9f
+mod.theme.color_outset_down = #f6aacd
+mod.theme.color_outset_1_down = #f6aacd
+mod.theme.color_outset_2_down = #f09bc3
+mod.theme.color_outset_drag = #f6aacd
+mod.theme.color_outset_1_drag = #f6aacd
+mod.theme.color_outset_2_drag = #f09bc3
+mod.theme.color_outset_disabled = #ddd0e2
+mod.theme.color_outset_1_disabled = #ddd0e2
+mod.theme.color_outset_2_disabled = #d4c6da
+
+// Wells pressed into the candy: a pale strawberry-milk floor.
+mod.theme.color_inset = #fff0f6
+mod.theme.color_inset_1 = #fff0f6
+mod.theme.color_inset_2 = #ffe6f0
+mod.theme.color_inset_hover = #fff5f9
+mod.theme.color_inset_1_hover = #fff5f9
+mod.theme.color_inset_2_hover = #ffebf3
+mod.theme.color_inset_focus = #fff0f6
+mod.theme.color_inset_1_focus = #fff0f6
+mod.theme.color_inset_2_focus = #ffe6f0
+mod.theme.color_inset_active = #fff0f6
+mod.theme.color_inset_1_active = #fff0f6
+mod.theme.color_inset_2_active = #ffe6f0
+mod.theme.color_inset_down = #ffe6f0
+mod.theme.color_inset_1_down = #ffe6f0
+mod.theme.color_inset_2_down = #ffdcea
+mod.theme.color_inset_drag = #fff0f6
+mod.theme.color_inset_1_drag = #fff0f6
+mod.theme.color_inset_2_drag = #ffe6f0
+mod.theme.color_inset_empty = #fff0f6
+mod.theme.color_inset_1_empty = #fff0f6
+mod.theme.color_inset_2_empty = #ffe6f0
+mod.theme.color_inset_disabled = #eadfe8
+mod.theme.color_inset_1_disabled = #eadfe8
+mod.theme.color_inset_2_disabled = #eadfe8
+
+// The outline every stock face strokes: a deep rose, never grey.
+mod.theme.beveling = 0.67
+mod.theme.color_bevel = #e27aab
+mod.theme.color_bevel_hover = #e27aab
+mod.theme.color_bevel_focus = #ff5fa2
+mod.theme.color_bevel_active = #e27aab
+mod.theme.color_bevel_empty = #e27aab
+mod.theme.color_bevel_down = #d66a9d
+mod.theme.color_bevel_drag = #d66a9d
+mod.theme.color_bevel_disabled = #cdb7cc
+mod.theme.color_bevel_inset_1 = #e27aab
+mod.theme.color_bevel_inset_2 = #f3b2d0
+mod.theme.color_bevel_outset_1 = #fbe0ec
+mod.theme.color_bevel_outset_2 = #e27aab
+mod.theme.color_bevel_inset_1_hover = #e27aab
+mod.theme.color_bevel_inset_2_hover = #f3b2d0
+mod.theme.color_bevel_outset_1_hover = #fbe0ec
+mod.theme.color_bevel_outset_2_hover = #e27aab
+mod.theme.color_bevel_inset_1_focus = #ff5fa2
+mod.theme.color_bevel_inset_2_focus = #ff5fa2
+mod.theme.color_bevel_outset_1_focus = #ff5fa2
+mod.theme.color_bevel_outset_2_focus = #ff5fa2
+mod.theme.color_bevel_inset_1_down = #d66a9d
+mod.theme.color_bevel_inset_2_down = #d66a9d
+mod.theme.color_bevel_outset_1_down = #d66a9d
+mod.theme.color_bevel_outset_2_down = #d66a9d
+mod.theme.color_bevel_inset_1_disabled = #cdb7cc
+mod.theme.color_bevel_inset_2_disabled = #cdb7cc
+mod.theme.color_bevel_outset_1_disabled = #cdb7cc
+mod.theme.color_bevel_outset_2_disabled = #cdb7cc
+
+// Ink. A dark plum on the ground (7.6:1) and on the pastel sweets; dim and
+// disabled words a dusty mauve, never below 3:1.
+mod.theme.color_text = #5a1d55
+mod.theme.color_text_hover = #4a1446
+mod.theme.color_text_focus = #4a1446
+mod.theme.color_text_active = #4a1446
+mod.theme.color_text_down = #5a1d55
+mod.theme.color_text_val = #5a1d55
+mod.theme.color_text_hl = #4a1446
+mod.theme.color_text_disabled = #8a5f84
+mod.theme.color_text_placeholder = #8e4f83
+mod.theme.color_text_placeholder_hover = #7e4474
+mod.theme.color_text_meta = #74376a
+mod.theme.color_text_cursor = #d81b72
+mod.theme.color_cursor = #d81b72
+mod.theme.color_cursor_focus = #d81b72
+mod.theme.color_label = #5a1d55
+mod.theme.color_label_hover = #4a1446
+mod.theme.color_label_focus = #4a1446
+mod.theme.color_label_active = #4a1446
+mod.theme.color_label_down = #5a1d55
+mod.theme.color_label_disabled = #8a5f84
+// The inner ink -- the icon on a key, the tree's rows, the docs' prose: a
+// berry, 5.1:1 on the deepest crossing of the tartan, so the star on a pink
+// key reads too.
+mod.theme.color_label_inner = #841a5e
+mod.theme.color_label_inner_hover = #741250
+mod.theme.color_label_inner_focus = #741250
+mod.theme.color_label_inner_active = #741250
+mod.theme.color_label_inner_down = #6a0e4a
+mod.theme.color_label_inner_drag = #6a0e4a
+mod.theme.color_label_inner_inactive = #8a5f84
+mod.theme.color_label_inner_disabled = #f4eef8
+mod.theme.color_label_outer = #5a1d55
+mod.theme.color_label_outer_off = #5a1d55
+mod.theme.color_label_outer_hover = #4a1446
+mod.theme.color_label_outer_focus = #4a1446
+mod.theme.color_label_outer_active = #4a1446
+mod.theme.color_label_outer_active_focus = #4a1446
+mod.theme.color_label_outer_down = #5a1d55
+mod.theme.color_label_outer_drag = #5a1d55
+mod.theme.color_label_outer_disabled = #8a5f84
+mod.theme.color_on_surface = #5a1d55
+// Captions over a group and the docs' headings: a berry, 5.2:1 on the
+// deepest crossing of the tartan.
+mod.theme.color_on_surface_variant = #821860
+mod.theme.color_icon = #5a1d55
+mod.theme.color_icon_hover = #4a1446
+mod.theme.color_icon_focus = #4a1446
+mod.theme.color_icon_active = #4a1446
+mod.theme.color_icon_down = #5a1d55
+mod.theme.color_icon_disabled = #8a5f84
+mod.theme.color_mark = #5a1d55
+
+// The light. Focus is a hot-pink ring; a value a stock face fills is the
+// same pink; the accent seed is that pink, so the primary, secondary and
+// tertiary families grow from it.
+mod.theme.color_focus = #ff5fa2
+mod.theme.color_ctrl_active = #ffffff
+mod.theme.color_val = #f472b0
+mod.theme.color_val_hover = #f685bd
+mod.theme.color_val_focus = #f472b0
+mod.theme.color_val_drag = #f685bd
+mod.theme.color_val_disabled = #cdb7cc
+mod.theme.color_mark_active = #ffffff
+mod.theme.color_mark_active_hover = #ffffff
+mod.theme.color_mark_focus = #ffffff
+mod.theme.color_mark_disabled = #e9dcea
+mod.theme.color_ctrl_selected = #f472b0
+mod.theme.color_bg_highlight = #fbc0db
+mod.theme.color_bg_highlight_inline = #f9a8d466
+mod.theme.color_text_on_accent = #ffffff
+// Selected words: a wash of strawberry the plum reads through.
+mod.theme.color_selection = #00000000
+mod.theme.color_selection_hover = #f9a8d44d
+mod.theme.color_selection_down = #f78fc273
+mod.theme.color_selection_focus = #f78fc273
+// A stock handle is a pearl.
+mod.theme.color_handle = #fff6fa
+mod.theme.color_handle_hover = #ffffff
+mod.theme.color_handle_1 = #ffffff
+mod.theme.color_handle_2 = #f4dbe8
+
+// Screens: deep plum glass, candy-pink figures glowing in it.
+mod.theme.color_screen = #3a1636
+mod.theme.color_screen_ink = #ffd2ea
+mod.theme.screen_ghost = 0.09
+mod.theme.color_lamp_plain = #fff6fb
+mod.theme.color_lamp_off = #3a1a33
+mod.theme.color_terminal_bg = #3a1636
+mod.theme.color_terminal_text = #ffe6f3
+
+// SPACING. Rows of 24 points, gaps of 8, panels padded 12. The base theme
+// froze everything it derives from space_factor when it was built, so every
+// rung this sheet depends on is stated again here.
+mod.theme.space_factor = 8.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 24.0
+mod.theme.space_6 = 32.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 20.0
+mod.theme.size_control_m = 24.0
+mod.theme.size_control_l = 28.0
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 24.0
+mod.theme.data_item_height = 22.0
+// Sweets are round: stock shaders draw a corner twice the number written,
+// so a cap gets 8 points and a panel 12.
+mod.theme.corner_radius = 4.0
+mod.theme.container_corner_radius = 6.0
+mod.theme.textselection_corner_radius = 2.0
+mod.theme.radius_xs = 2.0
+mod.theme.radius_s = 4.0
+mod.theme.radius_m = 6.0
+mod.theme.radius_l = 10.0
+
+// TYPE. Fredoka, round and bubbly: regular for words, its semibold for the
+// labels on the sweets, its bold for captions and titles.
+mod.theme.font_size_p = 8.5
+mod.theme.font_size_base = 8.5
+mod.theme.type_label_l_size = 8.5
+mod.theme.type_label_m_size = 7.75
+mod.theme.type_label_s_size = 7.0
+mod.theme.type_body_l_size = 9.25
+mod.theme.type_body_m_size = 8.5
+mod.theme.type_body_s_size = 7.75
+mod.theme.type_title_s_size = 9.5
+mod.theme.type_title_m_size = 10.5
+mod.theme.type_title_l_size = 12.0
+mod.theme.font_size_4 = 10.5
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Fredoka-Variable.ttf") weight: 450.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.5 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Fredoka-Variable.ttf") weight: 580.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 9.0 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Fredoka-Variable.ttf") weight: 660.0 asc: 0.0 desc: 0.0}}}
+// The type roles were frozen from the base's faces; stated again so every
+// role reads in the one family.
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 12.0 line_spacing: 1.2}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 10.5 line_spacing: 1.2}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 9.5 line_spacing: 1.2}
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 9.25 line_spacing: 1.35}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 8.5 line_spacing: 1.35}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 7.75 line_spacing: 1.35}
+mod.theme.font_label_l = mod.theme.font_label{font_size: 8.5 line_spacing: 1.2}
+mod.theme.font_label_m = mod.theme.font_label{font_size: 7.75 line_spacing: 1.2}
+mod.theme.font_label_s = mod.theme.font_label{font_size: 7.0 line_spacing: 1.2}
+
+// No surface material: every face that matters is drawn by the sheet.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+mod.theme.color_material_glow = #ff5fa2
+true

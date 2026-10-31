@@ -1,7 +1,7 @@
 //! Where the optional widget families plug into the core.
 //!
 //! The core never names a family: a `Window` hosts the design overlay, the
-//! voice wave and the AI chat slot, and the widget tree dumps a dock's tabs,
+//! voice wave and the AI chat slot,
 //! but each of those lives in a family crate an app may leave out. A family
 //! installs its hooks on the `Cx` when it registers (the same way the tweaker
 //! fills `Cx::tweak_callback` and the aichat crate fills `Cx::ai_callback`);
@@ -17,9 +17,7 @@ use crate::{
     makepad_draw::*,
     makepad_micro_serde::*,
     view::View,
-    widget::WidgetRef,
 };
-use std::any::TypeId;
 
 /// Answers whether a family took an event before the window's own dispatch.
 pub type WindowIntercept = fn(&mut Cx, &Event, &mut View, WindowId) -> bool;
@@ -35,10 +33,13 @@ pub struct TweakerHooks {
     /// Installed as `Cx::tweak_callback` by `set_ui_root`.
     pub tweak_callback: fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>,
     /// The widget type the tree tab reports as an inspector.
-    pub inspector_type: TypeId,
+    pub inspector_type: ScriptTypeId,
     /// The design delta since `after_generation`, for the chat's Studio
     /// feedback; `None` while nothing changed.
     pub feedback_snapshot: fn(u64) -> Option<TweakFeedbackSnapshot>,
+    /// The width the docked panel takes off the window's body, 0 while it
+    /// floats or is off.
+    pub docked_band_width: fn() -> f64,
 }
 
 /// The AI chat slot (`makepad-widgets-ai`).
@@ -62,9 +63,6 @@ pub struct WidgetHooks {
     pub tweaker: Option<TweakerHooks>,
     pub ai: Option<AiHooks>,
     pub voice: Option<VoiceHooks>,
-    /// A dock's tabs and tab headers for the widget tree's dumps
-    /// (`makepad-widgets-data`); `None` for a widget that is not a dock.
-    pub dock_dump: Option<fn(&WidgetRef, &Cx) -> Option<DockCompactDump>>,
 }
 
 impl WidgetHooks {
@@ -90,14 +88,8 @@ impl WidgetHooks {
         Self::get(cx).and_then(|hooks| hooks.voice)
     }
 
-    /// The dock dump of `widget`, when the data family is there and the
-    /// widget is a dock.
-    pub fn dock_dump(cx: &Cx, widget: &WidgetRef) -> Option<DockCompactDump> {
-        (Self::get(cx)?.dock_dump?)(widget, cx)
-    }
-
     /// Whether `type_id` is the design overlay's widget type.
-    pub fn is_inspector(cx: &Cx, type_id: Option<TypeId>) -> bool {
+    pub fn is_inspector(cx: &Cx, type_id: Option<ScriptTypeId>) -> bool {
         match (Self::tweaker(cx), type_id) {
             (Some(tweaker), Some(type_id)) => tweaker.inspector_type == type_id,
             _ => false,
@@ -119,29 +111,12 @@ pub struct WindowFamilies {
     pub ai: Option<fn(&mut ScriptVm)>,
 }
 
-/// A dock's layout, as the widget tree's dumps print it.
-#[derive(Clone, Debug, Default)]
-pub struct DockCompactDump {
-    pub tabs: Vec<DockCompactTabsInfo>,
-    pub tab_headers: Vec<DockCompactTabInfo>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DockCompactTabsInfo {
-    pub tabs_id: LiveId,
-    pub selected_tab_id: Option<LiveId>,
-    pub tab_count: usize,
-    pub rect: Rect,
-}
-
-#[derive(Clone, Debug)]
-pub struct DockCompactTabInfo {
-    pub tabs_id: LiveId,
-    pub tab_id: LiveId,
-    pub is_active: bool,
-    pub title: String,
-    pub rect: Rect,
-}
+/// The families a Splash isolate registers after the core's widgets: the
+/// facade crate sets them (the ones this build's features picked, without
+/// the families that reach past the host service bridge), so a face or a
+/// guest's panel finds the same names the window's own scripts do.
+#[derive(Clone, Default)]
+pub struct IsolateFamilies(pub Vec<fn(&mut ScriptVm)>);
 
 /// What the world asks of the slot, outside the widget tree: the bridge's
 /// `/ai?on=` and `/ai?say=`, the overlay's Escape. A `Cx` global; the
@@ -152,6 +127,9 @@ pub struct AiSlotRequests {
     pub open: Option<bool>,
     /// Lines to send as if typed, in order; taken by the overlay.
     pub say: Vec<String>,
+    /// Answers for the chat's parked cards, as if clicked: `run`, `always`
+    /// (run, and allow that tool for the rest of the chat) or `cancel`.
+    pub confirm: Vec<String>,
     /// The slot's state as it last reported it, for whoever asks.
     pub is_open: bool,
     /// The standalone window whose F10 pane most recently received input.

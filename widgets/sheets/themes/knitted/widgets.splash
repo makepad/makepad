@@ -1,0 +1,2801 @@
+use mod.prelude.widgets_internal.*
+
+// Knitted: a widget kit knitted in denim-blue wool.
+// The window is a piece of stockinette: rows of V stitches, each V two plump
+// legs of yarn slanting in to meet at its foot, every stitch a little
+// different, a haze of loose fibre in the gaps; a ribbed cuff runs round
+// the window's edge and a cord seam parts it from the fabric. Every control
+// is a padded patch of finer knit sewn onto it: a bound-off rim of chain
+// loops round its edge, the patch bulging a little in the middle and laying
+// a soft shadow on the fabric under it. Values run in a twisted cord of
+// coloured yarn in a dark cord track, thumbs and switch knobs are knitted
+// balls, knobs a knitted dome in a ring of chunky loops, screens dark knit
+// in a couched rope. The two sheets of the family share these faces line
+// for line; only the palette differs. Every face is drawn in true points
+// (one device pixel is `px`), and every shadow and halo is drawn OUTSIDE
+// the layout box: the quad is grown in `vertex`, and no padding is spent
+// on relief.
+
+// ---------------------------------------------------------------- helpers
+
+// One device pixel in points.
+let mk_px = fn(dpi: float) -> float {
+    return 1.0 / max(dpi, 0.5)
+}
+
+// An edge rounded to a whole device pixel in window space, handed back in
+// box space: a hairline on it lands on one pixel row.
+let mk_snap = fn(v: float, o: float, px: float) -> float {
+    return Finish.snap(o + v, px) - o
+}
+
+// Distance from p to the segment a..b, in points.
+let mk_seg = fn(p: vec2, a: vec2, b: vec2) -> float {
+    let pa = p - a
+    let ba = b - a
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return length(pa - ba * t)
+}
+
+// A hash that does not line up: the library's hash nearly repeats every 97
+// cells, so each cell is first sent to a far cell picked by its own hash.
+let mk_hash = fn(i: vec2) -> float {
+    let j = i + vec2(Finish.hash(i) * 419.0, Finish.hash(i + vec2(5.31, 9.17)) * 263.0)
+    return Finish.hash(j)
+}
+// Value noise on that hash, one unit per cell.
+let mk_noise = fn(q: vec2) -> float {
+    let i = floor(q)
+    let f = q - i
+    let u = f * f * (vec2(3.0, 3.0) - f * 2.0)
+    let a = mk_hash(i)
+    let b = mk_hash(i + vec2(1.0, 0.0))
+    let c = mk_hash(i + vec2(0.0, 1.0))
+    let d = mk_hash(i + vec2(1.0, 1.0))
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
+}
+// Two slow clouds over each other, -0.5..0.5: the dye lot and the hand of
+// the knitter, so no two stretches of fabric read alike.
+let mk_cloud = fn(q: vec2) -> float {
+    return (mk_noise(q / 83.0) - 0.5) * 0.6 + (mk_noise(q / 23.0 + vec2(7.7, 3.1)) - 0.5) * 0.4
+}
+
+// How much of the light from the upper left a face turned `n` takes:
+// +1 facing it, -1 turned away.
+let mk_lit = fn(n: vec2) -> float {
+    return dot(n, vec2(-0.55, -0.835))
+}
+
+// The way the edge of a rounded box faces at `p` (the box `c`, half size
+// `h`, corners `r`): the side whose edge is nearest, or the corner's own
+// direction round a corner.
+let mk_box_n = fn(p: vec2, c: vec2, h: vec2, r: float) -> vec2 {
+    let v = p - c
+    let s = vec2(step(0.0, v.x) * 2.0 - 1.0, step(0.0, v.y) * 2.0 - 1.0)
+    let rr = min(r, min(h.x, h.y))
+    let q = abs(v) - (h - vec2(rr, rr))
+    var n = vec2(0.0, s.y)
+    if q.x > q.y {
+        n = vec2(s.x, 0.0)
+    }
+    if q.x > 0.0 && q.y > 0.0 {
+        n = normalize(q) * s
+    }
+    return n
+}
+
+// How far round the edge of a rounded box `p` lies, in points, clockwise
+// from the left end of its top side: the side whose edge is nearest, or the
+// angle round a corner. A rim of loops counted on it runs on without a seam.
+let mk_perim = fn(p: vec2, c: vec2, h: vec2, r: float) -> float {
+    let v = p - c
+    let rr = min(r, min(h.x, h.y))
+    let hx = h.x - rr
+    let hy = h.y - rr
+    let q = abs(v) - vec2(hx, hy)
+    let arc = rr * 1.5707963
+    let th = atan2(max(q.y, 0.0), max(q.x, 0.0))
+    var s = 0.0
+    if q.x > q.y {
+        if v.x > 0.0 {
+            s = 2.0 * hx + arc + (v.y + hy)
+        } else {
+            s = 4.0 * hx + 3.0 * arc + 2.0 * hy + (hy - v.y)
+        }
+    } else {
+        if v.y < 0.0 {
+            s = v.x + hx
+        } else {
+            s = 2.0 * hx + 2.0 * arc + 2.0 * hy + (hx - v.x)
+        }
+    }
+    if q.x > 0.0 && q.y > 0.0 {
+        if v.x > 0.0 && v.y < 0.0 {
+            s = 2.0 * hx + (1.5707963 - th) * rr
+        }
+        if v.x > 0.0 && v.y > 0.0 {
+            s = 2.0 * hx + arc + 2.0 * hy + th * rr
+        }
+        if v.x < 0.0 && v.y > 0.0 {
+            s = 4.0 * hx + 2.0 * arc + 2.0 * hy + (1.5707963 - th) * rr
+        }
+        if v.x < 0.0 && v.y < 0.0 {
+            s = 4.0 * hx + 3.0 * arc + 4.0 * hy + th * rr
+        }
+    }
+    return s
+}
+// The whole way round that box.
+let mk_perim_len = fn(h: vec2, r: float) -> float {
+    let rr = min(r, min(h.x, h.y))
+    return 4.0 * (h.x - rr) + 4.0 * (h.y - rr) + 2.0 * PI * rr
+}
+
+// The three-quarter arc a waiting button turns in place of its label.
+let mk_spinner = fn(dst: vec4, p: vec2, c: vec2, rad: float, t: float, amt: float, stroke: float, ink: vec3) -> vec4 {
+    let sdf = Sdf2d.viewport(p)
+    let a0 = t * 2.0 * PI
+    sdf.arc_round_caps(c.x, c.y, rad, a0, a0 + 1.5 * PI, stroke)
+    sdf.fill(vec4(ink, amt))
+    return Finish.over(dst, sdf.result)
+}
+
+// ---------------------------------------------------------------- yarn
+
+// ONE LEG OF A STITCH: a plump loop of yarn lying along a..b, a teardrop
+// `r` thick, round at `a` and drawn to a point at `b`. Handed back: .x its
+// height (1 on its spine, 0 at its edge), .y the light it takes from above
+// and a little in front, with the twist of its plies in it, .z how far `p`
+// lies outside it (points, negative inside).
+let mk_leg = fn(p: vec2, a: vec2, b: vec2, r: float, ply: float) -> vec3 {
+    let ba = b - a
+    let ll = max(dot(ba, ba), 0.0001)
+    let t = clamp(dot(p - a, ba) / ll, 0.0, 1.0)
+    let ax = ba / sqrt(ll)
+    let off = p - a - ba * t
+    let rr = r * (0.86 + 0.55 * t - 0.92 * t * t)
+    let d = length(off)
+    let u = clamp(d / max(rr, 0.01), 0.0, 1.0)
+    let h = sqrt(max(1.0 - u * u, 0.0))
+    let n2 = off / max(d, 0.0001) * u
+    let s = dot(p - a, ax)
+    let side = off.x * ax.y - off.y * ax.x
+    let tw = sin((s - side * 1.3) * 6.2831853 / max(ply, 0.4))
+    let lit = n2.x * (0.0 - 0.35) + n2.y * (0.0 - 0.55) + h * 0.68 + tw * 0.04 * h
+    return vec3(h, lit, d - rr)
+}
+
+// ONE STITCH of stockinette, the one in column `col` and row `row`, at `p`
+// measured from the middle of the top of its cell: a V of two leaf-shaped
+// legs slanting in from the top corners of the cell to meet at its foot,
+// which lies just past the cell's foot, over the top of the V under it (a
+// row is six tenths of a stitch's width tall, so the V is short and wide).
+// Each stitch is nudged by its own hash -- its foot to one side, its legs
+// fatter or thinner, its yarn a shade lighter or darker -- and each row
+// pulled a little tighter or looser than the next. Handed back: .x the
+// height of whichever leg stands higher at `p`, .y its light, .z the shade
+// of the stitch's yarn (round 1), .w how far `p` lies outside both legs.
+let mk_stitch = fn(p0: vec2, col: float, row: float, sw: float) -> vec4 {
+    let p = p0 - vec2((Finish.hash(vec2(row, 9.1)) - 0.5) * 0.07 * sw, 0.0)
+    let h1 = mk_hash(vec2(col, row))
+    let h2 = fract(h1 * 7.13 + 0.31)
+    let h3 = fract(h1 * 13.71 + 0.57)
+    let foot = vec2((h1 - 0.5) * 0.11 * sw, sw * (0.60 + (h2 - 0.5) * 0.07))
+    let spread = sw * (0.33 + (h3 - 0.5) * 0.04)
+    let r = sw * (0.205 + (h2 - 0.5) * 0.03)
+    let top = sw * ((h1 - 0.5) * 0.05)
+    let ply = sw * 0.30
+    let a = mk_leg(p, vec2(0.0 - spread, top), foot - vec2(sw * 0.05, 0.0), r, ply)
+    let b = mk_leg(p, vec2(spread, top + (h3 - 0.5) * 0.05 * sw), foot + vec2(sw * 0.05, 0.0), r, ply)
+    let shade = 1.0 + (fract(h1 * 29.3 + 0.13) - 0.5) * 0.12 + (Finish.hash(vec2(row, 4.4)) - 0.5) * 0.07
+    // Where the two legs meet down the middle of the V they part in a
+    // crease.
+    let crease = (1.0 - smoothstep(0.0, 0.45, abs(a.x - b.x))) * smoothstep(0.0, 0.2, min(a.x, b.x))
+    let sc = shade * (1.0 - 0.38 * crease)
+    var res = vec4(a.x, a.y, sc, min(a.z, b.z))
+    if b.x > a.x {
+        res = vec4(b.x, b.y, sc * 0.97, min(a.z, b.z))
+    }
+    return res
+}
+
+// THE STOCKINETTE at `q0` (points), stitches `sw` wide and `sh` tall, its
+// columns wavering by up to `warp` points so no column is a ruled line.
+// A point is reached by the legs of its own stitch and by those of the
+// stitch over it (near the top of its cell) or under it (near its foot).
+// The upper V lies over the top of the one under it and lays a shade on
+// it along its edge, so every row reads as a row of chevrons. Handed back:
+// .x the height of the yarn (0 in the gaps), .y the light it takes, .z the
+// shade of its yarn (round 1, the cast shade in it), .w unused.
+let mk_knit = fn(q0: vec2, sw: float, sh: float, warp: float) -> vec4 {
+    let wx = Finish.noise(q0 / (sh * 8.0)) - 0.5
+    let wy = sin(q0.x * 0.071 + q0.y * 0.013 + sin(q0.y * 0.043) * 2.0) * 0.25
+    let q = q0 + vec2(wx, wy) * warp
+    let col = floor(q.x / sw)
+    let row = floor(q.y / sh)
+    let lx = q.x - (col + 0.5) * sw
+    let ly = q.y - row * sh
+    let nb = step(sh * 0.5, ly) * 2.0 - 1.0
+    let cur = mk_stitch(vec2(lx, ly), col, row, sw)
+    let nbr = mk_stitch(vec2(lx, ly - nb * sh), col, row + nb, sw)
+    // Above the middle of the cell the neighbour is the stitch over this
+    // one; below it, the stitch under.
+    let up = step(0.0, nb)
+    let upper = mix(nbr, cur, up)
+    let lower = mix(cur, nbr, up)
+    let cast = 1.0 - 0.42 * exp(0.0 - max(upper.w, 0.0) / (0.09 * sw))
+    var res = vec4(lower.x, lower.y, lower.z * cast, 0.0)
+    let over = smoothstep(0.0, 0.28, upper.x)
+    res = mix(res, vec4(upper.x, upper.y, upper.z, 0.0), over)
+    return res
+}
+
+// The colour of yarn `col` at a point of fabric `k` (mk_knit's result):
+// each leg lit by the way it faces, its plies a little lighter and darker,
+// falling into the shade of `gap` toward its edge; in the gaps loose fibre
+// catching a little light; over all a fibre's grain at the device pixel.
+let mk_yarn = fn(col: vec3, gap: vec3, k: vec4, q: vec2, px: float, fuzz: float) -> vec3 {
+    let h = k.x
+    let y = col * k.z * (0.78 + 0.32 * clamp(k.y, -0.4, 1.0))
+    let cell = floor(q / px)
+    let hair = Finish.hash(cell + vec2(0.7, 3.9))
+    let g = mix(gap, col * 0.85, fuzz * hair * hair * 0.55)
+    var c = mix(g, y, smoothstep(0.0, 0.42, h))
+    c = c * (1.0 + (Finish.hash(cell * 1.37 + vec2(3.3, 1.7)) - 0.5) * 0.07)
+    return max(c, vec3(0.0, 0.0, 0.0))
+}
+
+// The same yarn knitted on a patch that carries words: its stitches kept
+// softer the paler the yarn, so dark words on it stay clear of the knit.
+let mk_soft = fn(col: vec3, y: vec3) -> vec3 {
+    let amt = mix(1.0, 0.400, smoothstep(0.15, 0.55, Finish.lum(col)))
+    return mix(col * 0.95, y, amt)
+}
+
+// A TWISTED CORD of two plies, at `s` along it and `a` across it (-1 at
+// the side toward the light, 1 at the other), its plies `period` apart
+// and slanting across it. .x its height, .y the light it takes.
+let mk_ply = fn(s: float, a: float, period: float) -> vec2 {
+    let f = fract((s + a * period * 0.6) / max(period, 0.3))
+    let g = (f - 0.5) * 2.0
+    let across = sqrt(max(1.0 - a * a, 0.0))
+    let bump = sqrt(max(1.0 - g * g, 0.0))
+    let h = across * (0.45 + 0.55 * bump)
+    let lit = clamp((0.0 - a) * 0.75 - g * 0.35 * across + 0.15, -1.0, 1.0)
+    return vec2(h, lit)
+}
+
+// A RUNNING STITCH along a line: coverage of dashes `len` long, `gap`
+// apart, at `s` along and `t` across (points), `w` thick, their ends
+// round. .x coverage, .y the light along the dash's top.
+let mk_running = fn(s: float, t: float, len: float, gap: float, w: float, px: float) -> vec2 {
+    let pitch = len + gap
+    let f = s - pitch * floor(s / pitch) - len * 0.5 - gap * 0.5
+    let dx = max(abs(f) - len * 0.5 + w * 0.5, 0.0)
+    let d = length(vec2(dx, t)) - w * 0.5
+    let cov = Finish.cover(d, px)
+    let lit = clamp(0.0 - t / max(w * 0.5, 0.2), -1.0, 1.0)
+    return vec2(cov, lit)
+}
+
+// ---------------------------------------------------------------- the fabric
+
+// K1 P1 RIBBING at `q` with its ribs running along `along` (1 down the
+// window, 0 across it): a column of narrow knit V's, then a sunk column of
+// purl bumps, by turns. Handed back as mk_knit's result.
+let mk_rib = fn(q0: vec2, sw: float, sh: float, along: float) -> vec4 {
+    let q = mix(q0.yx, q0, along)
+    var k = mk_knit(q, sw, sh, 0.4)
+    let colf = q.x / sw
+    let purl = step(0.5, fract(colf * 0.5))
+    // A purl column: a bead of yarn lying across each row, sunk.
+    let ly = q.y - sh * floor(q.y / sh) - sh * 0.5
+    let lx = (fract(colf) - 0.5) * sw
+    let pb = mk_leg(vec2(lx, ly), vec2(0.0 - sw * 0.32, 0.0), vec2(sw * 0.32, 0.0), sh * 0.40, sw * 0.3)
+    let pk = vec4(pb.x * 0.8, pb.y * 0.7, 0.86, 0.0)
+    k = mix(k, pk, purl)
+    // The knit columns stand proud of the purl ones: shade at their sides.
+    let sd = abs(fract(colf) - 0.5) * 2.0
+    k = vec4(k.x, k.y - 0.35 * smoothstep(0.55, 1.0, sd) * (1.0 - purl), k.z * mix(1.0, 0.92, purl), k.w)
+    return k
+}
+
+// THE WINDOW'S GROUND at a window point `w` (points) in a window `size`
+// points large. Stockinette in the sheet's yarn, its stitches 9.5 points
+// wide and six tenths of that tall, lighter and darker in two slow clouds; a ribbed cuff along
+// the top, where the window's caption stands, a narrower one down the sides
+// and along the foot, each sewn to the fabric with a cord seam.
+let mk_ground = fn(w: vec2, px: float, size: vec2) -> vec3 {
+    let W = size.x
+    let H = size.y
+    let tb = min(32.0, H * 0.1)
+    let sb = min(7.0, W * 0.02)
+    // The fabric.
+    let k = mk_knit(w, 9.500, 9.500 * 0.6, 2.0)
+    var col = mk_yarn(vec3(0.145, 0.353, 0.529), vec3(0.039, 0.145, 0.251), k, w, px, 0.700)
+    col = mix(vec3(0.145, 0.353, 0.529) * 0.93, col, 1.000)
+    col = col * (1.0 + mk_cloud(w) * 0.070)
+    // The cuffs: how far in from the window's edge, and which way the ribs
+    // run there (down the window along the top and the foot).
+    let din = min(min(w.x, W - w.x), H - w.y)
+    let in_top = step(w.y, tb)
+    let in_side = step(din, sb) * (1.0 - in_top)
+    let along = clamp(in_top + step(H - sb, w.y), 0.0, 1.0)
+    let rk = mk_rib(w, 4.2, 2.6, along)
+    let rc = mk_yarn(vec3(0.106, 0.267, 0.439), vec3(0.039, 0.145, 0.251) * 0.8, rk, w, px, 0.700)
+    let cuff = clamp(in_top + in_side, 0.0, 1.0)
+    col = mix(col, rc, cuff)
+    // The seams: a cord where each cuff is sewn to the fabric, its shadow
+    // lying a little way onto the fabric under it.
+    let dt = w.y - tb
+    let dsd = sb - din
+    var st = dt
+    var sa = w.x
+    if in_top < 0.5 && abs(dsd) < abs(dt) {
+        st = dsd
+        sa = w.y + w.x
+    }
+    let ds = abs(st)
+    let cord_w = 1.6
+    let ac = clamp(st / cord_w, -1.0, 1.0)
+    let pl = mk_ply(sa, ac, 2.6)
+    let on_cord = 1.0 - smoothstep(cord_w - px, cord_w + px * 0.5, ds)
+    let cc = vec3(0.075, 0.184, 0.314) * (0.55 + 0.55 * pl.x) * (0.85 + 0.35 * pl.y)
+    col = mix(col, col * 0.80, (1.0 - smoothstep(0.0, 3.0, ds - cord_w)) * (1.0 - cuff) * 0.6)
+    col = mix(col, cc, on_cord * smoothstep(0.05, 0.4, pl.x))
+    return col
+}
+
+// ---------------------------------------------------------------- the patch
+
+// A KNITTED PATCH sewn onto the fabric: a box `lo`..`hi` with corners `rad`,
+// knitted in `col`. Out to in: what it throws on the fabric (`lift` 1 a soft
+// shadow falling a little down, 0 only a contact line); a faint haze of
+// loose fibre past its edge, which is not a ruled line but frays a little
+// along its length; the bound-off rim, a band of chain loops in `rimc`
+// slanting round the edge, round across like a cord, parted from the body
+// by a dark line; the body, stockinette finer than the ground's, padded so
+// it bulges -- lit along the upper edge, falling into shade toward the foot
+// and the sides. Hovered the yarn lightens; held the patch is pressed flat
+// into the fabric: its shadow goes, its bulge turns over and it darkens.
+// Focused, a running stitch of the accent yarn goes round it just outside.
+// `seed` sets where the knit starts, so patches of other sizes read apart.
+// Premultiplied.
+let mk_patch = fn(p: vec2, lo: vec2, hi: vec2, rad: float, px: float, col: vec3, rimc: vec3, hover: float, down: float, focus: float, lift: float, seed: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = max((hi - lo) * 0.5, vec2(0.5, 0.5))
+    let r = min(rad, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let up = 1.0 - down
+    let hh = hi.y - lo.y
+    // What it throws: a dense shade right under its foot and a soft one
+    // carrying on down; to the sides both stay inside half an 8 point gap.
+    let s = min(hh, 26.0)
+    let d1 = Finish.drop(p, c, h - vec2(0.03 * s, 0.0), r, vec2(0.0, 0.07 * s), 0.06 * s)
+    let d2 = Finish.drop(p, c, h - vec2(0.10 * s, 0.02 * s), r, vec2(0.0, 0.16 * s), 0.12 * s)
+    let drop = (1.0 - (1.0 - 0.70 * d1) * (1.0 - 0.55 * d2)) * lift * up * 0.550
+    let contact = Finish.drop(p, c, h, r, vec2(0.0, px), px * 0.8) * 0.5
+    let sha = 1.0 - (1.0 - drop) * (1.0 - contact)
+    var res = vec4(vec3(0.008, 0.039, 0.078) * sha, sha)
+    // Round the edge.
+    let n = mk_box_n(p, c, h, r)
+    let s_ed = mk_perim(p, c, h, r)
+    let fray = (Finish.noise(vec2(s_ed / 0.9, seed * 7.0)) - 0.5) * 0.55 + (Finish.hash(floor(p / px) + vec2(seed, 1.0)) - 0.5) * 0.3
+    let de = d - fray
+    let a = Finish.cover(de, px)
+    // The haze of loose fibre just past the edge.
+    let haze = exp(0.0 - max(de, 0.0) / 0.45) * (1.0 - a) * 0.22 * 0.700 * step(0.0, de) * step(de, 2.0)
+    res = Finish.over(res, vec4(col * 0.9, 1.0) * haze)
+    // The body.
+    let q = p - lo + vec2(seed * 37.0, seed * 11.0)
+    let k = mk_knit(q, 4.6, 2.8, 0.7)
+    var body = mk_soft(col, mk_yarn(col, col * 0.400, k, q, px, 0.700))
+    // The padding: lit along the upper edge, shaded at the foot; held, the
+    // light turns over and the patch darkens.
+    let bul = clamp(h.y * 0.9, 3.0, 10.0)
+    let e = clamp((0.0 - d) / bul, 0.0, 1.0)
+    let slope = 1.0 - e
+    var lt = mk_lit(n) * slope
+    lt = mix(lt, 0.0 - lt * 0.7, down)
+    body = body * (1.0 + 0.30 * lt - 0.22 * slope * slope + 0.05 * e * up)
+    body = body * (1.0 + 0.090 * hover * up) * (1.0 - 0.13 * down)
+    // Pressed into the fabric, the fabric round it overhangs its top.
+    let dent = Finish.inset(p, c, h, r, vec2(0.0, 1.8), 1.8)
+    body = mix(body, body * 0.55, dent * 0.75 * down)
+    // The rim: chain loops round the edge, their count whole so the chain
+    // closes on itself.
+    let rw = clamp(h.y * 0.26, 1.7, 3.0)
+    let per = mk_perim_len(h, r)
+    let nl = max(floor(per / (rw * 1.3) + 0.5), 4.0)
+    let period = per / nl
+    let u = clamp((0.0 - d) / rw, 0.0, 1.0)
+    let ac = u * 2.0 - 1.0
+    let f = fract(s_ed / period + u * 0.7)
+    let g = (f - 0.5) * 2.0
+    let loop_h = sqrt(max(1.0 - g * g, 0.0)) * sqrt(max(1.0 - ac * ac * 0.8, 0.0))
+    let rl = mk_lit(n) * (0.0 - ac) * 0.9 - g * 0.25
+    var rim = rimc * (0.50 + 0.62 * loop_h) * (0.9 + 0.35 * rl * mix(1.0, -0.6, down))
+    rim = rim * (1.0 + (Finish.hash(floor(p / px) + vec2(9.1, seed)) - 0.5) * 0.08)
+    rim = rim * (1.0 + 0.090 * hover * up) * (1.0 - 0.10 * down)
+    let in_rim = 1.0 - smoothstep(rw - px * 0.5, rw + px * 0.5, 0.0 - d)
+    var face = mix(body, rim, in_rim)
+    // The dark line where the rim is sewn to the body.
+    face = mix(face, face * 0.45, exp(0.0 - ((0.0 - d - rw) * (0.0 - d - rw)) / 0.18) * 0.65)
+    res = Finish.over(res, vec4(face * a, a))
+    // Focus: a running stitch of the accent yarn two points out.
+    let ts = d - 2.2
+    let rs = mk_running(s_ed, ts, 2.2, 1.4, 1.2, px)
+    let fc = vec3(1.000, 0.824, 0.353) * (0.8 + 0.35 * rs.y)
+    res = Finish.over(res, vec4(fc, 1.0) * rs.x * focus)
+    return res
+}
+
+// ---------------------------------------------------------------- buttons
+
+// Every button is a padded patch: 26 points on a 13 point line, 12 points
+// either side. Its shadow falls outside the box, so the box is the patch
+// and nothing is paid in padding.
+mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlat.min_height = 26.0
+// Glyphs sit at 14 points so an icon never makes a patch taller than the
+// row; an icon alone gets a square patch.
+mod.widgets.ButtonFlat.icon_walk.width = 14.0
+mod.widgets.ButtonIcon.padding = mod.turtle.Inset{left: 7.0 right: 7.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlatIcon.padding = mod.turtle.Inset{left: 7.0 right: 7.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlatterIcon.padding = mod.turtle.Inset{left: 7.0 right: 7.0 top: 4.0 bottom: 4.0}
+// The short rungs keep their own heights under the row minimum.
+mod.widgets.ButtonXs.min_height = 0.0
+mod.widgets.ButtonSm.min_height = 0.0
+mod.widgets.ButtonXs.draw_text.text_style.font_size = 7.0
+mod.widgets.ButtonFlat.draw_bg.border_radius = uniform(4.0)
+mod.widgets.ButtonFlat.draw_bg.border_size = uniform(0.34)
+mod.widgets.ButtonFlat.clip_x = false
+mod.widgets.ButtonFlat.clip_y = false
+mod.widgets.ButtonFlat.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+
+// The patch and its states, shared by every button template; `kind` picks
+// its yarn: 0 the plain patch (flat, small, large), 1 the default action, 2
+// primary, 3 secondary, 4 tertiary (sewn flatter), 5 danger, 6 outline, 7
+// flatter, 8 the patch that holds an icon alone. Disabled, every patch is
+// knitted in the grey of a spent skein.
+let mk_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, down: float, disabled: float, focus: float, loading: float, anim: float, kind: float) -> vec4 {
+    let m = 12.0
+    let px = mk_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(size.x, o.x, px), mk_snap(size.y, o.y, px))
+    let live = 1.0 - disabled
+    var col = vec3(0.502, 0.514, 0.553)
+    if kind > 0.5 && kind < 1.5 {
+        col = vec3(0.890, 0.843, 0.741)
+    }
+    if kind > 1.5 && kind < 2.5 {
+        col = vec3(0.914, 0.698, 0.227)
+    }
+    if kind > 2.5 && kind < 3.5 {
+        col = vec3(0.173, 0.573, 0.733)
+    }
+    if kind > 3.5 && kind < 4.5 {
+        col = vec3(0.482, 0.251, 0.710)
+    }
+    if kind > 4.5 && kind < 5.5 {
+        col = vec3(0.816, 0.173, 0.239)
+    }
+    if kind > 5.5 && kind < 6.5 {
+        col = vec3(0.890, 0.843, 0.741)
+    }
+    if kind > 6.5 && kind < 7.5 {
+        col = vec3(0.502, 0.514, 0.553)
+    }
+    if kind > 7.5 {
+        col = vec3(0.890, 0.843, 0.741)
+    }
+    var lift = 1.0
+    if kind > 3.5 && kind < 4.5 {
+        lift = 0.6
+    }
+    col = mix(col, vec3(0.235, 0.271, 0.325), disabled)
+    let rimc = col * 0.840
+    let seed = fract(size.x * 0.0137 + size.y * 0.071)
+    var res = mk_patch(p, lo, hi, min((hi.y - lo.y) * 0.24, 6.0), px, col, rimc, hover * live, down * live, focus * live, lift * mix(1.0, 0.5, disabled), seed)
+    if kind > 5.5 && kind < 6.5 {
+        // The outline: a running stitch of the patch's ink sewn round
+        // inside its rim.
+        let c = (lo + hi) * 0.5
+        let h = (hi - lo) * 0.5
+        let r = min(min((hi.y - lo.y) * 0.24, 6.0), min(h.x, h.y))
+        let d = Material.sd_box(p, c, h, r)
+        let rw = clamp(h.y * 0.26, 1.7, 3.0)
+        let rs = mk_running(mk_perim(p, c, h, r), d + rw + 2.0, 2.0, 1.5, 1.0, px)
+        res = Finish.over(res, vec4(vec3(0.118, 0.145, 0.200) * (0.85 + 0.25 * rs.y), 1.0) * rs.x * 0.8 * live)
+    }
+    if loading > 0.001 {
+        let c = (lo + hi) * 0.5
+        let rad = max(min(c.x - lo.x, c.y - lo.y) - 7.0, 2.0)
+        res = mk_spinner(res, p, c, rad, anim, loading, 1.5, vec3(0.965, 0.941, 0.886))
+    }
+    return res
+}
+
+mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 0.0), 12.0)
+}
+mod.widgets.Button.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 1.0), 12.0)
+}
+mod.widgets.ButtonIcon.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 8.0), 12.0)
+}
+mod.widgets.ButtonPrimary.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 2.0), 12.0)
+}
+mod.widgets.ButtonSecondary.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 3.0), 12.0)
+}
+mod.widgets.ButtonTertiary.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 4.0), 12.0)
+}
+mod.widgets.ButtonDanger.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 5.0), 12.0)
+}
+mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 6.0), 12.0)
+}
+mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
+    return self.host_over(mk_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 7.0), 12.0)
+}
+
+// Label ink per state: each yarn its own ink, every disabled patch dim.
+mod.widgets.ButtonFlat.draw_text.color = #f6f0e2
+mod.widgets.ButtonFlat.draw_text.color_hover = #f6f0e2
+mod.widgets.ButtonFlat.draw_text.color_down = #f6f0e2
+mod.widgets.ButtonFlat.draw_text.color_focus = #f6f0e2
+mod.widgets.ButtonFlat.draw_text.color_disabled = #8c95a3
+mod.widgets.ButtonFlat.draw_icon.color = #f6f0e2
+mod.widgets.Button.draw_text.color = #1e2533
+mod.widgets.Button.draw_text.color_hover = #1e2533
+mod.widgets.Button.draw_text.color_down = #1e2533
+mod.widgets.Button.draw_text.color_focus = #1e2533
+mod.widgets.Button.draw_text.color_disabled = #8c95a3
+mod.widgets.ButtonPrimary.draw_text.color = #2a2010
+mod.widgets.ButtonPrimary.draw_text.color_hover = #2a2010
+mod.widgets.ButtonPrimary.draw_text.color_down = #2a2010
+mod.widgets.ButtonPrimary.draw_text.color_focus = #2a2010
+mod.widgets.ButtonPrimary.draw_text.color_disabled = #8c95a3
+mod.widgets.ButtonPrimary.draw_icon.color = #2a2010
+mod.widgets.ButtonSecondary.draw_text.color = #f6f0e2
+mod.widgets.ButtonSecondary.draw_text.color_hover = #f6f0e2
+mod.widgets.ButtonSecondary.draw_text.color_down = #f6f0e2
+mod.widgets.ButtonSecondary.draw_text.color_focus = #f6f0e2
+mod.widgets.ButtonSecondary.draw_text.color_disabled = #8c95a3
+mod.widgets.ButtonSecondary.draw_icon.color = #f6f0e2
+mod.widgets.ButtonTertiary.draw_text.color = #f6f0e2
+mod.widgets.ButtonTertiary.draw_text.color_hover = #f6f0e2
+mod.widgets.ButtonTertiary.draw_text.color_down = #f6f0e2
+mod.widgets.ButtonTertiary.draw_text.color_focus = #f6f0e2
+mod.widgets.ButtonTertiary.draw_text.color_disabled = #8c95a3
+mod.widgets.ButtonTertiary.draw_icon.color = #f6f0e2
+mod.widgets.ButtonDanger.draw_text.color = #f6f0e2
+mod.widgets.ButtonDanger.draw_text.color_hover = #f6f0e2
+mod.widgets.ButtonDanger.draw_text.color_down = #f6f0e2
+mod.widgets.ButtonDanger.draw_text.color_focus = #f6f0e2
+mod.widgets.ButtonDanger.draw_text.color_disabled = #8c95a3
+mod.widgets.ButtonDanger.draw_icon.color = #f6f0e2
+mod.widgets.ButtonOutline.draw_text.color = #1e2533
+mod.widgets.ButtonOutline.draw_text.color_hover = #1e2533
+mod.widgets.ButtonOutline.draw_text.color_down = #1e2533
+mod.widgets.ButtonOutline.draw_text.color_focus = #1e2533
+mod.widgets.ButtonOutline.draw_text.color_disabled = #8c95a3
+mod.widgets.ButtonOutline.draw_icon.color = #1e2533
+mod.widgets.ButtonFlatter.draw_text.color = #f6f0e2
+mod.widgets.ButtonFlatter.draw_text.color_hover = #f6f0e2
+mod.widgets.ButtonFlatter.draw_text.color_down = #f6f0e2
+mod.widgets.ButtonFlatter.draw_text.color_focus = #f6f0e2
+mod.widgets.ButtonFlatter.draw_text.color_disabled = #8c95a3
+mod.widgets.ButtonFlat.draw_icon_end.color = #f6f0e2
+// An icon takes its patch's ink, whatever ink its caller gave it: a glyph
+// of the wrong ink is lost on the yarn. The icon on its own patch is the
+// star of the favourites, in its own yarn.
+mod.widgets.Button.draw_icon.get_color = fn() {
+    let base = self.eval_gradient()
+    return vec4(vec3(0.949, 0.722, 0.188) * base.a, base.a) * self.opacity
+}
+mod.widgets.ButtonIcon.draw_icon.get_color = fn() {
+    let base = self.eval_gradient()
+    return vec4(vec3(0.949, 0.722, 0.188) * base.a, base.a) * self.opacity
+}
+// The labels are set in the round face's medium weight.
+mod.widgets.ButtonFlat.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.Button.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonPrimary.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonSecondary.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonTertiary.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonDanger.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonOutline.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonFlatter.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonSm.draw_text.text_style = mod.theme.font_label{font_size: 7.5}
+mod.widgets.ButtonLg.draw_text.text_style = mod.theme.font_label{font_size: 10.0}
+
+// ---------------------------------------------------------------- balls and cords
+
+// A KNITTED BALL of radius `r` at `c` in `col`: a little stuffed ball of
+// stockinette, its stitches crowding toward its edge as they turn away,
+// lit from the upper left and a little in front, a fibre fray at its edge;
+// it throws a soft round shadow (`lift`). Premultiplied over `dst`.
+let mk_ball = fn(dst: vec4, p: vec2, c: vec2, r: float, px: float, col: vec3, hover: float, down: float, lift: float) -> vec4 {
+    let v = p - c
+    let q = v / max(r, 0.5)
+    let rl = length(q)
+    let sh = Finish.drop(p, c, vec2(r, r), r, vec2(0.0, 0.16 * r + 0.4), 0.2 * r + 0.4) * 0.65 * 0.550 * lift * (1.0 - down)
+    var res = Finish.over(dst, vec4(vec3(0.008, 0.039, 0.078) * sh, sh))
+    let z = sqrt(max(1.0 - rl * rl, 0.0))
+    let kq = v / (0.45 + 0.55 * z) + vec2(r * 3.0, r * 1.7)
+    let sw = max(r * 0.6, 2.8)
+    let k = mk_knit(kq, sw, sw * 0.6, 0.3)
+    var y = mk_yarn(col, col * 0.400, k, kq, px, 0.700)
+    let lit = q.x * (0.0 - 0.42) + q.y * (0.0 - 0.62) + z * 0.66
+    y = y * (0.52 + 0.62 * clamp(lit, -0.25, 1.0)) * (1.0 + 0.090 * hover) * (1.0 - 0.12 * down)
+    let fray = (Finish.hash(floor(p / px) + vec2(4.4, 0.3)) - 0.5) * 0.35
+    let a = Finish.cover(length(v) - r - fray, px)
+    return Finish.over(res, vec4(y * a, a))
+}
+
+// AN I-CORD lying from `lo` to `hi` (a pill along x when `vert` is 0,
+// along y when 1): a tube knitted in `col`, one column of stockinette
+// running along it so its V's point along the cord, round across and lit
+// along the side toward the upper left, a little fibre fraying its edge;
+// `shade` how much shadow it lays under itself. Premultiplied over `dst`.
+let mk_cord = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, px: float, col: vec3, shade: float, vert: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = max((hi - lo) * 0.5, vec2(0.3, 0.3))
+    let d = Finish.sd_pill(p, c, h)
+    let rad = min(h.x, h.y)
+    let sh = Finish.drop(p, c, h, rad, vec2(0.0, 0.3 * rad + 0.3), 0.35 * rad + 0.3) * 0.55 * 0.550 * shade
+    var res = Finish.over(dst, vec4(vec3(0.008, 0.039, 0.078) * sh, sh))
+    let v = p - c
+    let s = mix(v.x, 0.0 - v.y, vert)
+    let a = clamp(mix(v.y, v.x, vert) / rad, -1.0, 1.0)
+    let kq = vec2(a * rad * 0.94 + rad, s + 13.0)
+    let k = mk_knit(kq, rad * 2.0, rad * 1.25, 0.0)
+    var y = mk_yarn(col, col * 0.400, k, p, px, 0.700)
+    let z = sqrt(max(1.0 - a * a, 0.0))
+    y = y * (0.50 + 0.55 * clamp((0.0 - a) * 0.55 + z * 0.6, -0.2, 1.0))
+    let fray = (Finish.hash(floor(p / px) + vec2(8.4, 2.3)) - 0.5) * 0.3
+    let al = Finish.cover(d - fray, px)
+    return Finish.over(res, vec4(y * al, al))
+}
+
+// A STITCHED MARK: a line of satin stitch a..b `w` thick in `col`, its
+// threads lying slant across it so it reads as sewn, with the shade it
+// throws a device pixel under it. Premultiplied over `dst`.
+let mk_satin = fn(dst: vec4, p: vec2, a: vec2, b: vec2, w: float, px: float, col: vec3, amt: float) -> vec4 {
+    let d = mk_seg(p, a, b) - w * 0.5
+    let ds = mk_seg(p - vec2(0.0, px * 1.2), a, b) - w * 0.5
+    var res = Finish.over(dst, vec4(0.0, 0.0, 0.0, 1.0) * Finish.cover(ds, px) * 0.35 * amt)
+    let ba = normalize(b - a + vec2(0.0001, 0.0))
+    let t = dot(p - a, ba)
+    let x = (p.x - a.x) * ba.y - (p.y - a.y) * ba.x
+    let thr = fract((t * 0.8 + x * 1.2) / 1.1)
+    let sat = col * (0.84 + 0.26 * sqrt(max(1.0 - (thr * 2.0 - 1.0) * (thr * 2.0 - 1.0), 0.0)))
+    return Finish.over(res, vec4(sat, 1.0) * Finish.cover(d, px) * amt)
+}
+
+// ---------------------------------------------------------------- selection
+
+// The quad of a small control grows by this much so its shadow and focus
+// stitch can fall outside the box.
+mod.widgets.CheckBoxFlat.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.CheckBoxFlat.clip_x = false
+mod.widgets.CheckBoxFlat.clip_y = false
+mod.widgets.CheckBoxFlat.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.CheckBoxFlat.draw_bg.size = uniform(17.0)
+mod.widgets.CheckBoxFlat.draw_bg.border_radius = uniform(3.0)
+mod.widgets.CheckBoxFlat.label_walk.margin.left = 17.0
+
+// The check box: a 17 point patch; set, it is knitted in the accent yarn and
+// a check is sewn on it in satin stitch.
+mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
+    let m = 6.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sz = self.size
+    let x0 = (self.rect_size.x - sz) * self.mark_at_end
+    let y0 = self.rect_size.y * 0.5 - sz * 0.5
+    let lo = vec2(mk_snap(x0, o.x, px), mk_snap(y0, o.y, px))
+    let hi = vec2(mk_snap(x0 + sz, o.x, px), mk_snap(y0 + sz, o.y, px))
+    let c = (lo + hi) * 0.5
+    let on = max(self.active, self.mixed)
+    let held = max(self.down, self.pressed)
+    let live = 1.0 - self.disabled
+    var col = mix(vec3(0.075, 0.165, 0.271), vec3(0.914, 0.698, 0.227), on)
+    var rimc = mix(vec3(0.890, 0.843, 0.741), vec3(0.914, 0.698, 0.227) * 0.840, on)
+    col = mix(col, vec3(0.235, 0.271, 0.325), self.disabled)
+    rimc = mix(rimc, vec3(0.235, 0.271, 0.325) * 0.840, self.disabled)
+    var res = mk_patch(p, lo, hi, 4.0, px, col, rimc, self.hover * live, held, self.focus * live, 0.8, 0.31)
+    // The mark: a check 9 points across in satin stitch; mixed, a bar.
+    let cm = c + vec2(0.0, px * 0.5 * held)
+    let kk = sz / 14.0
+    let ink = mix(vec3(0.165, 0.125, 0.063), vec3(0.549, 0.584, 0.639), self.disabled)
+    let ck = (1.0 - self.mixed) * self.active
+    res = mk_satin(res, p, cm + vec2(-3.4, 0.1) * kk, cm + vec2(-1.0, 2.6) * kk, 2.0 * kk, px, ink, ck)
+    res = mk_satin(res, p, cm + vec2(-1.0, 2.6) * kk, cm + vec2(3.6, -2.8) * kk, 2.0 * kk, px, ink, ck)
+    res = mk_satin(res, p, cm + vec2(-3.2, 0.0) * kk, cm + vec2(3.2, 0.0) * kk, 2.1 * kk, px, ink, self.mixed)
+    let d = Material.sd_box(p, c, (hi - lo) * 0.5, 4.0)
+    return Finish.over(res, vec4(0.94, 0.25, 0.22, 1.0) * Finish.band(d, 0.0, px, px) * self.error)
+}
+
+// THE TOGGLE: a 36 x 19 patch of the dark yarn, a square knob of the knob
+// yarn sewn in it, half its length. On, the accent yarn fills the housing
+// from its left end up to the knob, which stands at its right; off, the
+// housing is bare and the knob at its left.
+mod.widgets.ToggleFlat.draw_bg.size = uniform(19.0)
+mod.widgets.ToggleFlat.draw_bg.pill_aspect = uniform(1.9)
+mod.widgets.ToggleFlat.label_walk.margin.left = 36.0
+mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
+    let m = 6.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let tw = self.size * self.pill_aspect
+    let th = self.size
+    let x0 = (self.rect_size.x - tw) * self.mark_at_end
+    let y0 = self.rect_size.y * 0.5 - th * 0.5
+    let lo = vec2(mk_snap(x0, o.x, px), mk_snap(y0, o.y, px))
+    let hi = vec2(mk_snap(x0 + tw, o.x, px), mk_snap(y0 + th, o.y, px))
+    let live = 1.0 - self.disabled
+    let tcol = mix(vec3(0.227, 0.255, 0.314), vec3(0.235, 0.271, 0.325), self.disabled * 0.7)
+    var res = mk_patch(p, lo, hi, 5.0, px, tcol, tcol * 0.840, 0.0, 0.0, self.focus * live, 0.7, 0.53)
+    // The knob travels the housing.
+    let kt = mix(self.active, self.drag_pos, self.drag)
+    let ins = 2.4
+    let ks = (hi.x - lo.x - ins * 2.0) * 0.5
+    let kx0 = mix(lo.x + ins, hi.x - ins - ks, kt)
+    let klo = vec2(Finish.snap(o.x + kx0, px) - o.x, lo.y + ins)
+    let khi = vec2(klo.x + ks, hi.y - ins)
+    // On, the accent yarn fills the housing up to the knob.
+    let fc = mix(vec3(0.541, 0.294, 0.769), vec3(0.235, 0.271, 0.325), self.disabled)
+    let fill = mk_patch(p, vec2(lo.x + ins, lo.y + ins), vec2(max(klo.x + 1.0, lo.x + ins + 1.0), hi.y - ins), 3.0, px, fc, fc * 0.840, 0.0, 0.0, 0.0, 0.0, 0.77)
+    res = Finish.over(res, fill * smoothstep(0.0, 0.3, kt))
+    let kc = mix(vec3(0.914, 0.867, 0.773), vec3(0.235, 0.271, 0.325), self.disabled * 0.6)
+    res = Finish.over(res, mk_patch(p, klo, khi, 3.5, px, kc, kc * 0.840, self.hover * live, max(self.pressed, self.down), 0.0, 0.8, 0.19))
+    return res * mix(1.0, 0.7, self.disabled)
+}
+
+// THE RADIO: a round patch sewn to the fabric, in its rim of loops;
+// chosen, it is knitted in the accent.
+mod.widgets.RadioButtonFlat.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RadioButtonFlat.clip_x = false
+mod.widgets.RadioButtonFlat.clip_y = false
+mod.widgets.RadioButtonFlat.draw_bg.size = uniform(17.0)
+mod.widgets.RadioButtonFlat.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.RadioButtonFlat.label_walk.margin.left = 17.0
+mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
+    let m = 6.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sz = self.size
+    let y0 = self.rect_size.y * 0.5 - sz * 0.5
+    let c = vec2(Finish.snap(o.x + sz * 0.5, px * 0.5) - o.x, Finish.snap(o.y + y0 + sz * 0.5, px * 0.5) - o.y)
+    let on = self.active
+    let live = 1.0 - self.disabled
+    let R = sz * 0.5
+    var col = mix(vec3(0.847, 0.796, 0.698), vec3(0.914, 0.698, 0.227), on)
+    col = mix(col, vec3(0.235, 0.271, 0.325), self.disabled)
+    let rimc = mix(col * 0.840, vec3(0.890, 0.843, 0.741), 0.000 * live)
+    return mk_patch(p, c - vec2(R, R), c + vec2(R, R), R, px, col, rimc, self.hover * live, self.down, self.focus * live, 0.8, 0.71)
+}
+
+// The radio tab: a patch; chosen, it is the accent yarn, pressed into the
+// fabric, its word in the accent's ink.
+mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RadioButtonTabFlat.clip_x = false
+mod.widgets.RadioButtonTabFlat.clip_y = false
+mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 0.0 right: 10.0 top: 4.0 bottom: 4.0}
+mod.widgets.RadioButtonTabFlat.min_height = 26.0
+mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
+    let m = 12.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px))
+    let sel = self.active
+    let live = 1.0 - self.disabled
+    var col = mix(vec3(0.086, 0.153, 0.243), vec3(0.914, 0.698, 0.227), sel)
+    col = mix(col, vec3(0.235, 0.271, 0.325), self.disabled)
+    return mk_patch(p, lo, hi, 7.0, px, col, col * 0.840, self.hover * live, max(self.down, sel), self.focus * live, 1.0, 0.41)
+}
+mod.widgets.RadioButtonTabFlat.draw_text.color = #efe6d2
+mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #efe6d2
+mod.widgets.RadioButtonTabFlat.draw_text.color_down = #efe6d2
+mod.widgets.RadioButtonTabFlat.draw_text.color_focus = #efe6d2
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #2a2010
+mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #8c95a3
+
+// ---------------------------------------------------------------- sliders
+
+// The slider's track: a cord of the dark yarn, then the value as a cord of
+// the slider's yarn laid over it from the start to the thumb.
+let mk_track = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, f0: float, f1: float, px: float, col: vec3, disabled: float) -> vec4 {
+    var res = mk_cord(dst, p, lo, hi, px, mix(vec3(0.059, 0.094, 0.157), vec3(0.235, 0.271, 0.325), disabled * 0.5), 1.0, 0.0)
+    if f1 - f0 > 0.01 {
+        let tl = vec2(f0, lo.y)
+        let th = vec2(max(f1, f0 + hi.y - lo.y), hi.y)
+        res = mk_cord(res, p, tl, th, px, mix(col, vec3(0.235, 0.271, 0.325), disabled * 0.8), 0.3, 0.0)
+    }
+    return res
+}
+// The thumb: a knitted ball, of the thumb yarn or of the slider's own.
+let mk_thumb_col = fn(col: vec3, disabled: float) -> vec3 {
+    return mix(mix(vec3(0.914, 0.867, 0.773), col, 1.000), vec3(0.235, 0.271, 0.325), disabled * 0.7)
+}
+
+// The bar slider: an 8 point i-cord under its label row, the value's
+// cord, and a 16 point knitted ball riding it.
+mod.widgets.SliderFlat.clip_x = false
+mod.widgets.SliderFlat.clip_y = false
+mod.widgets.SliderFlat.draw_bg.vertex = fn() {
+    let m = 7.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+let mk_bar_slider = fn(pos: vec2, size: vec2, o: vec2, dpi: float, slide: float, origin: float, arc_origin: float, hover: float, held: float, disabled: float, col: vec3) -> vec4 {
+    let m = 7.0
+    let px = mk_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let hs = 8.0
+    let cy = mk_snap(20.0 + (size.y - 20.0) * 0.5, o.y, px)
+    let lo = vec2(mk_snap(0.0, o.x, px), cy - 4.0)
+    let hi = vec2(mk_snap(size.x, o.x, px), cy + 4.0)
+    let span = size.x - hs * 2.0
+    let hx = hs + slide * span
+    let ox = hs + origin * span
+    let f0 = mix(lo.x + px, min(ox, hx), arc_origin)
+    let f1 = mix(hx, max(ox, hx), arc_origin)
+    let res = mk_track(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, f0, f1, px, col, disabled)
+    return mk_ball(res, p, vec2(Finish.snap(o.x + hx, px) - o.x, cy), hs, px, mk_thumb_col(col, disabled), hover * (1.0 - disabled), held * 0.4, 1.0)
+}
+mod.widgets.SliderFlat.draw_bg.pixel = fn() {
+    return mk_bar_slider(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.slide_pos, self.origin_pos, self.arc_origin, self.hover, max(self.drag, self.focus), self.disabled, vec3(0.275, 0.737, 0.902))
+}
+
+// A slider's value is a text input, and the field row's 26 point minimum
+// pushed it half a row below its label: here it is only as tall as its line.
+mod.widgets.SliderMinimal.text_input.min_height = 0.0
+mod.widgets.SliderMinimal.text_input.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderFlat.text_input.min_height = 0.0
+mod.widgets.SliderFlat.text_input.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.Slider.text_input.min_height = 0.0
+mod.widgets.Slider.text_input.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRoundFlat.text_input.min_height = 0.0
+mod.widgets.SliderRoundFlat.text_input.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRound.text_input.min_height = 0.0
+mod.widgets.SliderRound.text_input.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+// A dial's value box stands in the 20 point legend row above the ring: its
+// line and two points either side, so it clears the ring.
+mod.widgets.RotaryFlat.text_input.min_height = 0.0
+mod.widgets.RotaryFlat.text_input.padding = mod.turtle.Inset{left: 7.0 right: 7.0 top: 2.0 bottom: 2.0}
+mod.widgets.Rotary.text_input.min_height = 0.0
+mod.widgets.Rotary.text_input.padding = mod.turtle.Inset{left: 7.0 right: 7.0 top: 2.0 bottom: 2.0}
+mod.widgets.RotaryGradientY.text_input.min_height = 0.0
+mod.widgets.RotaryGradientY.text_input.padding = mod.turtle.Inset{left: 7.0 right: 7.0 top: 2.0 bottom: 2.0}
+
+// The minimal slider: only the cords, thinner, in the minimal's yarn; a
+// small ball shows under the hand.
+mod.widgets.SliderMinimal.clip_x = false
+mod.widgets.SliderMinimal.clip_y = false
+mod.widgets.SliderMinimal.draw_bg.vertex = fn() {
+    let m = 7.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
+    let m = 7.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let cy = mk_snap(self.offset_y + (self.rect_size.y - self.offset_y) * 0.5, o.y, px)
+    let lo = vec2(mk_snap(0.0, o.x, px), cy - 2.8)
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), cy + 2.8)
+    let lo2 = min(self.origin_pos, self.slide_pos)
+    let hi2 = max(self.origin_pos, self.slide_pos)
+    let f0 = mix(0.0, lo2, self.arc_origin) * self.rect_size.x
+    let f1 = mix(self.slide_pos, hi2, self.arc_origin) * self.rect_size.x
+    let col = vec3(0.608, 0.361, 0.839)
+    let res = mk_track(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, max(f0, lo.x + px), min(f1, hi.x - px), px, col, self.disabled)
+    let hx = self.slide_pos * self.rect_size.x
+    let show = max(self.hover, self.drag)
+    let th = mk_ball(vec4(0.0, 0.0, 0.0, 0.0), p, vec2(hx, cy), 6.5, px, mk_thumb_col(col, self.disabled), 0.0, 0.0, 1.0)
+    return Finish.over(res, th * show)
+}
+
+// The round slider: a label column, then the bar slider's cords in the round
+// slider's yarn and its ball. The track ends short of the right edge, so
+// the value the widget writes there stands on the fabric.
+mod.widgets.SliderRoundFlat.clip_x = false
+mod.widgets.SliderRoundFlat.clip_y = false
+mod.widgets.SliderRoundFlat.draw_bg.vertex = fn() {
+    let m = 7.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
+    let m = 7.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let hs = 8.0
+    let cy = mk_snap(self.rect_size.y * 0.5, o.y, px)
+    let x0 = mk_snap(self.label_size, o.x, px)
+    let lo = vec2(x0, cy - 4.0)
+    let hi = vec2(mk_snap(self.rect_size.x - 37.0, o.x, px), cy + 4.0)
+    let span = hi.x - lo.x - hs * 2.0
+    let hx = lo.x + hs + self.slide_pos * span
+    let col = vec3(0.941, 0.541, 0.165)
+    let res = mk_track(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, lo.x + px, hx, px, col, self.disabled)
+    return mk_ball(res, p, vec2(Finish.snap(o.x + hx, px) - o.x, cy), hs, px, mk_thumb_col(col, self.disabled), self.hover * (1.0 - self.disabled), max(self.drag, self.focus) * 0.4, 1.0)
+}
+
+// THE BAND is the sheet's slider with two thumbs: the same dark cord, the
+// value's cord between the thumbs in the band's yarn, two knitted balls.
+// The widget's grab geometry is set to the balls' own, so what is drawn is
+// what is dragged.
+mod.widgets.RangeSliderFlat.clip_x = false
+mod.widgets.RangeSliderFlat.clip_y = false
+mod.widgets.RangeSliderFlat.track_inset = 0.0
+mod.widgets.RangeSliderFlat.handle_size = 16.0
+mod.widgets.RangeSliderFlat.draw_bg.vertex = fn() {
+    let m = 7.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RangeSliderFlat.draw_bg.pixel = fn() {
+    let m = 7.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let hs = 8.0
+    let cy = mk_snap(self.label_px + (self.rect_size.y - self.label_px) * 0.5, o.y, px)
+    let lo = vec2(mk_snap(0.0, o.x, px), cy - 4.0)
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), cy + 4.0)
+    let span = self.rect_size.x - hs * 2.0
+    let h0 = hs + self.start_pos * span
+    let h1 = hs + self.end_pos * span
+    let col = vec3(0.886, 0.314, 0.541)
+    var res = mk_track(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, h0, h1, px, col, self.disabled)
+    let tc = mk_thumb_col(col, self.disabled)
+    res = mk_ball(res, p, vec2(Finish.snap(o.x + h0, px) - o.x, cy), hs, px, tc, self.hot_start, self.drag * self.hot_start * 0.4, 1.0)
+    return mk_ball(res, p, vec2(Finish.snap(o.x + h1, px) - o.x, cy), hs, px, tc, self.hot_end, self.drag * self.hot_end * 0.4, 1.0)
+}
+
+// THE FADER: a cord of the dark yarn laid along its travel with a scale of
+// running stitches either side, and a felt block riding it: a padded patch
+// of the fader yarn, a satin line across its middle as its index. Hovered
+// it lightens; held it is pressed flat and its shadow goes; focused, the
+// running stitch round it.
+mod.widgets.SliderFader.cap_size = 26.0
+mod.widgets.SliderFader.draw_bg.track_size = uniform(5.0)
+mod.widgets.SliderFader.draw_bg.cap_cross = uniform(0.85)
+mod.widgets.SliderFader.clip_x = false
+mod.widgets.SliderFader.clip_y = false
+mod.widgets.SliderFader.draw_bg.vertex = fn() {
+    let m = 7.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderFader.draw_bg.pixel = fn() {
+    let m = 7.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let sz = self.rect_size
+    let p = self.pos * (sz + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let v = self.is_vertical
+    let along = mix(sz.x, sz.y, v)
+    let across = mix(sz.y, sz.x, v)
+    let travel = max(along - self.inset_px * 2.0 - self.cap_px, 1.0)
+    let foot = self.inset_px + self.cap_px * 0.5
+    // Track space: `a` from the value's zero, `b` across.
+    let a = mix(p.x, sz.y - p.y, v)
+    let b = mix(p.y, p.x, v)
+    let mid = across * 0.5
+    // The cord, snapped on screen.
+    let slo = mix(vec2(self.inset_px, mid - 3.0), vec2(mid - 3.0, self.inset_px), v)
+    let shi = mix(vec2(sz.x - self.inset_px, mid + 3.0), vec2(mid + 3.0, sz.y - self.inset_px), v)
+    let lo = vec2(mk_snap(slo.x, o.x, px), mk_snap(slo.y, o.y, px))
+    let hi = vec2(mk_snap(shi.x, o.x, px), mk_snap(shi.y, o.y, px))
+    var res = mk_cord(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, px, vec3(0.059, 0.094, 0.157), 1.0, v)
+    // The scale: a running stitch either side of the cord, a stitch every
+    // 6 points.
+    let t1 = mk_running(a - foot + 1.0, b - (mid + 7.0), 2.0, 4.0, 1.3, px)
+    let t2 = mk_running(a - foot + 1.0, b - (mid - 7.0), 2.0, 4.0, 1.3, px)
+    let inr = step(foot - 2.0, a) * step(a, foot + travel + 2.0)
+    res = Finish.over(res, vec4(vec3(0.890, 0.843, 0.741) * (0.85 + 0.25 * t1.y), 1.0) * t1.x * inr * 0.9)
+    res = Finish.over(res, vec4(vec3(0.890, 0.843, 0.741) * (0.85 + 0.25 * t2.y), 1.0) * t2.x * inr * 0.9)
+    // The block, its leading end on the device pixel grid.
+    let live = 1.0 - self.disabled
+    let hsz = vec2(self.cap_px * 0.5 * 0.62, min(max(across * self.cap_cross, 8.0), across) * 0.5)
+    let at_free = foot + self.slide_pos * travel
+    let lead = Finish.snap(mix(o.x + at_free - hsz.x, o.y + sz.y - at_free - hsz.x, v), px)
+    let at = mix(lead - o.x + hsz.x, o.y + sz.y - lead - hsz.x, v)
+    let cc = mix(vec2(at, mid), vec2(mid, sz.y - at), v)
+    let hh = mix(hsz, hsz.yx, v)
+    let press = self.drag * live
+    let col = mix(vec3(0.914, 0.698, 0.227), vec3(0.235, 0.271, 0.325), self.disabled)
+    res = Finish.over(res, mk_patch(p, cc - hh, cc + hh, 3.5, px, col, col * 0.840, self.hover * live, press, self.focus * live, 1.0, 0.63))
+    // The index: a satin line across the middle of the block.
+    let ia = mix(vec2(cc.x, cc.y - hh.y + 3.5), vec2(cc.x - hh.x + 3.5, cc.y), v)
+    let ib = mix(vec2(cc.x, cc.y + hh.y - 3.5), vec2(cc.x + hh.x - 3.5, cc.y), v)
+    return mk_satin(res, p + vec2(0.0, 0.0 - px * 0.5 * press), ia, ib, 1.4, px, vec3(1.000, 0.965, 0.878), 1.0)
+}
+
+// ---------------------------------------------------------------- knobs
+
+// A KNOB: a knitted dome in a ring of chunky loops. Out to in: (in sheets
+// that have them) a scale of short stitches round it; what it throws on the
+// fabric; the ring, a round of fat chain loops in the dark yarn, the loops
+// the value covers knitted in the arc's yarn instead -- whole loops, as a
+// knitter changes yarn; the cap, a padded dome of stockinette that turns
+// with the value, lit from the upper left; a satin line from near its
+// middle toward the value, its index. Angles run from straight down,
+// clockwise, the gap at the bottom. `rr` is the knob's whole radius,
+// stitches included; `cap` 0 leaves the ring bare.
+let mk_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: float, arc_origin: float, gap: float, hover: float, held: float, focus: float, disabled: float, capc: vec3, idxc: vec3, cap: float) -> vec4 {
+    let q = p - c
+    let rl = length(q)
+    let nk = q / max(rl, 0.001)
+    let on = 1.0 - disabled
+    let ticks = 1.000 * cap
+    let tl = clamp(rr * 0.13, 2.0, 6.0) * ticks
+    let ring_out = rr - tl - 1.0 * ticks
+    let ring_w = clamp(ring_out * 0.22, 3.0, 10.0)
+    let ring_in = ring_out - ring_w
+    let ring_mid = ring_out - ring_w * 0.5
+    let rc = ring_in + max(px, 0.4)
+    let one = PI / 180.0
+    let sweep = 2.0 * PI - gap * one
+    let start = gap * one * 0.5
+    let ve = start + sweep * slide
+    let oe = start + sweep * origin
+    var ang = atan2(0.0 - q.x, q.y)
+    if ang < 0.0 {
+        ang = ang + 2.0 * PI
+    }
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    // The scale: eleven stitches across the sweep.
+    let nt = 10.0
+    let ta = clamp(ang, start, start + sweep)
+    let ti = floor((ta - start) / sweep * nt + 0.5)
+    let tang = start + ti / nt * sweep
+    let tdir = vec2(0.0 - sin(tang), cos(tang))
+    let perp = abs(q.x * tdir.y - q.y * tdir.x)
+    let alng = dot(q, tdir)
+    let tick_d = length(vec2(perp, max(abs(alng - (ring_out + 1.0 + tl * 0.5)) - tl * 0.35, 0.0))) - 0.7
+    res = Finish.over(res, vec4(vec3(0.890, 0.843, 0.741), 1.0) * Finish.cover(tick_d, px) * step(0.5, ticks) * mix(1.0, 0.5, disabled))
+    // What the knob throws on the fabric.
+    let s1 = Finish.drop(p, c + vec2(0.0, 0.07 * ring_out + 0.4), vec2(ring_out, ring_out), ring_out, vec2(0.0, 0.0), 0.08 * ring_out + 0.6) * 0.7 * 0.550
+    res = Finish.over(res, vec4(vec3(0.008, 0.039, 0.078) * s1, s1) * (1.0 - Finish.cover(rl - ring_out, px)))
+    // The ring of loops, their count whole.
+    let nl = max(floor(2.0 * PI * ring_mid / max(ring_w * 0.78, 2.4) + 0.5), 8.0)
+    let ac = clamp((rl - ring_mid) / (ring_w * 0.5), -1.0, 1.0)
+    let lf = ang / (2.0 * PI) * nl + ac * 0.28
+    let li = floor(lf)
+    let g = (fract(lf) - 0.5) * 2.0
+    let loop_h = sqrt(max(1.0 - g * g, 0.0)) * sqrt(max(1.0 - ac * ac * 0.85, 0.0))
+    let la = (li + 0.5) / nl * 2.0 * PI
+    let a0 = mix(start, min(oe, ve), arc_origin)
+    let a1 = mix(ve, max(oe, ve), arc_origin)
+    let lit_loop = step(a0, la) * step(la, a1) * step(0.002, a1 - a0) * on
+    var ry = mix(vec3(0.094, 0.157, 0.243), vec3(0.941, 0.627, 0.188), lit_loop)
+    let rlit = mk_lit(nk) * ac * 0.9 - g * 0.2
+    ry = ry * (0.48 + 0.62 * loop_h) * (0.9 + 0.32 * rlit)
+    ry = ry * (1.0 + (Finish.hash(floor(p / px) + vec2(2.7, 8.8)) - 0.5) * 0.08)
+    let fray = (Finish.hash(floor(p / px) + vec2(5.5, 1.1)) - 0.5) * 0.3
+    let ra = Finish.cover(rl - ring_out - fray, px) * mix(Finish.cover(ring_in - rl - fray, px), 1.0, cap)
+    res = Finish.over(res, vec4(ry * ra, ra))
+    // The cap's shade on the ring.
+    let cs = Finish.drop(p, c + vec2(0.3, 0.9), vec2(rc, rc), rc, vec2(0.0, 0.0), 1.0) * 0.45 * (1.0 - Finish.cover(rl - rc, px)) * cap
+    res = Finish.over(res, vec4(0.0, 0.0, 0.0, cs))
+    // The cap: a dome of stockinette turned with the value.
+    let ca = cos(ve)
+    let sa = sin(ve)
+    let kq = vec2(q.x * ca + q.y * sa, q.y * ca - q.x * sa)
+    let z = sqrt(max(1.0 - (rl / max(rc, 0.5)) * (rl / max(rc, 0.5)), 0.0))
+    let kw = kq / (0.55 + 0.45 * z) + vec2(rc * 2.3, rc * 1.9)
+    let sw = clamp(rc * 0.24, 3.0, 6.5)
+    let k = mk_knit(kw, sw, sw * 0.6, 0.4)
+    let ccol = mix(capc, vec3(0.235, 0.271, 0.325), disabled * 0.6)
+    var cy = mk_yarn(ccol, ccol * 0.400, k, kw, px, 0.700)
+    let lit = nk.x * (1.0 - z) * (0.0 - 0.45) + nk.y * (1.0 - z) * (0.0 - 0.65) + z * 0.62
+    cy = cy * (0.55 + 0.55 * clamp(lit, -0.3, 1.0)) * (1.0 + 0.090 * hover) * (1.0 - 0.08 * held)
+    // A darker round where the cap is bound off.
+    cy = mix(cy, cy * 0.6, Finish.band(rl - rc, 0.0, max(rc * 0.06, 0.8), px) * 0.7)
+    let kfray = (Finish.hash(floor(p / px) + vec2(7.3, 4.2)) - 0.5) * 0.3
+    let ka = Finish.cover(rl - rc - kfray, px) * cap
+    res = Finish.over(res, vec4(cy * ka, ka))
+    // The index: a satin line from near the middle toward the value.
+    let vd = vec2(0.0 - sin(ve), cos(ve))
+    let iw = clamp(rc * 0.11, 1.4, 3.6)
+    res = mk_satin(res, p, c + vd * (rc * 0.22), c + vd * (rc * 0.78), iw, px, mix(idxc, vec3(0.549, 0.584, 0.639), disabled), cap)
+    // Focus: a running stitch of the accent round the ring.
+    let fr = mk_running(ang * (ring_out + 2.4), rl - ring_out - 2.4 - tl, 2.2, 1.4, 1.2, px)
+    return Finish.over(res, vec4(vec3(1.000, 0.824, 0.353), 1.0) * fr.x * focus * on)
+}
+
+// The quad runs 10 points past the box, room for the knob's shadow.
+mod.widgets.RotaryKnob.clip_x = false
+mod.widgets.RotaryKnob.clip_y = false
+mod.widgets.RotaryKnob.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let dia = min(self.rect_size.x, self.rect_size.y)
+    let c = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x, Finish.snap(self.rect_pos.y + self.rect_size.y - dia * 0.5, px) - self.rect_pos.y)
+    return mk_knob(p, c, dia * 0.5 + 1.0, px, self.slide_pos, self.origin_pos, self.arc_origin, self.gap, self.hover, self.drag, self.focus, self.disabled, vec3(0.914, 0.698, 0.227), vec3(0.106, 0.141, 0.212), 1.0)
+}
+mod.widgets.RotaryFlat.clip_x = false
+mod.widgets.RotaryFlat.clip_y = false
+mod.widgets.RotaryFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let dia = min(self.rect_size.x, self.rect_size.y - 22.0)
+    let c = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x, Finish.snap(self.rect_pos.y + 22.0 + dia * 0.5, px) - self.rect_pos.y)
+    return mk_knob(p, c, dia * 0.5 + 1.0, px, self.slide_pos, self.origin_pos, self.arc_origin, self.gap, self.hover, self.drag, self.focus, self.disabled, vec3(0.110, 0.180, 0.282), vec3(0.949, 0.753, 0.251), 1.0)
+}
+// The legends over the knobs: in the round face's bold.
+mod.widgets.RotaryKnob.draw_text.text_style = mod.theme.font_bold{font_size: 8.0}
+mod.widgets.RotaryFlat.draw_text.text_style = mod.theme.font_bold{font_size: 8.5}
+
+// The spinner: the knob's ring of loops alone, three quarters of it in the
+// arc's yarn. A sheet may not read the pass clock and the spinner carries
+// no other, so it stands still.
+mod.widgets.SpinnerFlat.size = 22.0
+mod.widgets.SpinnerFlat.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let c = vec2(Finish.snap(o.x + self.rect_size.x * 0.5, px), Finish.snap(o.y + self.rect_size.y * 0.5, px)) - o
+    let size = min(self.rect_size.x, self.rect_size.y)
+    let res = mk_knob(p, c, size * 0.5, px, 0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, vec3(0.914, 0.698, 0.227), vec3(0.106, 0.141, 0.212), 0.0)
+    return res * self.alpha
+}
+
+// ---------------------------------------------------------------- fields
+
+// A text field: a patch of the field yarn, 26 points tall. A text field
+// clips what it holds, so the whole patch stands inside its own box and
+// throws only its contact line. Hovered the yarn lightens; focused, a
+// running stitch of the accent goes round inside its rim.
+let mk_field = fn(p: vec2, size: vec2, o: vec2, px: float, hover: float, focus: float, disabled: float, col: vec3, rimc: vec3) -> vec4 {
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(size.x - px * 0.49, o.x, px), mk_snap(size.y - px * 0.49, o.y, px) - px)
+    let fc = mix(col, vec3(0.235, 0.271, 0.325), disabled)
+    let rc = mix(rimc, vec3(0.235, 0.271, 0.325) * 0.840, disabled)
+    var res = mk_patch(p, lo, hi, 6.0, px, fc, rc, hover * (1.0 - disabled) * 0.6, 0.0, 0.0, 0.0, fract(size.x * 0.0113))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = Material.sd_box(p, c, h, 6.0)
+    let rw = clamp(h.y * 0.26, 1.7, 3.0)
+    let rs = mk_running(mk_perim(p, c, h, 6.0), d + rw + 1.4, 2.2, 1.4, 1.2, px)
+    return Finish.over(res, vec4(vec3(1.000, 0.824, 0.353) * (0.85 + 0.3 * rs.y), 1.0) * rs.x * focus * (1.0 - disabled))
+}
+
+// Text fields. An input with no fill of its own (the one a slider, a combo
+// box or a well holds) draws nothing.
+mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
+    if self.color.a < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let px = mk_px(self.draw_pass.dpi_factor)
+    return mk_field(self.pos * self.rect_size, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, vec3(0.890, 0.843, 0.741), vec3(0.784, 0.722, 0.588))
+}
+// A well that holds an input and its parts (a form's field, a search
+// with its icon) wears the same patch.
+mod.widgets.FieldWell.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    return mk_field(self.pos * self.rect_size, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, vec3(0.890, 0.843, 0.741), vec3(0.784, 0.722, 0.588))
+}
+mod.widgets.TextInputFlat.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 4.0 bottom: 4.0}
+mod.widgets.TextInputFlat.min_height = 26.0
+mod.widgets.TextInputFlat.draw_cursor.color = #1e2533
+mod.widgets.TextInputFlat.draw_text.color = #1e2533
+mod.widgets.TextInputFlat.draw_text.color_hover = #1e2533
+mod.widgets.TextInputFlat.draw_text.color_focus = #1e2533
+mod.widgets.TextInputFlat.draw_text.color_down = #1e2533
+mod.widgets.TextInputFlat.draw_text.color_empty = #584f41
+mod.widgets.TextInputFlat.draw_text.color_disabled = #8c95a3
+
+// The number field: a patch of the number yarn in its own rim; its stepper
+// two small patches of the dark yarn, one over the other, each with an
+// arrow sewn on in satin stitch.
+mod.widgets.NumberField.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    return mk_field(self.pos * self.rect_size, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, vec3(0.075, 0.137, 0.227), vec3(0.914, 0.698, 0.227))
+}
+mod.widgets.NumberField.spin_width = 17.0
+mod.widgets.NumberSpin.width = 17.0
+mod.widgets.NumberField.input.draw_text.color = #efe6d2
+mod.widgets.NumberField.input.draw_text.color_hover = #efe6d2
+mod.widgets.NumberField.input.draw_text.color_focus = #efe6d2
+// The widget's own filled triangles are hidden; the face draws its own.
+mod.widgets.NumberSpin.draw_text.color = #00000000
+mod.widgets.NumberSpin.draw_text.color_disabled = #00000000
+mod.widgets.NumberSpin.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let x0 = mk_snap(0.0, o.x, px) + px
+    let xr = mk_snap(self.rect_size.x - px * 0.49, o.x, px) - 3.5
+    let yt = mk_snap(0.0, o.y, px) + 3.5
+    let yb = mk_snap(self.rect_size.y - px * 0.49, o.y, px) - 4.5
+    let mid = mk_snap(self.rect_size.y * 0.5, o.y, px) - 0.5
+    let live = 1.0 - self.disabled
+    let hu = max(0.0, self.hot)
+    let hd = max(0.0, 0.0 - self.hot)
+    let du = max(0.0, self.down)
+    let dd = max(0.0, 0.0 - self.down)
+    let sc = vec3(0.133, 0.212, 0.310)
+    var res = mk_patch(p, vec2(x0, yt), vec2(xr, mid - 0.5), 2.5, px, sc, sc * 0.840, hu, du, 0.0, 0.0, 0.21)
+    res = Finish.over(res, mk_patch(p, vec2(x0, mid + 0.5), vec2(xr, yb), 2.5, px, sc, sc * 0.840, hd, dd, 0.0, 0.0, 0.67))
+    // The arrows.
+    let cx = (x0 + xr) * 0.5
+    let cu = (yt + mid) * 0.5 + px * 0.5 * du
+    let cd = (mid + yb) * 0.5 + px * 0.5 * dd
+    let ink = mix(vec3(0.937, 0.902, 0.824), vec3(0.549, 0.584, 0.639), self.disabled)
+    res = mk_satin(res, p, vec2(cx - 2.6, cu + 1.3), vec2(cx, cu - 1.3), 1.3, px, ink, 0.5 + 0.5 * live)
+    res = mk_satin(res, p, vec2(cx, cu - 1.3), vec2(cx + 2.6, cu + 1.3), 1.3, px, ink, 0.5 + 0.5 * live)
+    res = mk_satin(res, p, vec2(cx - 2.6, cd - 1.3), vec2(cx, cd + 1.3), 1.3, px, ink, 0.5 + 0.5 * live)
+    res = mk_satin(res, p, vec2(cx, cd + 1.3), vec2(cx + 2.6, cd - 1.3), 1.3, px, ink, 0.5 + 0.5 * live)
+    return res
+}
+
+// The drop-down: a patch of the choice yarn, a chevron sewn on at its right
+// in satin stitch (pointing up while its list is open), a running stitch
+// parting it from the words.
+mod.widgets.DropDownFlat.padding = mod.turtle.Inset{left: 10.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.DropDownFlat.clip_x = false
+mod.widgets.DropDownFlat.clip_y = false
+mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+let mk_chevron = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, px: float, disabled: float, open: float, ink: vec3) -> vec4 {
+    let cy = (lo.y + hi.y) * 0.5
+    let dx = hi.x - 21.0
+    let rs = mk_running(p.y - lo.y, p.x - dx, 1.8, 1.6, 1.0, px)
+    let inr = step(lo.y + 5.0, p.y) * step(p.y, hi.y - 5.0)
+    var res = Finish.over(dst, vec4(ink * 0.85, 1.0) * rs.x * inr * 0.55)
+    let cc = vec2(dx + 10.5, cy + mix(0.8, -0.8, open))
+    let dy = mix(1.0, -1.0, open) * 2.0
+    let ik = mix(ink, vec3(0.549, 0.584, 0.639), disabled)
+    res = mk_satin(res, p, cc + vec2(-3.4, 0.0 - dy), cc + vec2(0.0, dy), 1.6, px, ik, 1.0)
+    return mk_satin(res, p, cc + vec2(0.0, dy), cc + vec2(3.4, 0.0 - dy), 1.6, px, ik, 1.0)
+}
+mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
+    let m = 12.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px))
+    let live = 1.0 - self.disabled
+    let col = mix(vec3(0.890, 0.843, 0.741), vec3(0.235, 0.271, 0.325), self.disabled)
+    let res = mk_patch(p, lo, hi, min((hi.y - lo.y) * 0.32, 8.0), px, col, col * 0.840, max(self.hover, self.active) * live, self.down * live, self.focus * live, 1.0, fract(self.rect_size.x * 0.0173))
+    return mk_chevron(res, p, lo, hi, px, self.disabled, self.active, vec3(0.118, 0.145, 0.200))
+}
+mod.widgets.DropDownFlat.draw_text.color = #1e2533
+mod.widgets.DropDownFlat.draw_text.color_hover = #1e2533
+mod.widgets.DropDownFlat.draw_text.color_focus = #1e2533
+mod.widgets.DropDownFlat.draw_text.color_down = #1e2533
+mod.widgets.DropDownFlat.draw_text.color_disabled = #8c95a3
+
+// The combo box: the same patch and chevron.
+mod.widgets.ComboBoxFlat.padding = mod.turtle.Inset{left: 10.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.ComboBoxFlat.input.min_height = 0.0
+mod.widgets.ComboBoxFlat.clip_x = false
+mod.widgets.ComboBoxFlat.clip_y = false
+mod.widgets.ComboBoxFlat.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ComboBoxFlat.draw_bg.pixel = fn() {
+    let m = 12.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px))
+    let live = 1.0 - self.disabled
+    let col = mix(vec3(0.890, 0.843, 0.741), vec3(0.235, 0.271, 0.325), self.disabled)
+    let res = mk_patch(p, lo, hi, min((hi.y - lo.y) * 0.32, 8.0), px, col, col * 0.840, self.hover * live, 0.0, self.focus * live, 1.0, fract(self.rect_size.x * 0.0173))
+    return mk_chevron(res, p, lo, hi, px, self.disabled, 0.0, vec3(0.118, 0.145, 0.200))
+}
+mod.widgets.ComboBoxFlat.input.draw_text.color = #1e2533
+mod.widgets.ComboBoxFlat.input.draw_text.color_hover = #1e2533
+mod.widgets.ComboBoxFlat.input.draw_text.color_focus = #1e2533
+mod.widgets.ComboBoxFlat.input.draw_text.color_down = #1e2533
+mod.widgets.ComboBoxFlat.input.draw_text.color_empty = #584f41
+
+// Open lists: a patch of the list yarn; under the hand a row lightens, the
+// chosen row is a patch of the accent sewn on it.
+let mk_menu = fn(p: vec2, size: vec2, px: float) -> vec4 {
+    return mk_patch(p, vec2(0.0, 0.0), size - vec2(px, px), 6.0, px, vec3(0.882, 0.831, 0.729), vec3(0.882, 0.831, 0.729) * 0.840, 0.0, 0.0, 0.0, 0.0, fract(size.x * 0.019 + size.y * 0.007))
+}
+let mk_row = fn(p: vec2, size: vec2, px: float, hover: float, active: float, disabled: float) -> vec4 {
+    var res = vec4(1.0, 1.0, 1.0, 1.0) * 0.07 * hover * (1.0 - disabled)
+    let sel = mk_patch(p, vec2(2.0, 1.0), size - vec2(2.0, 1.0), 4.0, px, vec3(0.914, 0.698, 0.227), vec3(0.914, 0.698, 0.227) * 0.840, 0.0, 0.0, 0.0, 0.0, 0.27)
+    return Finish.over(res, sel * active)
+}
+mod.widgets.PopupMenuFlat.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    return mk_menu(self.pos * self.rect_size, self.rect_size, px)
+}
+mod.widgets.PopupMenuItem.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    return mk_row(self.pos * self.rect_size, self.rect_size, px, self.hover, self.active, self.disabled)
+}
+mod.widgets.PopupMenuItem.draw_text.color = #1e2533
+mod.widgets.PopupMenuItem.draw_text.color_hover = #1e2533
+mod.widgets.PopupMenuItem.draw_text.color_active = #2a2010
+mod.widgets.ComboBoxFlat.draw_popup_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    return mk_menu(self.pos * self.rect_size, self.rect_size, px)
+}
+mod.widgets.ComboBoxFlat.draw_item.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    return mk_row(self.pos * self.rect_size, self.rect_size, px, self.hover, self.active, 0.0)
+}
+mod.widgets.ComboBoxFlat.draw_item_text.color = #1e2533
+mod.widgets.ComboBoxFlat.draw_item_text.color_active = #2a2010
+
+// ---------------------------------------------------------------- tabs
+
+// The segmented control: the strip one patch of the segment yarn; the
+// chosen answer a patch of the accent pressed flat into it, its word in the
+// accent's ink.
+mod.widgets.SegmentedControlFlat.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
+    let m = 12.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px))
+    return mk_patch(p, lo, hi, 8.0, px, vec3(0.086, 0.153, 0.243), vec3(0.086, 0.153, 0.243) * 0.840, 0.0, 0.0, 0.0, 1.0, 0.13)
+}
+// The strip lays the answers 2 points in from its edge; the quad grows so
+// the chosen patch can reach the strip's rim.
+mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
+    let m = 11.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+// On the column (its pill's `radius` set to -1 as the mark) the patch keeps
+// to its own segment's height and reaches the strip's side rims.
+mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let m = 11.0
+    let v = 1.0 - step(0.0, self.radius)
+    let hz = 1.0 - v
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0 - 1.0 * v, o.x, px), mk_snap(0.0 - 1.0 * hz, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x + 1.0 * v, o.x, px), mk_snap(self.rect_size.y + 1.0 * hz, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    // The shade of the dent it is pressed into.
+    let dent = Finish.drop(p, c, h, 6.0, vec2(0.0, 0.0), 1.2) * (1.0 - Finish.cover(Material.sd_box(p, c, h, 6.0), px)) * 0.5
+    var res = vec4(0.0, 0.0, 0.0, dent)
+    return Finish.over(res, mk_patch(p, lo, hi, 6.0, px, vec3(0.914, 0.698, 0.227), vec3(0.914, 0.698, 0.227) * 0.840, 0.0, 1.0, 0.0, 0.0, 0.57))
+}
+mod.widgets.SegmentedControlFlat.draw_text.text_style = mod.theme.font_label{font_size: 8.5}
+mod.widgets.SegmentedControlFlat.draw_text_selected.text_style = mod.theme.font_label{font_size: 8.5}
+mod.widgets.SegmentedControlFlat.draw_text.color = #efe6d2
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #2a2010
+// The chosen word takes its ink from the control's role palette.
+mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #2a2010
+mod.widgets.SegmentedControl.palette.on_neutral_container = #2a2010
+mod.widgets.SegmentedControlVertical.draw_pill.radius = -1.0
+
+// Tabs: each tab its own patch standing beside the next; the tab in use is
+// knitted in the tab yarn and pressed into the fabric.
+mod.widgets.Tabs.height = 28.0
+mod.widgets.Tabs.clip_x = false
+mod.widgets.Tabs.clip_y = false
+let mk_tab = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, active: float) -> vec4 {
+    let m = 12.0
+    let px = mk_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(size.x, o.x, px) - 3.0, mk_snap(size.y, o.y, px))
+    let col = mix(vec3(0.086, 0.153, 0.243), vec3(0.698, 0.235, 0.651), active)
+    return mk_patch(p, lo, hi, 7.0, px, col, col * 0.840, hover, active * 0.7, 0.0, 1.0, fract(size.x * 0.031))
+}
+mod.widgets.Tabs.draw_tab.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_tab_hover.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_tab_active.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_bg.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab.pixel = fn() {
+    return mk_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_hover.pixel = fn() {
+    return mk_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 1.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_active.pixel = fn() {
+    return mk_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 0.0, 1.0)
+}
+mod.widgets.Tabs.draw_sep.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+// The marks: the cross that closes a tab, sewn on it in its ink, and the
+// plus that adds one, sewn on the fabric in the ground's ink.
+mod.widgets.Tabs.draw_mark.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let r = min(self.rect_size.x, self.rect_size.y) * 0.27
+    let a = mix(0.7853981634, 0.0, self.plus)
+    let d1 = vec2(cos(a), sin(a)) * r
+    let d2 = vec2(0.0 - d1.y, d1.x)
+    let ink = mix(vec3(0.937, 0.902, 0.824), vec3(0.945, 0.914, 0.839), self.plus)
+    let res = mk_satin(vec4(0.0, 0.0, 0.0, 0.0), p, c - d1, c + d1, 1.6, px, ink, 1.0)
+    return mk_satin(res, p, c - d2, c + d2, 1.6, px, ink, 1.0)
+}
+mod.widgets.Tabs.draw_text.color = #efe6d2
+mod.widgets.Tabs.draw_text_active.color = #f6f0e2
+mod.widgets.Tabs.draw_text.text_style = mod.theme.font_label{font_size: 8.5}
+mod.widgets.Tabs.draw_text_active.text_style = mod.theme.font_label{font_size: 8.5}
+
+// ---------------------------------------------------------------- lamps
+
+// LAMPS: real LEDs, each set in a grommet of felt sewn to the fabric. The
+// emitter is the light: at full current its middle burns toward white and
+// its rim is its most saturated colour; at lower current the middle is no
+// longer white, the colour deeper, the glow smaller; out, it is dark tinted
+// glass, its colour barely there. Round it the grommet: a raised ring of
+// felt lit from the upper left. Over the lens one crisp highlight of a
+// dome. Its light is added, never painted: a tight hot halo and a short
+// bloom in its own hue, screened over whatever is there and gone in about
+// two radii; on a pale ground, where light can barely brighten, its hue is
+// also laid round it as a tint that keeps the ground's luminance, so it
+// never darkens or greys its ground.
+let mk_led_add = fn(res: vec4, light: vec3, ground: vec3) -> vec4 {
+    let est = res.rgb + ground * (1.0 - res.a)
+    let add = (vec3(1.0, 1.0, 1.0) - exp(-light)) * max(vec3(1.0, 1.0, 1.0) - est, vec3(0.0, 0.0, 0.0))
+    return vec4(res.rgb + add, res.a)
+}
+// An LED's colour at full strength: its brightest channel at one.
+let mk_led_full = fn(ink: vec3) -> vec3 {
+    return ink / max(max(ink.x, max(ink.y, ink.z)), 0.01)
+}
+// The same colour at the emitter's own chroma: the hue kept and its
+// saturation raised by `vivid`.
+let mk_led_hue = fn(ink: vec3, vivid: float) -> vec3 {
+    let f = mk_led_full(ink)
+    let mn = min(f.x, min(f.y, f.z))
+    let ch = 1.0 - mn
+    let pure = (f - vec3(mn, mn, mn)) / max(ch, 0.001)
+    return mix(f, pure, clamp(vivid, 0.0, 1.0) * 0.72 * smoothstep(0.03, 0.12, ch))
+}
+// The lamp: its lens a rounded box `hb` either side of `c` (round when the
+// two are equal), `lit` its current 0..1, `ink` its colour and `vivid` how
+// far its chroma is raised, `ground` what shows through where nothing is
+// drawn, `room` how far its light may reach, `bez` and `raised` its bezel
+// (0: a socket cut in what is under it; 1: a raised ring of `bez`, the
+// felt grommet; 2: the same ring polished). Premultiplied over `dst`.
+let mk_led_lamp = fn(dst: vec4, p: vec2, c: vec2, hb: vec2, lit: float, ink: vec3, vivid: float, px: float, ground: vec3, room: float, bez: vec3, raised: float) -> vec4 {
+    let rt = max(min(hb.x, hb.y), 0.4)
+    let d = Material.sd_box(p, c, hb, rt)
+    let bw = clamp(0.5 * rt, 1.0, 2.8)
+    let ds = d - bw
+    let L = clamp(lit, 0.0, 1.0)
+    let b = mk_led_full(ink)
+    let hue = mk_led_hue(ink, vivid)
+    let pw = L * sqrt(L)
+    let white = vec3(1.0, 1.0, 1.0)
+    let lum = vec3(0.2126, 0.7152, 0.0722)
+    let pale = smoothstep(0.35, 0.75, dot(ground, lum))
+    var res = dst
+    let x = max(ds, 0.0)
+    let reach = max(room, 1.0)
+    let win = 1.0 - smoothstep(0.55 * reach, reach, x)
+    let ex = max(hb.x - hb.y, 0.0)
+    let ey = max(hb.y - hb.x, 0.0)
+    let qx = p.x - c.x
+    let qy = p.y - c.y
+    let q = vec2(qx - clamp(qx, 0.0 - ex, ex), qy - clamp(qy, 0.0 - ey, ey)) / rt
+    let t = clamp(length(q), 0.0, 1.0)
+    let nrm = q / max(length(q), 0.001)
+    // What the bead and its bezel throw on the ground: a soft shadow, down.
+    let shd = Finish.drop(p, c, hb + vec2(bw, bw), rt + bw, vec2(0.0, 0.22 * rt + 0.3), 0.32 * rt + px) * mix(0.18, 0.34, min(raised, 1.0)) * (1.0 - 0.6 * pw)
+    res = Finish.over(res, vec4(ground * 0.4 * shd, shd))
+    if L > 0.001 && pale > 0.001 {
+        let h = clamp(0.42 * pw * pow(2.0, 0.0 - x / max(0.4 * reach, 0.5)) * win, 0.0, 0.45) * pale
+        let est = res.rgb + ground * (1.0 - res.a)
+        let w = clamp(dot(hue, lum) / max(dot(est, lum), 0.001), 0.0, 1.0)
+        res = Finish.over(res, vec4(hue * h * w, h * w))
+    }
+    let a_s = Finish.cover(ds, px)
+    let u = clamp(d / max(bw, 0.01), 0.0, 1.0)
+    let facing = dot(nrm * (u - 0.5) * 2.0, vec2(-0.45, -0.89))
+    let metal = clamp(raised - 1.0, 0.0, 1.0)
+    var rc = bez * (0.94 + mix(0.12, 0.55, metal) * facing)
+    rc = mix(rc, min(bez + vec3(0.30, 0.30, 0.30), white), smoothstep(mix(0.35, 0.55, metal), 0.9, facing) * mix(0.6, 0.85, metal))
+    rc = mix(rc, rc * 0.8, Finish.band(ds, 0.0, max(px, 0.45), px) * smoothstep(0.0, 0.8, nrm.y) * 0.8)
+    // The felt of the grommet: a round of small loops.
+    let gl = atan2(p.y - c.y, p.x - c.x) / (2.0 * PI) * max(floor(2.0 * PI * (rt + bw * 0.5) / 1.5 + 0.5), 6.0)
+    let gg = (fract(gl + u * 0.4) - 0.5) * 2.0
+    rc = rc * mix(1.0, 0.72 + 0.4 * sqrt(max(1.0 - gg * gg, 0.0)), clamp(raised, 0.0, 1.0) * (1.0 - metal))
+    let under = res.rgb / max(res.a, 0.001) * step(0.001, res.a) + ground * (1.0 - step(0.001, res.a))
+    let gy = clamp(nrm.y * t, -1.0, 1.0)
+    var sc = under * mix(0.55, 0.92, smoothstep(-0.9, 0.9, gy))
+    sc = mix(sc, min(under * 1.06 + vec3(0.28, 0.28, 0.28), white), Finish.band(ds, 0.0, max(px, 0.45), px) * smoothstep(0.2, 0.95, nrm.y) * 0.85)
+    sc = min(mix(sc, rc, min(raised, 1.0)), white)
+    res = Finish.over(res, vec4(sc * a_s, a_s))
+    if L > 0.001 {
+        let xl = max(d, 0.0)
+        let halo = exp(0.0 - xl / max(0.30 * rt, 0.4)) * 1.5 + exp(0.0 - xl / max(0.65 * rt, 0.7)) * 0.32
+        let hwin = 1.0 - smoothstep(1.1 * rt, 2.0 * rt + 1.0, xl)
+        res = mk_led_add(res, mix(hue, white, 0.15 * pw) * halo * pw * hwin * win, ground)
+    }
+    // THE BEAD: a glossy dome of coloured glass.
+    let top = smoothstep(-1.0, 0.6, q.y)
+    let pool = exp(0.0 - (q.y - 0.55) * (q.y - 0.55) / 0.09 - q.x * q.x / 0.30)
+    var on = mix(hue * mix(0.55, 0.8, L), mix(b, hue, 0.5), top)
+    on = mix(on, min(mix(b, hue, 0.4) + vec3(0.35, 0.35, 0.35), white), pool * 0.5)
+    on = mix(on, vec3(1.0, 0.995, 0.985), exp(0.0 - t * t / 0.26) * smoothstep(0.5, 1.0, L) * 0.95)
+    on = mix(on, hue * (0.82 + 0.18 * L), smoothstep(0.62, 1.0, t))
+    on = on * (0.42 + 0.58 * L)
+    // Out: dark tinted glass, its colour barely there, the same dome, a
+    // catch light along its lower rim.
+    let offc = mix(vec3(0.085, 0.09, 0.115), b * 0.4, 0.14)
+    var off = mix(offc * 0.62, offc * 1.08, top)
+    off = mix(off, min(offc + vec3(0.18, 0.18, 0.18), white), pool * 0.35)
+    off = off * mix(1.0, 0.75, smoothstep(0.75, 1.0, t))
+    let catchl = smoothstep(0.62, 0.9, t) * (1.0 - smoothstep(0.9, 1.0, t)) * smoothstep(0.2, 0.9, nrm.y)
+    off = off + vec3(0.30, 0.30, 0.32) * catchl
+    var col = mix(off, min(on, white), smoothstep(0.0, 0.35, L))
+    let e = length(vec2(q.x / 0.62, (q.y + 0.46) / 0.30))
+    let spec = (1.0 - smoothstep(0.55, 1.0, e)) * mix(1.0, 0.3, clamp((q.y + 0.76) / 0.6, 0.0, 1.0))
+    col = mix(col, white, spec * mix(0.8, 0.55, L) * smoothstep(0.9, 2.2, rt))
+    col = mix(col, col * 0.7, Finish.band(d, 0.0, px * 0.6, px) * 0.6 * (1.0 - smoothstep(0.0, 0.25, L)))
+    col = min(col, white)
+    let a_l = Finish.cover(d, px)
+    return Finish.over(res, vec4(col * a_l, a_l))
+}
+
+// The Lamp widget and the bar lamp: the lamp above in its felt grommet.
+// The whole lamp -- grommet, light and shadow -- stays inside its own box,
+// a point clear of its edge, so a row of lamps or a lamp beside a switch
+// never lays its light on a neighbour. A dot is a third of its box tall; a
+// bar is a light pipe as thick as seven tenths of a dot and twice as long
+// as it is thick, laid from the start of its box, so a bar in a box drawn
+// wider than the row it stands in keeps to that row. The intents: the
+// sheet's accent, success green, warning yellow, error red, plain white.
+mod.widgets.Lamp.halo = 0.3
+mod.widgets.Lamp.halo_reach = 1.0
+mod.widgets.Lamp.draw_bg.color_accent = uniform(#39b8ff)
+mod.widgets.Lamp.draw_bg.color_success = uniform(#22d27a)
+mod.widgets.Lamp.draw_bg.color_warning = uniform(#ffc21a)
+mod.widgets.Lamp.draw_bg.color_error = uniform(#ff2a2a)
+mod.widgets.Lamp.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.Lamp.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let reach = clamp(self.reach, 0.0, 1.0)
+    let sz = self.rect_size
+    let t = sz.y / (1.0 + 2.0 * reach)
+    let bar = step(0.5, self.bar)
+    // A dot in the middle of its box; a bar from the start of its box.
+    let th = mix(t * 0.5, t * 0.35, bar)
+    let hb = vec2(mix(th, th * 2.0, bar), th)
+    let bw = clamp(0.5 * th, 1.0, 2.8)
+    let c = vec2(mix(sz.x * 0.5, 2.6 + bw + hb.x, bar), sz.y * 0.5)
+    // The light's room: what is left of the box round the lens and its
+    // socket, less a point; a bar keeps two points.
+    let free = min(sz.x * 0.5, sz.y * 0.5) - th - bw - 1.0
+    let room = mix(max(free, 1.5), 2.0, bar)
+    let res = mk_led_lamp(vec4(0.0, 0.0, 0.0, 0.0), p, c, hb, self.lit, self.intent_color().rgb, 1.0 - step(3.5, self.intent), px, vec3(0.122, 0.306, 0.471), room, vec3(0.227, 0.290, 0.388), 1.0)
+    return res * self.opacity
+}
+
+// ---------------------------------------------------------------- feedback
+
+// The colour of a cell of a ladder at `share` of its length: the sheet's
+// own yarn all the way (`ladder_mono` 1), or the level code, green at the
+// foot through yellow and orange to red at the top.
+let mk_ladder_col = fn(share: float) -> vec3 {
+    var c = vec3(0.220, 0.720, 0.300)
+    c = mix(c, vec3(0.560, 0.800, 0.200), step(0.45, share))
+    c = mix(c, vec3(0.980, 0.780, 0.150), step(0.65, share))
+    c = mix(c, vec3(0.980, 0.480, 0.120), step(0.80, share))
+    c = mix(c, vec3(0.900, 0.160, 0.160), step(0.90, share))
+    return mix(c, vec3(0.275, 0.753, 0.361), 0.000)
+}
+
+// A cell of a ladder: one fat V stitch filling `lo`..`hi`, in `col` when
+// lit and in `dark` when not. Premultiplied over `dst`.
+let mk_cell = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, px: float, col: vec3, lit: float, dark: vec3, seed: float) -> vec4 {
+    let sw = max(hi.x - lo.x, 1.0)
+    let sh = max(hi.y - lo.y, 1.0)
+    let k = mk_stitch(p - vec2((lo.x + hi.x) * 0.5, lo.y), seed, 3.0, min(sw * 1.05, sh * 1.35))
+    let y = mix(dark, col, lit)
+    let c = y * k.z * (0.62 + 0.48 * clamp(k.y, -0.4, 1.0))
+    let a = smoothstep(0.0, 0.35, k.x)
+    return Finish.over(dst, vec4(c * a, a))
+}
+
+// The progress bar: an i-cord of the dark yarn; the value an i-cord of the
+// bar's yarn laid over it.
+mod.widgets.ProgressBarFlat.height = 9.0
+mod.widgets.ProgressBarFlat.draw_bg.color_primary = uniform(#46c05c)
+mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let th = min(max(self.thickness, 7.0), self.rect_size.y)
+    let y0 = mk_snap((self.rect_size.y - th) * 0.5, o.y, px)
+    let x0 = mk_snap(self.rect_size.x * self.start, o.x, px)
+    let x1 = mk_snap(self.rect_size.x * self.end, o.x, px)
+    let lo = vec2(x0, y0)
+    let hi = vec2(x1, y0 + mk_snap(th, 0.0, px) - px)
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    if self.track > 0.5 {
+        res = mk_cord(res, p, lo, hi, px, vec3(0.059, 0.094, 0.157), 0.8, 0.0)
+    }
+    let fill = self.fill_color()
+    var v0 = 0.0
+    var v1 = clamp((self.value - self.start) / max(self.end - self.start, 0.001), 0.0, 1.0)
+    if self.value < 0.0 {
+        // Still: the sweep would need the pass clock, and a window at rest
+        // reads no clock, so the unknown is a run lit in the middle.
+        v0 = 0.3
+        v1 = 0.7
+    }
+    let span = hi.x - lo.x
+    let flo = vec2(lo.x + span * v0, lo.y)
+    let fhi = vec2(max(lo.x + span * v1, flo.x + hi.y - lo.y), hi.y)
+    let fs = mk_cord(vec4(0.0, 0.0, 0.0, 0.0), p, flo, fhi, px, fill.rgb, 0.0, 0.0)
+    res = Finish.over(res, fs * step(0.001, v1 - v0) * fill.a)
+    return res * self.opacity
+}
+
+// The level meter: a ladder of fat stitches on a strip of the dark yarn,
+// coloured by the level code; the clip lamp an LED. 8 points thick lying,
+// 14 standing.
+mod.widgets.LevelMeter.height = 8.0
+mod.widgets.LevelMeterColumn.width = 14.0
+mod.widgets.LevelMeterColumn.draw_bg.segment = uniform(7.0)
+mod.widgets.LevelMeter.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let sz = self.rect_size
+    let p = self.pos * sz
+    let v = self.vertical
+    let along = mix(sz.x, sz.y, v)
+    let across = mix(sz.y, sz.x, v)
+    let a = mix(p.x, sz.y - p.y, v)
+    let lamp_room = self.lamp * (across + 3.0)
+    let bar = max(4.0, along - lamp_room)
+    let wlo = mix(vec2(0.0, 0.0), vec2(0.0, sz.y - bar), v)
+    let whi = mix(vec2(bar, sz.y), vec2(sz.x, sz.y), v)
+    let lo = vec2(mk_snap(wlo.x, o.x, px), mk_snap(wlo.y, o.y, px))
+    let hi = vec2(mk_snap(whi.x, o.x, px), mk_snap(whi.y, o.y, px) - px)
+    var res = mk_patch(p, lo, hi, min(across * 0.3, 3.0), px, vec3(0.059, 0.094, 0.157), vec3(0.059, 0.094, 0.157) * 0.840, 0.0, 0.0, 0.0, 0.0, 0.91)
+    let pad = mix(1.6, 2.2, v)
+    let span = max(1.0, bar - pad * 2.0)
+    let pitch = max(self.segment, 3.0)
+    let gapw = mix(0.6, 1.0, v)
+    let k = floor((a - pad) / pitch)
+    let ca = pad + k * pitch
+    let share = clamp((ca + pitch * 0.5 - pad) / span, 0.0, 1.0)
+    let inr = step(0.0, k) * step(ca + pitch - gapw, bar - pad + 0.01)
+    let col = mk_ladder_col(share)
+    let on = step(share, self.level) * step(0.001, self.level)
+    let hold_at = pad + span * self.hold
+    let hc = step(abs(ca + pitch * 0.5 - hold_at), pitch * 0.5) * step(0.002, self.hold)
+    let clo = mix(vec2(ca, pad), vec2(pad, sz.y - ca - pitch + gapw), v)
+    let chi = mix(vec2(ca + pitch - gapw, across - pad - px), vec2(across - pad, sz.y - ca), v)
+    let cell = mk_cell(vec4(0.0, 0.0, 0.0, 0.0), p, clo, chi, px, col, max(on, hc), vec3(0.059, 0.094, 0.157) * 1.35, k)
+    res = Finish.over(res, cell * inr * self.opacity)
+    if self.lamp > 0.5 {
+        let lc = mix(vec2(bar + 3.0 + across * 0.5, sz.y * 0.5), vec2(sz.x * 0.5, across * 0.5), v)
+        let rl = clamp(across * 0.5 - 1.0, 1.2, 3.0)
+        res = mk_led_lamp(res, p, lc, vec2(rl, rl), step(0.5, self.over), vec3(0.950, 0.150, 0.150), 1.0, px, vec3(0.122, 0.306, 0.471), 3.0, vec3(0.227, 0.290, 0.388), 1.0)
+    }
+    return res * self.opacity
+}
+
+// ---------------------------------------------------------------- surfaces
+
+// The scroll bar: a cord of the dark yarn, the thumb a felt patch.
+mod.widgets.ScrollBar.bar_size = 9.0
+mod.widgets.ScrollBar.bar_side_margin = 1.0
+mod.widgets.ScrollBar.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let sz = self.rect_size
+    let p = self.pos * sz
+    let v = self.is_vertical
+    let c = sz * 0.5
+    let tw = 2.0
+    let tlo = mix(vec2(1.0, c.y - tw), vec2(c.x - tw, 1.0), v)
+    let thi = mix(vec2(sz.x - 1.0, c.y + tw), vec2(c.x + tw, sz.y - 1.0), v)
+    var res = mk_cord(vec4(0.0, 0.0, 0.0, 0.0), p, tlo, thi, px, vec3(0.059, 0.094, 0.157), 0.0, v)
+    let t0 = mix(sz.x * self.norm_scroll, sz.y * self.norm_scroll, v)
+    let t1 = t0 + mix(sz.x * self.norm_handle, sz.y * self.norm_handle, v)
+    let slo0 = mix(vec2(t0, 0.5), vec2(0.5, t0), v)
+    let shi0 = mix(vec2(t1, sz.y - 0.5), vec2(sz.x - 0.5, t1), v)
+    let slo = vec2(mk_snap(slo0.x, o.x, px), mk_snap(slo0.y, o.y, px))
+    let shi = vec2(mk_snap(shi0.x, o.x, px), mk_snap(shi0.y, o.y, px))
+    let hv = max(self.hover, self.drag)
+    res = Finish.over(res, mk_patch(p, slo, shi, 4.0, px, vec3(0.914, 0.698, 0.227), vec3(0.914, 0.698, 0.227) * 0.840, hv, 0.0, 0.0, 0.0, 0.47))
+    return res * self.opacity
+}
+
+// A SURFACE: a big knitted patch sewn on the fabric. Its rim a bound-off
+// cord of loops whose yarn changes every few loops among `r1`, `r2` and
+// `r3` (one yarn when they agree); a running stitch of `st` sewn round
+// inside it (`st_a` how much); in its lower right corner a triangle of
+// striped knit in `cn` (`cn_a`). Raised (`sunk` 0) it is padded and throws
+// a shadow kept within half the gap to its neighbours; sunk, the fabric
+// round it overhangs it and shades its top. Premultiplied.
+let mk_surface = fn(p: vec2, lo: vec2, hi: vec2, px: float, body_c: vec3, r1: vec3, r2: vec3, r3: vec3, st: vec3, st_a: float, cn: vec3, cn_a: float, sunk: float, hover: float, seed: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = max((hi - lo) * 0.5, vec2(0.5, 0.5))
+    let r = min(9.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let up = 1.0 - sunk
+    let s1 = Finish.drop(p, c, h - vec2(1.0, 0.0), r, vec2(0.0, 1.6), 1.4) * 0.65
+    let s2 = Finish.drop(p, c, h - vec2(4.0, 2.0), r, vec2(0.0, 3.6), 3.2) * 0.45
+    let sha = (1.0 - (1.0 - s1) * (1.0 - s2)) * 0.550 * up
+    var res = vec4(vec3(0.008, 0.039, 0.078) * sha, sha)
+    let n = mk_box_n(p, c, h, r)
+    let s_ed = mk_perim(p, c, h, r)
+    let fray = (Finish.noise(vec2(s_ed / 0.9, seed * 7.0)) - 0.5) * 0.55 + (Finish.hash(floor(p / px) + vec2(seed, 1.0)) - 0.5) * 0.3
+    let de = d - fray
+    let a = Finish.cover(de, px)
+    let haze = exp(0.0 - max(de, 0.0) / 0.45) * (1.0 - a) * 0.22 * 0.700 * step(0.0, de) * step(de, 2.0)
+    res = Finish.over(res, vec4(r1 * 0.9, 1.0) * haze)
+    // The body.
+    let q = p - lo + vec2(seed * 41.0, seed * 17.0)
+    let k = mk_knit(q, 5.0, 3.0, 0.9)
+    var body = mk_soft(body_c, mk_yarn(body_c, body_c * 0.400, k, q, px, 0.700))
+    body = body * (1.0 + mk_cloud(q * 1.7) * 0.070)
+    let e = clamp((0.0 - d) / 10.0, 0.0, 1.0)
+    let slope = 1.0 - e
+    let lt = mk_lit(n) * slope * mix(1.0, -1.0, sunk)
+    body = body * (1.0 + 0.22 * lt - 0.14 * slope * slope * up) * (1.0 + 0.090 * hover)
+    // Sunk: the fabric round it shades its top.
+    let ins = Finish.inset(p, c, h, r, vec2(0.0, 2.2), 2.4)
+    body = mix(body, body * 0.55, ins * 0.75 * sunk)
+    // The corner triangle: striped knit in the corner's yarn.
+    let ct = (p.x - hi.x) + (p.y - hi.y) + 26.0
+    let corner = smoothstep(0.0 - px, px, ct) * cn_a
+    let stripe = step(0.5, fract((p.x - p.y) / 5.0))
+    let ccol = mix(cn, cn * 0.78, stripe)
+    body = mix(body, mk_yarn(ccol, ccol * 0.400, k, q, px, 0.700) * (1.0 + 0.22 * lt), corner)
+    body = mix(body, body * 0.6, smoothstep(0.0 - px, px, ct) * (1.0 - smoothstep(px, px * 2.5, ct)) * cn_a)
+    // The rim.
+    let rw = 3.4
+    let per = mk_perim_len(h, r)
+    let nl = max(floor(per / (rw * 1.25) + 0.5), 4.0)
+    let period = per / nl
+    let u = clamp((0.0 - d) / rw, 0.0, 1.0)
+    let ac = u * 2.0 - 1.0
+    let lf = s_ed / period + u * 0.7
+    let f = fract(lf)
+    let g = (f - 0.5) * 2.0
+    let loop_h = sqrt(max(1.0 - g * g, 0.0)) * sqrt(max(1.0 - ac * ac * 0.8, 0.0))
+    let li = floor(lf)
+    let run = mk_hash(vec2(floor(li / 3.0), seed * 9.0))
+    var rimc = r1
+    if run > 0.66 {
+        rimc = r2
+    }
+    if run > 0.33 && run < 0.66 {
+        rimc = r3
+    }
+    let rl = mk_lit(n) * (0.0 - ac) * 0.9 - g * 0.25
+    var rim = rimc * (0.50 + 0.62 * loop_h) * (0.9 + 0.35 * rl * mix(1.0, -0.5, sunk))
+    rim = rim * (1.0 + (Finish.hash(floor(p / px) + vec2(9.1, seed)) - 0.5) * 0.08)
+    let in_rim = 1.0 - smoothstep(rw - px * 0.5, rw + px * 0.5, 0.0 - d)
+    var face = mix(body, rim, in_rim)
+    face = mix(face, face * 0.45, exp(0.0 - ((0.0 - d - rw) * (0.0 - d - rw)) / 0.2) * 0.6)
+    // The running stitch inside the rim.
+    let rs = mk_running(s_ed, d + rw + 2.6, 3.2, 2.0, 1.4, px)
+    face = Finish.over(vec4(face, 1.0), vec4(st * (0.85 + 0.3 * rs.y), 1.0) * rs.x * st_a).rgb
+    return Finish.over(res, vec4(face * a, a))
+}
+
+mod.widgets.PanelView.clip_x = false
+mod.widgets.PanelView.clip_y = false
+mod.widgets.PanelView.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 12.0 bottom: 12.0}
+mod.widgets.PanelView.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.PanelView.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px))
+    let seed = fract(self.rect_size.x * 0.0071 + self.rect_size.y * 0.013)
+    if self.sunken > 0.5 {
+        return mk_surface(p, lo, hi, px, vec3(0.067, 0.118, 0.192), vec3(0.090, 0.157, 0.247), vec3(0.090, 0.157, 0.247), vec3(0.090, 0.157, 0.247), vec3(0.914, 0.698, 0.227), 1.000, vec3(0.090, 0.157, 0.247), 0.0, 1.0, 0.0, seed)
+    }
+    return mk_surface(p, lo, hi, px, vec3(0.141, 0.349, 0.549), vec3(0.541, 0.294, 0.769), vec3(0.227, 0.690, 0.816), vec3(0.914, 0.698, 0.227), vec3(0.914, 0.698, 0.227), 0.000, vec3(0.914, 0.698, 0.227), 1.000, 0.0, 0.0, seed)
+}
+
+// The rounded view keeps the colour its caller gives it: a patch of that
+// yarn in a rim of a darker shade of it, flat on the fabric.
+mod.widgets.RoundedView.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let lo = vec2(self.border_inset.x, self.border_inset.y)
+    let hi = self.rect_size - vec2(self.border_inset.z, self.border_inset.w)
+    var fill = self.color
+    if self.color_2.x > -0.5 {
+        fill = mix(self.color, self.color_2, mix(self.pos.y, self.pos.x, self.gradient_fill_horizontal))
+    }
+    if fill.a < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let seed = fract(self.rect_size.x * 0.0093 + self.rect_size.y * 0.017)
+    let rc = mix(fill.rgb * 0.840, vec3(0.416, 0.659, 0.416), 1.000)
+    let res = mk_surface(p, lo, hi - vec2(px, px), px, fill.rgb, rc, rc, rc, vec3(0.416, 0.659, 0.416), 0.0, rc, 0.0, 0.0, 0.0, seed)
+    return res * fill.a
+}
+
+// The card: a raised patch of its own yarn; a pressable card lightens under
+// the hand.
+mod.widgets.Card.clip_x = false
+mod.widgets.Card.clip_y = false
+mod.widgets.Card.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 12.0 bottom: 12.0}
+mod.widgets.Card.draw_bg.vertex = fn() {
+    let m = 10.0
+    return self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Card.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px))
+    let seed = fract(self.rect_size.x * 0.0059 + self.rect_size.y * 0.021)
+    return mk_surface(p, lo, hi, px, vec3(0.302, 0.188, 0.439), vec3(0.604, 0.357, 0.831), vec3(0.604, 0.357, 0.831), vec3(0.604, 0.357, 0.831), vec3(0.914, 0.698, 0.227), 0.000, vec3(0.914, 0.698, 0.227), 1.000, 0.0, self.hover, seed)
+}
+
+// LIST ROWS: a list is a strip of the list yarn, each row 22 points of
+// knit with a seam under it; under the hand a row lightens. The chosen row
+// is knitted in the accent, or (where the sheet keeps the list's yarn) gets
+// a bar of the accent sewn down its left end.
+mod.widgets.ListItem.height = 22.0
+mod.widgets.ListItemOne.height = 22.0
+mod.widgets.ListItem.padding = mod.turtle.Inset{left: 12.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.ListItemOne.padding = mod.turtle.Inset{left: 12.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let live = 1.0 - self.disabled
+    let y0 = mk_snap(0.0, o.y, px)
+    let y1 = mk_snap(self.rect_size.y, o.y, px)
+    let x1 = mk_snap(self.rect_size.x, o.x, px)
+    let sel = self.selected * 1.000
+    let lc = mix(vec3(0.882, 0.831, 0.729), vec3(0.914, 0.698, 0.227), sel)
+    let q = p + vec2(3.7, 1.3)
+    let k = mk_knit(q, 4.6, 2.8, 0.6)
+    var col = mk_soft(lc, mk_yarn(lc, lc * 0.400, k, q, px, 0.700))
+    col = col * (1.0 + 0.08 * (self.hover + 0.5 * self.down) * live)
+    // The seam under the row, and the light catching the top of the next.
+    let t = (p.y - y0) / max(y1 - y0, 1.0)
+    col = col * (1.0 - 0.18 * smoothstep(0.75, 1.0, t) + 0.06 * (1.0 - smoothstep(0.0, 0.2, t)))
+    col = mix(col, vec3(0.714, 0.647, 0.522), step(y1 - px * 1.5, p.y))
+    var res = vec4(col, 1.0) * step(y0, p.y) * step(p.y, y1)
+    // The bar down the chosen row's left end.
+    let mk = Material.sd_box(p, vec2(3.5, (y0 + y1) * 0.5), vec2(1.8, (y1 - y0) * 0.5 - 2.5), 1.8)
+    let bar = Finish.cover(mk, px) * self.selected * 0.000
+    let bc = vec3(1.000, 0.824, 0.353) * (0.75 + 0.4 * (1.0 - clamp((p.x - 1.7) / 3.6, 0.0, 1.0)))
+    res = Finish.over(res, vec4(bc, 1.0) * bar)
+    return res * step(p.x, x1)
+}
+mod.widgets.ListItem.draw_text.color = #1e2533
+mod.widgets.ListItemOne.draw_text.color = #1e2533
+
+// The rows of a tree stand on the fabric, clear but for the faint tint of
+// every other row; the open row is a patch of the accent sewn on.
+mod.widgets.FileTreeNode.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let base = mix(self.color_1, self.color_2, self.is_even)
+    var res = vec4(base.rgb * base.a, base.a)
+    let sel = mk_patch(p, vec2(1.0, 1.0), self.rect_size - vec2(1.0, 1.0), 5.0, px, vec3(0.914, 0.698, 0.227), vec3(0.914, 0.698, 0.227) * 0.840, 0.0, 0.0, 0.0, 0.0, 0.29)
+    return Finish.over(res, sel * self.active)
+}
+mod.widgets.FileTreeNode.draw_text.color_active = #2a2010
+mod.widgets.FileTreeNode.draw_icon.color_active = #2a2010
+mod.widgets.ListItem.draw_text_2.color = #584f41
+
+// A chip is a small patch of the segment yarn; its role colour only tints
+// it.
+mod.widgets.ChipFlat.draw_text.text_style = mod.theme.font_label{font_size: 8.5}
+mod.widgets.ChipFlat.draw_text.color = #efe6d2
+// The chip's word takes its ink from its role palette.
+mod.widgets.ChipFlat.palette.on_neutral_container = #efe6d2
+mod.widgets.Chip.palette.on_neutral_container = #efe6d2
+mod.widgets.ChipFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ChipFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px))
+    let l = Finish.lum(self.color.rgb)
+    let tint = (self.color.rgb - vec3(l, l, l)) * 0.15 * self.color.a
+    let col = vec3(0.086, 0.153, 0.243) + tint
+    var res = mk_patch(p, lo, hi, (hi.y - lo.y) * 0.5, px, col, col * 0.840, self.hover, self.down, 0.0, 0.8, 0.59)
+    if self.keyed > 0.0 {
+        let d = Material.sd_box(p, (lo + hi) * 0.5, (hi - lo) * 0.5, (hi.y - lo.y) * 0.5)
+        let rs = mk_running(mk_perim(p, (lo + hi) * 0.5, (hi - lo) * 0.5, (hi.y - lo.y) * 0.5), d - 2.2, 2.2, 1.4, 1.2, px)
+        res = Finish.over(res, vec4(vec3(1.000, 0.824, 0.353), 1.0) * rs.x * self.keyed)
+    }
+    return res
+}
+
+// A count is a small patch of the badge yarn, its figures in its ink.
+mod.widgets.BadgePalette.neutral = #8a4bc4
+mod.widgets.BadgePalette.on_neutral = #f6f0e2
+mod.widgets.BadgeFlat.shape = mod.widgets.BadgeShape.Rounded
+mod.widgets.BadgeFlat.radius = 5.0
+mod.widgets.BadgeFlat.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x - px * 0.49, o.x, px), mk_snap(self.rect_size.y - px * 0.49, o.y, px))
+    let fill = self.color.rgb
+    let res = mk_patch(p, lo, hi, 5.0, px, fill, fill * 0.840, 0.0, 0.0, 0.0, 0.0, 0.17)
+    return res * max(self.color.a, 0.0)
+}
+
+// ---------------------------------------------------------------- screens
+
+// A SCREEN: a patch of the screen's dark knit sewn in a couched rope -- a
+// cord of two plies `rw` thick laid round its edge -- the readouts' and the
+// meter's one housing. The knit lies flat and the rope shades its top
+// edge. `face` is its knit. Premultiplied.
+let mk_screen = fn(p: vec2, lo: vec2, hi: vec2, px: float, face: vec3, seed: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = max((hi - lo) * 0.5, vec2(0.5, 0.5))
+    let r = min(7.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let rw = 3.2
+    let contact = Finish.drop(p, c, h, r, vec2(0.0, 1.0), 1.0) * 0.55 * 0.550
+    var res = vec4(vec3(0.008, 0.039, 0.078) * contact, contact)
+    // The knit.
+    let q = p - lo + vec2(seed * 29.0, seed * 13.0)
+    let k = mk_knit(q, 4.0, 2.4, 0.5)
+    var body = mk_yarn(face, face * 0.45, k, q, px, 0.700 * 0.5)
+    let ins = Finish.inset(p, c, h - vec2(rw, rw), max(r - rw, 1.0), vec2(0.0, 1.6), 1.8)
+    body = mix(body, body * 0.55, ins * 0.8)
+    // The rope.
+    let n = mk_box_n(p, c, h, r)
+    let s_ed = mk_perim(p, c, h, r)
+    let ac = clamp(((0.0 - d) - rw * 0.5) / (rw * 0.5), -1.0, 1.0)
+    let pl = mk_ply(s_ed, ac, rw * 1.5)
+    let lit = mk_lit(n) * (0.0 - ac) * 0.8 + pl.y * 0.3
+    var rope = vec3(0.914, 0.698, 0.227) * (0.42 + 0.66 * pl.x) * (0.88 + 0.35 * lit)
+    rope = rope * (1.0 + (Finish.hash(floor(p / px) + vec2(6.6, seed)) - 0.5) * 0.08)
+    let in_rope = 1.0 - smoothstep(rw - px * 0.5, rw + px * 0.5, 0.0 - d)
+    var col = mix(body, rope, in_rope * smoothstep(0.02, 0.25, pl.x))
+    col = mix(col, col * 0.5, exp(0.0 - ((0.0 - d - rw) * (0.0 - d - rw)) / 0.3) * 0.6)
+    let fray = (Finish.hash(floor(p / px) + vec2(seed, 2.0)) - 0.5) * 0.3
+    let a = Finish.cover(d - fray, px)
+    return Finish.over(res, vec4(col * a, a))
+}
+mod.widgets.ScreenView.clip_x = false
+mod.widgets.ScreenView.clip_y = false
+mod.widgets.ScreenView.padding = mod.turtle.Inset{top: 8.0 right: 10.0 bottom: 8.0 left: 10.0}
+mod.widgets.ScreenView.draw_bg.vertex = fn() {
+    let m = 4.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ScreenView.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px) - px)
+    let res = mk_screen(p, lo, hi, px, self.color.rgb, fract(self.rect_size.x * 0.011))
+    return res * self.color.a
+}
+// No glass over the knit.
+mod.widgets.ScreenView.sheen = 0.0
+mod.widgets.ScreenView.draw_glass.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+
+// THE NEEDLE METER is a screen: the same knit in its rope, its scale sewn
+// on in the screen ink -- the arc a running stitch, the ticks short satin
+// stitches -- the red zone a band of red yarn along the arc, the needle a
+// pale cord from a knitted bead at its root.
+mod.widgets.NeedleMeter.clip_x = false
+mod.widgets.NeedleMeter.clip_y = false
+mod.widgets.NeedleMeter.draw_bg.color_zone = uniform(#e0383a)
+mod.widgets.NeedleMeter.draw_bg.color_needle = uniform(#f6f0e2)
+mod.widgets.NeedleMeter.draw_bg.vertex = fn() {
+    let m = 4.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.NeedleMeter.draw_bg.pixel = fn() {
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let lo = vec2(mk_snap(0.0, o.x, px), mk_snap(0.0, o.y, px))
+    let hi = vec2(mk_snap(self.rect_size.x, o.x, px), mk_snap(self.rect_size.y, o.y, px) - px)
+    var res = mk_screen(p, lo, hi, px, self.color.rgb, 0.43)
+    let pv = self.pivot()
+    let rr = self.scale_radius()
+    let q = p - pv
+    let r = length(q)
+    let ang = atan2(q.x, 0.0 - q.y)
+    let sweep = self.sweep * 0.017453293
+    let t = ang / sweep + 0.5
+    let on_scale = step(-0.0001, t) * step(t, 1.0001)
+    let ink = self.color_scale.rgb
+    // The arc: a running stitch.
+    let arc = mk_running(ang * rr, r - rr, 2.0, 1.4, 1.0, px)
+    res = Finish.over(res, vec4(ink * (0.85 + 0.25 * arc.y), 1.0) * arc.x * on_scale * 0.8)
+    // The ticks: short satin stitches, the majors longer.
+    let n = max(floor(self.majors + 0.5), 1.0) * max(floor(self.minors + 0.5), 1.0)
+    let k = floor(clamp(t, 0.0, 1.0) * n + 0.5)
+    let ak = (k / n - 0.5) * sweep
+    let tdir = vec2(sin(ak), 0.0 - cos(ak))
+    let mn = max(floor(self.minors + 0.5), 1.0)
+    let major = 1.0 - step(0.5, k - mn * floor(k / mn + 0.0001))
+    let len = mix(self.tick_minor, self.tick_major, major)
+    res = mk_satin(res, p, pv + tdir * (rr - len), pv + tdir * (rr - 0.5), mix(1.0, 1.6, major), px, ink, 0.9)
+    if self.zone < 0.999 {
+        let za = (self.zone - 0.5) * sweep
+        let zone_t = step(za, ang) * step(ang, sweep * 0.5)
+        let zd = abs(r - rr - 1.6) - 1.3
+        let zy = vec3(0.880, 0.220, 0.220) * (0.75 + 0.35 * mk_ply(ang * rr, (r - rr - 1.6) / 1.3, 2.4).x)
+        res = Finish.over(res, vec4(zy, 1.0) * Finish.cover(zd, px) * zone_t)
+    }
+    // The needle: a pale cord, its shade under it.
+    let na = self.needle_angle(self.value)
+    let nd = vec2(sin(na), 0.0 - cos(na))
+    let tip = pv + nd * (rr + 3.0)
+    let root = pv - nd * max(self.pivot_size - px, 0.0)
+    let sd = mk_seg(p - vec2(0.4, 1.0), root, tip) - 1.0
+    res = Finish.over(res, vec4(0.0, 0.0, 0.0, 1.0) * Finish.cover(sd, px) * 0.35)
+    res = mk_satin(res, p, root, tip, 1.6, px, self.color_needle.rgb, 1.0)
+    // The bead at its root.
+    return mk_ball(res, p, pv, max(self.pivot_size, 2.5) + 0.8, px, vec3(0.914, 0.867, 0.773), 0.0, 0.0, 1.0) * self.opacity
+}
+
+// ---------------------------------------------------------------- switches
+
+// THE SWITCHES are the sheet's own toggle: the rocker and the slide switch
+// take the toggle's pill, fill and ball, its size and its label gap. The
+// rocker turns on a click; the slide switch follows a drag, as the toggle
+// does.
+mod.widgets.ToggleRocker.draw_bg.size = uniform(19.0)
+mod.widgets.ToggleSlide.draw_bg.size = uniform(19.0)
+mod.widgets.ToggleRocker.draw_bg.pill_aspect = uniform(1.9)
+mod.widgets.ToggleSlide.draw_bg.pill_aspect = uniform(1.9)
+mod.widgets.ToggleRocker.label_walk.margin.left = 36.0
+mod.widgets.ToggleSlide.label_walk.margin.left = 36.0
+mod.widgets.ToggleRocker.draw_bg.pixel = mod.widgets.ToggleFlat.draw_bg.pixel
+mod.widgets.ToggleSlide.draw_bg.pixel = mod.widgets.ToggleFlat.draw_bg.pixel
+
+// ---------------------------------------------------------------- field row
+
+// A ROW OF FIELDS IS ONE HEIGHT. The box metrics are stated ONCE here and
+// handed to each field below, so the search box, a number and a drop-down
+// beside it stand at one height.
+let field_height = 26.0
+let field_pad_v = 4.0
+let field_radius = 6.0
+let field_border = 0.34
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+// A field that states a frame and lays its own parts out inside it: a number
+// with a stepper, a date, a time. The height is all these take.
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+// The chrome-less input a well holds must impose no height of its own.
+mod.widgets.WellInput.min_height = 0.0
+
+// ---------------------------------------------------------------- rules
+
+// A rule is a running stitch of the seam's yarn across the middle of its
+// room.
+mod.widgets.Hr.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let rs = mk_running(p.x, p.y - self.rect_size.y * 0.5, 3.0, 2.0, 1.3, px)
+    return vec4(vec3(0.075, 0.184, 0.314) * (0.85 + 0.3 * rs.y), 1.0) * rs.x
+}
+mod.widgets.Vr.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let rs = mk_running(p.y, p.x - self.rect_size.x * 0.5, 3.0, 2.0, 1.3, px)
+    return vec4(vec3(0.075, 0.184, 0.314) * (0.85 + 0.3 * rs.y), 1.0) * rs.x
+}
+
+// A splitter is a seam where two pieces of the fabric are sewn together:
+// a running stitch of the seam's yarn down the middle of its strip, the
+// fabric showing either side. Under the hand or dragged, a cord of the
+// accent lies along its grip.
+mod.widgets.Splitter.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let v = step(0.5, self.is_vertical)
+    let mid = self.rect_size * 0.5
+    let s = mix(p.x, p.y, v)
+    let t = mix(p.y - mid.y, p.x - mid.x, v)
+    let rs = mk_running(s, t, 3.0, 2.0, 1.3, px)
+    var res = vec4(vec3(0.075, 0.184, 0.314) * (0.85 + 0.3 * rs.y), 1.0) * rs.x * 0.8
+    let hv = clamp(max(self.hover, max(self.drag, self.focus)), 0.0, 1.0)
+    let hb = mix(vec2(self.bar_size * 0.5, 1.6), vec2(1.6, self.bar_size * 0.5), v)
+    let cord = mk_cord(vec4(0.0, 0.0, 0.0, 0.0), p, mid - hb, mid + hb, px, vec3(1.000, 0.824, 0.353), 0.0, v)
+    return Finish.over(res, cord * hv)
+}
+
+// ---------------------------------------------------------------- ground
+
+// Plain views stop clipping so a shadow can fall past their edge; scroll
+// views keep clipping their content.
+mod.widgets.View.clip_x = false
+mod.widgets.View.clip_y = false
+mod.widgets.Window.pass.clear_color = #255a87
+// The window's own ground: the stockinette and its ribbed cuffs
+// (`mk_ground`).
+mod.widgets.Window.show_bg = true
+mod.widgets.Window.draw_bg.pixel = fn() {
+    let px = mk_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    return vec4(mk_ground(p + self.rect_pos, px, self.rect_size), 1.0)
+}
+
+// ---------------------------------------------------------------- states
+
+// Every held state is written as a plain value that cuts in at once (the
+// library writes some as snap() values, which a state held as a default --
+// the states page -- never applies). Live, the cut is the same as the snap.
+mod.widgets.ButtonFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.ButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.CheckBoxFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.CheckBoxFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.RadioButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.RadioButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+
+// ---------------------------------------------------------------- ink
+
+// Words are sewn on: a device pixel under every glyph of a label lies a
+// second copy of it, the shade the raised thread throws -- faint under dark
+// ink on the pale yarn, deeper under pale ink on the dark. Read from the
+// glyph one device pixel above, so it costs one more sample and nothing
+// else. On a patch the label also sinks with it: held, the glyphs are read
+// one device pixel higher in the atlas, so they stand one pixel lower.
+// Small labels come from the grayscale atlas, large ones from the
+// multi-channel one; both paths carry the shade and the nudge. A template
+// made from another before this sheet ran keeps its own copy of the
+// label's draw, so each patch template takes the literal.
+// Sewn words: on a patch a label is satin stitch, its threads lying slant
+// across every stroke, a little lighter along each thread's crown. Laid in
+// device pixels over the glyph's own quad, so each letter's threads run on
+// their own as a sewn letter's do.
+let mk_thread = fn(main: vec4, pos: vec2) -> vec4 {
+    let pa = max(abs(dFdx(pos.x)) + abs(dFdy(pos.x)), 0.0000001)
+    let pb = max(abs(dFdx(pos.y)) + abs(dFdy(pos.y)), 0.0000001)
+    let f = fract((pos.x / pa * 0.8 + pos.y / pb) / 2.8) * 2.0 - 1.0
+    let k = 0.70 + 0.34 * sqrt(max(1.0 - f * f, 0.0))
+    return vec4(main.rgb * k, main.a)
+}
+
+mod.widgets.ButtonFlat.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.Button.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonPrimary.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonSecondary.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonTertiary.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonDanger.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonOutline.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonFlatter.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonXs.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonSm.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonLg.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+mod.widgets.ButtonXl.draw_text.pixel = fn() {
+    let nudge = dFdy(self.t.xy) * step(0.5, self.down)
+    let c = self.get_color()
+    let dark = step(0.5, Finish.lum(c.rgb))
+    let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+    let sa = mix(0.500, 0.5, dark) * c.a
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.sdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.sdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let pm = clamp(self.t.xy - nudge, self.t_min + half_texel, self.t_max - half_texel)
+        let main = self.msdf(scale, pm, c) * vec4(c.rgb * c.a, c.a)
+        let ps = clamp(self.t.xy - nudge - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(self.sample_text_pixel(), self.pos)
+}
+
+// The same shade under every label that stands on the fabric or a patch.
+mod.widgets.Label.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return main
+}
+mod.widgets.CheckBoxFlat.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return main
+}
+mod.widgets.RadioButtonFlat.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return main
+}
+mod.widgets.SegmentedControlFlat.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return mk_thread(main, self.pos) + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(main, self.pos)
+}
+mod.widgets.Tabs.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return mk_thread(main, self.pos) + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(main, self.pos)
+}
+mod.widgets.Tabs.draw_text_active.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return mk_thread(main, self.pos) + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(main, self.pos)
+}
+mod.widgets.SliderMinimal.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return main + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return main
+}
+mod.widgets.RadioButtonTabFlat.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return mk_thread(main, self.pos) + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(main, self.pos)
+}
+mod.widgets.SegmentedControlFlat.draw_text_selected.pixel = fn() {
+    let main = self.sample_text_pixel()
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let dxt = length(dFdx(self.t))
+        let dyt = length(dFdy(self.t))
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        let c = self.get_color()
+        let dark = step(0.5, Finish.lum(c.rgb))
+        let sc = mix(vec3(0.000, 0.000, 0.000), vec3(0.0, 0.0, 0.0), dark)
+        let sa = mix(0.500, 0.5, dark) * c.a
+        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0))
+        return mk_thread(main, self.pos) + vec4(sc * s * sa, s * sa) * (1.0 - main.a)
+    }
+    return mk_thread(main, self.pos)
+}
+true

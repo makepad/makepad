@@ -1,5 +1,6 @@
 use {
     crate::{
+        diagonal_text::{diagonal_row_height, draw_diagonal_name, heading_fits_flat, DiagonalLean},
         flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::text::selection::Cursor,
@@ -54,6 +55,11 @@ script_mod! {
         color_drag_marker: #x1a73e8
         color_resize_guide: #x1a73e866
         color_header_edge: #x9aa0a6
+
+        /** how far a heading too long for its column is turned, in degrees; one that fits stays flat, and 0 turns none 0..80 step 5 */
+        header_angle: 0.
+        /** which way a turned heading leans: Rise hangs it over the right, Fall over the left */
+        header_lean: DiagonalLean.Rise
 
         draw_text +: {
             text_style: theme.font_regular{font_size: 9.0}
@@ -628,6 +634,10 @@ enum Interact {
         travelled: bool,
         /// The press is carrying its row out (`row_drag`).
         carrying: bool,
+        /// A `row_drag` press on a row of a selection of several left the
+        /// selection as it was, so a drag carries all of it; a click
+        /// (no travel) selects the pressed row alone as it comes up.
+        select_on_click: bool,
         /// The scroll as the press went down, which a `drag_scrolling`
         /// press moves away from by the pointer's travel.
         scroll_at_press: DVec2,
@@ -693,6 +703,8 @@ struct CellIter {
 
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet)]
 pub struct DataGrid {
+    #[rust]
+    semantic_cells: std::collections::HashMap<(usize, usize), String>,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -710,6 +722,21 @@ pub struct DataGrid {
     default_row_height: f64,
     #[live(28.0)]
     col_header_height: f64,
+    /// How far a column heading is turned from the horizontal when it has
+    /// to be, in degrees. Nought never turns one. Past nought, only a heading
+    /// whose name does not fit its column flat turns, standing on the middle
+    /// of its own column — which is how a sheet of narrow numeric columns
+    /// keeps long names over them — and one that fits stays exactly as it
+    /// was. The strip is as tall as the longest turned name needs, and with
+    /// nothing to turn it is `col_header_height` exactly: an angle on a sheet
+    /// of wide columns changes nothing. The arithmetic is in
+    /// `diagonal_text.rs`.
+    #[live]
+    header_angle: f64,
+    /// Which way a turned heading leans, and so which side its ink hangs
+    /// over. `Rise` by default: the spreadsheet's way.
+    #[live(DiagonalLean::Rise)]
+    header_lean: DiagonalLean,
     #[live(52.0)]
     row_header_width: f64,
     #[live(true)]
@@ -853,6 +880,12 @@ pub struct DataGrid {
     /// `color_header_sorted` either way.
     #[live]
     draw_text_header: DrawText,
+    /// The same headings, turned. It carries no style of its own on purpose:
+    /// the face and the ink are copied from whichever of the two above the
+    /// headings are drawn in, before each draw, so there is no second place
+    /// to restyle and no way for the two to drift apart.
+    #[live]
+    draw_header_turned: DrawRotatedText,
     #[live]
     scroll_bar_h: ScrollBar,
     #[live]
@@ -867,6 +900,18 @@ pub struct DataGrid {
     col_order: Option<Vec<u32>>,
     #[rust]
     col_labels: Vec<String>,
+    /// Every data column's name, measured flat in the heading face, and the
+    /// height of a line in it: what decides which headings turn and how
+    /// tall the strip is. Held rather than shaped each draw because a sheet
+    /// may have thousands of columns and the names move far less often than
+    /// the widths — which are NOT part of this, so a resize re-decides from
+    /// the held names at the cost of a comparison per column. `None` means
+    /// it has to be measured again — which the setters that can change a
+    /// name, a column count or the style all say.
+    #[rust]
+    header_names: Option<(Vec<f64>, f64)>,
+    #[rust]
+    head_glyphs: Vec<PathGlyphInstance>,
     /// (data col, ascending)
     #[rust]
     sort_indicator: Option<(usize, bool)>,
@@ -941,6 +986,10 @@ pub struct DataGrid {
     row_drag_frame: Option<NextFrame>,
     #[rust]
     row_drag_frame_time: Option<f64>,
+    /// The pressing window's size as a cell press went down: a `row_drag`
+    /// press that drags out a selection and leaves it carries the rows.
+    #[rust]
+    press_window: Option<DVec2>,
 }
 
 pub type CopyProvider = Box<dyn FnMut(&GridSelection) -> String>;
@@ -972,7 +1021,7 @@ impl ScriptHook for DataGrid {
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }
@@ -999,6 +1048,9 @@ impl ScriptHook for DataGrid {
         if self.selection == GridSelectMode::Off {
             self.selected = None;
         }
+        // The angle or the heading face may just have moved under the strip,
+        // and both change how tall it has to be.
+        self.remeasure_headers();
     }
 }
 
@@ -1032,6 +1084,7 @@ impl DataGrid {
         }
         self.rows = rows;
         self.cols = cols;
+        self.remeasure_headers();
         if let Some(order) = &self.col_order {
             if order.len() != cols {
                 self.col_order = None;
@@ -1155,6 +1208,13 @@ impl DataGrid {
     }
 
     pub fn set_col_labels(&mut self, labels: Vec<String>) {
+        // Only when they really changed: a host's draw loop hands the same
+        // list over on every frame, and a turned strip re-measured every
+        // frame would shape every name in the sheet to find a height that
+        // has not moved.
+        if self.col_labels != labels {
+            self.remeasure_headers();
+        }
         self.col_labels = labels;
     }
 
@@ -1281,12 +1341,119 @@ impl DataGrid {
         }
     }
 
-    fn header_area_height(&self) -> f64 {
-        if self.show_col_headers {
-            self.col_header_height
-        } else {
-            0.0
+    /// Whether a column heading MAY turn. Which ones do is decided per
+    /// column by [`DataGrid::header_turns`].
+    fn headers_may_turn(&self) -> bool {
+        self.show_col_headers && self.header_angle > 0.0
+    }
+
+    /// The names have to be measured again: a name, a column count, an
+    /// angle or a face has changed under them.
+    fn remeasure_headers(&mut self) {
+        self.header_names = None;
+    }
+
+    /// Whether the heading over `display_col` is turned: only when turning
+    /// is allowed at all and its name does not fit the column flat, by the
+    /// same test the table's headings use. So a column dragged wide enough
+    /// lays its name flat again on the next draw, and one dragged narrow
+    /// turns it, without anything being told.
+    fn header_turns(&self, display_col: usize) -> bool {
+        if !self.headers_may_turn() {
+            return false;
         }
+        let Some((names, _)) = &self.header_names else {
+            return false;
+        };
+        let data_col = self.display_to_data(display_col);
+        let name = names.get(data_col).copied().unwrap_or(0.0);
+        !heading_fits_flat(name, self.col_sizes.size_of(display_col), self.cell_pad_x)
+    }
+
+    /// The longest name among the turned headings, over EVERY column and
+    /// not only the ones in view: a strip that grew and shrank as the sheet
+    /// scrolled sideways would move every row under it, and the point of a
+    /// heading row is that it stays.
+    fn longest_turned_header(&self) -> Option<f64> {
+        let (names, _) = self.header_names.as_ref()?;
+        let mut longest = None;
+        for display_col in 0..self.cols {
+            if self.header_turns(display_col) {
+                let name = names.get(self.display_to_data(display_col)).copied().unwrap_or(0.0);
+                longest = Some(longest.map_or(name, |l: f64| l.max(name)));
+            }
+        }
+        longest
+    }
+
+    /// The strip: the stated height when no heading turns — so a grid with
+    /// an angle set and nothing to turn is not a point taller for it — and
+    /// otherwise what the longest turned name needs, never less than the
+    /// stated height the flat headings beside it still stand in.
+    fn header_area_height(&self) -> f64 {
+        if !self.show_col_headers {
+            return 0.0;
+        }
+        // Before the first draw nothing is measured yet, so nothing turns
+        // and the strip is the stated height: one draw behind, not missing.
+        match (self.longest_turned_header(), &self.header_names) {
+            (Some(longest), Some((_, line))) => {
+                // Up to the whole point: the strip is the top of every row's
+                // arithmetic below it, and a fractional one puts every line
+                // in the sheet half a pixel off its neighbour's.
+                diagonal_row_height(longest, *line, self.header_angle)
+                    .ceil()
+                    .max(self.col_header_height)
+            }
+            _ => self.col_header_height,
+        }
+    }
+
+    /// The part of a heading a flat name is placed in: the bottom slice of
+    /// the stated height, so a flat name beside turned ones reads along the
+    /// same bottom line they stand on. With nothing turned the slice IS the
+    /// heading.
+    fn flat_header_slot(&self, rect: Rect) -> Rect {
+        let h = self.col_header_height.min(rect.size.y);
+        Rect {
+            // Bracketed so that with nothing turned the offset is an exact
+            // nought and not a rounding of one.
+            pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - h)),
+            size: dvec2(rect.size.x, h),
+        }
+    }
+
+    /// The face the turned headings are drawn in: the flat ones' face,
+    /// copied over so the two can never drift apart.
+    fn turn_header_face(&mut self) {
+        let own = self.headers_have_own_text();
+        let (style, color) = if own {
+            (self.draw_text_header.text_style.clone(), self.color_header_text)
+        } else {
+            (self.draw_text.text_style.clone(), self.color_header_text)
+        };
+        self.draw_header_turned.text_style = style;
+        self.draw_header_turned.color = color;
+    }
+
+    /// Every data column's name, measured the way a flat heading measures
+    /// itself to decide whether it overflows — so "fits flat" here and "is
+    /// clipped" there are the same number — and the height of a line in the
+    /// turned face, which a turned name stands across.
+    fn measure_header_names(&mut self, cx: &mut Cx2d) -> (Vec<f64>, f64) {
+        let mut names = Vec::with_capacity(self.cols);
+        for col in 0..self.cols {
+            let label = self.col_label(col);
+            names.push(self.header_text_width(cx, &label));
+        }
+        // The line is the face's, not any one name's: ascender to
+        // descender is the same whatever is written, so one probe settles
+        // it even for a sheet whose first name is empty.
+        let mut line = self.draw_header_turned.text_style.font_size as f64;
+        if let Some(run) = self.draw_header_turned.prepare_single_line_run(cx, "Ag") {
+            line = line.max((run.ascender_in_lpxs - run.descender_in_lpxs) as f64);
+        }
+        (names, line)
     }
 
     fn header_area_width(&self) -> f64 {
@@ -1465,8 +1632,19 @@ impl DataGrid {
     // ---------------------------------------------------------------
 
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.semantic_cells.clear();
         cx.begin_turtle(walk, self.layout);
         self.vp.widget_rect = cx.turtle().rect();
+        // Before the viewport, which is laid out under the heading strip:
+        // with an angle set, how tall that strip is depends on which names
+        // fit their columns, and that is a measurement. Without one nothing
+        // is measured at all, so the flat grid costs what it always did.
+        if self.headers_may_turn() {
+            self.turn_header_face();
+            if self.header_names.is_none() {
+                self.header_names = Some(self.measure_header_names(cx));
+            }
+        }
         self.compute_viewport();
         if let Some((row, display_col)) = self.scroll_pending.take() {
             self.scroll_to_cell(row, display_col);
@@ -1554,6 +1732,7 @@ impl DataGrid {
     /// Fast path: one background quad + directly drawn text. Batches into two
     /// draw calls across all cells; no widget instantiation.
     pub fn cell_text_styled(&mut self, cx: &mut Cx2d, cell: &GridCell, text: &str, style: CellStyle) {
+        if cx.a11y.on { self.semantic_cells.insert((cell.row, cell.col), text.to_owned()); }
         let bg = style.bg.unwrap_or_else(|| self.default_cell_bg(cell.row));
         self.draw_cell.color = bg;
         self.draw_cell.draw_abs(cx, cell.rect);
@@ -1880,12 +2059,42 @@ impl DataGrid {
                 let data_col = self.display_to_data(display_col);
                 let label = self.col_label(data_col);
                 let look = self.header_look(data_col);
-                if w >= 15.0 {
+                if self.header_turns(display_col) {
+                    // A turned name is not inside its column, so the width
+                    // that would hide a flat label means nothing here: a
+                    // column two points across still gets its name, which is
+                    // the whole reason for turning them. The sort marks ride
+                    // the end of the name rather than sitting against an
+                    // edge the name no longer runs along.
+                    let mut label = label;
+                    // Only the mark that says this column IS sorted. The
+                    // faded pair that offers a sort has nowhere to sit here:
+                    // it belongs against the right edge of a heading, and a
+                    // turned name does not run along one — stuck on the end
+                    // of every name instead, it doubles the ink in a row
+                    // whose whole point is to be readable.
+                    if let Some((mark, false)) = look.mark {
+                        label.push(' ');
+                        label.push_str(mark);
+                    }
+                    self.draw_header_turned.color = look.color;
+                    let mut glyphs = std::mem::take(&mut self.head_glyphs);
+                    draw_diagonal_name(
+                        &mut self.draw_header_turned,
+                        cx,
+                        &mut glyphs,
+                        rect,
+                        &label,
+                        self.header_angle,
+                        self.header_lean,
+                    );
+                    self.head_glyphs = glyphs;
+                } else if w >= 15.0 {
                     let cell = GridCell {
                         row: 0,
                         col: data_col,
                         display_col,
-                        rect,
+                        rect: self.flat_header_slot(rect),
                     };
                     // Only a label past the middle comes near the marks, so
                     // only then are they measured for it to keep clear of.
@@ -1945,7 +2154,10 @@ impl DataGrid {
     /// the heading's height, where the cells' own edge lines fall, and only
     /// those in the heading strip. Nothing with `header_edges` off.
     fn header_edge_rects(&self) -> Vec<Rect> {
-        let strip = self.vp.col_header_rect;
+        // Within the stated height at the bottom of the strip: a strip made
+        // tall for turned names would otherwise run its edges up through
+        // the names crossing them. With nothing turned that is the strip.
+        let strip = self.flat_header_slot(self.vp.col_header_rect);
         if !self.header_edges || !self.show_col_headers || strip.size.y <= 0.0 {
             return Vec::new();
         }
@@ -2809,17 +3021,31 @@ impl DataGrid {
         // scroll, never rubber-bands: the press is held only to tell a
         // click from a drag.
         let selects = self.selection != GridSelectMode::Off;
-        if selects {
-            self.select_cell(cx, row, display_col, modifiers.shift);
+        // In a `row_drag` grid a plain press on a row of the selection keeps
+        // it, so the drag that may follow carries all of it (a click picks
+        // the row alone as it comes up); any other press picks as always.
+        let extend = modifiers.shift || modifiers.logo || modifiers.control;
+        let keep = selects && self.row_drag && !extend && row < self.rows
+            && self.selected.as_ref().is_some_and(|sel| {
+                let (first, last) = sel.row_range();
+                (first..=last).contains(&row) && first != last
+            });
+        if selects && !keep {
+            self.select_cell(cx, row, display_col, extend);
         }
+        // Dragging out a selection: in a `row_drag` grid only with a key
+        // held or from the empty space under the rows; a plain press there
+        // carries its row (and the selection it is part of).
+        let rubber_band = selects && !self.drag_scrolling && (!self.row_drag || extend || row >= self.rows);
         self.interact = Interact::CellPress {
             row,
             display_col,
             down_abs: abs,
             modifiers,
-            rubber_band: selects && !self.row_drag && !self.drag_scrolling,
+            rubber_band,
             travelled: false,
             carrying: false,
+            select_on_click: keep,
             scroll_at_press: self.scroll,
             at: abs,
         };
@@ -2869,6 +3095,7 @@ impl DataGrid {
             carrying,
             scroll_at_press,
             at,
+            ..
         } = &mut self.interact
         else {
             return;
@@ -2896,7 +3123,29 @@ impl DataGrid {
             }
             return;
         }
-        if row_drag {
+        if row_drag && *rubber_band {
+            // A selection dragged out past the window's edge goes on as a
+            // carry of the selected rows, out of the window.
+            let outside = self.press_window.is_some_and(|size| {
+                abs.x < 0.0 || abs.y < 0.0 || abs.x >= size.x || abs.y >= size.y
+            });
+            let head = self.selected.as_ref().map(|sel| sel.head).filter(|head| head.0 < self.rows);
+            if let (true, Some((head_row, head_col))) = (outside, head) {
+                *carrying = true;
+                let modifiers = *modifiers;
+                let col = self.display_to_data(head_col);
+                cx.widget_action(
+                    self.uid,
+                    DataGridAction::RowDragStarted {
+                        row: head_row,
+                        col,
+                        abs,
+                        modifiers,
+                    },
+                );
+                return;
+            }
+        } else if row_drag {
             if *travelled && *row < self.rows {
                 *carrying = true;
                 let (row, display_col, modifiers) = (*row, *display_col, *modifiers);
@@ -2956,6 +3205,7 @@ impl DataGrid {
             down_abs,
             travelled,
             carrying,
+            select_on_click,
             ..
         } = std::mem::take(&mut self.interact)
         else {
@@ -2968,6 +3218,9 @@ impl DataGrid {
         }
         if travelled || row >= self.rows || (abs - down_abs).length() > self.drag_threshold {
             return;
+        }
+        if select_on_click {
+            self.select_cell(cx, row, display_col, false);
         }
         let col = self.display_to_data(display_col);
         cx.widget_action(
@@ -3253,7 +3506,7 @@ impl WidgetNode for DataGrid {
             visit(LiveId(*item_id), item.widget.clone());
         }
     }
-    fn skip_widget_tree_search(&self) -> bool {
+    fn search_scope(&self) -> bool {
         true
     }
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
@@ -3264,6 +3517,85 @@ impl WidgetNode for DataGrid {
 }
 
 impl Widget for DataGrid {
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        let clip = (
+            self.vp.data_rect.pos,
+            self.vp.data_rect.pos + self.vp.data_rect.size,
+        );
+        for row in self.vp.row0..self.vp.row1 {
+            let key = (row as u64) << 32;
+            if let Some(rect) = self.row_rect(row) {
+                out.push((
+                    key,
+                    None,
+                    a11y_tree::Node {
+                        role: a11y_tree::Role::Row,
+                        bounds: makepad_platform::a11y::semantic_rect(rect.clip(clip)),
+                        pos_in_set: row as u32 + 1,
+                        set_size: self.rows as u32,
+                        table: Some(a11y_tree::TableInfo {
+                            rows: self.rows as u32,
+                            cols: self.cols as u32,
+                            row: row as u32,
+                            row_span: 1,
+                            col_span: self.cols as u32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ));
+                for &(col, _, _) in &self.vp.vis_cols {
+                    let rect = self.cell_rect(row, col).clip(clip);
+                    let mut states = a11y_tree::States::FOCUSABLE;
+                    states.set(
+                        a11y_tree::States::SELECTABLE,
+                        self.selection != GridSelectMode::Off,
+                    );
+                    states.set(
+                        a11y_tree::States::SELECTED,
+                        self.selected
+                            .is_some_and(|selection| selection.contains(row, col)),
+                    );
+                    out.push((
+                        key | (self.display_to_data(col) as u64 + 1),
+                        Some(key),
+                        a11y_tree::Node {
+                            role: a11y_tree::Role::Cell,
+                            states,
+                            actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                            name: self
+                                .semantic_cells
+                                .get(&(row, self.display_to_data(col)))
+                                .cloned()
+                                .unwrap_or_default(),
+                            bounds: makepad_platform::a11y::semantic_rect(rect),
+                            table: Some(a11y_tree::TableInfo {
+                                rows: self.rows as u32,
+                                cols: self.cols as u32,
+                                row: row as u32,
+                                col: col as u32,
+                                row_span: 1,
+                                col_span: 1,
+                            }),
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Grid;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.table = Some(a11y_tree::TableInfo {
+            rows: self.rows as u32,
+            cols: self.cols as u32,
+            ..Default::default()
+        });
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.uid;
 
@@ -3453,6 +3785,7 @@ impl Widget for DataGrid {
                         }
                     }
                     HitZone::Cell { row, display_col } => {
+                        self.press_window = cx.get_window_id_of(&self.area).map(|id| cx.windows[id].window_geom.inner_size);
                         self.press_cell(cx, row, display_col, fe.abs, fe.modifiers, fe.tap_count);
                         // Row picks and a grid whose columns fit move nothing sideways, so they leave a swipe back alone.
                         let drags_sideways = self.row_drag || if self.drag_scrolling {
@@ -4558,16 +4891,150 @@ mod tests {
         let at = middle(&grid, 2, 1);
         let (six, other_cell) = (at + dvec2(0.0, 6.0), middle(&grid, 5, 2));
         let out = raised(&mut cx, &mut grid, |cx, grid| {
-            grid.press_cell(cx, 2, 1, at, mods(false, true), 1);
+            grid.press_cell(cx, 2, 1, at, KeyModifiers::default(), 1);
             grid.move_cell_press(cx, six);
             grid.move_cell_press(cx, other_cell);
             grid.move_cell_press(cx, at + dvec2(400.0, 400.0));
             grid.release_cell_press(cx, at, KeyModifiers::default());
         });
-        assert_eq!(carried(&out), vec![(2, 1, six, mods(false, true))], "{out:?}");
+        assert_eq!(carried(&out), vec![(2, 1, six, KeyModifiers::default())], "{out:?}");
         assert!(released(&out).is_empty(), "{out:?}");
         assert_eq!(grid.selection(), Some(GridSelection::single(2, 1)));
         assert_eq!(grid.scroll, DVec2::default(), "the carry scrolled the grid");
+        });
+    }
+
+    /// A `row_drag` grid with rows 2..=4 picked: a plain press on row 3
+    /// keeps the pick and a drag carries it (no selection change on the
+    /// way); a click there picks row 3 alone as it comes up.
+    #[test]
+    fn a_press_on_the_picked_rows_carries_them_and_a_click_picks_one() {
+        crate::on_test_cx(|| {
+        for drag in [true, false] {
+            let mut cx = cx();
+            let mut grid = laid_out(&mut cx);
+            grid.row_drag = true;
+            grid.selected = Some(GridSelection { kind: GridSelectKind::Cells, anchor: (2, 0), head: (4, 0) });
+            let at = middle(&grid, 3, 1);
+            let end = if drag { middle(&grid, 6, 1) } else { at };
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 3, 1, at, KeyModifiers::default(), 1);
+                assert_eq!(grid.selection().map(|s| s.row_range()), Some((2, 4)), "the press dropped the pick");
+                grid.move_cell_press(cx, end);
+                grid.release_cell_press(cx, end, KeyModifiers::default());
+            });
+            if drag {
+                assert_eq!(carried(&out).len(), 1, "{out:?}");
+                assert_eq!(carried(&out)[0].0, 3);
+                assert!(!selection_changed(&out), "{out:?}");
+                assert_eq!(grid.selection().map(|s| s.row_range()), Some((2, 4)));
+            } else {
+                assert!(carried(&out).is_empty(), "{out:?}");
+                assert_eq!(released(&out).len(), 1, "{out:?}");
+                assert_eq!(grid.selection().map(|s| s.row_range()), Some((3, 3)));
+            }
+        }
+        });
+    }
+
+    /// A plain press on a row outside the pick picks that row and a drag
+    /// carries it alone; with nothing picked the same.
+    #[test]
+    fn a_press_off_the_pick_carries_the_pressed_row() {
+        crate::on_test_cx(|| {
+        for picked in [true, false] {
+            let mut cx = cx();
+            let mut grid = laid_out(&mut cx);
+            grid.row_drag = true;
+            grid.selected = picked.then(|| GridSelection { kind: GridSelectKind::Cells, anchor: (2, 0), head: (4, 0) });
+            let at = middle(&grid, 5, 1);
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 5, 1, at, KeyModifiers::default(), 1);
+                grid.move_cell_press(cx, at + dvec2(0.0, 30.0));
+            });
+            assert_eq!(carried(&out).iter().map(|c| c.0).collect::<Vec<_>>(), vec![5], "{out:?}");
+            assert_eq!(grid.selection().map(|s| s.row_range()), Some((5, 5)));
+        }
+        });
+    }
+
+    /// With Shift (or Cmd / Ctrl) held a `row_drag` press drags out a
+    /// selection instead of carrying; Shift-click still extends the pick.
+    #[test]
+    fn a_held_key_drags_out_a_selection_in_a_row_drag_grid() {
+        crate::on_test_cx(|| {
+        for held in [mods(true, false), mods(false, true), KeyModifiers { logo: true, ..Default::default() }] {
+            let mut cx = cx();
+            let mut grid = laid_out(&mut cx);
+            grid.row_drag = true;
+            grid.selected = Some(GridSelection::single(1, 1));
+            let at = middle(&grid, 2, 1);
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 2, 1, at, held, 1);
+                grid.move_cell_press(cx, middle(grid, 4, 1));
+                grid.release_cell_press(cx, middle(grid, 4, 1), held);
+            });
+            assert!(carried(&out).is_empty(), "{held:?}: {out:?}");
+            assert!(selection_changed(&out), "{held:?}: {out:?}");
+            assert_eq!(grid.selection().map(|s| s.row_range()), Some((1, 4)), "{held:?}");
+        }
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        grid.selected = Some(GridSelection::single(1, 1));
+        let at = middle(&grid, 3, 1);
+        grid.press_cell(&mut cx, 3, 1, at, mods(true, false), 1);
+        grid.release_cell_press(&mut cx, at, mods(true, false));
+        assert_eq!(grid.selection().map(|s| s.row_range()), Some((1, 3)), "Shift-click no longer extends");
+        });
+    }
+
+    /// A selection dragged out (Shift held) that leaves the window goes on
+    /// as a carry of the picked rows: the platform drag takes over.
+    #[test]
+    fn a_selection_dragged_out_of_the_window_becomes_a_carry() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        grid.press_window = Some(dvec2(300.0, 200.0));
+        grid.selected = Some(GridSelection::single(1, 1));
+        let at = middle(&grid, 2, 1);
+        let inside = middle(&grid, 3, 1);
+        let outside = dvec2(320.0, inside.y);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 2, 1, at, mods(true, false), 1);
+            grid.move_cell_press(cx, inside);
+            assert!(matches!(grid.interact, Interact::CellPress { carrying: false, .. }));
+            grid.move_cell_press(cx, outside);
+            grid.move_cell_press(cx, outside + dvec2(40.0, 0.0));
+            grid.release_cell_press(cx, outside, KeyModifiers::default());
+        });
+        let carried = carried(&out);
+        assert_eq!(carried.len(), 1, "{out:?}");
+        assert_eq!(carried[0].0, 3, "{out:?}");
+        assert!(out.iter().any(|a| matches!(a, DataGridAction::RowDragEnded { .. })), "{out:?}");
+        assert_eq!(grid.selection().map(|s| s.row_range()), Some((1, 3)));
+        });
+    }
+
+    /// A press in the empty space under the rows drags out a selection.
+    #[test]
+    fn a_press_under_the_rows_drags_out_a_selection() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        grid.rows = 4;
+        grid.compute_viewport();
+        let at = middle(&grid, 6, 1);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 6, 1, at, KeyModifiers::default(), 1);
+            grid.move_cell_press(cx, middle(grid, 1, 1));
+            grid.release_cell_press(cx, middle(grid, 1, 1), KeyModifiers::default());
+        });
+        assert!(carried(&out).is_empty(), "{out:?}");
+        assert!(selection_changed(&out), "{out:?}");
         });
     }
 
@@ -5892,5 +6359,159 @@ mod tests {
         grid.compute_viewport();
         assert_eq!(grid.header_edge_rects().len(), 1, "the last column drew an edge");
         });
+    }
+
+    /// A grid drawn once into a window-less pass, so the headings are
+    /// measured the way a real frame measures them. The cells it handed out.
+    fn drawn(cx: &mut Cx, grid: &mut DataGrid) -> Vec<GridCell> {
+        let mut frame = Frame::new(cx, dvec2(420.0, 200.0));
+        frame.draw(cx, grid, |_, _| {})
+    }
+
+    /// The sheet the option is for: a wide first column under a short name,
+    /// then numbers in 32-point columns under names far longer than that.
+    fn narrow_grid(cx: &mut Cx, angle: f64) -> DataGrid {
+        let mut grid = grid(cx);
+        grid.set_grid_size(20, 4);
+        grid.set_col_labels(vec![
+            "Site".into(),
+            "Readings taken".into(),
+            "Average reading".into(),
+            "Days without a reading".into(),
+        ]);
+        grid.set_col_widths(cx, &[120.0, 32.0, 32.0, 32.0]);
+        grid.header_angle = angle;
+        grid.remeasure_headers();
+        grid
+    }
+
+    fn turned(grid: &DataGrid) -> Vec<bool> {
+        (0..grid.cols).map(|c| grid.header_turns(c)).collect()
+    }
+
+    /// The operator's rule, whole: a sheet whose columns all hold their
+    /// names flat is exactly the same sheet with an angle set — the same
+    /// strip, the same cells, the same columns, the same edges between the
+    /// headings — in either lean. Nothing turns, so nothing moves.
+    #[test]
+    fn wide_columns_with_an_angle_draw_exactly_what_they_drew_without_one() {
+        let mut cx = cx();
+        let labels: Vec<String> = vec!["First".into(), "Last".into(), "Born".into()];
+        let mut off = grid(&mut cx);
+        off.set_col_labels(labels.clone());
+        let off_cells = drawn(&mut cx, &mut off);
+        for lean in [DiagonalLean::Rise, DiagonalLean::Fall] {
+            let mut on = grid(&mut cx);
+            on.set_col_labels(labels.clone());
+            on.header_angle = 45.0;
+            on.header_lean = lean;
+            on.remeasure_headers();
+            let on_cells = drawn(&mut cx, &mut on);
+            assert_eq!(turned(&on), vec![false; 3], "no heading here needs turning");
+            assert_eq!(on.vp.col_header_rect, off.vp.col_header_rect, "the same strip");
+            assert_eq!(on.vp.data_rect, off.vp.data_rect, "the same body");
+            assert_eq!(on.vp.vis_cols, off.vp.vis_cols, "the same columns");
+            assert_eq!(on.header_edge_rects(), off.header_edge_rects(), "the same edges");
+            let rects = |cells: &[GridCell]| cells.iter().map(|c| c.rect).collect::<Vec<_>>();
+            assert_eq!(rects(&on_cells), rects(&off_cells), "the same cells");
+        }
+    }
+
+    /// Only the names too long for their columns turn: the wide first
+    /// column keeps its short name flat beside them, and the strip grows to
+    /// hold the turned ones — with the cells starting under it.
+    #[test]
+    fn only_a_name_too_long_for_its_column_turns() {
+        let mut cx = cx();
+        let mut grid = narrow_grid(&mut cx, 45.0);
+        drawn(&mut cx, &mut grid);
+        assert_eq!(turned(&grid), vec![false, true, true, true]);
+        let strip = grid.vp.col_header_rect.size.y;
+        assert!(strip > 28.0, "turned names need more room than the stated {strip}");
+        assert_eq!(grid.vp.data_rect.pos.y, grid.vp.widget_rect.pos.y + strip);
+        assert_eq!(grid.col_widths(), vec![120.0, 32.0, 32.0, 32.0], "no column widened");
+
+        let mut flat = narrow_grid(&mut cx, 0.0);
+        drawn(&mut cx, &mut flat);
+        assert_eq!(turned(&flat), vec![false; 4], "nought turns nothing");
+        assert_eq!(flat.vp.col_header_rect.size.y, 28.0);
+    }
+
+    /// The strip is as tall as the longest TURNED name needs: a long name
+    /// lying flat in a column wide enough for it does not raise it.
+    #[test]
+    fn a_long_name_that_fits_flat_does_not_raise_the_strip() {
+        let mut cx = cx();
+        let mut short = narrow_grid(&mut cx, 45.0);
+        short.set_grid_size(20, 2);
+        short.set_col_labels(vec!["Site".into(), "Readings taken".into()]);
+        short.set_col_widths(&mut cx, &[120.0, 32.0]);
+        drawn(&mut cx, &mut short);
+        let mut long = narrow_grid(&mut cx, 45.0);
+        long.set_grid_size(20, 2);
+        long.set_col_labels(vec!["The site the readings were taken at".into(), "Readings taken".into()]);
+        long.set_col_widths(&mut cx, &[300.0, 32.0]);
+        drawn(&mut cx, &mut long);
+        assert_eq!(turned(&long), vec![false, true]);
+        assert_eq!(long.vp.col_header_rect.size.y, short.vp.col_header_rect.size.y);
+    }
+
+    /// A press anywhere in a turned heading, top to bottom of the taller
+    /// strip, lands on the column the name stands on.
+    #[test]
+    fn a_press_on_a_turned_heading_finds_its_own_column() {
+        let mut cx = cx();
+        let mut grid = narrow_grid(&mut cx, 45.0);
+        drawn(&mut cx, &mut grid);
+        let strip = grid.vp.col_header_rect;
+        for (display_col, x, w) in grid.vp.vis_cols.clone() {
+            for at in [strip.pos.y + 2.0, strip.pos.y + strip.size.y - 2.0] {
+                let hit = grid.hit_zone(dvec2(x + w * 0.5, at));
+                assert!(
+                    matches!(hit, HitZone::ColHeader { display_col: hit, .. } if hit == display_col),
+                    "column {display_col} at {at}: {hit:?}"
+                );
+            }
+        }
+    }
+
+    /// Sorting does not tip a heading onto the diagonal or off it: the fit
+    /// is decided on the name, not on the mark after it.
+    #[test]
+    fn sorting_leaves_every_heading_where_it_was() {
+        let mut cx = cx();
+        let mut grid = narrow_grid(&mut cx, 45.0);
+        drawn(&mut cx, &mut grid);
+        let before = (turned(&grid), grid.vp.col_header_rect);
+        for col in 0..4 {
+            grid.set_sort_indicator(Some((col, true)));
+            drawn(&mut cx, &mut grid);
+            assert_eq!((turned(&grid), grid.vp.col_header_rect), before, "sorted on {col}");
+        }
+    }
+
+    /// Drag a narrow column's edge until it holds its name and the name
+    /// lies down flat on the next draw; the others stay turned. Widen them
+    /// all and the strip goes back to the stated height, so the option
+    /// leaves no trace on a sheet that no longer needs it.
+    #[test]
+    fn dragging_a_narrow_column_wide_lays_its_name_flat_again() {
+        let mut cx = cx();
+        let mut grid = narrow_grid(&mut cx, 45.0);
+        let mut frame = Frame::new(&mut cx, dvec2(420.0, 200.0));
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        assert_eq!(turned(&grid), vec![false, true, true, true]);
+
+        let (_, x, w) = grid.vp.vis_cols[1];
+        let edge = dvec2(x + w, heading(&grid, 1).y);
+        primary_drag(&mut cx, &mut grid, &[edge, edge + dvec2(60.0, 0.0), edge + dvec2(120.0, 0.0)]);
+        assert_eq!(grid.col_widths()[1], 32.0 + 120.0, "the drag resized the column");
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        assert_eq!(turned(&grid), vec![false, false, true, true], "dragged wide: flat");
+
+        grid.set_col_widths(&mut cx, &[120.0, 152.0, 160.0, 200.0]);
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        assert_eq!(turned(&grid), vec![false; 4], "all wide: nothing turned");
+        assert_eq!(grid.vp.col_header_rect.size.y, 28.0, "and the strip is the stated one");
     }
 }

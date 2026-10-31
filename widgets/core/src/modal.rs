@@ -210,7 +210,7 @@ pub(crate) fn area_after_redraws(cx: &Cx, area: Area) -> Area {
             let Some(list) = cx.draw_lists.checked_index(ra.draw_list_id) else {
                 return Area::Empty;
             };
-            if cx.draw_lists.is_id_freed(ra.draw_list_id) || ra.rect_id >= list.rect_areas.len() {
+            if cx.draw_lists.is_id_freed(ra.draw_list_id) || ra.rect_id >= list.rect_area_count {
                 return Area::Empty;
             }
             Area::Rect(RectArea { redraw_id: list.redraw_id, ..ra })
@@ -257,6 +257,19 @@ impl ScriptHook for Modal {
 }
 
 impl Widget for Modal {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::MODAL, true);
+        node.states.set(a11y_tree::States::HIDDEN, !self.is_open);
+    }
+
+    /// Opened, so the run draws its content.
+    fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
+        self.open(cx);
+    }
+
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         self.is_open && self.cancel_children_impl(visit)
     }
@@ -326,7 +339,7 @@ impl Widget for Modal {
         let draw_list = self.draw_list.as_mut().unwrap();
         // Tab stays inside an open modal.
         CxDraw::set_nav_trap(cx, draw_list.id(), self.is_open);
-        draw_list.begin_overlay_reuse(cx);
+        draw_list.begin_popup_overlay(cx);
         cx.begin_root_turtle_for_pass(self.view.layout);
 
         // Even an invisible `draw_bg` costs the GPU a full-window pass every frame,

@@ -1,6 +1,6 @@
 use {
     crate::{
-        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+        animator::{Animate, Animator, AnimatorImpl},
         makepad_derive_widget::*,
         makepad_draw::{
             event::finger::TouchState,
@@ -303,6 +303,9 @@ script_mod! {
 
         /** The selection band: one rounded quad per selected run, drawn behind the ink. */
         draw_selection +: {
+            // Its own draw-call layer: the band's draws cross the text and caret
+            // calls back to the call `draw_walk` opens before the text.
+            draw_call_group: @selection
             /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
             /** keyboard-focus mix 0..1 step 0.01 */
@@ -828,6 +831,9 @@ impl DrawTextMark {
     }
 }
 
+/// Caret phases (half a blink each) a focused field shows after its last input.
+const CARET_BLINKS: u32 = 20;
+
 #[derive(Script, Widget, Animator)]
 pub struct TextInput {
     #[uid]
@@ -860,6 +866,10 @@ pub struct TextInput {
     layout: Layout,
     #[walk]
     walk: Walk,
+
+    #[live(true)]
+    #[visible]
+    visible: bool,
     #[live]
     label_align: Align,
 
@@ -935,6 +945,10 @@ pub struct TextInput {
     /// without this the cached multi-row layout survives it.
     #[rust]
     laidout_max_lines: usize,
+    /// `draw_text.text_style.font_size` as of the cached layout, part of the
+    /// cache key for the same reason (`set_font_size`).
+    #[rust]
+    laidout_font_size: f32,
     #[rust]
     text_area: Area,
     #[rust]
@@ -943,6 +957,8 @@ pub struct TextInput {
     history: History,
     #[rust]
     blink_timer: Timer,
+    #[rust]
+    blinks: u32,
     #[rust]
     preserved_selection_cursor: Option<Cursor>,
     /// When true, the next draw will scroll to keep the cursor visible.
@@ -1014,7 +1030,7 @@ impl TextInput {
                 return;
             };
             cx.with_script_vm_id(vm_id, |vm| {
-                let str_val = vm.bx.heap.new_string_from_str(&text);
+                let str_val = vm.new_string(&text);
                 vm.with_instruction_limit(
                     crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
                     |vm| {
@@ -1035,7 +1051,7 @@ impl TextInput {
                 return;
             };
             cx.with_script_vm_id(vm_id, |vm| {
-                let str_val = vm.bx.heap.new_string_from_str(&text);
+                let str_val = vm.new_string(&text);
                 vm.with_instruction_limit(
                     crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
                     |vm| {
@@ -1112,6 +1128,23 @@ impl TextInput {
 
     pub fn max_lines(&self) -> usize {
         self.draw_text.max_lines
+    }
+
+    /// Sets the text's size in points at run time (a field that follows a
+    /// zoom or a picture's scale). Like [`TextInput::set_max_lines`]: no
+    /// script apply (it would reset `text`), and the size is part of the
+    /// layout cache key, so the next draw re-lays out and the current layout
+    /// stays valid for cursor operations until then.
+    pub fn set_font_size(&mut self, cx: &mut Cx, font_size: f32) {
+        if self.draw_text.text_style.font_size == font_size {
+            return;
+        }
+        self.draw_text.text_style.font_size = font_size;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn font_size(&self) -> f32 {
+        self.draw_text.text_style.font_size
     }
 
     /// Takes key focus AND turns the caret on.
@@ -1271,6 +1304,7 @@ impl TextInput {
 
     pub fn reset_blink_timer(&mut self, cx: &mut Cx) {
         self.animator_cut(cx, ids!(blink.off));
+        self.blinks = 0;
         if !self.is_read_only {
             cx.stop_timer(self.blink_timer);
             self.blink_timer = cx.start_timeout(self.blink_speed)
@@ -1372,6 +1406,7 @@ impl TextInput {
         if self.laidout_text.is_some()
             && self.laidout_width == max_width_in_lpxs
             && self.laidout_max_lines == self.draw_text.max_lines
+            && self.laidout_font_size == self.draw_text.text_style.font_size
         {
             return;
         }
@@ -1389,6 +1424,7 @@ impl TextInput {
         let wrap = self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap();
         self.laidout_width = max_width_in_lpxs;
         self.laidout_max_lines = self.draw_text.max_lines;
+        self.laidout_font_size = self.draw_text.text_style.font_size;
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,
@@ -2773,6 +2809,145 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        let offset = |index: u32| {
+            self.password_cursor_to_cursor(Cursor {
+                index: index as usize,
+                prefer_next_row: false,
+            })
+            .index
+        };
+        if action.action == A::SET_TEXT_SELECTION {
+            let ActionArg::Range(a, b) = action.arg else {
+                return ActionResult::Unsupported;
+            };
+            let content = if self.is_password {
+                &self.password_text
+            } else {
+                &self.text
+            };
+            if !content.is_char_boundary(a as usize) || !content.is_char_boundary(b as usize) {
+                return ActionResult::Unsupported;
+            }
+            let (a, b) = (offset(a), offset(b));
+            self.set_selection(
+                cx,
+                Selection {
+                    anchor: Cursor {
+                        index: a,
+                        prefer_next_row: false,
+                    },
+                    cursor: Cursor {
+                        index: b,
+                        prefer_next_row: false,
+                    },
+                },
+            );
+            self.redraw(cx);
+            return ActionResult::Handled;
+        }
+        let result = if action.action == A::SET_VALUE {
+            let ActionArg::Text(text) = &action.arg else {
+                return ActionResult::Unsupported;
+            };
+            self.replace_range(cx, 0..self.text.len(), text, UndoGroup::New)
+        } else if action.action == A::REPLACE_TEXT {
+            let ActionArg::Replace(a, b, text) = &action.arg else {
+                return ActionResult::Unsupported;
+            };
+            let content = if self.is_password {
+                &self.password_text
+            } else {
+                &self.text
+            };
+            if a > b
+                || !content.is_char_boundary(*a as usize)
+                || !content.is_char_boundary(*b as usize)
+            {
+                return ActionResult::Unsupported;
+            }
+            let range = offset(*a)..offset(*b);
+            self.replace_range(cx, range, text, UndoGroup::New)
+        } else {
+            return ActionResult::Unhandled;
+        };
+        if result.is_ok() {
+            ActionResult::Handled
+        } else {
+            ActionResult::Unsupported
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = if self.is_password {
+            a11y_tree::Role::PasswordField
+        } else if self.is_multiline {
+            a11y_tree::Role::TextArea
+        } else {
+            a11y_tree::Role::TextField
+        };
+        let content = if self.is_password {
+            &self.password_text
+        } else {
+            &self.text
+        };
+        makepad_platform::a11y::set_string(&mut node.value, content);
+        makepad_platform::a11y::set_string(&mut node.placeholder, &self.empty_text);
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::EDITABLE, !self.is_read_only);
+        node.states
+            .set(a11y_tree::States::READ_ONLY, self.is_read_only);
+        node.states
+            .set(a11y_tree::States::PROTECTED, self.is_password);
+        node.states
+            .set(a11y_tree::States::MULTILINE, self.is_multiline);
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_TEXT_SELECTION;
+        if !self.is_read_only {
+            node.actions
+                .insert(a11y_tree::Actions::SET_VALUE | a11y_tree::Actions::REPLACE_TEXT);
+        }
+        let text = node.text.get_or_insert_with(Default::default);
+        makepad_platform::a11y::set_string(&mut text.content, content);
+        let selection = self.selection_to_password_selection(self.selection);
+        text.selection = (selection.anchor.index as u32, selection.cursor.index as u32);
+        text.lines.clear();
+        text.glyph_x.clear();
+        if let Some(layout) = &self.laidout_text {
+            crate::semantics::text_layout(
+                text,
+                layout,
+                self.text_area.rect(cx).pos,
+                self.draw_text.font_scale,
+                !self.is_read_only || cx.has_key_focus(self.area()),
+            );
+        }
+    }
+
+    fn clips_content(&self) -> bool {
+        true
+    }
+
+    /// What a person types cannot be bounded: its faces ship whole, with
+    /// the web runtime's text input and clipboard.
+    fn scan(&mut self, cx: &mut Cx, scan: &ScanEvent, _scope: &mut Scope) {
+        self.draw_text.scan_open_text(cx, scan);
+        self.draw_text.scan_text(cx, &self.empty_text);
+        scan.need_js_feature("text-input");
+        scan.need_js_feature("clipboard");
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -2780,18 +2955,14 @@ impl Widget for TextInput {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(&self.text);
+            let str_val = vm.new_string(&self.text);
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying text input contents")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying text input contents")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);
@@ -2808,9 +2979,7 @@ impl Widget for TextInput {
         self.text.clone()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.text.clone())
-    }
+
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
         self.text = self.filter_input(text, true);
@@ -2835,10 +3004,14 @@ impl Widget for TextInput {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_selection.append_to_draw_call(cx);
-        self.draw_composition_underline.append_to_draw_call(cx);
-        self.draw_mark.append_to_draw_call(cx);
+        // The selection band's call goes in now, before the text: the band is
+        // drawn after the text and caret (it needs their layout) and lands here
+        // through its own draw_call_group, so it stays behind the glyphs.
+        self.draw_selection.new_draw_call(cx);
         // Push an inner clip rect to prevent scrolled text from bleeding into
         // the padding area. For multiline, this clips vertically-scrolled content.
         // For single-line, this clips horizontally-scrolled content that overflows.
@@ -2904,16 +3077,24 @@ impl Widget for TextInput {
             self.draw_bg.redraw(cx);
             self.draw_cursor.redraw(cx);
         }
+        // Hidden: no hits, and no typing into a field that kept the key focus.
+        if !self.visible {
+            return;
+        }
 
         if self.blink_timer.is_event(event).is_some() {
-            if self.animator_in_state(cx, ids!(blink.off)) {
-                self.animator_play(cx, ids!(blink.on));
+            self.blinks += 1;
+            let visible = self.animator_in_state(cx, ids!(blink.off));
+            if visible && self.blinks >= CARET_BLINKS {
+                // Left alone, the caret stays lit and a focused field draws
+                // nothing; input or a new focus starts it blinking again.
+                self.blink_timer = Timer::empty();
             } else {
-                self.animator_play(cx, ids!(blink.off));
+                // No redraw: the animator writes `blink` straight into the drawn cursor,
+                // so a blink repaints without re-running the draw code of everything around it.
+                self.animator_play(cx, if visible { ids!(blink.on) } else { ids!(blink.off) });
+                self.blink_timer = cx.start_timeout(self.blink_speed)
             }
-            // No redraw: the animator writes `blink` straight into the drawn cursor,
-            // so a blink repaints without re-running the draw code of everything around it.
-            self.blink_timer = cx.start_timeout(self.blink_speed)
         }
 
         let uid = self.widget_uid();
@@ -3791,6 +3972,13 @@ impl TextInputRef {
         self.borrow().map(|inner| inner.max_lines()).unwrap_or(0)
     }
 
+    /// See [`TextInput::set_font_size`].
+    pub fn set_font_size(&self, cx: &mut Cx, font_size: f32) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_font_size(cx, font_size);
+        }
+    }
+
     /// See [`TextInput::take_key_focus`].
     pub fn take_key_focus(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -4090,7 +4278,6 @@ pub enum ReplaceRangeError {
 
 /// The saved (checkpointed) state of a text input widget.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TextInputState {
     text: String,
     password_text: String,
@@ -4166,7 +4353,6 @@ impl TextNavigation {
 }
 
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct History {
     current_edit_kind: Option<EditKind>,
     undo_stack: EditStack,
@@ -4232,7 +4418,6 @@ impl History {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 enum EditKind {
     Insert,
     Backspace,
@@ -4253,7 +4438,6 @@ impl EditKind {
 }
 
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct EditStack {
     edit_groups: Vec<EditGroup>,
     edits: Vec<Edit>,
@@ -4288,14 +4472,12 @@ impl EditStack {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct EditGroup {
     selection: Selection,
     edit_start: usize,
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Edit {
     start: usize,
     end: usize,

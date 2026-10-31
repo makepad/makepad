@@ -183,7 +183,7 @@ impl ScriptHook for SlidesView {
                             continue;
                         }
                         if let Some(template_obj) = kv.value.as_object() {
-                            self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                            self.templates.insert(id, vm.new_object_ref(template_obj));
                             // The written order is the deck's order. An id
                             // already in it is this slide being applied
                             // again, not another slide behind it.
@@ -257,6 +257,12 @@ impl WidgetNode for SlidesView {
 }
 
 impl Widget for SlidesView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         match event {
             Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {

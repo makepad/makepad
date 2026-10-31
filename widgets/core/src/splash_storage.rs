@@ -76,7 +76,7 @@ pub(crate) fn set_quota_for_heap(heap_key: usize, total_bytes: Option<u64>) {
 
 /// This isolate's whole-jail cap.
 fn quota_for_vm(vm: &ScriptVm) -> u64 {
-    let heap_key = vm.bx.heap.heap_key();
+    let heap_key = vm.heap_key();
     JAIL_QUOTAS.with(|q| q.borrow().get(&heap_key).copied()).unwrap_or(MAX_TOTAL_BYTES)
 }
 
@@ -112,7 +112,7 @@ pub(crate) fn gc_roots(dead_heaps: &[usize]) {
 }
 
 fn root_for_vm(vm: &ScriptVm) -> Option<PathBuf> {
-    let heap_key = vm.bx.heap.heap_key();
+    let heap_key = vm.heap_key();
     SANDBOX_ROOTS.with(|r| r.borrow().get(&heap_key).cloned())
 }
 
@@ -375,10 +375,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     Err(_) => return script_err_io!(vm.trap(), "not a directory"),
                 }
                 names.sort();
-                let array = vm.bx.heap.new_array();
+                let array = vm.heap_mut().new_array();
                 for name in &names {
-                    let name = vm.bx.heap.new_string_from_str(name);
-                    vm.bx.heap.array_push_unchecked(array, name);
+                    let name = vm.new_string(name);
+                    vm.heap_mut().array_push_unchecked(array, name);
                 }
                 array.into()
             }

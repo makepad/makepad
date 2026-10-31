@@ -84,6 +84,12 @@ fn channel_color(rgb: u32) -> Vec4f {
 }
 
 impl Widget for PerfGraph {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.next_frame.is_event(event).is_some() {
             self.redraw(cx);

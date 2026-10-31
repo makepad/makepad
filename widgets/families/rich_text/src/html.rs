@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     fold_button::{FoldButton, FoldButtonAction},
     makepad_derive_widget::*,
     makepad_draw::turtle::{Baseline, RowAlign},
@@ -832,6 +832,12 @@ impl Html {
 }
 
 impl Widget for Html {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Document;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Route clicks on the summary line to the matching FoldButton so the
         // whole summary toggles, not just the triangle. Hit-test on the
@@ -1380,8 +1386,8 @@ impl ScriptHook for HtmlLink {
     fn on_after_new_scoped(&mut self, _vm: &mut ScriptVm, scope: &mut Scope) {
         // After an HtmlLink instance has been instantiated,
         // populate its struct fields from the `<a>` tag's attributes.
-        if let Some(doc) = scope.props.get::<HtmlDoc>() {
-            let mut walker = doc.new_walker_with_index(scope.index + 1);
+        if let Some(doc) = scope.props().get::<HtmlDoc>() {
+            let mut walker = doc.new_walker_with_index(scope.index() + 1);
             while let Some((lc, attr)) = walker.while_attr_lc() {
                 match lc {
                     live_id!(href) => {
@@ -1402,12 +1408,22 @@ impl WidgetMatchEvent for HtmlLink {
 }
 
 impl Widget for HtmlLink {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Link;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::ClearHover = event {
             self.animator_cut(cx, ids!(hover.off));
         }
         if self.animator_handle_event(cx, event).must_redraw() {
-            if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+            if let Some(tf) = scope.data_mut().get_mut::<TextFlow>() {
                 tf.redraw(cx);
             } else {
                 self.drawn_areas.iter().for_each(|area| area.redraw(cx));
@@ -1470,7 +1486,7 @@ impl Widget for HtmlLink {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        let Some(tf) = scope.data.get_mut::<TextFlow>() else {
+        let Some(tf) = scope.data_mut().get_mut::<TextFlow>() else {
             return DrawStep::done();
         };
 

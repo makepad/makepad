@@ -418,30 +418,22 @@ impl ScriptHook for MapThemeStyle {
                     let Some(obj) = kv.value.as_object() else {
                         continue;
                     };
-                    if vm
-                        .bx
-                        .heap
+                    if vm.heap()
                         .type_matches_id(obj, MapFillRule::script_type_id_static())
                     {
                         self.fill_rules
                             .push(MapFillRule::script_from_value(vm, kv.value));
-                    } else if vm
-                        .bx
-                        .heap
+                    } else if vm.heap()
                         .type_matches_id(obj, MapRoadRule::script_type_id_static())
                     {
                         self.road_rules
                             .push(MapRoadRule::script_from_value(vm, kv.value));
-                    } else if vm
-                        .bx
-                        .heap
+                    } else if vm.heap()
                         .type_matches_id(obj, MapWaterwayRule::script_type_id_static())
                     {
                         self.waterway_rules
                             .push(MapWaterwayRule::script_from_value(vm, kv.value));
-                    } else if vm
-                        .bx
-                        .heap
+                    } else if vm.heap()
                         .type_matches_id(obj, MapRailRule::script_type_id_static())
                     {
                         self.railway_rule = Some(MapRailRule::script_from_value(vm, kv.value));

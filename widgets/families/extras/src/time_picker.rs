@@ -162,10 +162,15 @@ script_mod! {
             /** corner rounding radius 0..24 step 0.5 */
             border_radius: theme.corner_radius
 
+            // The chosen row's plate is a selected row's ground, and its
+            // label below is a selected row's ink: the pair every theme
+            // holds a menu's chosen item to, so the value is written on a
+            // ground its ink was settled against. The value fill this used
+            // to read is a slider's, which nothing is written on.
             color: #00000000
             color_hover: theme.color_inset_hover
-            color_active: theme.color_val
-            color_disabled: theme.color_val_disabled
+            color_active: theme.color_outset_active
+            color_disabled: theme.color_outset_disabled
         }
 
         /** The values that were not chosen: present, readable, quieter. */
@@ -176,7 +181,7 @@ script_mod! {
 
         /** The value that was chosen. */
         draw_text_active +: {
-            color: theme.color_label_inner
+            color: theme.color_label_inner_active
             text_style: theme.font_regular{font_size: theme.font_size_p}
         }
     }
@@ -801,6 +806,11 @@ impl TimeColumn {
 }
 
 impl Widget for TimeColumn {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         if self.disabled != disabled {
             self.disabled = disabled;
@@ -1147,6 +1157,17 @@ impl TimeField {
 }
 
 impl Widget for TimeField {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
         self.well.set_disabled(cx, disabled);
@@ -1456,6 +1477,12 @@ impl TimePicker {
 }
 
 impl Widget for TimePicker {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         if self.disabled != disabled {
             self.disabled = disabled;

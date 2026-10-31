@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptFnRef,
@@ -8,6 +8,7 @@ use crate::{
 };
 
 use crate::makepad_draw::DrawSvg;
+use crate::pointer_field::{FieldArbiter, PointerField};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -20,6 +21,16 @@ script_mod! {
     mod.widgets.ButtonFlat = set_type_default() do mod.widgets.ButtonBase{
         /** the label text */
         text: "Button"
+
+        // The compact face, worn when the row this sits on runs out of width.
+        // Declared with `:=` rather than `:` so it lands in the instance's vec:
+        // a widget proto is frozen VALIDATED, so a key its props do not list is
+        // a hard error at construction -- but the checked path falls back to the
+        // vec first, which is what makes `tight: {...}` legal at the use site.
+        // The vec is also invisible to the derived apply, so the block never
+        // clobbers the button's own text.
+        /** the face this button wears when its row runs out of width */
+        tight := {}
         width: Fit
         height: Fit
         /** gap between icon and label 0..24 step 1 */
@@ -44,6 +55,8 @@ script_mod! {
             disabled: instance(0.0)
             /** loading mix: fades the label out under the spinner 0..1 step 0.01 */
             loading: instance(0.0)
+            /** latched mix: the label of a button shown on, lit as a held one is 0..1 step 0.01 */
+            active: instance(0.0)
 
             // A button face is a box with one line of text in it: center the
             // ink, not the line box, or the label reads as sitting high.
@@ -66,14 +79,28 @@ script_mod! {
                 /** label type size in points 6..32 step 0.5 */
                 font_size: theme.font_size_p
             }
-            /** ink mix order: focus, hover, down, disabled; then faded out while loading */
+            /** how far the label lifts toward the glow ink while held; the theme's material_ink_glow, 0 in every stock theme 0..1 step 0.01 */
+            material_ink_glow: uniform(theme.material_ink_glow)
+            /** how far past full brightness lit ink is pushed before it clips 1..4 step 0.05 */
+            material_ink_lift: uniform(theme.material_ink_lift)
+            /** the emissive ink lit label ink is pushed toward */
+            material_glow_ink: uniform(theme.color_material_glow)
+
+            /** ink mix order: focus, hover, down, disabled; lit toward the
+             * glow ink while held or latched under an illuminating
+             * material; then faded out while loading */
             get_color: fn() {
                 let ink = self.color
                     .mix(self.color_focus, self.focus)
                     .mix(self.color_hover, self.hover)
                     .mix(self.color_down, self.down)
                     .mix(self.color_disabled, self.disabled)
-                return vec4(ink.rgb, ink.a * (1.0 - self.loading))
+                // Lit ink is one mix on a value already computed once per
+                // pixel: the glow's halo comes from the face, never from
+                // sampling the glyph again.
+                let lit = self.material_ink_glow * max(self.down, self.active) * (1.0 - self.disabled)
+                let glow = self.material_glow_ink.rgb * self.material_ink_lift
+                return vec4(mix(ink.rgb, glow, lit), ink.a * (1.0 - self.loading))
             }
         }
 
@@ -96,8 +123,18 @@ script_mod! {
             disabled: instance(0.0)
             /** loading mix: fades the spinner arc in over the face 0..1 step 0.01 */
             loading: instance(0.0)
+            /** latched mix: a button shown on, as a toggle holds it. Under a material it stays where a press leaves it and keeps the light a press gives it; without one it draws nothing 0..1 step 0.01 */
+            active: instance(0.0)
             /** the spinner's clock, ramped 0..1 once a second by the time track 0..1 step 0.01 */
             anim_time: instance(0.0)
+            /** the pointer's field over the face, 0..1, written by the widget while cap_field_reach is above zero */
+            cap_field: instance(0.0)
+            /** the pointer along the face from its centre, in points, while the field is up */
+            cap_pointer_along: instance(0.0)
+            /** the pointer across the face from its centre, in points, while the field is up */
+            cap_pointer_across: instance(0.0)
+            /** a clock in seconds while the field is up */
+            cap_time: instance(0.0)
 
             /** spinner arc ink while loading */
             loading_color: uniform(theme.color_label_inner)
@@ -136,6 +173,8 @@ script_mod! {
             color_focus: uniform(theme.color_outset_focus)
             /** face fill when disabled */
             color_disabled: uniform(theme.color_outset_disabled)
+            /** this variant's own resting fill, which a style sheet that draws a face of its own draws for; `color` set away from it is a host's colour (see host_over) */
+            color_default: uniform(theme.color_outset)
 
             /** fill gradient end stop; negative alpha means flat fill */
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
@@ -179,8 +218,222 @@ script_mod! {
             /** dash length of the bevel stroke in pixels; 0 draws it solid 0..16 step 0.5 */
             border_dash: uniform(0.0)
 
+            // THE MATERIAL, from the theme, packed as `ReliefView` and
+            // `RoundedView` pack theirs. Zero in every stock theme: at
+            // `material` 0 this shader draws what it always drew, and the
+            // uniform branch costs one compare per draw call.
+            /** surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: direction (x right, y down, z out) and intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** bevel width, profile curve, raise, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** occlusion, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** face gradient, hairline, occlusion reach, sink */
+            material_tune: uniform(vec4(theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach, theme.material_sink))
+            /** cast shadow strength, blur, falloff (0 linear 1 expo), contact occlusion */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_shadow_falloff, theme.material_contact_ao))
+            /** inner shadow, inner blur, ground lip, glow */
+            material_inner: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_ground_lip, theme.material_glow))
+            /** the margin the face keeps back from the quad under a material, where its cast shadow and glow fall, in points 0..32 step 0.5 */
+            material_margin: uniform(theme.material_margin)
+            /** signed change in elevation while held: past -raise the face inverts, short of it it deepens -32..8 step 0.5 */
+            material_press: uniform(theme.material_press_depth)
+            /** how far a held face dishes as well as descends: 0 stays convex, 1 fully inverts 0..1 step 0.01 */
+            material_press_invert: uniform(theme.material_press_invert)
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+            /** the emissive ink a held face and its halo take */
+            material_glow_ink: uniform(theme.color_material_glow)
+
+            /** THE HOST'S COLOUR UNDER A STYLE SHEET. A sheet that replaces
+             * `pixel` with a face of its own still owes the host the colour
+             * it paints: an app lights a latch -- the page it is on, a mute
+             * that is down -- by setting `color`, and that has to show
+             * under every sheet. `color_default` is what the variant rests
+             * in; where `color` has been set away from it, `host_face`
+             * moves a face colour by the difference (the sheet's bevels,
+             * gloss and grain stay, its colour becomes the host's) and a
+             * host colour let through lets the face through as far. At the
+             * default both helpers return what they are given, so the sheet
+             * draws exactly what it always drew. */
+            host_face: fn(face: vec3) -> vec3 {
+                let d = (self.color.rgb - self.color_default.rgb) * (1.0 - self.disabled) * step(0.5, self.color_default.a)
+                return clamp(face + d, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            }
+
+            /** how much of an opaque sheet face the host's colour lets
+             * through: 1 at the default, 0 for a face the host keeps
+             * transparent (a readout that takes a click) */
+            host_alpha: fn() -> float {
+                return mix(1.0, clamp(self.color.a / max(self.color_default.a, 0.001), 0.0, 1.0), step(0.5, self.color_default.a))
+            }
+
+            /** `host_face` for a finished, premultiplied face: moved inside
+             * the button's rect only, so the shadows and glows a sheet
+             * throws outside it keep their own colour. `m` is how far the
+             * sheet grew its quad round the rect. A variant that has no
+             * face at rest (a borderless button) gets the host's colour laid
+             * under what the sheet drew, in the rect's rounded shape. */
+            host_over: fn(res: vec4, m: float) -> vec4 {
+                let host = self.color
+                let own = self.color_default
+                let apart = abs(host - own)
+                if max(max(apart.x, apart.y), max(apart.z, apart.w)) < 0.002 {
+                    return res
+                }
+                let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+                let h = self.rect_size * 0.5
+                let r = clamp(self.border_radius, 0.0, min(h.x, h.y))
+                let q = abs(p - h) - h + vec2(r, r)
+                let sd = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - r
+                let inside = clamp(0.5 - sd, 0.0, 1.0)
+                let on = 1.0 - self.disabled
+                if own.a > 0.5 {
+                    let d = (host.rgb - own.rgb) * inside * on
+                    // Not capped at res.a: a sheet's face is not held to
+                    // premultiplied colour (the light it throws past its
+                    // edge, and a glass face, carry colour above their
+                    // alpha), and capping cut every glow at the rect and
+                    // emptied the outline face.
+                    let rgb = clamp(res.rgb + d * res.a, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+                    // Where the sheet's face lets the ground through (glass,
+                    // a face that is only its frame), the host's colour is
+                    // the body under it, as far as the host moved it: a lit
+                    // latch reads on glass too, and a face the host only
+                    // nudged stays nearly the sheet's.
+                    let moved = max(max(apart.x, apart.y), apart.z)
+                    let ba = host.a * smoothstep(0.0, 0.25, moved) * inside * on * (1.0 - res.a)
+                    return (vec4(rgb, res.a) + vec4(host.rgb * ba, ba)) * self.host_alpha()
+                }
+                let fa = host.a * inside * on
+                return res + vec4(host.rgb * fa, fa) * (1.0 - res.a)
+            }
+
+            /** THE STATE CONTRACT, as one elevation. Raised at rest; the
+             * pointer lifts it a quarter more (hover adds subtle elevation);
+             * a press adds material_press, whose sign and size pick the
+             * idiom -- past -raise the face crosses zero and INVERTS, short
+             * of it the cap only DEEPENS, near zero the glow carries the
+             * press; disabled moulds it flat into the ground, which also
+             * takes its shadow away. hover stays at 1 while held, so a held
+             * face starts from its lifted height. A latched face is a held
+             * one the pointer has left. */
+            material_elev: fn() -> float {
+                let raise = self.material_relief.z
+                return (raise + raise * 0.25 * self.hover + self.material_held() * self.material_press) * (1.0 - self.disabled)
+            }
+
+            /** how far the face is held: by a press, or by a latch */
+            material_held: fn() -> float {
+                return max(self.down, self.active)
+            }
+
+            /** signed distance to the face box with its four corner radii,
+             * doubled and clamped exactly as Sdf2d.box_all draws them, so
+             * this agrees with sdf.shape and can be read off-pixel */
+            material_sd: fn(p: vec2, c: vec2, h: vec2, r_tl: float, r_tr: float, r_br: float, r_bl: float) -> float {
+                let q0 = p - c
+                var r = r_tl
+                if q0.x > 0.0 {
+                    r = r_tr
+                    if q0.y > 0.0 {
+                        r = r_br
+                    }
+                } else {
+                    if q0.y > 0.0 {
+                        r = r_bl
+                    }
+                }
+                let k = min(2.0 * r, min(h.x, h.y))
+                let q = abs(q0) - h + vec2(k, k)
+                return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - k
+            }
+
+            /** the face box's outward gradient at p, by central differences of material_sd */
+            material_grad: fn(p: vec2, c: vec2, h: vec2, r_tl: float, r_tr: float, r_br: float, r_bl: float) -> vec2 {
+                let e = 0.5
+                let g = vec2(
+                    self.material_sd(p + vec2(e, 0.0), c, h, r_tl, r_tr, r_br, r_bl) - self.material_sd(p - vec2(e, 0.0), c, h, r_tl, r_tr, r_br, r_bl),
+                    self.material_sd(p + vec2(0.0, e), c, h, r_tl, r_tr, r_br, r_bl) - self.material_sd(p - vec2(0.0, e), c, h, r_tl, r_tr, r_br, r_bl)
+                )
+                if length(g) > 0.00001 {
+                    return normalize(g)
+                }
+                return vec2(0.0, 1.0)
+            }
+
+            /** what the face throws on the ground round it, premultiplied,
+             * to lay UNDER the face: its cast shadow, contact occlusion and
+             * light-side lip, and its glow while held; faded out before the
+             * quad edge along a box rounded like the face, so a shadow
+             * never ends on a straight line. `d` and `g` are the face's
+             * distance and gradient at `p`, `m` the margin it falls into. */
+            material_under: fn(p: vec2, d: float, g: vec2, c: vec2, h: vec2, m: float, r_tl: float, r_tr: float, r_br: float, r_bl: float) -> vec4 {
+                let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                let elev = self.material_elev()
+                let off = Material.cast_offset(elev, self.material_light)
+                // A shadow wider than the margin it falls into would only be
+                // cut off: its blur stays within reach of the quad's edge.
+                let sh = vec4(self.material_shadow.x, Material.blur_fit(self.material_shadow.y, m, length(off)), self.material_shadow.z, self.material_shadow.w)
+                var under = Material.cast(
+                    d,
+                    self.material_sd(p - off, c, h, r_tl, r_tr, r_br, r_bl),
+                    self.material_sd(p + off, c, h, r_tl, r_tr, r_br, r_bl),
+                    g, px, elev, self.material_relief.z,
+                    self.material_light, sh, self.material_inner.z,
+                    self.material_shadow_ink.rgb, self.material_light_ink.rgb
+                ) * (1.0 - self.disabled)
+                // The halo of a held face under an illuminating material.
+                let glow = self.material_inner.w
+                if glow > 0.001 {
+                    let a3 = clamp(Material.tail(d, glow * 26.0, sh.z) * glow, 0.0, 1.0) * 0.85 * self.material_held() * (1.0 - self.disabled)
+                    under = vec4(self.material_glow_ink.rgb * a3, a3) + under * (1.0 - a3)
+                }
+                let qc = self.rect_size * 0.5
+                let rq = min((r_tl + r_tr + r_br + r_bl) * 0.5 + m, min(qc.x, qc.y))
+                let edge = -Material.sd_box(p, qc, qc, rq)
+                return under * Material.window(edge, m)
+            }
+
+            /** the face lit by the material: convex at rest, dished as far
+             * as material_press_invert says when held below zero, with the
+             * surround's inner shadow (the outline shifted down-light and
+             * blurred) once it has dropped below its ground, and lit toward
+             * the glow ink while held under an illuminating material. Tier 1
+             * is the relief alone: no rim, gloss or specular. */
+            material_face: fn(fill: vec4, p: vec2, d: float, g: vec2, c: vec2, h: vec2, r_tl: float, r_tr: float, r_br: float, r_bl: float) -> vec4 {
+                let elev = self.material_elev()
+                let convex = mix(self.material_relief.z * (1.0 - self.disabled), elev, self.material_press_invert)
+                var insh = 0.0
+                if self.material_inner.x > 0.001 && elev < 0.0 {
+                    let ioff = Material.shadow_dir(self.material_light) * abs(elev) * 1.6
+                    let rq = min((r_tl + r_tr + r_br + r_bl) * 0.5, min(h.x, h.y))
+                    insh = 1.0 - Material.box_cov(c - h + ioff, c + h + ioff, p, max(self.material_inner.y * 0.5, 0.35), rq)
+                }
+                let t2 = step(1.5, self.material)
+                let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                let rel = vec4(self.material_relief.x, self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                let uv = (p - c) / (2.0 * h) + vec2(0.5, 0.5)
+                var o = Material.face(
+                    fill.rgb, d, g, uv, elev, convex, 0.0, insh, 0.0,
+                    self.material_light, rel, fin, self.material_tune, self.material_inner.x,
+                    self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                )
+                let glow = self.material_inner.w
+                if glow > 0.001 {
+                    o = mix(o, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * self.material_held() * (1.0 - self.disabled))
+                }
+                return vec4(o, fill.a)
+            }
+
             /** the face fill for the current state: gradient resolved at
-             * this pixel, state-mixed, then the state layer laid over it */
+             * this pixel, state-mixed, then the state layer laid over it
+             * (under a material the relief carries the state instead: a
+             * face that both darkens and re-lights reads as muddy) */
             face_fill: fn() -> vec4 {
                 let border_sz_uv = vec2(
                     self.border_size / self.rect_size.x
@@ -223,7 +476,7 @@ script_mod! {
                     .mix(color_fill_down, self.down)
                     .mix(color_fill_disabled, self.disabled)
 
-                if self.layer_color.x > -0.5 {
+                if self.layer_color.x > -0.5 && self.material < 0.5 {
                     // The state layer composites over the fill with straight
                     // alpha, so a transparent face still shows the tint.
                     let layer_a = clamp(self.hover * self.layer_hover + self.down * self.layer_down, 0.0, 1.0) * (1.0 - self.disabled)
@@ -285,25 +538,45 @@ script_mod! {
                 let r_br = mix(self.border_radius, self.border_radius_br, step(0., self.border_radius_br))
                 let r_bl = mix(self.border_radius, self.border_radius_bl, step(0., self.border_radius_bl))
 
+                // Under a material the face keeps back from the quad by
+                // material_margin on every side: makepad clips by default,
+                // so a control buys the room its shadow falls into out of
+                // its own rect rather than by growing its geometry, and the
+                // stylesheet pays for it in padding. Zero without a material.
+                let m = self.material_margin * step(0.5, self.material)
+                let inset = self.border_size + m
                 sdf.box_all(
-                    self.border_size
-                    self.border_size
-                    self.rect_size.x - self.border_size * 2.
-                    self.rect_size.y - self.border_size * 2.
+                    inset
+                    inset
+                    self.rect_size.x - inset * 2.
+                    self.rect_size.y - inset * 2.
                     r_tl
                     r_tr
                     r_br
                     r_bl
                 )
 
-                sdf.fill_keep(self.face_fill())
+                var face = self.face_fill()
+                if self.material > 0.5 {
+                    let p = self.pos * self.rect_size
+                    let c = self.rect_size * 0.5
+                    let h = max(c - vec2(inset, inset), vec2(0.5, 0.5))
+                    let d = sdf.shape
+                    let g = self.material_grad(p, c, h, r_tl, r_tr, r_br, r_bl)
+                    // A face that is not there (a borderless button at rest)
+                    // casts nothing. `clear` premultiplies what it is given.
+                    let under = self.material_under(p, d, g, c, h, m, r_tl, r_tr, r_br, r_bl) * face.a
+                    sdf.clear(vec4(under.rgb / max(under.a, 0.0001), under.a))
+                    face = self.material_face(face, p, d, g, c, h, r_tl, r_tr, r_br, r_bl)
+                }
+                sdf.fill_keep(face)
                 sdf.stroke(self.face_stroke(), self.border_size)
 
                 // The wait spinner: a three-quarter arc turning once a second
                 // in the middle of the face, where the label was.
                 if self.loading > 0.0 {
                     let c = self.rect_size * 0.5
-                    let r = max(min(self.rect_size.x, self.rect_size.y) * 0.5 - self.border_size - self.loading_inset, 1.0)
+                    let r = max(min(self.rect_size.x, self.rect_size.y) * 0.5 - inset - self.loading_inset, 1.0)
                     let a0 = self.anim_time * 2.0 * PI
                     sdf.arc_round_caps(c.x, c.y, r, a0, a0 + 1.5 * PI, self.loading_stroke)
                     sdf.fill(vec4(self.loading_color.rgb, self.loading_color.a * self.loading))
@@ -448,6 +721,7 @@ script_mod! {
     mod.widgets.ButtonFlatter = mod.widgets.ButtonFlat{
         draw_bg +: {
             color: theme.color_u_hidden
+            color_default: theme.color_u_hidden
             color_hover: theme.color_u_hidden
             color_down: theme.color_u_hidden
             /** the one state that paints a face: disabled */
@@ -486,6 +760,7 @@ script_mod! {
         draw_bg +: {
             /** gradient start stop at rest */
             color: theme.color_outset_1
+            color_default: theme.color_outset_1
             /** gradient start stop under the pointer */
             color_hover: theme.color_outset_1_hover
             /** gradient start stop while held */
@@ -552,6 +827,7 @@ script_mod! {
     mod.widgets.ButtonPrimary = mod.widgets.ButtonFlat{
         draw_bg +: {
             color: theme.color_primary
+            color_default: theme.color_primary
             color_hover: theme.color_primary
             color_down: theme.color_primary
             color_focus: theme.color_primary
@@ -579,6 +855,7 @@ script_mod! {
     mod.widgets.ButtonSecondary = mod.widgets.ButtonPrimary{
         draw_bg +: {
             color: theme.color_secondary
+            color_default: theme.color_secondary
             color_hover: theme.color_secondary
             color_down: theme.color_secondary
             color_focus: theme.color_secondary
@@ -604,6 +881,7 @@ script_mod! {
     mod.widgets.ButtonTertiary = mod.widgets.ButtonPrimary{
         draw_bg +: {
             color: theme.color_tertiary_container
+            color_default: theme.color_tertiary_container
             color_hover: theme.color_tertiary_container
             color_down: theme.color_tertiary_container
             color_focus: theme.color_tertiary_container
@@ -631,6 +909,7 @@ script_mod! {
             /** outline thickness in pixels 0..4 step 0.5 */
             border_size: 1.0
             color: theme.color_u_hidden
+            color_default: theme.color_u_hidden
             color_hover: theme.color_u_hidden
             color_down: theme.color_u_hidden
             color_focus: theme.color_u_hidden
@@ -665,6 +944,7 @@ script_mod! {
     mod.widgets.ButtonDanger = mod.widgets.ButtonPrimary{
         draw_bg +: {
             color: theme.color_error
+            color_default: theme.color_error
             color_hover: theme.color_error
             color_down: theme.color_error
             color_focus: theme.color_error
@@ -1134,7 +1414,7 @@ pub enum ButtonAction {
 }
 
 /// A clickable button widget that emits actions when pressed, and when either released or clicked.
-#[derive(Script, Widget, Animator)]
+#[derive(Script, Widget, WidgetSet, Animator)]
 pub struct Button {
     #[uid]
     uid: WidgetUid,
@@ -1174,6 +1454,16 @@ pub struct Button {
     /// clicks are ignored until it is cleared.
     #[live]
     pub loading: bool,
+
+    /// How far from the face, in points, the pointer's field reaches, for
+    /// a material whose face answers the pointer's approach: the draw gets
+    /// `cap_field`, `cap_pointer_along`, `cap_pointer_across` and
+    /// `cap_time` while it is above zero. Only the nearest two faces on a
+    /// window carry a field at once. Zero (the default) keeps it off.
+    #[live]
+    pub cap_field_reach: f64,
+    #[rust]
+    field: PointerField,
 
     /// Text a click puts on the clipboard; set, it makes this a copy button
     /// that shows `copied_text` for `copied_secs` and raises
@@ -1246,6 +1536,10 @@ pub struct Button {
     #[live]
     pub text: ArcStringMut,
 
+    /// What assistive technology calls a button that shows no text (an icon).
+    #[live]
+    a11y_name: ArcStringMut,
+
     #[live]
     on_click: ScriptFnRef,
 
@@ -1285,6 +1579,153 @@ impl ScriptHook for Button {
 }
 
 impl Widget for Button {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult, Actions as A};
+        if action.action != A::PRESS {
+            return ActionResult::Unhandled;
+        }
+        if !self.enabled || self.disabled(cx) || self.loading {
+            return ActionResult::Disabled;
+        }
+        let uid = self.widget_uid();
+        if self.grab_key_focus {
+            cx.set_key_focus(self.draw_bg.area());
+        }
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
+        if self.trigger_on_press {
+            cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+        }
+        cx.widget_action_with_data(
+            &self.action_data,
+            uid,
+            ButtonAction::Clicked(KeyModifiers::default()),
+        );
+        if !self.trigger_on_press {
+            cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+        }
+        if !self.text_to_copy.is_empty() {
+            self.copy_now(cx);
+        }
+        self.animator_play(cx, ids!(hover.off));
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Button;
+        let name: &str = self.a11y_name.as_ref();
+        makepad_platform::a11y::set_string(&mut node.name, if name.is_empty() { self.shown_label() } else { name });
+        node.actions = a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS;
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states.set(
+            a11y_tree::States::DISABLED,
+            !self.enabled || self.disabled(cx) || self.loading,
+        );
+        node.states.set(a11y_tree::States::BUSY, self.loading);
+    }
+
+    /// Its text, laid out (hidden buttons draw nothing).
+    fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
+        self.draw_text.scan_text(cx, self.text.as_ref());
+    }
+
+    /// What this button would be worth on a row, with `over` in force.
+    ///
+    /// Measured, not drawn: `DrawText::layout` touches no turtle and comes out
+    /// of an LRU cache keyed on the string and its style, so measuring a label
+    /// here and drawing it afterwards is a cache hit rather than a second
+    /// shaping pass.
+    ///
+    /// `None` wherever an honest number is not available -- an icon whose
+    /// document has not loaded answers `None` rather than a guess, because a
+    /// rung priced wrong is a rung the ladder never gives back.
+    fn measure_width(
+        &mut self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        if over.is_some_and(|o| o.opaque) {
+            return None;
+        }
+        // A block that states `visible` states it: the child may be wearing the
+        // opposite right now, and a price taken off what it is wearing is a
+        // price of the concession rather than of the face being priced.
+        let visible = over.and_then(|o| o.visible).unwrap_or(self.visible);
+        if !visible {
+            return Some(0.0);
+        }
+
+        let margin = over.and_then(|o| o.margin).unwrap_or(self.walk.margin);
+        // A stated width is the answer whatever is inside it.
+        let width = over.and_then(|o| o.width).unwrap_or(self.walk.width);
+        if let Size::Fixed(w) = width {
+            return Some(w + margin.width());
+        }
+        // A Fill takes what the others leave, so what it adds to the row's own
+        // width is its minimum -- nothing, for a plain spacer. Answering None
+        // here would make a row with a spacer in it unpriceable, which is most
+        // rows.
+        if let Size::Fill { min, .. } = width {
+            return Some(min.unwrap_or(0.0) + margin.width());
+        }
+
+        let pad = over.and_then(|o| o.padding).unwrap_or(self.layout.padding);
+        let gap = over.and_then(|o| o.spacing).unwrap_or(self.layout.spacing);
+
+        let label: &str = match over.and_then(|o| o.text.as_deref()) {
+            Some(t) => t,
+            None if self.copied && !self.copied_text.is_empty() => self.copied_text.as_str(),
+            None => self.text.as_ref(),
+        };
+        let mut text_w = if label.is_empty() {
+            0.0
+        } else {
+            crate::badge::advance(&self.draw_text, cx, label)
+        };
+        // A description stacks BELOW the label, so the pair is as wide as the
+        // wider of the two, not as wide as both.
+        if !self.description.is_empty() {
+            text_w = text_w.max(crate::badge::advance(
+                &self.draw_description,
+                cx,
+                &self.description,
+            ));
+        }
+
+        let mut icon_w = 0.0;
+        let mut parts = if text_w > 0.0 { 1 } else { 0 };
+        let icons = [
+            (self.icon_walk, self.draw_icon.svg.is_none()),
+            (self.icon_end_walk, self.draw_icon_end.svg.is_none()),
+        ];
+        for (i, (iw, empty)) in icons.into_iter().enumerate() {
+            if empty {
+                continue;
+            }
+            let svg = if i == 0 {
+                &mut self.draw_icon
+            } else {
+                &mut self.draw_icon_end
+            };
+            // `None` means the walk leaves this icon's width to a turtle and
+            // the document has not loaded. Either way there is no honest number.
+            icon_w += crate::badge::icon_extent(svg, cx, iw)?;
+            parts += 1;
+        }
+
+        Some(
+            pad.width()
+                + text_w
+                + icon_w
+                + gap * (parts as f64 - 1.0).max(0.0)
+                + margin.width(),
+        )
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -1292,18 +1733,14 @@ impl Widget for Button {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            let str_val = vm.new_string(self.text.as_ref());
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying button text")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying button text")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);
@@ -1350,6 +1787,10 @@ impl Widget for Button {
             self.draw_bg.redraw(cx);
         }
 
+        if self.cap_field_reach > 0.0 {
+            self.field_event(cx, event);
+        }
+
         if let Event::ClearHover = event {
             self.animator_cut(cx, ids!(hover.off));
         }
@@ -1394,6 +1835,7 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(hover.down));
             }
             Hit::KeyUp(ke) if takes_input && is_activation_key(ke.key_code) => {
+                crate::makepad_platform::makepad_error_log::flight_mark!("ui.click", uid.0, 0, "button `{}` (key)", self.text.as_ref());
                 cx.widget_action_with_data(
                     &self.action_data,
                     uid,
@@ -1455,6 +1897,7 @@ impl Widget for Button {
                         true
                     };
                 if was_clicked {
+                    crate::makepad_platform::makepad_error_log::flight_mark!("ui.click", uid.0, 0, "button `{}`", self.text.as_ref());
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
@@ -1499,7 +1942,12 @@ impl Widget for Button {
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_label(cx);
+        // An icon-only button has no label part: walking an empty label still
+        // took a turtle step, and the spacing before it pushed the icon off
+        // centre (the width measurement above already counts no label part).
+        if !self.shown_label().is_empty() || !self.description.is_empty() {
+            self.draw_label(cx);
+        }
         self.draw_icon_end.draw_walk(cx, self.icon_end_walk);
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
@@ -1525,6 +1973,39 @@ fn is_activation_key(key_code: KeyCode) -> bool {
 }
 
 impl Button {
+    /// The pointer's field: its frame steps, the pointer read against the
+    /// face (points from the face's centre; the distance to the face's
+    /// edge goes to the arbiter, so faces of every size compete alike),
+    /// and the leave. The material gets the values on the drawn area.
+    fn field_event(&mut self, cx: &mut Cx, event: &Event) {
+        let press = if self.animator_in_state(cx, ids!(hover.down)) { 1.0 } else { 0.0 };
+        if self.field.tick(cx, event, press) {
+            let (f, a, c, t) = self.field.read(press);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_field), &[f]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_pointer_along), &[a]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_pointer_across), &[c]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_time), &[t]);
+        }
+        match event {
+            Event::MouseMove(e) => {
+                let rect = self.draw_bg.area().rect(cx);
+                if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+                    return;
+                }
+                let centre = rect.pos + rect.size * 0.5;
+                let rel = (e.abs.x - centre.x, e.abs.y - centre.y);
+                let dx = (rel.0.abs() - rect.size.x * 0.5).max(0.0);
+                let dy = (rel.1.abs() - rect.size.y * 0.5).max(0.0);
+                let dist = (dx * dx + dy * dy).sqrt();
+                let granted = FieldArbiter::report(e.abs, self.widget_uid().0, dist);
+                let near = dist < self.cap_field_reach && granted;
+                self.field.pointer(cx, rel, near);
+            }
+            Event::MouseLeave(_) => self.field.leave(cx),
+            _ => (),
+        }
+    }
+
     /// The label the face shows right now.
     fn shown_label(&self) -> &str {
         if self.copied && !self.copied_text.is_empty() {
@@ -1772,17 +2253,23 @@ impl ButtonRef {
             .and_then(|inner| inner.released_modifiers(actions))
     }
 
+    /// Redraws only when the button changes: callers re-assert it every frame.
     pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.visible = visible;
-            inner.redraw(cx);
+            if inner.visible != visible {
+                inner.visible = visible;
+                inner.redraw(cx);
+            }
         }
     }
 
+    /// Redraws only when the button changes: callers re-assert it every frame.
     pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.enabled = enabled;
-            inner.redraw(cx);
+            if inner.enabled != enabled {
+                inner.enabled = enabled;
+                inner.redraw(cx);
+            }
         }
     }
 
@@ -1915,9 +2402,7 @@ mod open_tests {
                     mod.shader.test_compile_draw_source(mod.widgets.ButtonFloatingSm.draw_bg, "glsl", false)
                 })),
             ] {
-                let text = vm
-                    .bx
-                    .heap
+                let text = vm.heap()
                     .string_with(value, |_heap, text| text.to_string())
                     .expect("the compiler answers with source");
                 assert!(!text.starts_with("ERRORS:"), "{name} did not compile: {text}");
@@ -1925,6 +2410,41 @@ mod open_tests {
                 if name == "ButtonFloating" {
                     assert!(text.contains("glyph_stroke"), "{name} draws its glyph");
                 }
+            }
+        });
+    }
+
+    /// A sheet's face reaches the finish library by its bare name, as a
+    /// sheet writes it after the widgets prelude, and compiles.
+    #[test]
+    fn a_sheet_face_reaches_the_finish_library() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            crate::script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                mod.widgets.Button.draw_bg.pixel = fn() {
+                    let p = self.pos * self.rect_size
+                    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                    let c = self.rect_size * 0.5
+                    let h = c - vec2(3.0, 3.0)
+                    let d = Finish.sd_chamfer(p, c, h, 4.0)
+                    let sh = Finish.drop(p, c, h, 0.0, vec2(0.0, 1.0), 2.0)
+                    var face = vec3(0.2, 0.22, 0.25) * (1.0 + 0.2 * Finish.bevel(d, vec2(0.0, -1.0), 1.5, vec2(-0.3, -0.9)))
+                    face = Finish.lift(face, 0.3 * self.hover + Finish.grain(p / px, 0.01))
+                    let a = Finish.cover(d, px)
+                    return Finish.over(vec4(0.0, 0.0, 0.0, sh * 0.4), vec4(face * a, a))
+                }
+            });
+            let value = crate::script_eval!(vm, {
+                mod.shader.test_compile_draw_source(mod.widgets.Button.draw_bg, "glsl", false)
+            });
+            let text = vm.heap()
+                .string_with(value, |_heap, text| text.to_string())
+                .expect("the compiler answers with source");
+            assert!(!text.starts_with("ERRORS:"), "the sheet face did not compile: {text}");
+            for name in ["sd_chamfer", "drop", "bevel", "lift", "grain", "cover", "over"] {
+                assert!(text.contains(&format!("_{name}(")), "{name} is not in the face: {text}");
             }
         });
     }

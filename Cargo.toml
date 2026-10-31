@@ -10,6 +10,8 @@ workspace.members = [
     "libs/relax_api/macro",
     "libs/relax_api/macro_impl",
     "libs/civil_time",
+    "libs/app_registry",
+    "libs/app_host",
     "libs/code_arch",
     "libs/code_language",
     "libs/search",
@@ -25,6 +27,7 @@ workspace.members = [
     # crates), the generate hub and the live pipe.
     # Constructive solid geometry.
     "libs/csg/csg_math",
+    "libs/typography",
     "libs/web_manifest",
     "libs/font_subset",
     "libs/soft_body",
@@ -34,6 +37,7 @@ workspace.members = [
     "libs/strict_json",
     "libs/cell_width",
     "libs/loader_bundle",
+    "libs/change_report",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/xatlas",
     # Editable polygon topology and worker-owned model documents.
@@ -55,6 +59,7 @@ workspace.members = [
     "libs/drumkit_phys",
     "libs/musicxml",
     # === Synth: live-coded scores, their player and the tweak UI kit ===
+    "libs/edit_values",
     # === own MP3 / Ogg Vorbis decoders ===
     # === own Ogg Vorbis encoder (stem side-channels) ===
     # === pictures of audio (spectrogram, wave strip, composite) ===

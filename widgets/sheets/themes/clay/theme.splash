@@ -1,0 +1,246 @@
+mod.theme = mod.themes.light
+
+// Clay. Every part is a lump of colourful modelling clay pressed onto a
+// pink clay board: soft and matte with a soft matte bloom, rolled thick round
+// its edges, a little uneven, with the prints and tool marks of the hands
+// that made it. Each kind of control is its own colour (white fields,
+// mint choices, a navy primary, green marks that are set, a blue slider
+// snake, sunny knobs) and the words are a round bubbly face in a warm
+// near-black. The faces are drawn in widgets.splash; this file holds the
+// tokens every face and every stock widget reads.
+use mod.res.*
+use mod.text.*
+
+// The board: a bright bubblegum pink clay.
+mod.theme.color_bg_app = #ffabe1
+mod.theme.color_fg_app = #f1e4cd
+mod.theme.color_bg_container = #ffabe1
+mod.theme.color_bg_even = #00000000
+mod.theme.color_bg_odd = #00000000
+mod.theme.color_highlight = #b8a5dc
+mod.theme.color_bg_highlight = #f29fd4
+mod.theme.color_bg_highlight_inline = #8f7fd04d
+
+// The surface ladder in the board's pinks, the container a peach clay.
+mod.theme.color_surface = #ffabe1
+mod.theme.color_surface_dim = #f29fd4
+mod.theme.color_surface_bright = #ffe0f3
+mod.theme.color_surface_container_lowest = #fff0f9
+mod.theme.color_surface_container_low = #ffd3ee
+mod.theme.color_surface_container = #5cc16c
+mod.theme.color_surface_container_high = #56b866
+mod.theme.color_surface_container_highest = #50ae5f
+mod.theme.color_on_surface = #2a211c
+mod.theme.color_on_surface_variant = #3b302a
+mod.theme.color_inverse_surface = #3c3437
+mod.theme.color_inverse_on_surface = #fff0f9
+
+// Raised faces the sheet does not redraw: a sunny yellow clay.
+mod.theme.color_outset = #fdda6b
+mod.theme.color_outset_1 = #fee28a
+mod.theme.color_outset_2 = #f1c955
+mod.theme.color_outset_hover = #fedf7c
+mod.theme.color_outset_1_hover = #ffe799
+mod.theme.color_outset_2_hover = #f5cf60
+mod.theme.color_outset_down = #f0c955
+mod.theme.color_outset_1_down = #e6be4c
+mod.theme.color_outset_2_down = #f8d76e
+mod.theme.color_outset_focus = #fdda6b
+mod.theme.color_outset_1_focus = #fee28a
+mod.theme.color_outset_2_focus = #f1c955
+mod.theme.color_outset_active = #f0c955
+mod.theme.color_outset_1_active = #e6be4c
+mod.theme.color_outset_2_active = #f8d76e
+mod.theme.color_outset_drag = #f0c955
+mod.theme.color_outset_1_drag = #e6be4c
+mod.theme.color_outset_2_drag = #f8d76e
+mod.theme.color_outset_disabled = #d8d0cc
+mod.theme.color_outset_1_disabled = #d8d0cc
+mod.theme.color_outset_2_disabled = #d8d0cc
+
+// Wells the sheet does not redraw: the white clay of its fields, opaque in
+// every state.
+mod.theme.color_inset = #f7f4f1
+mod.theme.color_inset_1 = #f7f4f1
+mod.theme.color_inset_2 = #f7f4f1
+mod.theme.color_inset_hover = #fbf9f7
+mod.theme.color_inset_1_hover = #fbf9f7
+mod.theme.color_inset_2_hover = #fbf9f7
+mod.theme.color_inset_focus = #fbf9f7
+mod.theme.color_inset_1_focus = #fbf9f7
+mod.theme.color_inset_2_focus = #fbf9f7
+mod.theme.color_inset_active = #f7f4f1
+mod.theme.color_inset_1_active = #f7f4f1
+mod.theme.color_inset_2_active = #f7f4f1
+mod.theme.color_inset_down = #efebe7
+mod.theme.color_inset_1_down = #efebe7
+mod.theme.color_inset_2_down = #efebe7
+mod.theme.color_inset_drag = #efebe7
+mod.theme.color_inset_1_drag = #efebe7
+mod.theme.color_inset_2_drag = #efebe7
+mod.theme.color_inset_empty = #f7f4f1
+mod.theme.color_inset_1_empty = #f7f4f1
+mod.theme.color_inset_2_empty = #f7f4f1
+mod.theme.color_inset_disabled = #d3cdd2
+mod.theme.color_inset_1_disabled = #d3cdd2
+mod.theme.color_inset_2_disabled = #d3cdd2
+
+// The edge a stock face draws: a soft warm brown, the crease where clay
+// meets clay.
+mod.theme.beveling = 0.5
+mod.theme.color_bevel = #7a6656
+mod.theme.color_bevel_hover = #6a5748
+mod.theme.color_bevel_focus = #4f7fd8
+mod.theme.color_bevel_down = #6a5748
+mod.theme.color_bevel_active = #6a5748
+mod.theme.color_bevel_empty = #7a6656
+mod.theme.color_bevel_drag = #6a5748
+mod.theme.color_bevel_disabled = #b3a79d
+mod.theme.color_bevel_inset_1 = #7a6656
+mod.theme.color_bevel_inset_2 = #f7f1e8
+mod.theme.color_bevel_outset_1 = #f7f1e8
+mod.theme.color_bevel_outset_2 = #9c8674
+
+// Ink: a warm near-black, 12:1 on the slab; the second voice a brown at
+// 9:1; words that are off a soft taupe.
+mod.theme.color_text = #2a211c
+mod.theme.color_text_hover = #1d1612
+mod.theme.color_text_focus = #1d1612
+mod.theme.color_text_active = #1d1612
+mod.theme.color_text_down = #1d1612
+mod.theme.color_text_disabled = #8f8279
+mod.theme.color_text_placeholder = #43365a
+mod.theme.color_text_placeholder_hover = #3a2e50
+mod.theme.color_text_val = #2a211c
+mod.theme.color_text_meta = #4a3d34
+mod.theme.color_text_cursor = #2a211c
+mod.theme.color_cursor = #2a211c
+mod.theme.color_label = #2a211c
+mod.theme.color_label_hover = #1d1612
+mod.theme.color_label_focus = #1d1612
+mod.theme.color_label_active = #1d1612
+mod.theme.color_label_down = #1d1612
+mod.theme.color_label_disabled = #8f8279
+mod.theme.color_label_inner = #2a211c
+mod.theme.color_label_inner_hover = #1d1612
+mod.theme.color_label_inner_focus = #2a211c
+mod.theme.color_label_inner_down = #1d1612
+mod.theme.color_label_inner_drag = #1d1612
+mod.theme.color_label_inner_active = #1d1612
+mod.theme.color_label_inner_inactive = #3b302a
+mod.theme.color_label_inner_disabled = #8f8279
+mod.theme.color_label_outer = #2a211c
+mod.theme.color_label_outer_off = #2a211c
+mod.theme.color_label_outer_hover = #1d1612
+mod.theme.color_label_outer_down = #1d1612
+mod.theme.color_label_outer_drag = #1d1612
+mod.theme.color_label_outer_focus = #1d1612
+mod.theme.color_label_outer_active = #1d1612
+mod.theme.color_label_outer_active_focus = #1d1612
+mod.theme.color_label_outer_disabled = #8f8279
+mod.theme.color_icon = #2a211c
+mod.theme.color_icon_hover = #1d1612
+mod.theme.color_icon_focus = #2a211c
+mod.theme.color_icon_active = #1d1612
+mod.theme.color_icon_down = #1d1612
+mod.theme.color_icon_disabled = #8f8279
+
+// The accent seed: a navy clay, so the primary family grown from it carries
+// cream ink. Focus is a sky-blue rolled thread; a value a cornflower clay.
+mod.theme.color_ctrl_selected = #414f8b
+mod.theme.color_text_on_accent = #fbf3e6
+mod.theme.color_focus = #4f7fd8
+mod.theme.color_ctrl_active = #414f8b
+mod.theme.color_val = #4a73c9
+mod.theme.color_val_hover = #5a82d3
+mod.theme.color_val_focus = #5a82d3
+mod.theme.color_val_drag = #5a82d3
+mod.theme.color_val_disabled = #b9b1ad
+mod.theme.color_mark = #2a211c
+mod.theme.color_mark_active = #2a211c
+mod.theme.color_selection_hover = #8f7fd04d
+mod.theme.color_selection_focus = #8f7fd073
+mod.theme.color_selection_down = #8f7fd073
+mod.theme.color_handle = #fdda6b
+mod.theme.color_handle_hover = #fee28a
+mod.theme.color_handle_1 = #fee28a
+mod.theme.color_handle_2 = #f1c955
+
+// Screens and the dial's readout: a charcoal clay frame round dark glass,
+// the figures a warm cream.
+mod.theme.color_screen = #2c2729
+mod.theme.color_screen_ink = #f6ead2
+mod.theme.screen_ghost = 0.07
+mod.theme.color_lamp_off = #2b2628
+mod.theme.color_terminal_bg = #2c2729
+mod.theme.color_terminal_text = #f6ead2
+
+// SPACING. Rows of 26, gaps of 8, a panel's padding 12. The rungs below were
+// frozen as numbers when the base was read, so they are stated again here.
+mod.theme.space_factor = 6.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 20.0
+mod.theme.space_6 = 24.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 22.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 32.0
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 26.0
+mod.theme.data_item_height = 22.0
+// Stock shaders draw a corner twice the number written: clay is rounded.
+mod.theme.corner_radius = 5.0
+mod.theme.container_corner_radius = 7.0
+mod.theme.textselection_corner_radius = 2.0
+mod.theme.radius_xs = 2.0
+mod.theme.radius_s = 4.0
+mod.theme.radius_m = 6.0
+mod.theme.radius_l = 8.0
+
+// TYPE. Fredoka, a round bubbly face, as letters rolled from clay would be:
+// a sturdy regular for working text, medium on the caps, semibold for
+// captions, which stand two sizes larger, as hand-lettered group names.
+mod.theme.font_size_p = 8.5
+mod.theme.font_size_base = 8.5
+mod.theme.type_title_l_size = 12.5
+mod.theme.type_title_m_size = 11.0
+mod.theme.type_title_s_size = 9.75
+mod.theme.type_body_l_size = 9.25
+mod.theme.type_body_m_size = 8.5
+mod.theme.type_body_s_size = 7.75
+mod.theme.type_label_l_size = 8.5
+mod.theme.type_label_m_size = 8.0
+mod.theme.type_label_s_size = 7.5
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Fredoka-Variable.ttf") weight: 460.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.5 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Fredoka-Variable.ttf") weight: 560.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 11.0 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Fredoka-Variable.ttf") weight: 640.0 asc: 0.0 desc: 0.0}}}
+// The type roles were frozen from the base's faces; stated again so every
+// role reads in the one family.
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 12.5 line_spacing: 1.2}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 11.0 line_spacing: 1.2}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 9.75 line_spacing: 1.2}
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 9.25 line_spacing: 1.35}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 8.5 line_spacing: 1.35}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 7.75 line_spacing: 1.35}
+mod.theme.font_label_l = mod.theme.font_bold{font_size: 8.5 line_spacing: 1.2}
+mod.theme.font_label_m = mod.theme.font_bold{font_size: 8.0 line_spacing: 1.2}
+mod.theme.font_label_s = mod.theme.font_bold{font_size: 7.5 line_spacing: 1.2}
+
+// No surface material: every face that matters is drawn by the sheet.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+mod.theme.color_material_glow = #4f7fd8
+true

@@ -5,7 +5,7 @@
 //! hardcoded, zero cost while off. The slot owns nothing of the chat — it
 //! is a place. On the first F10 it instantiates the chat's module root BY
 //! NAME, `mod.widgets.AiChatOverlay{}`, which exists when the app links
-//! the `makepad-aichat` crate and calls its `script_mod` (the same two
+//! the `makepad-app-aichat` crate and calls its `script_mod` (the same two
 //! lines every app already does for widgets). An app that did not link it
 //! gets one log line and nothing on screen. Generic window-manager tiles
 //! leave F10 to the WM. Studio evaluation apps with a feedback identity keep
@@ -367,7 +367,7 @@ impl AiChatSlot {
     fn theme_ground(cx: &mut Cx) -> Option<Vec4f> {
         cx.with_vm(|vm| {
             let theme = vm.module(id!(theme));
-            let value = vm.bx.heap.value(theme, id!(color_bg_app).into(), NoTrap);
+            let value = vm.value(theme, id!(color_bg_app));
             value.as_color().map(|c| Vec4f {
                 x: ((c >> 24) & 0xff) as f32 / 255.0,
                 y: ((c >> 16) & 0xff) as f32 / 255.0,
@@ -392,14 +392,14 @@ impl AiChatSlot {
     }
 
     /// Make the chat's root, by name. `mod.widgets.AiChatOverlay` exists
-    /// when the app linked `makepad-aichat`; a miss is one log line.
+    /// when the app linked `makepad-app-aichat`; a miss is one log line.
     fn ensure_overlay(&mut self, cx: &mut Cx) -> bool {
         if self.overlay.is_some() {
             return true;
         }
         let overlay = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let ty = vm.bx.heap.value_path(widgets, ids!(AiChatOverlay), NoTrap);
+            let ty = vm.heap().value_path(widgets, ids!(AiChatOverlay), NoTrap);
             if ty.as_object().is_none() {
                 return None;
             }
@@ -411,7 +411,7 @@ impl AiChatSlot {
         });
         match overlay {
             Some(overlay) => {
-                // Part of the tree under this slot: /snap and /d see it.
+                // Part of the tree under this slot: ui find and ui see it.
                 cx.widget_tree_insert_child(self.uid, live_id!(overlay), overlay.clone());
                 self.overlay = Some(overlay);
                 true
@@ -419,7 +419,7 @@ impl AiChatSlot {
             None => {
                 if !self.missing_logged {
                     self.missing_logged = true;
-                    log!("F10: this app does not link makepad-aichat (no mod.widgets.AiChatOverlay); nothing to show");
+                    log!("F10: this app does not link makepad-app-aichat (no mod.widgets.AiChatOverlay); nothing to show");
                 }
                 false
             }
@@ -695,6 +695,11 @@ struct AiSlotToggleGuard {
 }
 
 impl Widget for AiChatSlot {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Requests from outside the tree land here (or in the intercept).
         self.take_requests(cx);

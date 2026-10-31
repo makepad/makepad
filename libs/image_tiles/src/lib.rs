@@ -27,7 +27,7 @@
 //! Note: baking requires the platform's single-intra-frame hardware encoder
 //! (VideoToolbox — macOS today); viewing requires hardware decode.
 
-pub use makepad_widgets;
+pub use makepad_widgets_core;
 
 pub mod bake;
 pub mod db;
@@ -40,7 +40,7 @@ pub mod tape;
 pub use grid::{TileGrid, TileGridAction};
 pub use library::Library;
 
-use makepad_widgets::ScriptVm;
+use makepad_widgets_core::ScriptVm;
 
 /// Register the TileGrid widget. A host calls this once, after
 /// `makepad_widgets::script_mod`, before its own UI module.

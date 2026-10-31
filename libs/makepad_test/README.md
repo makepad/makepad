@@ -1,6 +1,6 @@
 # makepad_test
 
-`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive an owned standalone release app through its `--remote` HTTP surface. Test windows are hidden by default; no Studio instance or hub is required.
+`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive an owned standalone release app through its `--remote` makepad-remote endpoint (a Unix socket). Test windows are hidden by default; no Studio instance or hub is required.
 
 ## Quick Start
 
@@ -49,8 +49,8 @@ release target. An inherited `CARGO_TARGET_DIR` or explicit
 `TestConfig::env["CARGO_TARGET_DIR"]` override is respected; the harness does not
 create a separate build target per example.
 
-The runner starts only its own executable, reads its PID and ephemeral port from
-the startup line, and closes it with `/gq` (grab and quit), falling back to `/quit`
+The runner starts only its own executable, reads its PID and socket path from
+the startup line (`[makepad-remote] pid=.. app=.. socket=..`), and closes it with `gq` (grab and quit; the PNG files are written by the test client), falling back to `quit`
 when needed. It waits for the owned process to exit and kills that exact child
 only if graceful shutdown fails. Existing user instances are never reused.
 
@@ -58,7 +58,7 @@ only if graceful shutdown fails. Existing user instances are never reused.
 
 - `#[makepad_test]` for current-package UI tests
 - `TestApp` for app-scoped input, waits, logs, screenshots, and low-level input forwarding
-- `Selector` for structured snapshot matching
+- `Selector` for semantic queries (role, name, text, state, path, nth)
 - `Locator` for strict single-widget interaction and assertions
 
 Structured selectors support:
@@ -111,7 +111,7 @@ Builds write `build-stderr.txt`. Launched sessions also write `app-stdout.txt`,
 - synchronous API only
 - the macro targets its current package; `run_with_config` can target another manifest/package
 - `forward` supports pointer, scroll, key, and text input; other legacy protocol messages return an error
-- widget snapshots require the current remote fields `window_id` and boolean `enabled`; optional `selected` is preserved
+- `widget_snapshot()` returns typed semantic trees decoded from `ui json=1`; locators read `ui find json=1` and act through `ui act` / `ui type`
 - milestone-1 repo suite is validated on macOS first
 - no visual diffing or trace viewer yet
 

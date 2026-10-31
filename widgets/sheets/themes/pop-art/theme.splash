@@ -1,0 +1,280 @@
+mod.theme = mod.themes.light
+
+// Pop art: a comic-book page. Everything is printed in flat primary inks --
+// cadmium yellow, a cyan-blue, a hot red, white paper and black -- and every
+// shape carries a thick black ink outline. Shading is never a gradient: it is
+// a Ben-Day dot screen whose dots grow where the shade deepens. A part that
+// stands up throws a solid black shadow offset down and to the right, never
+// blurred; pressed, it drops onto that shadow. The page under the content is
+// yellow newsprint with a light dot screen; the noise of the comic -- speed
+// lines, bursts, racing stripes, a chequered flag -- stays at the window's
+// frame. The faces are drawn in widgets.splash; this file holds the tokens
+// every face and every stock widget reads.
+use mod.res.*
+use mod.text.*
+
+// The page: cadmium yellow newsprint.
+mod.theme.color_bg_app = #fdd503
+mod.theme.color_fg_app = #fdd503
+mod.theme.color_bg_container = #fdd503
+mod.theme.color_bg_even = #00000000
+mod.theme.color_bg_odd = #00000000
+// A plain container is a sheet of white paper laid on the page: black words
+// read 17:1 on it.
+mod.theme.color_surface = #fdd503
+mod.theme.color_surface_dim = #f2c600
+mod.theme.color_surface_bright = #ffe14a
+mod.theme.color_surface_container_lowest = #fdd503
+mod.theme.color_surface_container_low = #ffe14a
+mod.theme.color_surface_container = #xf7f3e8
+mod.theme.color_surface_container_high = #xfaf7ee
+mod.theme.color_surface_container_highest = #fdfbf5
+mod.theme.color_highlight = #128cf0
+mod.theme.color_outline = #111111
+mod.theme.color_outline_variant = #4a4128
+mod.theme.color_inverse_surface = #111111
+mod.theme.color_inverse_on_surface = #fdd503
+
+// Raised parts a stock face draws without a face of this sheet's: white
+// paper, a breath warmer at the foot.
+mod.theme.color_outset = #xf7f3e8
+mod.theme.color_outset_1 = #xfbf8ef
+mod.theme.color_outset_2 = #ece6d6
+mod.theme.color_outset_hover = #ffffff
+mod.theme.color_outset_1_hover = #ffffff
+mod.theme.color_outset_2_hover = #xf2ede0
+mod.theme.color_outset_focus = #xf7f3e8
+mod.theme.color_outset_1_focus = #xfbf8ef
+mod.theme.color_outset_2_focus = #ece6d6
+mod.theme.color_outset_active = #128cf0
+mod.theme.color_outset_1_active = #128cf0
+mod.theme.color_outset_2_active = #0a6cc4
+mod.theme.color_outset_down = #e6dfcc
+mod.theme.color_outset_1_down = #e6dfcc
+mod.theme.color_outset_2_down = #ddd5bf
+mod.theme.color_outset_drag = #e6dfcc
+mod.theme.color_outset_1_drag = #e6dfcc
+mod.theme.color_outset_2_drag = #ddd5bf
+mod.theme.color_outset_disabled = #c9c4b6
+mod.theme.color_outset_1_disabled = #c9c4b6
+mod.theme.color_outset_2_disabled = #bdb8aa
+
+// Wells a stock face cuts: white paper too, so the black ink reads in them.
+mod.theme.color_inset = #xfbf8ef
+mod.theme.color_inset_1 = #xfbf8ef
+mod.theme.color_inset_2 = #xf4efe2
+mod.theme.color_inset_hover = #ffffff
+mod.theme.color_inset_1_hover = #ffffff
+mod.theme.color_inset_2_hover = #xf7f3e8
+mod.theme.color_inset_focus = #ffffff
+mod.theme.color_inset_1_focus = #ffffff
+mod.theme.color_inset_2_focus = #xf7f3e8
+mod.theme.color_inset_active = #xfbf8ef
+mod.theme.color_inset_1_active = #xfbf8ef
+mod.theme.color_inset_2_active = #xf4efe2
+mod.theme.color_inset_down = #efe9da
+mod.theme.color_inset_1_down = #efe9da
+mod.theme.color_inset_2_down = #xe8e1d0
+mod.theme.color_inset_drag = #xfbf8ef
+mod.theme.color_inset_1_drag = #xfbf8ef
+mod.theme.color_inset_2_drag = #xf4efe2
+mod.theme.color_inset_empty = #xfbf8ef
+mod.theme.color_inset_1_empty = #xfbf8ef
+mod.theme.color_inset_2_empty = #xf4efe2
+mod.theme.color_inset_disabled = #d6d1c4
+mod.theme.color_inset_1_disabled = #d6d1c4
+mod.theme.color_inset_2_disabled = #d6d1c4
+
+// Every edge a stock face strokes is black ink.
+mod.theme.beveling = 0.5
+mod.theme.color_bevel = #111111
+mod.theme.color_bevel_hover = #111111
+mod.theme.color_bevel_focus = #128cf0
+mod.theme.color_bevel_active = #111111
+mod.theme.color_bevel_empty = #111111
+mod.theme.color_bevel_down = #111111
+mod.theme.color_bevel_drag = #111111
+mod.theme.color_bevel_disabled = #x6e6a5e
+mod.theme.color_bevel_inset_1 = #111111
+mod.theme.color_bevel_inset_2 = #111111
+mod.theme.color_bevel_outset_1 = #111111
+mod.theme.color_bevel_outset_2 = #111111
+mod.theme.color_bevel_inset_1_hover = #111111
+mod.theme.color_bevel_inset_2_hover = #111111
+mod.theme.color_bevel_outset_1_hover = #111111
+mod.theme.color_bevel_outset_2_hover = #111111
+mod.theme.color_bevel_inset_1_focus = #128cf0
+mod.theme.color_bevel_inset_2_focus = #128cf0
+mod.theme.color_bevel_outset_1_focus = #128cf0
+mod.theme.color_bevel_outset_2_focus = #128cf0
+mod.theme.color_bevel_inset_1_down = #111111
+mod.theme.color_bevel_inset_2_down = #111111
+mod.theme.color_bevel_outset_1_down = #111111
+mod.theme.color_bevel_outset_2_down = #111111
+mod.theme.color_bevel_inset_1_disabled = #x6e6a5e
+mod.theme.color_bevel_inset_2_disabled = #x6e6a5e
+mod.theme.color_bevel_outset_1_disabled = #x6e6a5e
+mod.theme.color_bevel_outset_2_disabled = #x6e6a5e
+
+// Ink. Black printing ink, 13:1 on the yellow page; dim words a dark olive
+// still 6:1 on it, disabled ones a dull olive at 4:1.
+mod.theme.color_text = #141414
+mod.theme.color_text_hover = #000000
+mod.theme.color_text_focus = #000000
+mod.theme.color_text_active = #000000
+mod.theme.color_text_down = #000000
+mod.theme.color_text_val = #141414
+mod.theme.color_text_hl = #000000
+mod.theme.color_text_disabled = #6b5f30
+mod.theme.color_text_placeholder = #4f4628
+mod.theme.color_text_placeholder_hover = #3d3620
+mod.theme.color_text_meta = #3b3418
+mod.theme.color_text_cursor = #000000
+mod.theme.color_cursor = #000000
+mod.theme.color_cursor_focus = #000000
+mod.theme.color_label = #141414
+mod.theme.color_label_hover = #000000
+mod.theme.color_label_focus = #000000
+mod.theme.color_label_active = #000000
+mod.theme.color_label_down = #000000
+mod.theme.color_label_disabled = #6b5f30
+mod.theme.color_label_inner = #141414
+mod.theme.color_label_inner_hover = #000000
+mod.theme.color_label_inner_focus = #000000
+mod.theme.color_label_inner_active = #000000
+mod.theme.color_label_inner_down = #000000
+mod.theme.color_label_inner_drag = #000000
+mod.theme.color_label_inner_inactive = #3b3418
+mod.theme.color_label_inner_disabled = #6b5f30
+mod.theme.color_label_outer = #141414
+mod.theme.color_label_outer_off = #2a2614
+mod.theme.color_label_outer_hover = #000000
+mod.theme.color_label_outer_focus = #000000
+mod.theme.color_label_outer_active = #000000
+mod.theme.color_label_outer_active_focus = #000000
+mod.theme.color_label_outer_down = #000000
+mod.theme.color_label_outer_drag = #000000
+mod.theme.color_label_outer_disabled = #6b5f30
+mod.theme.color_on_surface = #141414
+// The second voice -- a caption over a group, a row's detail -- is the
+// comic's red, 3.9:1 on the page and 5:1 on white paper; a label in it is
+// printed black on a solid red offset copy of its letters.
+mod.theme.color_on_surface_variant = #d0101c
+mod.theme.color_icon = #141414
+mod.theme.color_icon_hover = #000000
+mod.theme.color_icon_focus = #000000
+mod.theme.color_icon_active = #000000
+mod.theme.color_icon_down = #000000
+mod.theme.color_icon_disabled = #6b5f30
+mod.theme.color_mark = #141414
+
+// The light. Focus is a cyan-blue ring; a value a stock face fills is the
+// same blue; the accent seed is a deep blue that white words read on, so the
+// primary family grows from it.
+mod.theme.color_focus = #128cf0
+mod.theme.color_ctrl_active = #141414
+mod.theme.color_val = #128cf0
+mod.theme.color_val_hover = #2a9af4
+mod.theme.color_val_focus = #128cf0
+mod.theme.color_val_drag = #2a9af4
+mod.theme.color_val_disabled = #8a8574
+mod.theme.color_mark_active = #141414
+mod.theme.color_mark_active_hover = #000000
+mod.theme.color_mark_focus = #141414
+mod.theme.color_mark_disabled = #6b5f30
+mod.theme.color_ctrl_selected = #0a6cc4
+mod.theme.color_bg_highlight = #ffe14a
+mod.theme.color_bg_highlight_inline = #128cf040
+mod.theme.color_text_on_accent = #ffffff
+// Selected text: a stroke of cyan over the words.
+mod.theme.color_selection = #00000000
+mod.theme.color_selection_hover = #128cf04d
+mod.theme.color_selection_down = #128cf073
+mod.theme.color_selection_focus = #128cf073
+// A stock handle is white paper.
+mod.theme.color_handle = #xf7f3e8
+mod.theme.color_handle_hover = #ffffff
+mod.theme.color_handle_1 = #ffffff
+mod.theme.color_handle_2 = #e6dfcc
+
+// Screens: night-blue glass, yellow figures, the unlit segments a ghost.
+mod.theme.color_screen = #x0e1b2e
+mod.theme.color_screen_ink = #ffd21a
+mod.theme.screen_ghost = 0.10
+mod.theme.color_lamp_plain = #fffaf0
+mod.theme.color_lamp_off = #1a1a1a
+mod.theme.color_terminal_bg = #x0e1b2e
+mod.theme.color_terminal_text = #xf7f3e8
+
+// SPACING. Rows of 24 points, gaps of 8, panels padded 12. The base theme
+// froze everything it derives from space_factor when it was built, so every
+// rung this sheet depends on is stated again here.
+mod.theme.space_factor = 8.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 24.0
+mod.theme.space_6 = 32.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 20.0
+mod.theme.size_control_m = 24.0
+mod.theme.size_control_l = 28.0
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 24.0
+mod.theme.data_item_height = 22.0
+// Comic corners are softly rounded: stock shaders draw a corner twice the
+// number written, so a cap gets 5 points and a panel 8.
+mod.theme.corner_radius = 2.5
+mod.theme.container_corner_radius = 4.0
+mod.theme.textselection_corner_radius = 1.5
+mod.theme.radius_s = 4.0
+mod.theme.radius_m = 5.0
+mod.theme.radius_l = 8.0
+
+// TYPE. Headings, captions and the legends on the buttons are lettered in
+// Anton, a condensed poster capital face. The words on the controls are
+// IBM Plex Sans in its bold italic, the comic letterer's slanted hand. Body
+// text is Inter at a heavy book weight, upright, so a paragraph reads.
+mod.theme.font_size_p = 8.5
+mod.theme.font_size_base = 8.5
+mod.theme.type_label_l_size = 8.5
+mod.theme.type_label_m_size = 8.0
+mod.theme.type_label_s_size = 7.25
+mod.theme.type_body_l_size = 9.25
+mod.theme.type_body_m_size = 8.5
+mod.theme.type_body_s_size = 7.75
+mod.theme.type_title_s_size = 11.0
+mod.theme.type_title_m_size = 12.5
+mod.theme.type_title_l_size = 15.0
+mod.theme.font_size_4 = 10.5
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 540.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.5 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("makepad_widgets:resources/IBMPlexSans-BoldItalic.ttf") weight: 700.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 12.0 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Anton-Regular.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+// The type roles were frozen from the base's faces; stated again so every
+// role reads in its face: titles lettered, body upright, labels slanted.
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 15.0 line_spacing: 1.15}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 12.5 line_spacing: 1.15}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 11.0 line_spacing: 1.15}
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 9.25 line_spacing: 1.35}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 8.5 line_spacing: 1.35}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 7.75 line_spacing: 1.35}
+mod.theme.font_label_l = mod.theme.font_label{font_size: 8.5 line_spacing: 1.2}
+mod.theme.font_label_m = mod.theme.font_label{font_size: 8.0 line_spacing: 1.2}
+mod.theme.font_label_s = mod.theme.font_label{font_size: 7.25 line_spacing: 1.2}
+
+// No surface material: every face that matters is drawn by the sheet.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+mod.theme.color_material_glow = #128cf0
+true

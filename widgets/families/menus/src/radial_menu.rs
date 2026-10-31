@@ -987,66 +987,66 @@ script_mod! {
             let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
             let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
             if level < 0.5 {
-                return self.scene_texture.sample_as_bgra(safe_uv)
+                return self.scene_texture.sample(safe_uv)
             }
             if level < 1.5 {
                 let size = max(self.mip0_texture.size(), vec2(1.0, 1.0))
                 let h = self.bicubic_h(safe_uv, size)
                 let g0 = self.bicubic_g0(safe_uv, size)
                 let g1 = 1.0 - g0
-                return self.mip0_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                    + self.mip0_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                    + self.mip0_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                    + self.mip0_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                return self.mip0_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip0_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip0_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip0_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
             }
             if level < 2.5 {
                 let size = max(self.mip1_texture.size(), vec2(1.0, 1.0))
                 let h = self.bicubic_h(safe_uv, size)
                 let g0 = self.bicubic_g0(safe_uv, size)
                 let g1 = 1.0 - g0
-                return self.mip1_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                    + self.mip1_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                    + self.mip1_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                    + self.mip1_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                return self.mip1_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip1_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip1_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip1_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
             }
             if level < 3.5 {
                 let size = max(self.mip2_texture.size(), vec2(1.0, 1.0))
                 let h = self.bicubic_h(safe_uv, size)
                 let g0 = self.bicubic_g0(safe_uv, size)
                 let g1 = 1.0 - g0
-                return self.mip2_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                    + self.mip2_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                    + self.mip2_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                    + self.mip2_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                return self.mip2_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip2_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip2_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip2_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
             }
             if level < 4.5 {
                 let size = max(self.mip3_texture.size(), vec2(1.0, 1.0))
                 let h = self.bicubic_h(safe_uv, size)
                 let g0 = self.bicubic_g0(safe_uv, size)
                 let g1 = 1.0 - g0
-                return self.mip3_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                    + self.mip3_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                    + self.mip3_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                    + self.mip3_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                return self.mip3_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip3_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip3_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip3_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
             }
             if level < 5.5 {
                 let size = max(self.mip4_texture.size(), vec2(1.0, 1.0))
                 let h = self.bicubic_h(safe_uv, size)
                 let g0 = self.bicubic_g0(safe_uv, size)
                 let g1 = 1.0 - g0
-                return self.mip4_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                    + self.mip4_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                    + self.mip4_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                    + self.mip4_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                return self.mip4_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip4_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip4_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip4_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
             }
             let size = max(self.mip5_texture.size(), vec2(1.0, 1.0))
             let h = self.bicubic_h(safe_uv, size)
             let g0 = self.bicubic_g0(safe_uv, size)
             let g1 = 1.0 - g0
-            return self.mip5_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                + self.mip5_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                + self.mip5_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                + self.mip5_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+            return self.mip5_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                + self.mip5_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                + self.mip5_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                + self.mip5_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
         }
 
         sample_blur: fn(level: float, uv: vec2) -> vec4 {
@@ -2602,6 +2602,32 @@ impl Drop for RadialMenu {
 }
 
 impl Widget for RadialMenu {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Menu;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            let Some(open) = self.open.as_ref() else {
+                return Some(format_snapshot(None));
+            };
+            let rings = self.rings_for(open);
+            let parents: Vec<String> = (1..rings.len())
+                .filter_map(|depth| {
+                    self.node_at(&open.open_path, depth - 1, open.open_path[depth - 1])
+                })
+                .map(|node| node.key.clone())
+                .collect();
+            let hot = self.hot_key();
+            Some(format_snapshot(Some((
+                open.centre,
+                rings.len() - 1,
+                hot.as_deref(),
+                &parents,
+            ))))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.in_field() {
             return self.draw_in_field(cx, walk);
@@ -2763,48 +2789,63 @@ impl Widget for RadialMenu {
             .unwrap_or_default()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        let Some(open) = self.open.as_ref() else {
-            return Some(format_snapshot(None));
-        };
-        let rings = self.rings_for(open);
-        let parents: Vec<String> = (1..rings.len())
-            .filter_map(|depth| self.node_at(&open.open_path, depth - 1, open.open_path[depth - 1]))
-            .map(|node| node.key.clone())
-            .collect();
-        let hot = self.hot_key();
-        Some(format_snapshot(Some((open.centre, rings.len() - 1, hot.as_deref(), &parents))))
-    }
+
 
     /// Every choice on the open rings, so a test can find "Mail" by its id
     /// or its word and press the middle of its rect. The rect is a square on
     /// the word's point, half the ring deep and never wider than half the
     /// wedge's arc there, so its middle is always on the wedge the pick
     /// reads, whatever frame of a grow the tree is read in.
-    fn snapshot_parts(&self, _cx: &Cx) -> Vec<SnapshotPart> {
-        let Some(open) = self.open.as_ref() else { return Vec::new() };
-        let rings = self.rings_for(open);
-        let mut parts = Vec::new();
-        for (depth, ring) in rings.iter().enumerate() {
-            let nodes = ring_nodes(&self.tree, &open.open_path, depth).unwrap_or(&[]);
-            let mid = (ring.inner + ring.outer) * 0.5;
-            let side = ((ring.outer - ring.inner) * 0.5).min(ring.step() * mid * 0.5).max(1.0);
-            for (i, node) in nodes.iter().enumerate().take(ring.count) {
-                let (ox, oy) = ring.offset(i, mid);
-                parts.push(SnapshotPart {
-                    id: node.id,
-                    widget_type: "RadialMenuItem",
-                    rect: Rect {
-                        pos: dvec2(open.centre.x + ox - side * 0.5, open.centre.y + oy - side * 0.5),
-                        size: dvec2(side, side),
-                    },
-                    text: node.label.clone(),
-                    selected: open.hot == Some((depth, i)),
-                    enabled: node.enabled,
-                });
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        out.extend((|| {
+            let Some(open) = self.open.as_ref() else {
+                return Vec::new();
+            };
+            let rings = self.rings_for(open);
+            let mut parts = Vec::new();
+            for (depth, ring) in rings.iter().enumerate() {
+                let nodes = ring_nodes(&self.tree, &open.open_path, depth).unwrap_or(&[]);
+                let mid = (ring.inner + ring.outer) * 0.5;
+                let side = ((ring.outer - ring.inner) * 0.5)
+                    .min(ring.step() * mid * 0.5)
+                    .max(1.0);
+                for (i, node) in nodes.iter().enumerate().take(ring.count) {
+                    let (ox, oy) = ring.offset(i, mid);
+                    parts.push((
+                        ((node.id).0 ^ LiveId::from_str("RadialMenuItem").0.rotate_left(1)),
+                        None,
+                        a11y_tree::Node {
+                            role: a11y_tree::Role::MenuItem,
+                            class: ("RadialMenuItem").to_string(),
+                            path: makepad_widgets_core::widget_tree::live_id_token(node.id),
+                            bounds: makepad_platform::a11y::semantic_rect(Rect {
+                                pos: dvec2(
+                                    open.centre.x + ox - side * 0.5,
+                                    open.centre.y + oy - side * 0.5,
+                                ),
+                                size: dvec2(side, side),
+                            }),
+                            name: node.label.clone(),
+                            states: {
+                                let mut states = a11y_tree::States::FOCUSABLE;
+                                states
+                                    .set(a11y_tree::States::SELECTED, open.hot == Some((depth, i)));
+                                states.set(a11y_tree::States::DISABLED, !(node.enabled));
+                                states
+                            },
+                            toggle: if open.hot == Some((depth, i)) {
+                                a11y_tree::Toggle::On
+                            } else {
+                                a11y_tree::Toggle::Off
+                            },
+                            actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                            ..Default::default()
+                        },
+                    ));
+                }
             }
-        }
-        parts
+            parts
+        })());
     }
 }
 
@@ -2905,7 +2946,6 @@ impl RadialMenuRef {
 mod tests {
     use super::*;
     use crate::makepad_platform::event::{ScrollEvent, ScrollPhase};
-    use crate::makepad_script::trap::NoTrap;
 
     const DEG: f64 = PI / 180.0;
 
@@ -3327,15 +3367,13 @@ mod tests {
     /// restate it.
     fn theme_ease(vm: &mut ScriptVm, token: &str) -> Ease {
         let theme = vm.module(id!(theme));
-        let value = vm.bx.heap.value(theme, LiveId::from_str(token).into(), NoTrap);
+        let value = vm.value(theme, LiveId::from_str(token));
         Ease::script_from_value(vm, value)
     }
 
     fn theme_number(vm: &mut ScriptVm, token: &str) -> f64 {
         let theme = vm.module(id!(theme));
-        vm.bx
-            .heap
-            .value(theme, LiveId::from_str(token).into(), NoTrap)
+        vm.value(theme, LiveId::from_str(token))
             .as_f64()
             .unwrap_or_else(|| panic!("the theme has no number {token}"))
     }
@@ -3476,9 +3514,7 @@ mod tests {
             let value = crate::script_eval!(vm, {
                 mod.shader.test_compile_draw_source(mod.widgets.RadialMenu.draw_wedge, "glsl", false)
             });
-            let text = vm
-                .bx
-                .heap
+            let text = vm.heap()
                 .string_with(value, |_heap, text| text.to_string())
                 .expect("the compiler answers with source");
             assert!(!text.starts_with("ERRORS:"), "the wedge did not compile: {text}");
@@ -3669,13 +3705,10 @@ mod tests {
 
     fn theme_color(vm: &mut ScriptVm, theme: &str, token: &str) -> [f64; 3] {
         let themes = vm.module(id!(themes));
-        let table = vm
-            .bx
-            .heap
-            .value(themes, LiveId::from_str(theme).into(), NoTrap)
+        let table = vm.value(themes, LiveId::from_str(theme))
             .as_object()
             .unwrap_or_else(|| panic!("no theme {theme}"));
-        let value = vm.bx.heap.value(table, LiveId::from_str(token).into(), NoTrap);
+        let value = vm.value(table, LiveId::from_str(token));
         assert!(value.as_color().is_some() || value.as_pod().is_some(), "{theme} has no colour {token}");
         rgb_of(Vec4f::script_from_value(vm, value))
     }
@@ -3706,7 +3739,7 @@ mod tests {
             let value = crate::script_eval!(vm, {
                 mod.shader.test_compile_draw_source(mod.widgets.RadialMenu.draw_wedge, "glsl", false)
             });
-            let text = vm.bx.heap.string_with(value, |_heap, text| text.to_string()).expect("source");
+            let text = vm.heap().string_with(value, |_heap, text| text.to_string()).expect("source");
             assert!(text.contains("uni_color_wedge_open_rim"), "the wedge draws no band");
         });
         });
@@ -3796,7 +3829,7 @@ mod tests {
             assert_eq!(menu.open_path(), &[1], "crossing Share's rim opened its ring");
             menu.pointer_at(cx, toward(c, 30.0, 130.0));
             assert_eq!(
-                menu.snapshot_value(cx),
+                semantic_value(&*menu, cx),
                 Some("open at=400,300 focus=1 hot=share/mail rings=share".to_string())
             );
             assert_eq!(menu.text(), "Mail");
@@ -3849,7 +3882,7 @@ mod tests {
             assert!(menu.is_open(), "a refusal is not a cancel");
             menu.pointer_at(cx, toward(c, 0.0, 10.0));
             assert!(menu.open_path().is_empty(), "the hub closes every outer ring");
-            assert_eq!(menu.snapshot_value(cx), Some("open at=400,300 focus=0 hot=- rings=".to_string()));
+            assert_eq!(semantic_value(&*menu, cx), Some("open at=400,300 focus=0 hot=- rings=".to_string()));
             menu.release_at(cx, toward(c, 0.0, 10.0));
             assert!(!menu.is_open(), "a later release in the hub is none of these");
         });
@@ -3955,7 +3988,7 @@ mod tests {
             assert_eq!(keys(&menu.tree), vec!["open".to_string(), "arrange{arrange/front, arrange/back}".to_string()]);
             assert!(!menu.tree[1].children[1].enabled);
             assert!(!menu.is_open());
-            assert_eq!(menu.snapshot_value(vm.cx()), Some("closed".to_string()));
+            assert_eq!(semantic_value(&menu, vm.cx()), Some("closed".to_string()));
             let frosted = crate::script_eval!(vm, {use mod.widgets.* RadialMenuFrosted{}});
             let frosted = RadialMenu::script_from_value(vm, frosted);
             assert_eq!(frosted.look, RadialLook::Frosted);
@@ -4532,26 +4565,26 @@ mod tests {
     fn the_open_rings_are_parts_of_the_tree() {
         crate::on_test_cx(|| {
         drive(|menu, cx| {
-            assert!(menu.snapshot_parts(cx).is_empty(), "closed");
+            assert!(semantic_parts(&*menu, cx).is_empty(), "closed");
             menu.open_at(cx, dvec2(400.0, 300.0));
             menu.key_down(cx, &key(KeyCode::Key5));
             let c = menu.centre().unwrap();
             menu.pointer_at(cx, toward(c, 240.0, 60.0));
-            let parts = menu.snapshot_parts(cx);
+            let parts = semantic_parts(&*menu, cx);
             assert_eq!(parts.len(), 6 + 3, "ring 0 and Edit's ring");
             let open = menu.open.clone().unwrap();
             let rings = menu.rings_for(&open);
             for part in &parts {
-                let at = part.rect.center() - c;
+                let at = node_rect(&part).center() - c;
                 let (depth, index) = pick(&rings, menu.bands().hub, at.x, at.y).expect("on a wedge");
                 let node = menu.node_at(&open.open_path, depth, index).unwrap();
-                assert_eq!((part.id, part.text.as_str()), (node.id, node.label.as_str()));
-                assert_eq!(part.widget_type, "RadialMenuItem");
-                assert_eq!(part.enabled, node.enabled);
+                assert_eq!((part.path.as_str(), part.name.as_str()), (crate::widget_tree::live_id_token(node.id).as_str(), node.label.as_str()));
+                assert_eq!(part.class, "RadialMenuItem");
+                assert_eq!(!part.states.contains(a11y_tree::States::DISABLED), node.enabled);
             }
-            let selected: Vec<&str> = parts.iter().filter(|part| part.selected).map(|part| part.text.as_str()).collect();
+            let selected: Vec<&str> = parts.iter().filter(|part| part.states.contains(a11y_tree::States::SELECTED)).map(|part| part.name.as_str()).collect();
             assert_eq!(selected, vec!["Edit"]);
-            assert!(parts.iter().any(|part| part.text == "Paste" && !part.enabled));
+            assert!(parts.iter().any(|part| part.name == "Paste" && part.states.contains(a11y_tree::States::DISABLED)));
         });
         });
     }
@@ -4736,4 +4769,22 @@ mod tests {
         assert!(!menu.is_open() && !menu.swallow_up && !menu.locked, "with no release owed and nothing held");
         });
     }
+}
+
+#[cfg(test)]
+fn semantic_value(widget: &dyn Widget, cx: &Cx) -> Option<String> {
+    let mut node = a11y_tree::Node::default();
+    widget.semantics(cx, &mut node);
+    Some(node.value)
+}
+
+#[cfg(test)]
+fn semantic_parts(widget: &dyn Widget, cx: &Cx) -> Vec<a11y_tree::Node> {
+    let mut parts = Vec::new();
+    widget.semantics_parts(cx, &mut parts);
+    parts.into_iter().map(|(_, _, node)| node).collect()
+}
+#[cfg(test)]
+fn node_rect(node: &a11y_tree::Node) -> Rect {
+    rect(node.bounds.x as f64, node.bounds.y as f64, node.bounds.w as f64, node.bounds.h as f64)
 }

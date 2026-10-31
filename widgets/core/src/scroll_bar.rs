@@ -1,3 +1,4 @@
+use crate::widget::*;
 use crate::animator::*;
 use crate::event::{ScrollEvent, ScrollPhase, TouchState, TAP_COUNT_DISTANCE};
 use crate::makepad_derive_widget::*;
@@ -284,11 +285,14 @@ enum ScrollState {
     },
 }
 
-#[derive(Script, ScriptHook, Animator)]
+#[derive(Script, ScriptHook, Animator, Widget)]
 pub struct ScrollBar {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[live]
+    #[redraw]
     draw_bg: DrawScrollBar,
     /// Whether the handle is drawn and can be grabbed. With it off the view still
     /// scrolls by wheel, trackpad and API, there's just nothing to click.
@@ -341,6 +345,15 @@ pub struct ScrollBar {
     /// How long the bar stays shown after the last scroll, in seconds.
     #[live(1.5)]
     hide_delay: f64,
+    /// Content that gets shorter (a fold) does not pull the offset back: the
+    /// view keeps its place over empty space at the end, and what the reader
+    /// was looking at stays where it was. That empty space goes as the reader
+    /// scrolls back towards the content; it never grows.
+    #[live(false)]
+    keep_on_shrink: bool,
+    /// The offset kept past the content's end ([`Self::keep_on_shrink`]).
+    #[rust]
+    held_end: f64,
 
     #[apply_default]
     animator: Animator,
@@ -573,8 +586,15 @@ impl ScrollBar {
         return self.scroll_pos;
     }
 
+    /// How far the offset may go: the content's end, or (keeping on shrink)
+    /// the offset kept past it.
+    fn scroll_limit(&self) -> f64 {
+        let end = (self.view_total - self.view_visible).max(0.);
+        if self.keep_on_shrink { end.max(self.held_end) } else { end }
+    }
+
     pub fn set_scroll_pos_no_action(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
+        let scroll_pos = scroll_pos.min(self.scroll_limit()).max(0.);
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
             self.scroll_target = scroll_pos;
@@ -584,7 +604,7 @@ impl ScrollBar {
         return false;
     }
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
+        let scroll_pos = scroll_pos.min(self.scroll_limit()).max(0.);
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
             self.scroll_target = scroll_pos;
@@ -625,9 +645,7 @@ impl ScrollBar {
     pub fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f64) -> bool {
         // clamp scroll_pos to
 
-        let new_target = scroll_pos_target
-            .min(self.view_total - self.view_visible)
-            .max(0.);
+        let new_target = scroll_pos_target.min(self.scroll_limit()).max(0.);
         if self.scroll_target != new_target {
             self.scroll_target = new_target;
             self.scroll_delta = new_target - self.scroll_pos;
@@ -1289,6 +1307,13 @@ impl ScrollBar {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction),
     ) {
+        if let Event::A11yAction(request) = event {
+            if request.node.uid() == self.uid.0 {
+                let result = self.handle_action(cx, request, &mut Scope::empty());
+                if result == a11y_tree::ActionResult::Handled { dispatch_action(cx, self.make_scroll_action()); }
+                cx.a11y.record_action(request.req, result);
+            }
+        }
         self.handle_flick(cx, event, dispatch_action);
         self.handle_bounce(cx, event, dispatch_action);
 
@@ -1317,13 +1342,11 @@ impl ScrollBar {
             if !self.show_handle {
                 return;
             }
-            // A hidden bar takes no presses, so a tap on its strip reaches the content beneath.
-            if matches!(event, Event::MouseDown(_) | Event::TouchUpdate(_))
-                && self.auto_hide
-                && !self.animator_in_state(cx, ids!(show.on))
-            {
-                return;
-            }
+            // A faded bar still owns its strip: a press there shows it and
+            // scrolls or drags as always. The layouts in this tree leave the
+            // strip to their bar (ItemGrid's scroll_bar_band, View's
+            // pointer capture), so a bar that let the press through here
+            // would leave a strip along the edge that answers nothing.
 
             match event.hits(cx, self.draw_bg.area()) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
@@ -1557,7 +1580,10 @@ impl ScrollBar {
             if cross_overflows { track_len - self.bar_size } else { track_len } - self.bar_side_margin * 2.;
         self.view_total = total;
         self.view_visible = viewport;
-        self.scroll_pos = self.scroll_pos.min(total - viewport).max(0.);
+        // Content that got shorter: the offset kept past its end, or pulled back.
+        let end = (total - viewport).max(0.);
+        self.held_end = if self.keep_on_shrink && self.scroll_pos > end { self.scroll_pos } else { 0. };
+        self.scroll_pos = self.scroll_pos.min(self.scroll_limit()).max(0.);
 
         if self.visible && self.show_handle {
             // Drop a stale hover, since we miss the hover-out if the pointer left while the bar wasn't drawn.
@@ -1594,13 +1620,11 @@ impl ScrollBar {
                 }
             };
             self.draw_bg.draw_rel(cx, rect);
+            if cx.a11y.on { crate::semantics::record_leaf(self, cx); }
         }
 
         // see if we need to clamp
-        let clamped_pos = self
-            .scroll_pos
-            .min(self.view_total - self.view_visible)
-            .max(0.);
+        let clamped_pos = self.scroll_pos.min(self.scroll_limit()).max(0.);
         if clamped_pos != self.scroll_pos {
             self.scroll_pos = clamped_pos;
             self.scroll_target = clamped_pos;
@@ -1609,6 +1633,57 @@ impl ScrollBar {
         }
 
         self.scroll_pos
+    }
+}
+
+impl Widget for ScrollBar {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::ScrollBar;
+        let vertical = matches!(self.axis, ScrollAxis::Vertical);
+        node.states = if vertical {
+            a11y_tree::States::VERTICAL
+        } else {
+            a11y_tree::States::HORIZONTAL
+        };
+        node.range = Some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: self.scroll_limit(),
+            now: self.scroll_pos,
+            step: 0.0,
+        });
+        node.actions = a11y_tree::Actions::SCROLL | a11y_tree::Actions::SET_VALUE;
+    }
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        let value = if action.action == A::SCROLL {
+            let ActionArg::Scroll(x, y) = action.arg else {
+                return ActionResult::Unsupported;
+            };
+            self.scroll_pos
+                + if matches!(self.axis, ScrollAxis::Vertical) {
+                    y as f64
+                } else {
+                    x as f64
+                }
+        } else if action.action == A::SET_VALUE {
+            let ActionArg::Number(value) = action.arg else {
+                return ActionResult::Unsupported;
+            };
+            value
+        } else {
+            return ActionResult::Unhandled;
+        };
+        if !value.is_finite() {
+            return ActionResult::Unsupported;
+        }
+        self.set_scroll_pos(cx, value);
+        self.draw_bg.redraw(cx);
+        ActionResult::Handled
     }
 }
 
@@ -1622,7 +1697,6 @@ mod pointer_capture_tests {
     use crate::event::{ScrollEvent, TouchPoint, TouchState, TouchUpdateEvent};
     use crate::makepad_draw::cx_draw::CxDraw;
     use crate::view::View;
-    use crate::widget::*;
     use std::cell::Cell;
 
     const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };

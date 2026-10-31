@@ -1,0 +1,30 @@
+[package]
+name = "makepad-kinetic-type"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Kinetic type as engine primitives: glyph shapes and per-glyph records from a text, a Splash animator kernel per glyph writing the draw record in place, and an instanced glyph draw whose look is Splash"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-script-compute-sched = { path = "../../platform/script/compute_sched" }
+makepad-draw = { path = "../../draw", version = "2.0.0" }
+# Kernels, and the shared Splash stdlib looks call (`vm`).
+makepad-script-compute = { path = "../../platform/script/compute", features = ["vm"] }
+makepad-render-kernels = { path = "../render_kernels" }
+# `ease(@name, u)` in mod.shared.
+makepad-tween-script = { path = "../tween/script" }
+makepad-text-mesh = { path = "../text_mesh" }
+makepad-geom3d = { path = "../geom3d" }
+makepad-typography = { path = "../typography" }
+# The audio-reactive input looks and animators read (spectrum, levels, hits).
+makepad-audio-reactive = { path = "../audio_reactive" }
+# Post passes and kits (Glow, Halation, ...), all Splash.
+makepad-render-graph = { path = "../render_graph" }
+
+[dev-dependencies]
+makepad-text-mesh = { path = "../text_mesh", features = ["dev-fonts"] }
+# The check tool's window, readback and PNG writer.
+makepad-widgets = { path = "../../widgets", default-features = false }

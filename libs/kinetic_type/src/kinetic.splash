@@ -1,0 +1,185 @@
+// The `kinetic` kernel module: the stock glyph motions as functions, for
+// a kit's `glyph: fn(g, o)` (CPU, per glyph, every frame). `use kinetic.*`
+// is in scope in every kit. Each returns numbers the kit applies to `o`:
+// nothing here writes the record, so a kit mixes, scales and re-times them
+// freely. With `amp` 0 every motion leaves the glyph at rest.
+//
+// Signals the kit has as params: time, beat (fractional beats), phase
+// (0..1 in the beat), pulse (the beat's eased envelope 0..1), bar (0..1 in
+// the bar), bpm, energy (0..1), grow (the 0..1 sweep of the kit's cycle),
+// and its dials by name (p1..p4 too).
+
+// The vj_fx hash (a sin hash), for porting looks that used it.
+fn hash1(x) { fract(sin(x * 12.9898) * 43758.5453) }
+
+// A quaternion about an axis (need not be unit).
+fn qaxis(axis, angle) { quat_axis_angle(normalize(axis), angle) }
+fn qx(a) { vec4(sin(a * 0.5), 0.0, 0.0, cos(a * 0.5)) }
+fn qy(a) { vec4(0.0, sin(a * 0.5), 0.0, cos(a * 0.5)) }
+fn qz(a) { vec4(0.0, 0.0, sin(a * 0.5), cos(a * 0.5)) }
+// A rotation vector (axis * angle) as a quaternion; zero = none.
+fn qvec(v) {
+    let a = length(v)
+    if a < 0.000001 { vec4(0.0, 0.0, 0.0, 1.0) } else { quat_axis_angle(v / a, a) }
+}
+
+// Back ease out with overshoot s (1.70158 is the classic).
+fn back_out(u, s) {
+    let k = clamp(u, 0.0, 1.0) - 1.0
+    1.0 + (s + 1.0) * k * k * k + s * k * k
+}
+// A steep sigmoid 0..1 over 0..1 (k 7 = a snap).
+fn snap(x, k) {
+    let t = clamp(x, 0.0, 1.0)
+    let a = pow(t, k)
+    a / max(a + pow(1.0 - t, k), 0.000001)
+}
+// 0..1 through [t0, t0 + dur].
+fn span01(t, t0, dur) { clamp((t - t0) / max(dur, 0.000001), 0.0, 1.0) }
+
+// WAVE: a travelling sine along the line (1.5 waves over its width):
+// (dy, roll) for a glyph at x.
+fn wave(x, width, size, t, amp, rate, pulse) {
+    let k = 9.42 / max(width, size)
+    let ph = x * k - t * 2.2 * rate
+    let a = amp * size * 0.25 * (1.0 + pulse * 0.6)
+    vec2(sin(ph) * a, clamp(cos(ph) * k * a, -0.7, 0.7))
+}
+
+// FLIP: a full turn per beat slot, staggered by ordinal, landing upright
+// on the beat: the angle about x.
+fn flip(beat, index, stagger, amp) {
+    let e = smoothstep(0.55, 1.0, fract(beat - index * stagger))
+    e * TAU * amp
+}
+
+// CASCADE: drop in reading order as `sweep` runs 0..1: (dy, roll).
+fn cascade(sweep, t, size, amp) {
+    let l = clamp((sweep - t * 0.7) / 0.3, 0.0, 1.0)
+    let e = 1.0 - pow(1.0 - l, 3.0)
+    let bounce = sin(l * TAU) * (1.0 - l) * 0.15
+    vec2((1.0 - e + bounce) * amp * size * 4.0, (1.0 - e) * 0.5 * amp)
+}
+
+// SPIN: one turn per two beats (at rate 1), phase staggered by ordinal.
+fn spin(beat, index, stagger, rate, amp) { (beat * 0.5 * rate + index * stagger) * TAU * amp }
+
+// SCATTER: bar-synced flight, out over the first third of the bar and back
+// before the downbeat. (offset xyz, fly 0..1); tumble with
+// `scatter_turn(index, fly)`.
+fn scatter(index, bar, size, amp) {
+    let stag = hash1(index * 3.31 + 0.7) * 0.10
+    let b = clamp((bar - stag) / max(1.0 - stag, 0.3), 0.0, 1.0)
+    let fly = smoothstep(0.0, 0.07, b) * (1.0 - smoothstep(0.30, 0.68, b)) * amp
+    let dir = vec3(hash1(index * 3.7 + 1.0) - 0.5, hash1(index * 5.1 + 2.0) - 0.5, hash1(index * 7.3 + 3.0) - 0.2)
+    let d = dir / max(length(dir), 0.05) * (fly * size * 3.0)
+    vec4(d.x, d.y, d.z, fly)
+}
+fn scatter_turn(index, fly) {
+    let axis = vec3(hash1(index * 1.9 + 4.0) - 0.5, hash1(index * 2.3 + 5.0) - 0.5, hash1(index * 4.1 + 6.0) - 0.5)
+    qaxis(axis, fly * (hash1(index * 6.7 + 7.0) * 2.0 - 1.0) * 5.0)
+}
+
+// TYPE: glyphs past reveal * n are hidden, the last shown one flashes:
+// (scale, flash).
+fn typed(index, count, reveal, pulse, amp) {
+    let shown = reveal * count
+    let vis = step(index + 0.5, shown)
+    let last = step(shown - 1.0, index) * vis
+    vec2(vis * (1.0 + last * pulse * 0.15 * amp), last * pulse * 0.8 * amp)
+}
+
+// TICKER: x advanced by `scroll` text widths, wrapping over the width plus
+// a gap of two sizes.
+fn ticker(x, width, size, scroll) {
+    let p = width + size * 2.0
+    let a = x + p * 0.5 - scroll * width
+    wrap(wrap(a, p) + p, p) - p * 0.5
+}
+
+// SCROLL: the block up by `scroll` lines, wrapping line by line over the
+// height plus one line: the glyph's new y.
+fn scroll_lines(y, line, height, line_h, scroll) {
+    let q = height + line_h
+    let lref = height * 0.5 - (floor(line + 0.5) + 0.5) * line_h
+    let a = lref + scroll * line_h + q * 0.5
+    wrap(wrap(a, q) + q, q) - q * 0.5 + (y - lref)
+}
+
+// FLOAT: a word bobbing and turning on its own phase: (dx, dy, roll).
+fn drift(word, t, rate, size, amp) {
+    let wp = word * 1.7
+    vec3(sin(t * 0.7 * rate + wp) * amp * size * 0.15, cos(t * 0.9 * rate + wp * 1.3) * amp * size * 0.15, sin(t * 0.5 * rate + wp) * 0.25 * amp)
+}
+
+// BOUNCE: word w drops on beat w of a cycle of words + 3 beats, bounces
+// and is lifted back before its next drop: (dy, roll).
+fn bounce(word, words, beat, size, amp) {
+    let cyc = max(words, 1.0) + 3.0
+    let lt = wrap(beat - word, cyc)
+    let hgt = amp * size * 4.0
+    let fall = clamp(lt / 0.5, 0.0, 1.0)
+    let tt = max(lt - 0.5, 0.0)
+    let decay = exp(0.0 - tt * 2.2)
+    let y0 = if lt > 0.5 { hgt * 0.3 * decay * abs(sin(tt * TAU)) } else { hgt * (1.0 - fall * fall) }
+    let y = y0 + hgt * smoothstep(cyc - 0.5, cyc, lt)
+    vec2(y, step(0.5, lt) * sin(tt * 9.0) * decay * 0.35 * amp * (hash1(word * 1.7 + 0.3) * 2.0 - 1.0))
+}
+
+// PUFF: inflate on the beat plus a slow breath: (scale, dome) — the dome
+// is for the look's `deform`.
+fn puff(t, rate, index, pulse, amp) {
+    let breath = 0.5 + 0.5 * sin(t * 1.3 * rate + index * 0.7)
+    let inflate = amp * (pulse * 0.8 + 0.2 * breath)
+    vec2(1.0 + inflate * 0.12, inflate * 0.35)
+}
+
+// JELLY: a hop per beat landing on the beat, a squash on landing and a
+// wobble: (dy in sizes, wide, tall, shear).
+fn jelly(beat, index, stagger, amp) {
+    let u = fract(beat - index * stagger)
+    let a = min(amp, 1.5)
+    let hop = 4.0 * u * (1.0 - u)
+    let land = exp(0.0 - u * 9.0)
+    let pre = smoothstep(0.75, 1.0, u)
+    vec4(hop * 1.6 * a, 1.0 + 0.28 * land * a - 0.08 * pre * a, 1.0 - 0.38 * land * a + 0.18 * pre * a, sin(u * 25.0) * exp(0.0 - u * 5.0) * 0.35 * a)
+}
+
+// RIPPLE: a ring from the centre on every beat plus a slow heave: the push
+// toward the camera for a glyph at (x, y).
+fn ripple(x, y, reach, size, t, phase, rate, amp) {
+    let q = (length(vec2(x, y)) - phase * reach) / (size * 1.2)
+    let ring = exp(0.0 - q * q) * (1.0 - phase * 0.7)
+    let heave = sin(x * 0.55 / size + t * 0.6 * rate) * cos(y * 0.45 / size - t * 0.5 * rate)
+    amp * size * (ring * 1.1 + heave * 0.35)
+}
+
+// ---- layouts in space -------------------------------------------------------
+
+// RING: the line wound round a cylinder of `radius` about +y, arc 0 facing
+// the camera: (x, z, turn about y) for a glyph at arc position x.
+fn ring(x, radius) {
+    let a = x / max(radius, 0.001)
+    vec3(sin(a) * radius, cos(a) * radius, a)
+}
+// The radius that closes a line of `width` into a ring.
+fn ring_radius(width, size) { max(width / TAU * 1.05, size) }
+
+// HELIX: the ring descending `pitch` per turn: (x, y offset, z, turn).
+fn helix(x, radius, pitch) {
+    let a = x / max(radius, 0.001)
+    vec4(sin(a) * radius, 0.0 - a / TAU * pitch, cos(a) * radius, a)
+}
+
+// GRID: cell k of a `cols` lattice with `pitch`, centred: (x, y).
+fn grid(k, count, cols, pitch) {
+    let c = max(floor(cols), 1.0)
+    let rows = ceil(count / c)
+    let col = k - floor(k / c) * c
+    let row = floor(k / c)
+    vec2((col - (c - 1.0) * 0.5) * pitch, ((rows - 1.0) * 0.5 - row) * pitch)
+}
+
+// A junk shape for a scramble: one of `alphas` alphabet shapes from
+// `alpha0`, rerolled every `tick`.
+fn junk(index, tick, alpha0, alphas) { alpha0 + floor(rand01(int(tick), int(index), 7) * max(alphas, 1.0)) }

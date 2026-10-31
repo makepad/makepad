@@ -22,12 +22,14 @@ pub enum MenuItem {
     #[live { name: String::new(), items: Vec::new() }]
     Sub { name: String, items: Vec<LiveId> },
 
-    #[live { name: String::new(), shift: false, key: KeyCode::Unknown, enabled: true }]
+    #[live { name: String::new(), shift: false, key: KeyCode::Unknown, enabled: true, dock: false }]
     Item {
         name: String,
         shift: bool,
         key: KeyCode,
         enabled: bool,
+        /// Also in the Dock icon's menu (macOS).
+        dock: bool,
     },
 
     #[pick]
@@ -77,9 +79,7 @@ impl ScriptHook for WindowMenu {
                         if let Some(id) = kv.key.as_id() {
                             // Check if this is a MenuItem by checking its type
                             if let Some(val_obj) = kv.value.as_object() {
-                                if vm
-                                    .bx
-                                    .heap
+                                if vm.heap()
                                     .type_matches_id(val_obj, MenuItem::script_type_id_static())
                                 {
                                     let item = MenuItem::script_from_value(vm, kv.value);
@@ -116,6 +116,7 @@ impl WindowMenu {
                             shift,
                             key,
                             enabled,
+                            dock,
                         } => {
                             return MacosMenu::Item {
                                 command,
@@ -123,6 +124,7 @@ impl WindowMenu {
                                 shift,
                                 key,
                                 enabled,
+                                dock,
                             }
                         }
                         MenuItem::Sub { name, items } => {
@@ -157,6 +159,12 @@ impl WindowMenu {
 }
 
 impl Widget for WindowMenu {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::MenuBar;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         match event {
             Event::MacosMenuCommand(item) => {

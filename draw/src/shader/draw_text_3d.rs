@@ -150,7 +150,7 @@ impl DrawText3d {
         label_scale: f32,
         horizontal_align: f32,
     ) -> bool {
-        let Some(run) = self.draw_super.draw_super.prepare_single_line_run(cx, text) else {
+        let Some(run) = self.draw_super.draw_super.prepare_single_line_raster_run(cx, text) else {
             return false;
         };
 
@@ -162,14 +162,14 @@ impl DrawText3d {
         for glyph in &run.glyphs {
             let glyph_origin = crate::text::geom::Point::new(
                 baseline.x + glyph.pen_x_in_lpxs + glyph.offset_x_in_lpxs,
-                baseline.y,
+                baseline.y + glyph.offset_y_in_lpxs,
             );
             self.draw_super.draw_glyph_at(
                 cx,
                 glyph_origin,
                 rotation_origin,
                 glyph.font_size_in_lpxs,
-                glyph.rasterized,
+                glyph.glyph,
                 rotation,
                 label_scale,
             );

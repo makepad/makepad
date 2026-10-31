@@ -82,7 +82,7 @@
 use crate::{
     // Animate is set_disabled's; the other four are what the Animator derive
     // and animator_handle_event need. The same set as range_slider.rs:30.
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     // The intent palette a region or a mark is coloured through, and the
     // one-line text measurer the skip-not-clip rule needs.
     badge::{BadgeIntent, BadgePalette},
@@ -511,6 +511,11 @@ script_mod! {
         draw_name +: {
             color: theme.color_text_meta
             text_style: theme.font_regular{font_size: theme.font_size_p}
+        }
+
+        /** The plate under a region's name: the page, the ground the name's ink is put to. */
+        draw_name_plate +: {
+            color: theme.color_bg_app
         }
 
         animator: Animator{
@@ -1412,6 +1417,13 @@ pub struct Waveform {
     /// can read.
     #[live]
     pub draw_name: DrawText,
+    /// Under each region's name. The names run along the foot of the lane,
+    /// where a loud wave reaches and the region's own wash lies, and the
+    /// wave is drawn in the value fill, which is chosen to stand off the
+    /// lane and held to nothing written on it. On a plate of the page the
+    /// name reads against the ground its ink was put to, whatever is under.
+    #[live]
+    pub draw_name_plate: DrawColor,
     /// The colour of every intent, inherited from the shared palette so a
     /// region and a badge that mean the same thing look the same.
     #[live]
@@ -1817,6 +1829,14 @@ impl Waveform {
             if width > room {
                 continue;
             }
+            let pad = (size * 0.25).round();
+            self.draw_name_plate.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x0 + self.name_inset - pad, top),
+                    size: dvec2(width + pad * 2.0, box_h),
+                },
+            );
             self.draw_name.draw_abs(
                 cx,
                 dvec2(x0 + self.name_inset, text_top(top, box_h, size)),
@@ -2039,6 +2059,12 @@ impl WaveformRef {
 // ---- the Widget impl ------------------------------------------------------
 
 impl Widget for Waveform {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     /// The catalogue's Disabled control calls this and returns before the
     /// branch that would log an error (app.rs:219-230), and the trait
     /// defaults do nothing at all (widget.rs:338) — so without this pair the
@@ -2066,8 +2092,7 @@ impl Widget for Waveform {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_playhead) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let at = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64();
+                let at = vm.vec_value_trap(args_obj, 0).as_f64();
                 if let Some(at) = at {
                     vm.with_cx_mut(|cx| self.set_playhead(cx, at));
                 }

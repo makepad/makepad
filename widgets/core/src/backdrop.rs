@@ -8,10 +8,25 @@ use crate::{
     window::{DrawGaussDownsample, DrawGaussScene, DrawGaussUpsample},
 };
 
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.pos.x < b.pos.x + b.size.x
+        && a.pos.x + a.size.x > b.pos.x
+        && a.pos.y < b.pos.y + b.size.y
+        && a.pos.y + a.size.y > b.pos.y
+}
+fn inflate(r: Rect, by: f64) -> Rect {
+    Rect { pos: r.pos - dvec2(by, by), size: r.size + dvec2(2.0 * by, 2.0 * by) }
+}
+/// How far past a glass surface's rect its blur reads: the downsample kernel,
+/// smooth upsampling and bicubic taps, and a lens's displacement.
+fn blur_support(level: f64, reach: f64) -> f64 {
+    2.0f64.powf(level.ceil() + 2.0) + reach.max(0.0)
+}
+
 #[derive(Default)]
 struct BackdropReuse {
     source: Option<usize>,
-    damage: Vec<Rect>,
+    covered: Vec<Rect>,
 }
 impl BackdropReuse {
     fn needs_checkpoint(&self, rect: Rect, level: f64, reach: f64) -> bool {
@@ -19,22 +34,12 @@ impl BackdropReuse {
         // and how far a lens reads OUTSIDE its rect (the peak displacement
         // plus any chroma), or content moving just past the rim would change
         // what the glass shows without a new checkpoint.
-        let support = 2.0f64.powf(level.ceil() + 2.0) + reach.max(0.0);
-        let sample = Rect {
-            pos: rect.pos - dvec2(support, support),
-            size: rect.size + dvec2(2.0 * support, 2.0 * support),
-        };
-        self.source.is_none()
-            || self.damage.iter().any(|r| {
-                r.pos.x < sample.pos.x + sample.size.x
-                    && r.pos.x + r.size.x > sample.pos.x
-                    && r.pos.y < sample.pos.y + sample.size.y
-                    && r.pos.y + r.size.y > sample.pos.y
-            })
+        let sample = inflate(rect, blur_support(level, reach));
+        self.source.is_none() || self.covered.iter().any(|r| overlaps(*r, sample))
     }
     fn checkpoint(&mut self, source: usize) {
         self.source = Some(source);
-        self.damage.clear();
+        self.covered.clear();
     }
 }
 
@@ -63,6 +68,11 @@ impl BackdropCompositor {
             scene: cx.with_vm(|vm| DrawGaussScene::script_new_with_default(vm)),
         }
     }
+
+    /// The pass the desk scene is recorded into.
+    pub fn scene_pass_id(&self) -> Option<DrawPassId> {
+        self.stacks.first().map(|stack| stack.scene_pass_id())
+    }
     /// Draw all layers in window-local coordinates, including in a cached View.
     pub fn begin(&mut self, cx: &mut Cx2d) {
         self.size = cx.owning_window_or_root_pass_size();
@@ -84,7 +94,7 @@ impl BackdropCompositor {
     }
     /// Record every composited object's coverage, including opaque windows.
     pub fn content(&mut self, rect: Rect) {
-        self.reuse.damage.push(rect);
+        self.reuse.covered.push(rect);
     }
     /// A window capture samples the preceding backdrop and is consumed by the
     /// current scene. Include it between those passes in the dependency chain.
@@ -182,7 +192,7 @@ mod tests {
         let mut reuse = BackdropReuse::default();
         assert!(reuse.needs_checkpoint(rect(0.0, 0.0, 200.0, 200.0), 3.0, 0.0));
         reuse.checkpoint(0);
-        reuse.damage.push(rect(0.0, 0.0, 200.0, 200.0));
+        reuse.covered.push(rect(0.0, 0.0, 200.0, 200.0));
         assert!(!reuse.needs_checkpoint(rect(400.0, 0.0, 200.0, 200.0), 3.0, 0.0));
         assert!(reuse.needs_checkpoint(rect(150.0, 0.0, 200.0, 200.0), 3.0, 0.0));
         reuse.checkpoint(1);
@@ -192,7 +202,7 @@ mod tests {
     fn blur_support_and_opaque_intervening_content_count() {
         let mut reuse = BackdropReuse::default();
         reuse.checkpoint(0);
-        reuse.damage.push(rect(100.0, 100.0, 200.0, 200.0));
+        reuse.covered.push(rect(100.0, 100.0, 200.0, 200.0));
         assert!(reuse.needs_checkpoint(rect(320.0, 100.0, 100.0, 100.0), 3.0, 0.0));
         assert!(!reuse.needs_checkpoint(rect(380.0, 100.0, 100.0, 100.0), 3.0, 0.0));
         assert!(reuse.needs_checkpoint(rect(380.0, 100.0, 100.0, 100.0), 4.5, 0.0));
@@ -201,7 +211,7 @@ mod tests {
     fn a_lens_reaches_past_its_rect_by_its_displacement() {
         let mut reuse = BackdropReuse::default();
         reuse.checkpoint(0);
-        reuse.damage.push(rect(100.0, 100.0, 200.0, 200.0));
+        reuse.covered.push(rect(100.0, 100.0, 200.0, 200.0));
         // Level 1 (mip0): 8 pt of blur support. Content 10 pt beyond that is
         // out of a frosted surface's footprint, but a 10 pt lens reads it.
         assert!(!reuse.needs_checkpoint(rect(318.0, 100.0, 100.0, 100.0), 1.0, 0.0));

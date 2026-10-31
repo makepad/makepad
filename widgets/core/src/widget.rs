@@ -65,7 +65,7 @@ pub trait WidgetNode: ScriptApply {
 
     /// If true, global widget-tree search/flood will not traverse this node's descendants.
     /// The node is still indexed and can still be matched directly by name/path.
-    fn skip_widget_tree_search(&self) -> bool {
+    fn search_scope(&self) -> bool {
         false
     }
     /// Find all widgets whose area contains the given point. Calls the closure for each found widget.
@@ -107,6 +107,7 @@ pub trait WidgetNode: ScriptApply {
     fn visible(&self) -> bool {
         true
     }
+
 
     // Selection API - override for widgets that support text selection.
     // Containers should delegate to children (the derive macro does this
@@ -264,25 +265,59 @@ fn first_interactive_widget_in(
     result
 }
 
-/// One target a widget draws for itself — a bar item, a panel row, a line in
-/// a stack — reported to the test tree as a row of its own, so a test can find
-/// and press it the way it presses a button. The tree only knows widget
-/// nodes; without this, anything drawn in Rust rather than built from child
-/// widgets is invisible to `/snap`.
-#[derive(Clone, Debug)]
-pub struct SnapshotPart {
-    pub id: LiveId,
-    /// The row's type in the tree, e.g. "PillNavItem".
-    pub widget_type: &'static str,
-    /// Window-local layout points, already clipped to what is on screen.
-    pub rect: Rect,
-    pub text: String,
-    /// The part is the current / chosen one.
-    pub selected: bool,
-    pub enabled: bool,
+/// The width part of the default [`Widget::measure_width`], compiled once
+/// instead of once per widget type.
+#[inline(never)]
+fn measure_width_from_walk(
+    over: Option<&crate::width_override::WidthOverride>,
+    walk: &Walk,
+) -> Option<f64> {
+    let width = over.and_then(|o| o.width).unwrap_or(walk.width);
+    let margin = over.and_then(|o| o.margin).unwrap_or(walk.margin);
+    if let Size::Fixed(w) = width {
+        return Some(w + margin.width());
+    }
+    // A Fill takes what the others leave, so what it adds to the row's own
+    // width is its minimum -- nothing, for a plain spacer. Answering None
+    // here would make a row with a spacer in it unpriceable, which is most
+    // rows.
+    if let Size::Fill { min, .. } = width {
+        return Some(min.unwrap_or(0.0) + margin.width());
+    }
+    None
 }
 
 pub trait Widget: WidgetNode {
+    /// The OUTER width this widget would take if it were drawn now with `over`
+    /// in force, its margin included -- or `None` when it cannot say without
+    /// drawing.
+    ///
+    /// `None` is not a failure. It is the honest answer for a widget whose width
+    /// is its children's business, and a caller that needs a number for every
+    /// child reads one `None` as "this rung is unpriced", leaving its cost at
+    /// zero -- which [`crate::button_group::concession_level`] already treats as
+    /// NOT KNOWN and walks one rung per draw, exactly as it does today.
+    ///
+    /// The default answers for a stated width, which is free and correct for
+    /// every widget. Only a `Fit`-width widget needs a body of its own, because
+    /// `Turtle::next_walk_width` is NaN for `Fit` and stays NaN until the subtree
+    /// has drawn.
+    fn measure_width(
+        &mut self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        if over.is_some_and(|o| o.opaque) {
+            return None;
+        }
+        // A block that states `visible` states it, whatever the widget is
+        // wearing at the moment it is asked.
+        if !over.and_then(|o| o.visible).unwrap_or_else(|| self.visible()) {
+            return Some(0.0);
+        }
+        let walk = self.walk(cx.cx);
+        measure_width_from_walk(over, &walk)
+    }
     /// Visit the current active children and report whether this widget can own
     /// cancel input. Return false without visiting when inactive. Override this
     /// for runtime open states or children not represented by derived fields.
@@ -301,6 +336,16 @@ pub trait Widget: WidgetNode {
     }
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
+    /// A collect run's scan (`Event::Scan`, see `makepad_platform::collect`)
+    /// reached this widget: emit what it can need on the web that the run
+    /// does not show by drawing it (text it can show while hidden, open
+    /// text, JS sections, assets). Called once per widget, before its
+    /// `handle_event` gets the same event; the event then reaches every
+    /// child through `children()` whether or not `handle_event` forwards
+    /// it. Widgets that create children from data spawn their variants here
+    /// (see `crate::scan`). Default: nothing.
+    fn scan(&mut self, _cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {}
+
     fn script_call(
         &mut self,
         _vm: &mut ScriptVm,
@@ -316,6 +361,13 @@ pub trait Widget: WidgetNode {
     /// Defaults to true. Override to return false for non-interactive widgets.
     fn is_interactive(&self) -> bool {
         true
+    }
+
+    /// Whether this widget deliberately shows only part of its content
+    /// (scrolls it, or keeps a caret in view): what lies outside its rect is
+    /// out of view by design, not a layout fault. UI checks read this.
+    fn clips_content(&self) -> bool {
+        false
     }
 
     fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
@@ -378,6 +430,22 @@ pub trait Widget: WidgetNode {
         self.draw_all(cx, &mut Scope::empty());
     }
 
+    /// Describe this widget after drawing. The node's buffers are reused between frames.
+    fn semantics(&self, _cx: &Cx, _node: &mut makepad_platform::a11y_tree::Node) {}
+
+    /// Additional semantic nodes for items drawn without a WidgetRef. The key is stable across
+    /// redraws and reordering; the builder supplies the wire id and routes actions to this widget.
+    fn semantics_parts(&self, _cx: &Cx, _out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {}
+
+    fn handle_action(
+        &mut self,
+        _cx: &mut Cx,
+        _action: &makepad_platform::a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> makepad_platform::a11y_tree::ActionResult {
+        makepad_platform::a11y_tree::ActionResult::Unhandled
+    }
+
     fn text(&self) -> String {
         String::new()
     }
@@ -398,33 +466,13 @@ pub trait Widget: WidgetNode {
         false
     }
 
-    /// What a checkbox-like widget reports to the test tree: `Some(true)`
-    /// while it is on, `Some(false)` while it is off. A widget with no
-    /// on/off state leaves the default `None`, and the snapshot then falls
-    /// back to the tree's own downcasts.
-    fn snapshot_checked(&self, _cx: &Cx) -> Option<bool> {
-        None
-    }
 
-    /// What a value-carrying widget reports to the test tree: the value the
-    /// viewer sees, spelled the way the widget shows it (a slider gives its
-    /// readout, an input its text). `None` when the widget carries no value.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        None
-    }
 
-    /// What a selection-carrying widget reports to the test tree: the label
-    /// of the current choice. `None` when nothing is selectable. A reported
-    /// selection also becomes the row's `text`, as a drop-down's does.
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        None
-    }
 
-    /// The targets this widget draws for itself, each reported to the test
-    /// tree as a row after the widget's own. Default: none.
-    fn snapshot_parts(&self, _cx: &Cx) -> Vec<SnapshotPart> {
-        Vec::new()
-    }
+
+
+
+
 
     fn ref_cast_type_id(&self) -> TypeId
     where
@@ -575,13 +623,12 @@ impl dyn Widget {
     }
 }
 
-pub trait WidgetFactory: 'static {
-    fn script_new(&self, vm: &mut ScriptVm) -> Box<dyn Widget>;
-}
+/// Makes a new widget of one registered type.
+pub type WidgetFactory = fn(&mut ScriptVm) -> Box<dyn Widget>;
 
 #[derive(Default)]
 pub struct WidgetRegistry {
-    pub map: BTreeMap<TypeId, (ComponentInfo, Box<dyn WidgetFactory>)>,
+    pub map: BTreeMap<ScriptTypeId, (ComponentInfo, WidgetFactory)>,
 }
 
 impl ComponentRegistry for WidgetRegistry {
@@ -602,17 +649,19 @@ impl ComponentRegistry for WidgetRegistry {
 }
 
 impl WidgetRegistry {
-    pub fn can_script_new(&self, ty: TypeId) -> bool {
+    pub fn can_script_new(&self, ty: ScriptTypeId) -> bool {
         self.map.contains_key(&ty)
     }
 
-    pub fn script_new(&self, vm: &mut ScriptVm, ty: TypeId) -> Option<Box<dyn Widget>> {
-        self.map.get(&ty).map(|(_, fac)| fac.script_new(vm))
+    pub fn script_new(&self, vm: &mut ScriptVm, ty: ScriptTypeId) -> Option<Box<dyn Widget>> {
+        self.map.get(&ty).map(|(_, fac)| fac(vm))
     }
 }
 
 pub struct WidgetRefInner {
     pub widget: Box<dyn Widget>,
+    // Widgets implemented without a source field still retain their override object.
+    a11y_source: Option<ScriptObjectRef>,
 }
 #[derive(Clone, Default)]
 pub struct WidgetRef(Rc<RefCell<Option<WidgetRefInner>>>);
@@ -776,7 +825,7 @@ impl WidgetRef {
         let Some(obj) = value.as_object() else {
             return false;
         };
-        let Some(type_id) = vm.bx.heap.object_type_id(obj) else {
+        let Some(type_id) = vm.heap().object_type_id(obj) else {
             return false;
         };
 
@@ -806,7 +855,7 @@ impl WidgetRef {
     }
 
     pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
-        Self(Rc::new(RefCell::new(Some(WidgetRefInner { widget }))))
+        Self(Rc::new(RefCell::new(Some(WidgetRefInner { widget, a11y_source: None }))))
     }
 
     pub fn downgrade(&self) -> WidgetWeakRef {
@@ -847,13 +896,30 @@ impl WidgetRef {
         scope: &mut Scope,
         sweep_area: Area,
     ) {
+        if let Event::Scan(scan) = event {
+            return crate::scan::scan_widget(self, cx, scan, event, scope);
+        }
         if let Some(inner) = self.0.borrow_mut().as_mut() {
+            semantic_action(&mut *inner.widget, cx, event, scope);
             inner.widget.handle_event_with(cx, event, scope, sweep_area)
         }
     }
 
-    pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    /// The widget's own [`Widget::scan`] and `handle_event` for a scan
+    /// (see `crate::scan::scan_widget`).
+    pub(crate) fn scan_inner(&self, cx: &mut Cx, scan: &ScanEvent, event: &Event, scope: &mut Scope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.scan(cx, scan, scope);
+            inner.widget.handle_event(cx, event, scope);
+        }
+    }
+
+    pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::Scan(scan) = event {
+            return crate::scan::scan_widget(self, cx, scan, event, scope);
+        }
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            semantic_action(&mut *inner.widget, cx, event, scope);
             inner.widget.handle_event(cx, event, scope);
         }
     }
@@ -896,8 +962,7 @@ impl WidgetRef {
             let Some(args_obj) = args.as_object() else {
                 return ScriptAsyncResult::Return(NIL);
             };
-            let trap = vm.bx.threads.cur().trap.pass();
-            let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+            let value = vm.vec_value_trap(args_obj, 0);
             let visible = value
                 .as_bool()
                 .or_else(|| value.as_number().map(|n| n != 0.0));
@@ -940,11 +1005,12 @@ impl WidgetRef {
             .and_then(|r| r.as_ref().map(|w| w.widget.widget_uid()))
     }
 
-    pub fn widget_type_id(&self) -> Option<TypeId> {
+    /// The widget's script type (the WidgetRegistry key).
+    pub fn widget_type_id(&self) -> Option<ScriptTypeId> {
         self.0
             .try_borrow()
             .ok()
-            .and_then(|r| r.as_ref().map(|w| w.widget.ref_cast_type_id()))
+            .and_then(|r| r.as_ref().map(|w| w.widget.script_type_id()))
     }
 
     pub fn area(&self) -> Area {
@@ -1087,11 +1153,11 @@ impl WidgetRef {
         true
     }
 
-    pub fn skip_widget_tree_search(&self) -> bool {
+    pub fn search_scope(&self) -> bool {
         self.0
             .try_borrow()
             .ok()
-            .and_then(|r| r.as_ref().map(|w| w.widget.skip_widget_tree_search()))
+            .and_then(|r| r.as_ref().map(|w| w.widget.search_scope()))
             .unwrap_or(false)
     }
 
@@ -1123,6 +1189,10 @@ impl WidgetRef {
         } else {
             None
         }
+    }
+
+    pub fn clips_content(&self) -> bool {
+        self.0.borrow().as_ref().is_some_and(|inner| inner.widget.clips_content())
     }
 
     pub fn is_interactive(&self) -> bool {
@@ -1285,12 +1355,24 @@ impl WidgetRef {
         );
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
+            let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
+            let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
                 cx.sploded_note_depth(uid.0, depth);
             }
-            let step = inner.widget.draw_walk(cx, scope, walk).step();
+            let step = if cx.a11y.on {
+                semantic_draw(&mut *inner.widget, inner.a11y_source.as_ref(), cx, scope, SemanticDraw::Walk(walk)).step()
+            } else {
+                inner.widget.draw_walk(cx, scope, walk).step()
+            };
+            if cx.text_runs.is_some() {
+                cx.exit_text_owner(text_owner);
+            }
+            if cx.draw_owners.is_some() {
+                cx.exit_draw_owner(draw_owner);
+            }
             cx.exit_nesting_depth();
             if let Some(nd) = step {
                 if nd.is_empty() {
@@ -1308,12 +1390,24 @@ impl WidgetRef {
         );
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
+            let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
+            let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
                 cx.sploded_note_depth(uid.0, depth);
             }
-            inner.widget.draw_walk_all(cx, scope, walk);
+            if cx.a11y.on {
+                let _ = semantic_draw(&mut *inner.widget, inner.a11y_source.as_ref(), cx, scope, SemanticDraw::WalkAll(walk));
+            } else {
+                inner.widget.draw_walk_all(cx, scope, walk);
+            }
+            if cx.text_runs.is_some() {
+                cx.exit_text_owner(text_owner);
+            }
+            if cx.draw_owners.is_some() {
+                cx.exit_draw_owner(draw_owner);
+            }
             cx.exit_nesting_depth();
         }
     }
@@ -1339,12 +1433,22 @@ impl WidgetRef {
     pub fn draw(&mut self, cx: &mut Cx2d, scope: &mut Scope) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
+            let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
+            let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
                 cx.sploded_note_depth(uid.0, depth);
             }
-            let step = inner.widget.draw(cx, scope).step();
+            let step = if cx.a11y.on {
+                semantic_draw(&mut *inner.widget, inner.a11y_source.as_ref(), cx, scope, SemanticDraw::Draw).step()
+            } else { inner.widget.draw(cx, scope).step() };
+            if cx.text_runs.is_some() {
+                cx.exit_text_owner(text_owner);
+            }
+            if cx.draw_owners.is_some() {
+                cx.exit_draw_owner(draw_owner);
+            }
             cx.exit_nesting_depth();
             if let Some(nd) = step {
                 if nd.is_empty() {
@@ -1359,12 +1463,20 @@ impl WidgetRef {
     pub fn draw_unscoped(&mut self, cx: &mut Cx2d) -> DrawStep {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             cx.enter_nesting_depth();
+            let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
+            let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
                 cx.sploded_note_depth(uid.0, depth);
             }
             let step = inner.widget.draw(cx, &mut Scope::empty()).step();
+            if cx.text_runs.is_some() {
+                cx.exit_text_owner(text_owner);
+            }
+            if cx.draw_owners.is_some() {
+                cx.exit_draw_owner(draw_owner);
+            }
             cx.exit_nesting_depth();
             if let Some(nd) = step {
                 if nd.is_empty() {
@@ -1409,6 +1521,18 @@ impl WidgetRef {
         true
     }
 
+    /// What this child would be worth on a row, with `over` in force.
+    ///
+    /// A row holds its children as refs, and the ref's inner is private, so
+    /// without this a caller cannot reach the widget's own answer at all.
+    pub fn measure_width(
+        &self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        self.0.borrow_mut().as_mut()?.widget.measure_width(cx, over)
+    }
+
     pub fn text(&self) -> String {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.text()
@@ -1450,37 +1574,19 @@ impl WidgetRef {
         true
     }
 
-    pub fn snapshot_checked(&self, cx: &Cx) -> Option<bool> {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.snapshot_checked(cx);
-        }
-        None
-    }
 
-    pub fn snapshot_value(&self, cx: &Cx) -> Option<String> {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.snapshot_value(cx);
-        }
-        None
-    }
 
-    pub fn snapshot_selected(&self, cx: &Cx) -> Option<String> {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.snapshot_selected(cx);
-        }
-        None
-    }
 
-    pub fn snapshot_parts(&self, cx: &Cx) -> Vec<SnapshotPart> {
-        if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.widget.snapshot_parts(cx);
-        }
-        Vec::new()
-    }
+
+
+
+
 
     pub fn draw_all(&self, cx: &mut Cx2d, scope: &mut Scope) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.widget.draw_all(cx, scope);
+            if cx.a11y.on { let _ = semantic_draw(&mut *inner.widget, inner.a11y_source.as_ref(), cx, scope, SemanticDraw::All); }
+            else { inner.widget.draw_all(cx, scope); }
+            return;
         }
     }
 
@@ -1504,60 +1610,74 @@ impl WidgetRef {
         }
     }
 
+    // `borrow`/`borrow_mut`/`cast_inner*` are called with ~160 widget types;
+    // the RefCell borrow and the type check run in the non-generic
+    // `*_dyn` bodies, the generic shells only cast the pointer.
+
+    #[inline(never)]
+    fn borrow_mut_dyn(&self, type_id: TypeId) -> Option<std::cell::RefMut<'_, dyn Widget + 'static>> {
+        std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| match inner.as_mut() {
+            Some(inner) if inner.widget.ref_cast_type_id() == type_id => Some(&mut *inner.widget),
+            _ => None,
+        })
+        .ok()
+    }
+
+    #[inline(never)]
+    fn borrow_dyn(&self, type_id: TypeId) -> Option<std::cell::Ref<'_, dyn Widget + 'static>> {
+        std::cell::Ref::filter_map(self.0.borrow(), |inner| match inner.as_ref() {
+            Some(inner) if inner.widget.ref_cast_type_id() == type_id => Some(&*inner.widget),
+            _ => None,
+        })
+        .ok()
+    }
+
+    #[inline(never)]
+    fn cast_inner_mut_dyn(&self, type_id: TypeId) -> Option<std::cell::RefMut<'_, dyn Any + 'static>> {
+        std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| {
+            inner.as_mut().and_then(|inner| inner.widget.cast_inner_any_mut(type_id))
+        })
+        .ok()
+    }
+
+    #[inline(never)]
+    fn cast_inner_dyn(&self, type_id: TypeId) -> Option<std::cell::Ref<'_, dyn Any + 'static>> {
+        std::cell::Ref::filter_map(self.0.borrow(), |inner| {
+            inner.as_ref().and_then(|inner| inner.widget.cast_inner_any(type_id))
+        })
+        .ok()
+    }
+
     pub fn borrow_mut<T: 'static + Widget>(&self) -> Option<std::cell::RefMut<'_, T>> {
-        if let Ok(ret) = std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| {
-            if let Some(inner) = inner.as_mut() {
-                inner.widget.downcast_mut::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
+        let widget = self.borrow_mut_dyn(TypeId::of::<T>())?;
+        // SAFETY: `borrow_mut_dyn` checked the concrete type is `T`, as
+        // `<dyn Widget>::downcast_mut` does.
+        Some(std::cell::RefMut::map(widget, |w| unsafe {
+            &mut *(w as *mut dyn Widget as *mut T)
+        }))
     }
 
     pub fn cast_inner_mut<T: 'static>(&self) -> Option<std::cell::RefMut<'_, T>> {
-        if let Ok(ret) = std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| {
-            if let Some(inner) = inner.as_mut() {
-                inner.widget.cast_inner_mut::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
+        std::cell::RefMut::filter_map(self.cast_inner_mut_dyn(TypeId::of::<T>())?, |inner| {
+            inner.downcast_mut::<T>()
+        })
+        .ok()
     }
 
     pub fn borrow<T: 'static + Widget>(&self) -> Option<std::cell::Ref<'_, T>> {
-        if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), |inner| {
-            if let Some(inner) = inner.as_ref() {
-                inner.widget.downcast_ref::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
+        let widget = self.borrow_dyn(TypeId::of::<T>())?;
+        // SAFETY: `borrow_dyn` checked the concrete type is `T`, as
+        // `<dyn Widget>::downcast_ref` does.
+        Some(std::cell::Ref::map(widget, |w| unsafe {
+            &*(w as *const dyn Widget as *const T)
+        }))
     }
 
     pub fn cast_inner<T: 'static>(&self) -> Option<std::cell::Ref<'_, T>> {
-        if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), |inner| {
-            if let Some(inner) = inner.as_ref() {
-                inner.widget.cast_inner::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
+        std::cell::Ref::filter_map(self.cast_inner_dyn(TypeId::of::<T>())?, |inner| {
+            inner.downcast_ref::<T>()
+        })
+        .ok()
     }
 
     fn script_apply(
@@ -1572,7 +1692,7 @@ impl WidgetRef {
 
         // Get the TypeId from the value if it's an object with a registered type
         let type_id = if let Some(obj) = value.as_object() {
-            vm.bx.heap.object_type_id(obj)
+            vm.heap().object_type_id(obj)
         } else {
             None
         };
@@ -1581,12 +1701,15 @@ impl WidgetRef {
         if let Some(component) = &mut *inner {
             if let Some(type_id) = type_id {
                 // We have a type_id from the value - check if it matches
-                if component.widget.ref_cast_type_id() != type_id {
+                if component.widget.script_type_id() != type_id {
                     // Type changed, drop old component
                     *inner = None;
                 } else {
                     // Type matches, apply to existing widget and redraw
                     component.widget.script_apply(vm, apply, scope, value);
+                    if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
+                        component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
+                    }
                     let cx = vm.cx_mut();
                     component.widget.redraw(cx);
                     return;
@@ -1594,6 +1717,9 @@ impl WidgetRef {
             } else {
                 // No type_id in value, apply to existing widget anyway
                 component.widget.script_apply(vm, apply, scope, value);
+                    if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
+                        component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
+                    }
                 let cx = vm.cx_mut();
                 component.widget.redraw(cx);
                 return;
@@ -1610,13 +1736,16 @@ impl WidgetRef {
             let new_widget = components.get::<WidgetRegistry>().script_new(vm, type_id);
 
             if let Some(new_widget) = new_widget {
-                *inner = Some(WidgetRefInner { widget: new_widget });
+                *inner = Some(WidgetRefInner { widget: new_widget, a11y_source: None });
                 if type_id == crate::Root::script_type_id_static() {
                     set_ui_after_apply = true;
                 }
                 // Apply value to the new widget and redraw
                 if let Some(component) = &mut *inner {
                     component.widget.script_apply(vm, apply, scope, value);
+                    if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
+                        component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
+                    }
                     let cx = vm.cx_mut();
                     component.widget.redraw(cx);
                 }
@@ -1626,6 +1755,25 @@ impl WidgetRef {
         if set_ui_after_apply {
             vm.with_cx_mut(|cx| set_ui_root(cx, self));
         }
+    }
+
+    /// `Apply::Animate` of `value` onto the widget this ref holds, without the
+    /// unconditional `redraw` of [`WidgetRef::script_apply`]: shader instance
+    /// values land in the GPU buffer directly, and a caller that moved layout
+    /// fields redraws itself. Nothing is created: an empty ref (or one that is
+    /// already borrowed, such as the calling widget's own ref from inside its
+    /// `handle_event`) answers `false` and is left untouched.
+    pub(crate) fn script_apply_animate(&self, vm: &mut ScriptVm, value: ScriptValue) -> bool {
+        let Ok(mut inner) = self.0.try_borrow_mut() else {
+            return false;
+        };
+        let Some(component) = inner.as_mut() else {
+            return false;
+        };
+        component
+            .widget
+            .script_apply(vm, &Apply::Animate, &mut Scope::empty(), value);
+        true
     }
 }
 
@@ -1656,6 +1804,17 @@ impl ScriptApply for WidgetRef {
             inner.widget.script_source()
         } else {
             ScriptObject::ZERO
+        }
+    }
+
+    /// The heap the widget's `#[source]` lives in; 0 when unknown, empty or
+    /// borrowed right now (never panics, unlike `script_source`).
+    fn script_source_heap_key(&self) -> usize {
+        match self.0.try_borrow() {
+            Ok(inner) => inner
+                .as_ref()
+                .map_or(0, |inner| inner.widget.script_source_heap_key()),
+            Err(_) => 0,
         }
     }
 }
@@ -2126,34 +2285,35 @@ pub trait WidgetRegister {
     fn register_widget(vm: &mut ScriptVm) -> ScriptValue;
 }
 
+/// What [`register_widget!`] expands to: registers `T`'s factory under its name.
+#[doc(hidden)]
+pub fn register_widget_type<T: Widget + ScriptNew>(cx: &mut Cx, type_name: &str) {
+    fn new_widget<T: Widget + ScriptNew>(vm: &mut ScriptVm) -> Box<dyn Widget> {
+        Box::new(T::script_new(vm))
+    }
+    register_widget_factory(cx, T::script_type_id_static(), type_name, new_widget::<T>);
+}
+
+#[inline(never)]
+fn register_widget_factory(cx: &mut Cx, type_id: ScriptTypeId, type_name: &str, factory: WidgetFactory) {
+    crate::widget_async::ensure_widget_async_hooks_registered(cx);
+    let name = LiveId::from_str_with_lut(type_name).unwrap();
+    cx.components
+        .get_or_create::<WidgetRegistry>()
+        .map
+        .insert(type_id, (ComponentInfo { name }, factory));
+}
+
 #[macro_export]
 macro_rules! register_widget {
-    ( $ cx: expr, $ ty: ty) => {{
-        struct Factory();
-        impl WidgetFactory for Factory {
-            fn script_new(&self, vm: &mut ScriptVm) -> Box<dyn Widget> {
-                Box::new(<$ty>::script_new(vm))
-            }
-        }
-
-        let cx = $cx;
-        $crate::widget_async::ensure_widget_async_hooks_registered(cx);
-        let type_id = std::any::TypeId::of::<$ty>();
-        let name = $crate::LiveId::from_str_with_lut(stringify!($ty)).unwrap();
-
-        cx.components
-            .get_or_create::<$crate::WidgetRegistry>()
-            .map
-            .insert(
-                type_id,
-                ($crate::ComponentInfo { name }, Box::new(Factory())),
-            );
-    }};
+    ( $ cx: expr, $ ty: ty) => {
+        $crate::widget::register_widget_type::<$ty>($cx, stringify!($ty))
+    };
 }
 
 /// Applies the `field` draw of a widget's `value` to `twin` with its `clock` fn swapped for its
 /// `clock_fn`, so a second shader of that draw keeps every override the field gets.
-pub(crate) fn apply_draw_twin<T: ScriptApply + 'static>(
+pub(crate) fn apply_draw_twin<T: ScriptApply + ScriptNew>(
     vm: &mut ScriptVm,
     apply: &Apply,
     scope: &mut Scope,
@@ -2162,25 +2322,25 @@ pub(crate) fn apply_draw_twin<T: ScriptApply + 'static>(
     clock_fn: LiveId,
     twin: &mut T,
 ) {
-    let draw = match vm.bx.heap.value_for_apply(value, field.into(), apply) {
+    let draw = match vm.heap_mut().value_for_apply(value, field.into(), apply) {
         Some(draw) => draw.as_object(),
         // Like the derive, a field the widget never sets comes from its type's default.
         None if apply.is_new() || apply.is_reload() => {
-            vm.bx.heap.type_default_for_id(ScriptTypeId::of::<T>())
+            vm.heap().type_default_for_id(<T as ScriptNew>::script_type_id_static())
         }
         None => None,
     };
     let Some(draw) = draw else {
         return;
     };
-    let object = vm.bx.heap.new_with_proto(draw.into());
+    let object = vm.heap_mut().new_with_proto(draw.into());
     // An eval only fills a draw's own entries, so the twin needs the eval's own values too.
     if apply.is_eval() {
-        vm.bx.heap.merge_object(object, draw, NoTrap);
+        vm.heap_mut().merge_object(object, draw, NoTrap);
     }
-    let clock = vm.bx.heap.value(draw, clock_fn.into(), NoTrap);
-    if clock.as_object().is_some_and(|f| vm.bx.heap.is_fn(f)) {
-        vm.bx.heap.set_value(object, id!(clock).into(), clock, NoTrap);
+    let clock = vm.heap().value(draw, clock_fn.into(), NoTrap);
+    if clock.as_object().is_some_and(|f| vm.heap().is_fn(f)) {
+        vm.heap_mut().set_value(object, id!(clock).into(), clock, NoTrap);
     }
     twin.script_apply(vm, apply, scope, object.into());
 }
@@ -2188,6 +2348,28 @@ pub(crate) fn apply_draw_twin<T: ScriptApply + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_less_widgets_keep_generic_semantic_overrides() {
+        crate::test_cx::on_test_cx(|| {
+            let mut cx = crate::test_cx::checkout_test_cx(crate::script_mod);
+            let icon = cx.with_vm(|vm| {
+                let value = crate::script_eval!(vm, { use mod.widgets.* AppIcon{a11y: {role: "button" label: "Go" hidden: true live: @Assertive}} });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let inner = icon.0.borrow();
+            let inner = inner.as_ref().unwrap();
+            assert_eq!(inner.widget.script_source(), ScriptObject::ZERO);
+            assert!(inner.a11y_source.is_some());
+            let mut node = a11y_tree::Node::default();
+            inner.widget.semantics(&cx, &mut node);
+            crate::semantics::apply_overrides(&*inner.widget, inner.a11y_source.as_ref(), &cx, &mut node);
+            assert_eq!(node.role, a11y_tree::Role::Button);
+            assert_eq!(node.name, "Go");
+            assert_eq!(node.live, a11y_tree::Live::Assertive);
+            assert!(node.states.contains(a11y_tree::States::HIDDEN));
+        });
+    }
 
     struct InnerWidget {
         uid: WidgetUid,
@@ -2273,4 +2455,62 @@ mod tests {
 
         assert_eq!(widget.cast_inner::<InnerWidget>().unwrap().value, 11);
     }
+}
+
+fn semantic_action(widget: &mut dyn Widget, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    if let Event::A11yAction(req) = event {
+        if cx.a11y.action_owner(req.node).uid() == widget.widget_uid().0 {
+            let result = widget.handle_action(cx, req, scope);
+            cx.a11y.record_action(req.req, result);
+        }
+    }
+}
+
+enum SemanticDraw { Walk(Walk), WalkAll(Walk), Draw, All }
+
+fn semantic_draw(widget: &mut (dyn Widget + 'static), source: Option<&ScriptObjectRef>, cx: &mut Cx2d, scope: &mut Scope, draw: SemanticDraw) -> DrawStep {
+    let list = cx.draw_list_stack.last().copied();
+    let token = cx.a11y.begin_node(widget.widget_uid().0, list);
+    // End at every return, including a DrawStep. Resumption reopens the same uid;
+    // the builder merges its children within this frame, so it never closes a token twice.
+    // A leaf yield also retains the attachment context for rows the caller fills between entries.
+    let step = match draw {
+        SemanticDraw::Walk(walk) => widget.draw_walk(cx, scope, walk),
+        SemanticDraw::WalkAll(walk) => { widget.draw_walk_all(cx, scope, walk); DrawStep::done() }
+        SemanticDraw::Draw => widget.draw(cx, scope),
+        SemanticDraw::All => { widget.draw_all(cx, scope); DrawStep::done() }
+    };
+    if step.as_ref().err().is_some_and(|target| target.is_empty()) {
+        cx.a11y.suspend_node(token);
+    }
+    if cx.a11y.window_root(token) == 0 {
+        // Containers outside all windows have no semantic node; avoid transient class/path strings.
+        cx.a11y.end_node(token, Default::default(), Area::Empty);
+        return step;
+    }
+    let mut node = cx.a11y.take_node(token);
+    let needs_metadata = node.id.is_none();
+    node.states.remove(a11y_tree::States::HIDDEN);
+    widget.semantics(cx, &mut node);
+    if needs_metadata {
+        let registry = cx.components.get::<WidgetRegistry>();
+        if let Some((info, _)) = registry.map.get(&widget.script_type_id()) {
+            node.class = crate::widget_tree::live_id_token(info.name);
+        }
+        node.path = cx.widget_tree().semantic_path(widget.widget_uid(), WidgetUid(cx.a11y.window_root(token)));
+    }
+    if let Some(rect) = makepad_platform::a11y::snapshot_rect(&widget.area(), cx) {
+        node.bounds = makepad_platform::a11y::semantic_rect(rect);
+    }
+    crate::semantics::apply_overrides(widget, source, cx, &mut node);
+    if !widget.visible() { node.states.insert(a11y_tree::States::HIDDEN); }
+    let target = crate::semantics::label_target(widget, source, cx);
+    cx.a11y.set_label_for(token, target);
+    let mut parts = Vec::new();
+    widget.semantics_parts(cx, &mut parts);
+    for (key, parent, part) in parts {
+        cx.a11y.set_part(token, key, parent, part, || WidgetUid::new().0);
+    }
+    cx.a11y.end_node(token, node, widget.area());
+    step
 }

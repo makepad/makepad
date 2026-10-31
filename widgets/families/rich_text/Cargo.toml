@@ -14,3 +14,4 @@ makepad-html = { path = "../../../libs/html", version = "1.0.0" }
 unicode-segmentation = { version = "1.12.0", path = "../../../libs/unicode/unicode-segmentation" }
 pulldown-cmark = { version = "0.12.2", path = "../../../libs/pulldown-cmark", default-features = false, features = ["simd"] }
 makepad-latex-math = { path = "../../../libs/latex_math", version = "0.1.0" }
+makepad-base64 = { path = "../../../libs/base64", version = "1.0.0" }

@@ -1,0 +1,3329 @@
+use mod.prelude.widgets_internal.*
+use mod.sdf.Cap
+
+// Bling: white Carrara marble set in polished gold, after the "marble / bling
+// light" pictures. Every face is drawn in true points (one device pixel is
+// `px`), and every shadow and light falls OUTSIDE the layout box: the quad
+// is grown in `vertex`, the templates that throw a shadow stop clipping, and
+// no padding is spent on either. Three materials make every control:
+// MARBLE, a white stone with soft grey veins that meander, part and rejoin
+// at several scales (broad soft clouds, veins of varied width, a few fine
+// dark threads), calm under the content and stronger toward the window's
+// frame; GOLD, polished, a round bead that catches a bright specular line on
+// the side toward the light (from the top, a little from the left) and a
+// warm darker band on the side away from it; and GEMS, cut stones with flat
+// facets, a deep coloured interior and a few crisp star glints, set in gold.
+// Lamps are LEDs as gems in gold settings. Small gold scrolls stand only in
+// the corners of the surfaces and of the window, never over words.
+
+// ---------------------------------------------------------------- helpers
+
+// One device pixel in points.
+let mb_px = fn(dpi: float) -> float {
+    return 1.0 / max(dpi, 0.5)
+}
+
+// An edge rounded to a whole device pixel in window space, handed back in
+// box space: a hairline on it lands on one pixel row.
+let mb_snap = fn(v: float, o: float, px: float) -> float {
+    return Finish.snap(o + v, px) - o
+}
+
+// Distance from p to the segment a..b, in points.
+let mb_seg = fn(p: vec2, a: vec2, b: vec2) -> float {
+    let pa = p - a
+    let ba = b - a
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return length(pa - ba * t)
+}
+
+// Which way the outline of a rounded box faces at p.
+let mb_normal = fn(p: vec2, c: vec2, h: vec2, r: float) -> vec2 {
+    let s = vec2(step(0.0, p.x - c.x) * 2.0 - 1.0, step(0.0, p.y - c.y) * 2.0 - 1.0)
+    let q = abs(p - c) - (h - vec2(r, r))
+    let qc = max(q, vec2(0.0, 0.0))
+    var n = vec2(0.0, s.y)
+    if q.x > q.y {
+        n = vec2(s.x, 0.0)
+    }
+    if q.x > 0.0 && q.y > 0.0 {
+        n = qc / max(length(qc), 0.0001) * s
+    }
+    return n
+}
+
+// Anything drawn in a grown quad fades out over its last points, so a soft
+// shadow never ends on a hard edge where the quad stops.
+let mb_fade = fn(pos: vec2, size: vec2, m: float) -> float {
+    let q = pos * (size + vec2(2.0 * m, 2.0 * m))
+    let e = min(min(q.x, q.y), min(size.x + 2.0 * m - q.x, size.y + 2.0 * m - q.y))
+    return smoothstep(0.0, 3.0, e)
+}
+
+// A seed from a box's size, so two faces of different sizes show different
+// stone (never the position: a face that scrolls must not change).
+let mb_seed = fn(size: vec2) -> vec2 {
+    return vec2(fract(size.x * 0.1373) * 997.0 + size.y * 3.7, fract(size.y * 0.2113) * 613.0 + size.x * 1.3)
+}
+
+// ---------------------------------------------------------------- palette
+
+// The stone's mean white (#efeee9), for a face that fades to it.
+let mb_ground = fn() -> vec3 {
+    return vec3(0.937, 0.933, 0.914)
+}
+// The warm grey-brown every shadow is cast in; laid at a coverage.
+let mb_shade = fn() -> vec3 {
+    return vec3(0.25, 0.20, 0.13)
+}
+// The ink, dark grey-brown (#3a2e1c).
+let mb_ink = fn() -> vec3 {
+    return vec3(0.227, 0.180, 0.110)
+}
+// The key light in the screen plane, toward the light: from the top, a
+// little from the left.
+let mb_lv = fn() -> vec2 {
+    return vec2(-0.419, -0.908)
+}
+// The stones, measured on the pictures: emerald (#079846 lit, #0b5028 in
+// the deep), ruby, a golden citrine, sapphire, amethyst, a white diamond,
+// and the two smoky quartzes of the second and third buttons.
+let mb_emerald = fn() -> vec3 {
+    return vec3(0.03, 0.56, 0.27)
+}
+let mb_ruby = fn() -> vec3 {
+    return vec3(0.76, 0.06, 0.16)
+}
+let mb_citrine = fn() -> vec3 {
+    return vec3(0.88, 0.55, 0.12)
+}
+// The citrine as a cut stone shows it: its body a golden yellow (what the
+// gem renderer absorbs to).
+let mb_citrine_gem = fn() -> vec3 {
+    return vec3(0.98, 0.78, 0.16)
+}
+let mb_sapphire = fn() -> vec3 {
+    return vec3(0.14, 0.32, 0.86)
+}
+let mb_amethyst = fn() -> vec3 {
+    return vec3(0.56, 0.26, 0.82)
+}
+let mb_diamond = fn() -> vec3 {
+    return vec3(0.86, 0.875, 0.905)
+}
+let mb_champagne = fn() -> vec3 {
+    return vec3(0.66, 0.53, 0.37)
+}
+let mb_smoky = fn() -> vec3 {
+    return vec3(0.40, 0.36, 0.30)
+}
+
+// ---------------------------------------------------------------- gold
+
+// Polished gold by the light it catches, 0..1, measured on the pictures'
+// bars: the deep brown-gold of a face turned away (#2e2008), the warm darker
+// band (#5a4214), the shade (#8a6a2c), the body (#b8964e), the bright
+// (#e2c886) and the specular white-gold (#fff4cc).
+let mb_gold = fn(l: float) -> vec3 {
+    let x = clamp(l, 0.0, 1.0)
+    var c = mix(vec3(0.180, 0.125, 0.031), vec3(0.353, 0.259, 0.078), smoothstep(0.0, 0.2, x))
+    c = mix(c, vec3(0.541, 0.416, 0.173), smoothstep(0.2, 0.4, x))
+    c = mix(c, vec3(0.722, 0.588, 0.306), smoothstep(0.4, 0.6, x))
+    c = mix(c, vec3(0.886, 0.784, 0.525), smoothstep(0.6, 0.8, x))
+    return mix(c, vec3(1.0, 0.957, 0.800), smoothstep(0.8, 1.0, x))
+}
+
+// What polished metal reflects, by how far a face is turned toward the key
+// light (`e` -1..1, 0 facing the eye): the body flat on, a warm darker band
+// just past flat on the side away, a narrow bright specular strip on the
+// side toward it.
+let mb_env = fn(e: float) -> float {
+    let x = clamp(e, -1.0, 1.0)
+    var l = 0.5 + 0.30 * x
+    l = l - 0.24 * exp(-(x + 0.42) * (x + 0.42) / 0.035)
+    l = l + 0.48 * exp(-(x - 0.55) * (x - 0.55) / 0.018)
+    return clamp(l, 0.0, 1.0)
+}
+
+// A round bead of gold: `u` 0 at its outer edge to 1 at its inner, `n` the
+// way its outline faces. Its outer half faces out and its inner half in:
+// the side toward the light carries the bright specular line, the side
+// away the warm dark band; its crest always holds a polished streak, and
+// both its edges roll away dark, so a wide rim reads chunky.
+let mb_bead = fn(u: float, n: vec2) -> float {
+    let t = cos(clamp(u, 0.0, 1.0) * PI)
+    var l = mb_env(t * dot(n, mb_lv()) * 0.95)
+    l = l + 0.12 * exp(-t * t / 0.05)
+    return l - 0.20 * smoothstep(0.80, 1.0, abs(t))
+}
+
+// A gold rim `w` points wide inside the outline at distance `d` (negative
+// inside), its light varied a little along its run so a long rim is never
+// one flat colour.
+let mb_rim = fn(d: float, w: float, n: vec2, p: vec2) -> vec3 {
+    let u = clamp(-d / max(w, 0.01), 0.0, 1.0)
+    let l = mb_bead(u, n) + 0.06 * (Finish.noise(p / 6.0) - 0.5)
+    return mb_gold(l)
+}
+
+// A DOUBLE RIM `w` points wide: a broad outer bead (0.6 of it), a dark
+// groove, and a slimmer inner bead, as the pictures' field frames.
+let mb_rim2 = fn(d: float, w: float, n: vec2, p: vec2, px: float) -> vec3 {
+    let wo = w * 0.60
+    let wg = max(w * 0.12, px)
+    let wi = max(w - wo - wg, 0.3)
+    let jit = 0.06 * (Finish.noise(p / 6.0) - 0.5)
+    let co = mb_gold(mb_bead(clamp(-d / wo, 0.0, 1.0), n) + jit)
+    let ci = mb_gold(mb_bead(clamp((-d - wo - wg) / wi, 0.0, 1.0), n) + jit)
+    var col = mix(co, mb_gold(0.06), Finish.cover(d + wo, px))
+    return mix(col, ci, Finish.cover(d + wo + wg, px))
+}
+
+// A gold face: a polished bar, flat in the middle with a soft reflection of
+// a bright window across its upper third, its border `bw` rolling over to
+// the outline (`d` its distance, `n` the way it faces).
+let mb_goldface = fn(p: vec2, c: vec2, h: vec2, d: float, n: vec2, bw: float) -> vec3 {
+    let y = (p.y - c.y) / max(h.y, 1.0)
+    let edge = 1.0 - smoothstep(0.0, bw, -d)
+    var e = -0.16 * y
+    e = mix(e, dot(n, mb_lv()) * 0.85, edge)
+    var l = mb_env(e)
+    l = l + 0.11 * exp(-(y + 0.42) * (y + 0.42) / 0.04) * (1.0 - edge)
+    l = l + 0.04 * (Finish.noise(p / vec2(14.0, 3.0)) - 0.5)
+    return mb_gold(l)
+}
+
+// One gold wire of an ornament: its coverage and light from the signed
+// distance `e` across its middle, `hw` half its width, `n` the way +e faces
+// and `lv` the light in the wire's own frame.
+let mb_wire = fn(e: float, hw: float, n: vec2, lv: vec2, px: float) -> vec2 {
+    let a = Finish.cover(abs(e) - hw, px)
+    let t = clamp(e / max(hw, 0.01), -1.0, 1.0)
+    return vec2(a, mb_env(t * dot(n, lv) * 0.95))
+}
+let mb_wire_max = fn(a: vec2, b: vec2) -> vec2 {
+    if b.x > a.x {
+        return b
+    }
+    return a
+}
+// A spiral wire about `c`, `pitch` apart, from radius `r0` to `r1`.
+let mb_curl = fn(m: vec2, c: vec2, pitch: float, r0: float, r1: float, hw: float, lv: vec2, px: float) -> vec2 {
+    let q = m - c
+    let r = length(q)
+    let ang = atan2(q.y, q.x)
+    let e = (fract(r / pitch - ang / (2.0 * PI) + 0.5) - 0.5) * pitch
+    let w = smoothstep(r0 - 0.3, r0 + 0.5, r) * (1.0 - smoothstep(r1 - 0.6, r1 + 0.2, r))
+    let g = mb_wire(e, hw, q / max(r, 0.01), lv, px)
+    return vec2(g.x * w, g.y)
+}
+// A vine wire along an edge: a wave `amp` either side of `y0`, a wavelength
+// `wl` long, from `x0` to `x1`, thinning and calming as it runs.
+let mb_vine = fn(m: vec2, x0: float, x1: float, y0: float, amp: float, wl: float, hw: float, lv: vec2, px: float) -> vec2 {
+    let k = 2.0 * PI / wl
+    let run = clamp((m.x - x0) / max(x1 - x0, 1.0), 0.0, 1.0)
+    let fade = smoothstep(x0, x0 + 1.0, m.x) * (1.0 - smoothstep(x1 - 2.0, x1, m.x))
+    let A = amp * (1.0 - 0.5 * run)
+    let yc = y0 + A * sin((m.x - x0) * k)
+    let dy = A * k * cos((m.x - x0) * k)
+    let nl = sqrt(1.0 + dy * dy)
+    let g = mb_wire((m.y - yc) / nl, hw * mix(1.0, 0.65, run), vec2(-dy, 1.0) / nl, lv, px)
+    return vec2(g.x * fade, g.y)
+}
+// The scroll of one corner at scale `s`, in corner space (`m` points along
+// the edges from the corner; folded about the diagonal, so both edges carry
+// the same vine): a volute round the corner's eye (where a small stone is
+// set), a vine along each edge with a curl hanging from each crest and a
+// bud closing it, a short arc across the corner. `lv` the light in corner
+// space. All of it within nine points of the edges and the corner.
+let mb_corner = fn(m0: vec2, s: float, lv0: vec2, px: float) -> vec2 {
+    var m = m0
+    var lv = lv0
+    if m.y > m.x {
+        m = vec2(m0.y, m0.x)
+        lv = vec2(lv0.y, lv0.x)
+    }
+    var g = mb_curl(m, vec2(7.0, 7.0) * s, 1.45 * s, 2.0 * s, 4.4 * s, 0.48 * s, lv, px)
+    g = mb_wire_max(g, mb_vine(m, 11.0 * s, 40.0 * s, 5.9 * s, 1.3 * s, 9.0 * s, 0.50 * s, lv, px))
+    g = mb_wire_max(g, mb_curl(m, vec2(15.6 * s, 8.3 * s), 0.85 * s, 0.25 * s, 1.95 * s, 0.36 * s, lv, px))
+    g = mb_wire_max(g, mb_curl(m, vec2(24.6 * s, 4.3 * s), 0.75 * s, 0.25 * s, 1.5 * s, 0.32 * s, lv, px))
+    g = mb_wire_max(g, mb_curl(m, vec2(33.6 * s, 7.4 * s), 0.65 * s, 0.2 * s, 1.3 * s, 0.30 * s, lv, px))
+    // A bud at the vine's end.
+    let bd = length(m - vec2(41.0 * s, 5.9 * s)) - 0.95 * s
+    let bn = (m - vec2(41.0 * s, 5.9 * s)) / max(length(m - vec2(41.0 * s, 5.9 * s)), 0.01)
+    g = mb_wire_max(g, vec2(Finish.cover(bd, px), mb_env(dot(bn, lv) * 0.8)))
+    return g
+}
+
+// ---------------------------------------------------------------- marble
+
+// THE VEINS' FIELD: value noise laid along the veins' general drift `dv`
+// (a unit direction; the drift runs from the upper right down to the lower
+// left), `sa` points along and `sb` across, the coordinates first warped by
+// two more fields (`warp` how far), so its level lines wander, branch and
+// rejoin like the veins of a stone rather than running as parallel strokes.
+// Its value in .x and its gradient's size per point in .y, measured a point
+// either way: a vein's distance in points is its value over that.
+let mb_vf = fn(q: vec2, dv: vec2, sa: float, sb: float, warp: float, seed: vec2) -> float {
+    var s = vec2(dot(q, dv) / sa, dot(q, vec2(-dv.y, dv.x)) / sb) + seed
+    if warp > 0.001 {
+        let w = vec2(Finish.fbm(s * 0.55 + vec2(4.3, 1.7)), Finish.fbm(s * 0.55 + vec2(9.1, 6.2))) - vec2(0.5, 0.5)
+        s = s + w * warp
+    }
+    return Finish.fbm(s)
+}
+let mb_vfg = fn(q: vec2, dv: vec2, sa: float, sb: float, warp: float, seed: vec2) -> vec2 {
+    let f = mb_vf(q, dv, sa, sb, warp, seed)
+    let fx = mb_vf(q + vec2(1.0, 0.0), dv, sa, sb, warp, seed)
+    let fy = mb_vf(q + vec2(0.0, 1.0), dv, sa, sb, warp, seed)
+    return vec2(f, max(length(vec2(fx - f, fy - f)), 0.00015))
+}
+
+// THE GROUND'S MARBLE at `q` (points in window space), white Carrara:
+// - a polished white with broad pale grey clouds drifting along the run;
+// - the main veins, a level line of the warped field: where the field is
+//   flat they spread into a soft diffuse band, everywhere a darker inner
+//   band round a soft core of varied width broken into dabs, fading in and
+//   out along their run, grey with stretches warmed to an old gold;
+// - forks, where the next level runs close by and parts from it;
+// - a finer network that branches off them, and a few fine threads close
+//   by them.
+// `k` the veins' strength: calm under the content, full at the frame.
+let mb_marble = fn(q: vec2, px: float, k: float) -> vec3 {
+    let white = vec3(0.966, 0.963, 0.952)
+    let dv = vec2(-0.62, 0.785)
+    let cl = mb_vf(q, dv, 600.0, 260.0, 1.6, vec2(1.3, 8.2))
+    var col = mix(white, vec3(0.872, 0.868, 0.855), smoothstep(0.48, 0.82, cl) * (0.5 + 0.5 * k) * 0.6)
+    let cl2 = mb_vf(q, dv, 180.0, 90.0, 1.2, vec2(6.1, 2.4))
+    col = mix(col, vec3(0.900, 0.896, 0.884), smoothstep(0.55, 0.85, cl2) * 0.4 * k)
+    // The main veins.
+    let n1 = mb_vfg(q, dv, 430.0, 190.0, 2.2, vec2(0.0, 0.0))
+    let v = abs(n1.x - 0.5)
+    let d1 = v / n1.y
+    let pres = smoothstep(0.25, 0.7, mb_vf(q, dv, 160.0, 90.0, 0.8, vec2(21.0, 4.0)))
+    let tone = smoothstep(0.45, 0.75, Finish.noise(q / 380.0 + vec2(31.0, 7.0)))
+    let dab = 0.6 + 0.4 * Finish.noise(q / 7.0 + vec2(3.0, 1.0))
+    let vc = mix(vec3(0.52, 0.51, 0.48), vec3(0.66, 0.55, 0.32), tone)
+    col = mix(col, vec3(0.80, 0.795, 0.77), clamp(exp(-v / 0.020) * (0.25 + 0.75 * pres) * 0.6 * k, 0.0, 1.0))
+    col = mix(col, vec3(0.70, 0.685, 0.65), clamp(exp(-d1 / 3.5) * pres * 0.5 * k, 0.0, 1.0))
+    let wn = Finish.noise(q / 70.0 + vec2(1.7, 3.3))
+    let hw = 0.4 + 2.2 * smoothstep(0.3, 1.0, wn) * pres
+    let core = (1.0 - smoothstep(hw - 0.5, hw + 1.2, d1)) * pres * dab
+    col = mix(col, vc, clamp(core * 0.85 * k, 0.0, 1.0))
+    // A fork: the next level, close by, where the vein frays.
+    let dc = abs(n1.x - 0.53) / n1.y
+    let fray = smoothstep(0.5, 0.8, Finish.noise(q / 140.0 + vec2(8.0, 1.0))) * pres
+    col = mix(col, vec3(0.66, 0.65, 0.62), clamp((1.0 - smoothstep(0.0, 1.1, dc)) * fray * 0.55 * k, 0.0, 1.0))
+    // The branches: a finer network shown off the main veins and in a few
+    // patches of its own.
+    let n2 = mb_vfg(q, vec2(-0.3, 0.95), 210.0, 130.0, 1.4, vec2(7.3, 2.9))
+    let d2 = abs(n2.x - 0.5) / n2.y
+    let near = exp(-d1 / 40.0) * (0.3 + 0.7 * pres)
+    var m2 = clamp(near + smoothstep(0.66, 0.9, Finish.noise(q / 300.0 + vec2(11.0, 5.0))) * 0.5, 0.0, 1.0)
+    m2 = m2 * smoothstep(0.2, 0.6, mb_vf(q, dv, 90.0, 60.0, 0.6, vec2(2.0, 9.0)))
+    // Where a field is nearly flat its level lines close into small rings,
+    // which no marble has: a branch or a thread fades out there.
+    m2 = m2 * smoothstep(0.35 / 130.0, 0.9 / 130.0, n2.y)
+    col = mix(col, vec3(0.80, 0.795, 0.77), clamp(exp(-abs(n2.x - 0.5) / 0.015) * m2 * 0.35 * k, 0.0, 1.0))
+    col = mix(col, vec3(0.60, 0.59, 0.56), clamp((1.0 - smoothstep(-0.2, 1.0, d2 - 0.25)) * m2 * 0.55 * k * dab, 0.0, 1.0))
+    // The fine threads, close by the veins.
+    let n3 = mb_vfg(q, dv, 90.0, 60.0, 0.9, vec2(3.1, 17.7))
+    let d3 = abs(n3.x - 0.5) / n3.y
+    let m3 = clamp(exp(-d1 / 14.0) * 0.8 * pres, 0.0, 1.0) * smoothstep(0.3, 0.6, Finish.noise(q / 40.0 + vec2(5.0, 2.0))) * smoothstep(0.4 / 60.0, 1.0 / 60.0, n3.y)
+    col = mix(col, vec3(0.50, 0.49, 0.46), Finish.cover(d3 - 0.2, px) * m3 * 0.5 * k)
+    // The polish: a crystalline grain, a device pixel fine.
+    let g = Finish.grain(q / px, 0.006)
+    return col + vec3(g, g, g)
+}
+
+// THE STONE OF A FACE: the same marble, lighter work for a small face: a
+// soft cloud, and now and then a soft vein with its diffuse band, fading
+// in and out; `k` its strength, kept low under the words a face carries.
+let mb_stone = fn(q: vec2, px: float, k: float) -> vec3 {
+    let white = vec3(0.968, 0.965, 0.955)
+    let dv = vec2(-0.62, 0.785)
+    let cl = mb_vf(q, dv, 260.0, 120.0, 1.2, vec2(2.3, 7.1))
+    var col = mix(white, vec3(0.895, 0.890, 0.875), smoothstep(0.5, 0.85, cl) * 0.6 * k)
+    let n = mb_vfg(q, dv, 300.0, 140.0, 1.6, vec2(4.1, 9.3))
+    let v = abs(n.x - 0.5)
+    let d = v / n.y
+    let pres = smoothstep(0.3, 0.7, Finish.noise(q / 90.0 + vec2(13.0, 2.0)))
+    col = mix(col, vec3(0.83, 0.825, 0.80), clamp(exp(-v / 0.02) * 0.5 * k, 0.0, 1.0))
+    let hw = 0.3 + 1.0 * Finish.noise(q / 40.0 + vec2(5.1, 1.2))
+    col = mix(col, vec3(0.62, 0.605, 0.57), (1.0 - smoothstep(hw - 0.4, hw + 1.0, d)) * pres * 0.6 * k)
+    let g = Finish.grain(q / px, 0.005)
+    return col + vec3(g, g, g)
+}
+
+// ---------------------------------------------------------------- gems
+
+// A stone's colour by the light a facet sends back, 0..1: its deep
+// interior (the colour squared, darker), its body, a paler fire and white.
+let mb_gemcol = fn(ink: vec3, v: float) -> vec3 {
+    let deep = ink * ink * 0.55
+    let bright = mix(ink, vec3(1.0, 1.0, 1.0), 0.5)
+    var c = mix(deep, ink, smoothstep(0.0, 0.5, v))
+    c = mix(c, bright, smoothstep(0.5, 0.86, v))
+    return mix(c, vec3(1.0, 1.0, 1.0), smoothstep(0.88, 1.0, v))
+}
+
+// A star glint: a hot white core and two crossed rays `s` points long, a
+// device pixel thin, and a fainter diagonal pair.
+let mb_glint = fn(q: vec2, s: float, px: float) -> float {
+    let ax = abs(q.x)
+    let ay = abs(q.y)
+    let w = max(0.045 * s, 0.35 * px)
+    let ray = exp(-ay / w) * max(1.0 - ax / s, 0.0) + exp(-ax / w) * max(1.0 - ay / s, 0.0)
+    let dg = vec2(abs(q.x + q.y), abs(q.x - q.y)) * 0.7071
+    let diag = exp(-dg.x / w) * max(1.0 - dg.y / (0.45 * s), 0.0) + exp(-dg.y / w) * max(1.0 - dg.x / (0.45 * s), 0.0)
+    let core = exp(-(ax * ax + ay * ay) / max(0.025 * s * s, px * px))
+    return clamp(ray * ray * 0.95 + diag * diag * 0.45 + core, 0.0, 1.0)
+}
+
+// A WHITE DIAMOND, a round brilliant seen from above, radius `R`, turned by
+// `spin`. Its facets are flat planes with straight edges, each ONE tone out
+// of four (near black, a grey-blue, a light grey, near white), set so that
+// neighbours jump between them, nudged by the key light and a little
+// chance: the regular octagonal table (about half the stone across), eight
+// star facets standing on its edges, eight kites from the table's corners
+// to the girdle, and sixteen upper girdle facets in pairs along the rim.
+// The table is one flat facet too, a clear glass a breath under white. A
+// few white facets flash a pale spectral colour (orange, blue or green);
+// every facet edge is a crisp hairline (light on a dark facet, grey-blue on
+// a light one) and the girdle a bright line. Laid out in one sector (an
+// eighth, its middle on a table edge's middle) folded about that middle,
+// so every edge is a straight line. A small stone keeps the table and eight
+// crown facets.
+let mb_dia_tone = fn(L: float) -> vec3 {
+    var c = vec3(0.13, 0.14, 0.18)
+    c = mix(c, vec3(0.44, 0.48, 0.57), step(0.25, L))
+    c = mix(c, vec3(0.79, 0.81, 0.86), step(0.5, L))
+    return mix(c, vec3(0.985, 0.99, 1.0), step(0.75, L))
+}
+// How much a facet facing the screen direction `d` turns to the key light.
+let mb_facing = fn(d: float) -> float {
+    return cos(d) * mb_lv().x + sin(d) * mb_lv().y
+}
+let mb_brilliant_white = fn(q: vec2, R: float, spin: float, px: float) -> vec3 {
+    let st = PI / 4.0
+    let t2 = 0.41421356
+    let r = length(q) / max(R, 0.3)
+    let a = atan2(q.y, q.x) - spin + 8.0 * PI
+    let k = floor(a / st)
+    let am = (a - k * st) - st * 0.5
+    let side = step(0.0, am)
+    let par = k - 2.0 * floor(k * 0.5)
+    let th = k * st + st * 0.5 + spin
+    let x = r * cos(am)
+    let y = abs(r * sin(am))
+    // The table's edge (x = tc, its corner at vy), the star's apex at sx,
+    // the kite's foot on the girdle at (gx, gy).
+    let tc = 0.48965
+    let vy = 0.20282
+    let sx = 0.80
+    let gx = 0.92388
+    let gy = 0.38268
+    let ystar = vy * (sx - x) / (sx - tc)
+    let csg = (gx - sx) * y - gy * (x - sx)
+    let kb = k + side - 8.0 * floor((k + side) / 8.0)
+    let small = step(R, 6.0)
+    var L = 0.5
+    var fid = 0.0
+    var e = abs(x - tc) * R
+    if x < tc {
+        // The table: one flat facet, clear and bright.
+        L = 2.0
+        fid = 100.0
+    } else {
+        if small > 0.5 {
+            // A small stone: eight crown facets, alternately lit and dark.
+            L = mix(0.86, 0.30, par) + 0.15 * mb_facing(th)
+            fid = 20.0 + k
+            e = min(e, (st * 0.5 - abs(am)) * r * R)
+        } else {
+            if y < ystar {
+                // A star facet.
+                L = mix(0.86, 0.42, par) + 0.15 * mb_facing(th) + 0.12 * (Finish.hash(vec2(20.0 + k, 7.7)) - 0.5)
+                fid = 20.0 + k
+            } else {
+                if csg > 0.0 {
+                    // A kite, its tone stepping round the stone.
+                    let k4 = kb - 4.0 * floor(kb * 0.25)
+                    var kbase = 0.16
+                    kbase = mix(kbase, 0.66, step(0.5, k4))
+                    kbase = mix(kbase, 0.40, step(1.5, k4))
+                    kbase = mix(kbase, 0.88, step(2.5, k4))
+                    L = kbase + 0.16 * mb_facing(kb * st + spin) + 0.12 * (Finish.hash(vec2(40.0 + kb, 3.3)) - 0.5)
+                    fid = 40.0 + kb
+                } else {
+                    // An upper girdle facet.
+                    L = mix(0.30 + 0.2 * par, 0.80 - 0.25 * par, side) + 0.15 * mb_facing(th + (side * 2.0 - 1.0) * st * 0.25) + 0.2 * (Finish.hash(vec2(60.0 + 2.0 * k + side, 9.1)) - 0.5)
+                    fid = 60.0 + 2.0 * k + side
+                    e = min(e, y * R)
+                }
+            }
+            let nst = sqrt(vy * vy + (sx - tc) * (sx - tc))
+            e = min(e, abs((y - ystar) * (sx - tc)) / nst * R + 9.0 * step(sx + 0.02, x))
+            let nsg = sqrt((gx - sx) * (gx - sx) + gy * gy)
+            e = min(e, abs(csg) / nsg * R + 9.0 * step(y, ystar))
+        }
+    }
+    L = L + 0.03 * (r - 0.6)
+    var col = mb_dia_tone(L)
+    // The table's own tone: a clear glass a breath under white.
+    col = mix(col, vec3(0.915, 0.928, 0.962), step(1.5, L))
+    // Fire: a few lit facets flash orange, blue or green.
+    let hf = Finish.hash(vec2(fid, 13.3))
+    let hue = floor(Finish.hash(vec2(fid, 5.1)) * 3.0)
+    var fcol = vec3(1.0, 0.72, 0.42)
+    fcol = mix(fcol, vec3(0.55, 0.75, 1.0), step(0.5, hue))
+    fcol = mix(fcol, vec3(0.62, 0.95, 0.66), step(1.5, hue))
+    col = mix(col, col * (0.62 + 0.38 * fcol), step(0.93, hf) * step(0.75, L) * step(L, 1.5) * (1.0 - step(R, 6.0)))
+    // The facet edges: crisp hairlines, light along a dark facet and a
+    // grey-blue along a light one; the girdle a bright line.
+    let line = 1.0 - smoothstep(0.0, px * 0.9, e)
+    let lum = dot(col, vec3(0.3, 0.5, 0.2))
+    let ecol = mix(min(col + vec3(0.32, 0.32, 0.32), vec3(1.0, 1.0, 1.0)), vec3(0.56, 0.60, 0.69), step(0.7, lum))
+    col = mix(col, ecol, line * 0.6)
+    col = mix(col, vec3(1.0, 1.0, 1.0), smoothstep(0.955, 0.99, r) * 0.75)
+    return col
+}
+// The star glints of a white diamond, at facet corners that turn with it:
+// a table corner, a star's apex and a kite's foot; one on a small stone.
+let mb_dia_glints = fn(q: vec2, R: float, spin: float, px: float) -> float {
+    let st = PI / 4.0
+    let a1 = spin + 7.0 * st
+    let a2 = spin + 3.5 * st
+    let a3 = spin + 1.0 * st
+    var g = mb_glint(q - vec2(cos(a1), sin(a1)) * (0.53 * R), max(0.55 * R, 2.6), px)
+    if R > 6.0 {
+        g = g + mb_glint(q - vec2(cos(a2), sin(a2)) * (0.80 * R), 0.28 * R, px) * 0.85
+        g = g + mb_glint(q - vec2(cos(a3), sin(a3)) * (0.96 * R), 0.22 * R, px) * 0.7
+    }
+    return clamp(g, 0.0, 1.0)
+}
+
+// A ROUND BRILLIANT in colour (the emerald knobs): the octagonal table
+// showing the pavilion through it as wedges that alternate dark and light,
+// eight star facets, eight kites and sixteen upper girdle facets, each facet
+// a flat light by how it tilts to the key light and a little chance;
+// hairlines of light along the facet edges. A white stone is drawn as the
+// diamond above. `q` from the centre. Colour only.
+let mb_brilliant = fn(q: vec2, R: float, ink: vec3, spin: float, px: float) -> vec3 {
+    if max(ink.x, max(ink.y, ink.z)) - min(ink.x, min(ink.y, ink.z)) < 0.15 {
+        return mb_brilliant_white(q, R, spin, px)
+    }
+    let lv = mb_lv()
+    let r = length(q) / max(R, 0.5)
+    let a = atan2(q.y, q.x) - spin + 8.0 * PI
+    let st = PI / 4.0
+    let k = floor(a / st)
+    let am = (a - k * st) - st * 0.5
+    let fa = abs(am) / (st * 0.5)
+    let roct = r * cos(am) / cos(st * 0.5)
+    let rstar = mix(0.80, 0.53, fa)
+    let rug = mix(0.80, 1.0, fa)
+    // A white stone is all brilliance, light facets beside near black ones;
+    // a coloured one keeps its colour, its facets closer together.
+    let chroma = max(ink.x, max(ink.y, ink.z)) - min(ink.x, min(ink.y, ink.z))
+    let colored = smoothstep(0.15, 0.4, chroma)
+    let base = mix(0.64, 0.42, colored)
+    let amp = mix(0.62, 0.36, colored)
+    var v = 0.5
+    var edge = 10.0
+    var hid = 0.0
+    if roct < 0.53 {
+        // The pavilion seen through the table: sixteen wedges in three
+        // rings, alternating, each its own small chance.
+        let wk = floor(a / (st * 0.5))
+        let ring = floor(r / 0.18)
+        let alt = fract((wk + ring) * 0.5) * 2.0
+        hid = wk * 7.0 + ring
+        v = base + amp * ((alt - 0.5) * 0.95 + 0.4 * (Finish.hash(vec2(hid, 3.1)) - 0.5))
+        v = mix(v, base + 0.1, smoothstep(0.07, 0.0, r))
+        let ew = abs(fract(a / (st * 0.5) + 0.5) - 0.5) * (st * 0.5) * r * R
+        let er = abs(fract(r / 0.18 + 0.5) - 0.5) * 0.18 * R
+        edge = min(min((0.53 - roct) * R, ew), er)
+    } else {
+        var dir = k * st + st * 0.5
+        var tilt = 0.45
+        var id = 20.0 + k
+        if r >= rstar && r < rug {
+            let kb = k + step(0.0, am)
+            dir = kb * st
+            tilt = 0.62
+            id = 40.0 + kb
+        }
+        if r >= rug {
+            let side = step(0.0, am)
+            dir = k * st + st * 0.5 + (side * 2.0 - 1.0) * st * 0.25
+            tilt = 0.85
+            id = 60.0 + 2.0 * k + side
+        }
+        // The two halves of a facet pair either side of its middle line
+        // tilt apart a little, so the crown reads as a star of light and
+        // dark triangles.
+        let half = step(0.0, am) * 2.0 - 1.0
+        let face = tilt * dot(vec2(cos(dir + spin + half * st * 0.2), sin(dir + spin + half * st * 0.2)), lv)
+        hid = id * 2.0 + step(0.0, am)
+        v = base + amp * (0.95 * face + 0.22 * half + 0.5 * (Finish.hash(vec2(hid, 7.7)) - 0.5))
+        edge = min(min(abs(roct - 0.53), abs(r - rstar) * 0.85), abs(r - rug) * 0.85) * R
+        if r >= rug {
+            edge = min(edge, abs(am) * r * R)
+        }
+    }
+    v = clamp(v, 0.0, 1.0)
+    var col = mb_gemcol(ink, v)
+    // A white stone runs from a near black grey through a cool grey to white.
+    var wc = mix(vec3(0.17, 0.18, 0.22), vec3(0.60, 0.62, 0.68), smoothstep(0.0, 0.5, v))
+    wc = mix(wc, vec3(1.0, 1.0, 1.0), smoothstep(0.5, 0.92, v))
+    col = mix(wc, col, colored)
+    // A white stone's fire: a few bright facets throw a spectral tint.
+    let fh = Finish.hash(vec2(hid, 13.3))
+    let fire = mix(vec3(1.0, 0.86, 0.62), vec3(0.66, 0.80, 1.0), step(0.5, fract(fh * 7.0)))
+    col = mix(col, col * fire, (1.0 - colored) * step(0.86, fh) * smoothstep(0.55, 0.8, v) * 0.3)
+    let line = 1.0 - smoothstep(0.0, max(px * 0.9, 0.035 * R), edge)
+    col = mix(col, mix(col, vec3(1.0, 1.0, 1.0), 0.5), line * mix(0.4, 0.3, colored))
+    return col
+}
+
+// ---------------------------------------------------------------- the gem renderer
+
+// THE GEMS ARE RAY TRACED. A cut stone is a convex polyhedron (every facet a
+// plane n.p <= D), seen from above by an eye several stone radii over it. A
+// view ray is refracted in at the crown (a diamond bends light by 2.42),
+// bounces off the facets inside a few times by total internal reflection,
+// and where it can leave it is refracted out with a slightly different index
+// per colour channel, so the colours part a little: the stone's fire. What
+// leaves is lit by a studio (below): soft boxes of varied brightness with
+// dark seams, the key light brighter at the upper left, spokes of light and
+// shade over the eye. A coloured stone takes its colour by absorbing along
+// the path inside it (Beer's law). Each pass is bounded: a few bounces, each
+// testing one folded wedge of planes. Units: the girdle's radius (a step
+// cut's half its smaller side) is 1, z toward the eye.
+
+// A ROUND BRILLIANT, eight-fold: a table 0.565 out at its corners; eight
+// bezel facets at 34.5 degrees reaching the girdle; eight stars at 22.5
+// degrees on the table's edges; sixteen upper girdle facets at 42 degrees;
+// below, eight pavilion mains at 40.8 degrees and sixteen lower girdle
+// facets at 42.5. Folded by its symmetry into one wedge (0 the middle of a
+// bezel, 22.5 degrees the middle of a star), where one plane of each family
+// is the one that counts, so a ray is tested against six planes and the
+// girdle's cylinder, not fifty-seven.
+let mb_gfold = fn(v: vec2) -> vec2 {
+    let st = PI / 4.0
+    let a = atan2(v.y, v.x)
+    let k = floor(a / st + 0.5)
+    return vec2(k, step(0.0, a - k * st) * 2.0 - 1.0)
+}
+let mb_gto = fn(v: vec3, f: vec2) -> vec3 {
+    let a = -f.x * PI / 4.0
+    let c = cos(a)
+    let s = sin(a)
+    return vec3(v.x * c - v.y * s, (v.x * s + v.y * c) * f.y, v.z)
+}
+let mb_gfrom = fn(v: vec3, f: vec2) -> vec3 {
+    let a = f.x * PI / 4.0
+    let c = cos(a)
+    let s = sin(a)
+    let y = v.y * f.y
+    return vec3(v.x * c - y * s, v.x * s + y * c, v.z)
+}
+// One plane's exit: kept in `best` (normal, distance) when it is nearer.
+let mb_gplane = fn(best: vec4, p: vec3, d: vec3, n: vec3, dd: float) -> vec4 {
+    let nd = dot(n, d)
+    let t = (dd - dot(n, p)) / max(nd, 0.00001)
+    let take = step(0.00001, nd) * step(t, best.w)
+    return mix(best, vec4(n, t), take)
+}
+// The crown over (x, y): its outward normal and its height.
+let mb_gcrown = fn(xy: vec2) -> vec4 {
+    let f = mb_gfold(xy)
+    let w = mb_gto(vec3(xy.x, xy.y, 0.0), f)
+    var best = vec4(0.0, 0.0, 1.0, 0.298967)
+    let zb = (0.566406 - 0.566406 * w.x) / 0.824126
+    best = mix(best, vec4(0.566406, 0.0, 0.824126, zb), step(zb, best.w))
+    let zs = (0.475967 - 0.353553 * w.x - 0.146447 * w.y) / 0.923880
+    best = mix(best, vec4(0.353553, 0.146447, 0.923880, zs), step(zs, best.w))
+    let zu = (0.669131 - 0.656273 * w.x - 0.130541 * w.y) / 0.743145
+    best = mix(best, vec4(0.656273, 0.130541, 0.743145, zu), step(zu, best.w))
+    return vec4(mb_gfrom(best.xyz, f), best.w)
+}
+// Where a ray inside the brilliant leaves it: the outward normal there and
+// the distance. The wedge is taken where the ray is guessed to leave and
+// the guess refined (`passes` in all); each pass can only shorten the
+// distance.
+// Every loop of the tracer counts to a number it is handed, not to one
+// written in it: a counted loop is compiled once and run, where a written
+// one is copied out pass by pass, and the copies made a page of stones take
+// seconds to compile.
+let mb_gexit = fn(p: vec3, d: vec3, passes: float) -> vec4 {
+    var best = vec4(0.0, 0.0, 1.0, 1000.0)
+    var g = p + d * 0.6
+    for i in 0..passes {
+        let f = mb_gfold(g.xy)
+        let pw = mb_gto(p, f)
+        let dw = mb_gto(d, f)
+        var loc = vec4(0.0, 0.0, 1.0, 1000.0)
+        loc = mb_gplane(loc, pw, dw, vec3(0.0, 0.0, 1.0), 0.298967)
+        loc = mb_gplane(loc, pw, dw, vec3(0.566406, 0.0, 0.824126), 0.566406)
+        loc = mb_gplane(loc, pw, dw, vec3(0.353553, 0.146447, 0.923880), 0.475967)
+        loc = mb_gplane(loc, pw, dw, vec3(0.656273, 0.130541, 0.743145), 0.669131)
+        loc = mb_gplane(loc, pw, dw, vec3(0.653421, 0.0, -0.756995), 0.653421)
+        loc = mb_gplane(loc, pw, dw, vec3(0.654071, 0.169154, -0.737277), 0.675590)
+        // The girdle, a cylinder of radius 1.
+        let a = max(dot(dw.xy, dw.xy), 0.000001)
+        let b = dot(pw.xy, dw.xy)
+        let c = dot(pw.xy, pw.xy) - 1.0
+        let tc = (sqrt(max(b * b - a * c, 0.0)) - b) / a
+        let hc = pw.xy + dw.xy * tc
+        let hn = hc / max(length(hc), 0.0001)
+        loc = mix(loc, vec4(hn.x, hn.y, 0.0, tc), step(0.000001, dot(dw.xy, dw.xy)) * step(tc, loc.w))
+        best = mix(best, vec4(mb_gfrom(loc.xyz, f), loc.w), step(loc.w, best.w))
+        g = p + d * best.w
+    }
+    return vec4(best.xyz, clamp(best.w, 0.0, 4.0))
+}
+
+// THE STUDIO, by the direction `e` leaving the stone (in the stone's frame,
+// `spin` turning it back to the room's): rows of soft boxes from 18 degrees
+// up to 72, nine degrees tall and fourteen wide, every row half a box
+// along, each box dim, bright or very bright by chance, with dark seams; the
+// key side (upper left) brighter; over 72 degrees a ceiling of spokes of
+// light and shade radiating from the eye, the eye itself a small dark patch
+// straight overhead (`eyed` how dark); below the boxes broad light and dark
+// panels round the horizon, lighter where the light comes up from under the
+// stone.
+let mb_genv = fn(e: vec3, spin: float, eyed: float) -> float {
+    let d2r = PI / 180.0
+    let az = atan2(e.y, e.x) + spin
+    let el = atan2(e.z, length(e.xy))
+    let rf = (el - 18.0 * d2r) / (9.0 * d2r)
+    let ri = floor(rf)
+    let fe = rf - ri
+    let u = az / (14.0 * d2r) + ri * 0.5
+    let ci = floor(u)
+    let fa = u - ci
+    let seam = clamp((0.5 - abs(fa - 0.5) - 0.12) / 0.05, 0.0, 1.0) * clamp((0.5 - abs(fe - 0.5) - 0.10) / 0.06, 0.0, 1.0)
+    let h = Finish.hash(vec2(ci, ri + 3.0))
+    let key = 0.7 + 0.6 * clamp(cos(az + 135.0 * d2r), 0.0, 1.0)
+    var b = 0.3
+    b = mix(b, 1.4, step(0.22, h))
+    b = mix(b, 3.0, step(0.55, h))
+    var v = 0.47 + b * key * seam
+    // Below the boxes, broad panels round the horizon, light and dark.
+    let pl = az / (20.0 * d2r) + 0.25
+    let low = mix(0.35, 1.5, step(pl - floor(pl), 0.5)) * (0.8 + 0.4 * clamp(-e.z, 0.0, 1.0))
+    v = mix(v, low, step(el, 18.0 * d2r))
+    // The ceiling: spokes of light and shade radiating from the eye.
+    let sp = az / (15.0 * d2r)
+    let ceil = mix(0.55, 2.2, step(sp - floor(sp), 0.5))
+    v = mix(v, ceil, step(72.0 * d2r, el))
+    return mix(v, mix(v, 0.25, eyed), step(0.996, e.z))
+}
+
+// A direction refracted through a surface of normal `n` (facing against
+// it), the indices' ratio `eta`; .w 0 where it cannot pass (total internal
+// reflection).
+let mb_grefr = fn(d: vec3, n: vec3, eta: float) -> vec4 {
+    let c = -dot(d, n)
+    let k = 1.0 - eta * eta * (1.0 - c * c)
+    let thru = step(0.0, k)
+    return vec4((eta * d + (eta * c - sqrt(max(k, 0.0))) * n) * thru, thru)
+}
+let mb_grefl = fn(d: vec3, n: vec3) -> vec3 {
+    return d - 2.0 * dot(d, n) * n
+}
+
+// What a stone of the colour `ink` absorbs per unit of path inside it: the
+// channels its hue lacks, and evenly as much as it is dark (a smoky stone).
+let mb_gabsorb = fn(ink: vec3) -> vec3 {
+    let mx = max(max(ink.x, ink.y), max(ink.z, 0.02))
+    let dk = -log(mx) * 0.5
+    return (vec3(1.0, 1.0, 1.0) - ink / mx) * 1.6 + vec3(dk, dk, dk)
+}
+
+// A stone's body colour for the renderer: a colourless ink (the sheet's
+// diamond white) absorbs nothing.
+let mb_gink = fn(ink: vec3) -> vec3 {
+    let ch = max(ink.x, max(ink.y, ink.z)) - min(ink.x, min(ink.y, ink.z))
+    return mix(vec3(1.0, 1.0, 1.0), ink, step(0.15, ch))
+}
+
+// A ROUND BRILLIANT at `q` (points from its centre), radius `R`, turned by
+// `spin`; `ink` its body colour (white: a diamond, no absorption), `nb` the
+// internal bounces followed (four for a big stone, two for a small one).
+// Colour only, tone mapped.
+let mb_gem = fn(q: vec2, R: float, ink: vec3, spin: float, nb: float) -> vec3 {
+    // Outside the girdle there is no stone: nothing is traced there, so no
+    // ray can run off to infinity in a pixel the stone does not cover.
+    var res = vec3(0.5, 0.5, 0.5)
+    if dot(q, q) < R * R * 1.1 {
+        let cs = cos(-spin)
+        let sn = sin(-spin)
+        let x = (q.x * cs - q.y * sn) / max(R, 0.3)
+        let y = (q.x * sn + q.y * cs) / max(R, 0.3)
+        let cr = mb_gcrown(vec2(x, y))
+        var p = vec3(x, y, cr.w)
+        let n = cr.xyz
+        // The eye eight radii over the stone and a little off its axis, in the
+        // stone's frame.
+        let eye = vec3(0.10 * cs + 0.18 * sn, 0.10 * sn - 0.18 * cs, 8.0)
+        var d = normalize(p - eye)
+        let f0 = 0.172395
+        let tint = step(0.15, max(ink.x, max(ink.y, ink.z)) - min(ink.x, min(ink.y, ink.z)))
+        let fi = (f0 + (1.0 - f0) * pow(1.0 - clamp(-dot(d, n), 0.0, 1.0), 5.0)) * mix(1.0, 0.4, tint)
+        var col = vec3(1.0, 1.0, 1.0) * (fi * mb_genv(mb_grefl(d, n), spin, 1.0))
+        var thr = vec3(1.0, 1.0, 1.0) * (1.0 - fi)
+        d = mb_grefr(d, n, 1.0 / 2.419).xyz
+        let absorb = mb_gabsorb(ink)
+        for b in 0..nb {
+            let h = mb_gexit(p, d, 2.0)
+            p = p + d * h.w
+            thr = thr * exp(-absorb * h.w)
+            let nh = h.xyz
+            let fe = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(d, nh), 0.0, 1.0), 5.0)
+            let rr = mb_grefr(d, -nh, 2.414)
+            let rg = mb_grefr(d, -nh, 2.419)
+            let rb = mb_grefr(d, -nh, 2.425)
+            let lit = vec3(mb_genv(normalize(rr.xyz + vec3(0.0, 0.0, 0.00001)), spin, 1.0) * rr.w, mb_genv(normalize(rg.xyz + vec3(0.0, 0.0, 0.00001)), spin, 1.0) * rg.w, mb_genv(normalize(rb.xyz + vec3(0.0, 0.0, 0.00001)), spin, 1.0) * rb.w)
+            col = col + thr * (1.0 - fe) * lit
+            thr = thr * mix(1.0, fe, rg.w)
+            d = mb_grefl(d, nh)
+        }
+        col = col + thr * 0.6
+        res = vec3(1.0, 1.0, 1.0) - exp(-col * 1.5)
+    }
+    return res
+}
+// The same with `ns` samples along the device pixel's diagonal, for a big
+// stone.
+let mb_gem_aa = fn(q: vec2, R: float, ink: vec3, spin: float, px: float, nb: float, ns: float) -> vec3 {
+    var acc = vec3(0.0, 0.0, 0.0)
+    for k in 0..ns {
+        let t = (float(k) + 0.5) / max(ns, 1.0) - 0.5
+        acc = acc + mb_gem(q + vec2(t, t) * px, R, ink, spin, nb)
+    }
+    return acc / max(ns, 1.0)
+}
+
+// A STEP CUT (an emerald cut, or a baguette when long and narrow), its
+// girdle the box `g` either side of its middle with its corners cut `cc`
+// (units of its half height or width, whichever is less): round the table
+// two crown steps, at 42 and 26 degrees, 0.22 and 0.18 wide; below, three
+// pavilion steps at 55, 45 and 35 degrees, 0.25, 0.25 wide and the rest.
+// Folded by its two mirrors into one quarter, where three directions count
+// (its long side, its short side and the cut corner), six planes each.
+// `dens` scales what the stone absorbs along its path (a pale quartz less
+// than an emerald), `veil` darkens its table for words laid on it.
+let mb_sdir = fn(best: vec4, p: vec3, d: vec3, u: vec2, gg: float) -> vec4 {
+    var b = best
+    // The girdle's side.
+    b = mb_gplane(b, p, d, vec3(u.x, u.y, 0.0), gg)
+    // The crown steps.
+    b = mb_gplane(b, p, d, vec3(u.x * 0.669131, u.y * 0.669131, 0.743145), 0.669131 * gg)
+    b = mb_gplane(b, p, d, vec3(u.x * 0.438371, u.y * 0.438371, 0.898794), 0.438371 * (gg - 0.22) + 0.898794 * 0.198089)
+    // The pavilion steps.
+    b = mb_gplane(b, p, d, vec3(u.x * 0.819152, u.y * 0.819152, -0.573576), 0.819152 * gg)
+    b = mb_gplane(b, p, d, vec3(u.x * 0.707107, u.y * 0.707107, -0.707107), 0.707107 * (gg - 0.25) + 0.707107 * 0.357037)
+    b = mb_gplane(b, p, d, vec3(u.x * 0.573576, u.y * 0.573576, -0.819152), 0.573576 * (gg - 0.5) + 0.819152 * 0.607037)
+    return b
+}
+// The crown's height over a quarter point `w` for one direction: the lower
+// of its two steps.
+let mb_scrown = fn(best: vec4, w: vec2, u: vec2, gg: float) -> vec4 {
+    var b = best
+    let s = dot(w, u)
+    let z1 = (0.669131 * gg - 0.669131 * s) / 0.743145
+    b = mix(b, vec4(u.x * 0.669131, u.y * 0.669131, 0.743145, z1), step(z1, b.w))
+    let z2 = (0.438371 * (gg - 0.22) + 0.898794 * 0.198089 - 0.438371 * s) / 0.898794
+    return mix(b, vec4(u.x * 0.438371, u.y * 0.438371, 0.898794, z2), step(z2, b.w))
+}
+// Where a ray inside the step cut leaves it: the quarter taken where it is
+// guessed to leave, refined (`passes` in all).
+let mb_sexit = fn(p: vec3, d: vec3, g: vec2, gd: float, passes: float) -> vec4 {
+    let ud = vec2(0.707107, 0.707107)
+    var best = vec4(0.0, 0.0, 1.0, 1000.0)
+    var gq = p + d * 0.6
+    for i in 0..passes {
+        let s2 = vec2(step(0.0, gq.x) * 2.0 - 1.0, step(0.0, gq.y) * 2.0 - 1.0)
+        let pw = vec3(p.x * s2.x, p.y * s2.y, p.z)
+        let dw = vec3(d.x * s2.x, d.y * s2.y, d.z)
+        var loc = vec4(0.0, 0.0, 1.0, 1000.0)
+        loc = mb_gplane(loc, pw, dw, vec3(0.0, 0.0, 1.0), 0.285881)
+        loc = mb_sdir(loc, pw, dw, vec2(1.0, 0.0), g.x)
+        loc = mb_sdir(loc, pw, dw, vec2(0.0, 1.0), g.y)
+        loc = mb_sdir(loc, pw, dw, ud, gd)
+        best = mix(best, vec4(loc.x * s2.x, loc.y * s2.y, loc.z, loc.w), step(loc.w, best.w))
+        gq = p + d * best.w
+    }
+    return best
+}
+let mb_gstep = fn(q: vec2, hh: vec2, ink: vec3, nb: float, veil: float, dens: float) -> vec3 {
+    // Outside its box there is no stone: nothing is traced there.
+    var stone = vec3(0.5, 0.5, 0.5)
+    if abs(q.x) < hh.x + 1.0 && abs(q.y) < hh.y + 1.0 {
+        let sc = max(min(hh.x, hh.y), 0.5)
+        let g = hh / sc
+        let cc = 0.12
+        let gd = (g.x + g.y - cc) * 0.707107
+        let ud = vec2(0.707107, 0.707107)
+        let x = q / sc
+        // The crown hit, in the quarter.
+        let sg = vec2(step(0.0, x.x) * 2.0 - 1.0, step(0.0, x.y) * 2.0 - 1.0)
+        let w = abs(x)
+        var cr = vec4(0.0, 0.0, 1.0, 0.285881)
+        cr = mb_scrown(cr, w, vec2(1.0, 0.0), g.x)
+        cr = mb_scrown(cr, w, vec2(0.0, 1.0), g.y)
+        cr = mb_scrown(cr, w, ud, gd)
+        var p = vec3(x.x, x.y, cr.w)
+        let n = vec3(cr.x * sg.x, cr.y * sg.y, cr.z)
+        let eye = vec3(0.08 * g.x, -0.15, 3.0 + g.x)
+        var d = normalize(p - eye)
+        let f0 = 0.172395
+        let fi = (f0 + (1.0 - f0) * pow(1.0 - clamp(-dot(d, n), 0.0, 1.0), 5.0)) * 0.4
+        var col = vec3(1.0, 1.0, 1.0) * (fi * mb_genv(mb_grefl(d, n), 0.0, 0.0))
+        var thr = vec3(1.0, 1.0, 1.0) * (1.0 - fi)
+        d = mb_grefr(d, n, 1.0 / 2.419).xyz
+        let absorb = mb_gabsorb(ink) * dens
+        for b in 0..nb {
+            let best = mb_sexit(p, d, g, gd, 2.0)
+            let tw = clamp(best.w, 0.0, 4.0)
+            p = p + d * tw
+            thr = thr * exp(-absorb * tw)
+            let nh = best.xyz
+            let fe = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(d, nh), 0.0, 1.0), 5.0)
+            let rr = mb_grefr(d, -nh, 2.414)
+            let rg = mb_grefr(d, -nh, 2.419)
+            let rb = mb_grefr(d, -nh, 2.425)
+            let lit = vec3(mb_genv(normalize(rr.xyz + vec3(0.0, 0.0, 0.00001)), 0.0, 0.0) * rr.w, mb_genv(normalize(rg.xyz + vec3(0.0, 0.0, 0.00001)), 0.0, 0.0) * rg.w, mb_genv(normalize(rb.xyz + vec3(0.0, 0.0, 0.00001)), 0.0, 0.0) * rb.w)
+            col = col + thr * (1.0 - fe) * lit
+            thr = thr * mix(1.0, fe, rg.w)
+            d = mb_grefl(d, nh)
+        }
+        col = col + thr * 0.6
+        let lit_out = vec3(1.0, 1.0, 1.0) - exp(-col * 1.35)
+        // Over the table a veil of the stone's deep colour, `veil` strong, so
+        // words laid on it read; the steps round it keep their sparkle.
+        let mx = max(max(ink.x, ink.y), max(ink.z, 0.02))
+        let deep = ink / mx * 0.40 * min(mx * 1.6, 1.0) + vec3(0.02, 0.02, 0.02)
+        stone = mix(lit_out, deep, veil * step(0.999, n.z))
+    }
+    return stone
+}
+
+// A tiny pavé diamond, radius `rad`, `q` from its centre, `h` its chance
+// (a few of them catch the light and sparkle). Premultiplied.
+let mb_pave = fn(q: vec2, rad: float, h: float, px: float) -> vec4 {
+    let t = length(q) / max(rad, 0.1)
+    let ang = atan2(q.y, q.x)
+    let sec = step(0.5, fract(ang / (PI / 4.0) + h * 3.0))
+    var col = mix(vec3(0.985, 0.985, 0.99), vec3(0.66, 0.67, 0.71), smoothstep(0.4, 1.0, t))
+    col = col * (0.88 + 0.16 * sec)
+    let sq = q / max(rad, 0.1) + vec2(0.28, 0.34)
+    col = mix(col, vec3(1.0, 1.0, 1.0), exp(-dot(sq, sq) / 0.08) * 0.9)
+    col = mix(col, vec3(0.42, 0.34, 0.20), Finish.band(length(q) - rad, 0.0, max(px * 0.7, 0.10 * rad), px) * 0.45)
+    let a = Finish.cover(length(q) - rad, px)
+    var res = vec4(min(col, vec3(1.0, 1.0, 1.0)) * a, a)
+    if h > 0.86 {
+        let gl = mb_glint(q + vec2(0.2, 0.25) * rad, rad * 2.6, px) * 0.85
+        res = Finish.over(res, vec4(gl, gl, gl, gl))
+    }
+    return res
+}
+
+// MILGRAIN: a line of tiny bright beads `at` points inside the outline of a
+// rounded box, `pitch` apart, the jeweller's pavé edge of a frame. Over the
+// colour `col` already worked out there.
+let mb_milgrain = fn(col: vec3, p: vec2, c: vec2, h: vec2, r: float, at: float, rad: float, pitch: float, px: float) -> vec3 {
+    let d = Material.sd_box(p, c, h, r) + at
+    let n = mb_normal(p, c, h, r)
+    var s = p.x
+    if abs(n.x) > abs(n.y) {
+        s = p.y
+    }
+    let t = (fract(s / pitch) - 0.5) * pitch
+    let bd = length(vec2(t, d)) - rad
+    let a = Finish.cover(bd, px)
+    let k = clamp((t * 0.6 - d * 0.8) / max(rad, 0.1), -1.0, 1.0)
+    let bc = mix(vec3(0.60, 0.58, 0.55), vec3(1.0, 0.995, 0.985), k * 0.5 + 0.5)
+    return mix(col, mix(bc, vec3(0.42, 0.33, 0.16), Finish.band(bd, 0.0, px * 0.6, px) * 0.4), a)
+}
+
+// A row of pavé diamonds along x from `x0` to `x1` on the line `cy`, `pitch`
+// apart, in a gold seat. Premultiplied, over `dst`.
+let mb_pave_row = fn(dst: vec4, p: vec2, x0: float, x1: float, cy: float, rad: float, pitch: float, px: float) -> vec4 {
+    let cell = floor((p.x - x0) / pitch)
+    let cx = x0 + (cell + 0.5) * pitch
+    let inside = step(x0, cx - rad * 0.5) * step(cx + rad * 0.5, x1)
+    let h = Finish.hash(vec2(cell, 5.3))
+    return Finish.over(dst, mb_pave(p - vec2(cx, cy), rad, h, px) * inside)
+}
+
+// ---------------------------------------------------------------- light
+
+// LIGHT is added, never painted: screened over what is there (what lies
+// under a point taken as this face over the stone) and rolled off as
+// 1 - e^-light, so it brightens and never clips or darkens.
+let mb_lit = fn(res: vec4, light: vec3) -> vec4 {
+    let est = res.rgb + mb_ground() * (1.0 - res.a)
+    let add = (vec3(1.0, 1.0, 1.0) - exp(-light)) * max(vec3(1.0, 1.0, 1.0) - est, vec3(0.0, 0.0, 0.0))
+    return vec4(res.rgb + add, res.a)
+}
+
+// LAMPS: an LED as a gem in a gold setting. The emitter is the light: at
+// full current its middle burns toward white and its rim is its most
+// saturated colour; at lower current the middle is no longer white, the
+// colour deeper, the glow smaller; out, it is dark tinted glass, its colour
+// barely there, with a catch light on its lower rim. Its lens is faintly
+// faceted, a cut stone. Round it a polished gold bezel (a round bead lit
+// from the top), or a socket cut into what is under it. Over the lens one
+// crisp highlight of a dome. Its light is added, never painted: a tight hot
+// halo and a short bloom in its own hue, gone in about two radii; on a pale
+// ground, where light can barely brighten, its hue is laid round it as a
+// tint that keeps the ground's luminance (at most 0.45 one device pixel
+// out, halving every 0.4 of its reach, gone at the reach). A bar is the
+// same light drawn out into a light pipe.
+let mb_lamp_add = fn(res: vec4, light: vec3, ground: vec3) -> vec4 {
+    let est = res.rgb + ground * (1.0 - res.a)
+    let add = (vec3(1.0, 1.0, 1.0) - exp(-light)) * max(vec3(1.0, 1.0, 1.0) - est, vec3(0.0, 0.0, 0.0))
+    return vec4(res.rgb + add, res.a)
+}
+let mb_lamp_full = fn(ink: vec3) -> vec3 {
+    return ink / max(max(ink.x, max(ink.y, ink.z)), 0.01)
+}
+let mb_lamp_hue = fn(ink: vec3, vivid: float) -> vec3 {
+    let f = mb_lamp_full(ink)
+    let mn = min(f.x, min(f.y, f.z))
+    let ch = 1.0 - mn
+    let pure = (f - vec3(mn, mn, mn)) / max(ch, 0.001)
+    return mix(f, pure, clamp(vivid, 0.0, 1.0) * 0.72 * smoothstep(0.03, 0.12, ch))
+}
+// The lamp: its lens a rounded box `hb` either side of `c`, `lit` its
+// current 0..1, `ink` its colour, `ground` what shows through, `room` how
+// far its light may reach, `raised` its setting (0 a socket cut in what is
+// under it; 1 a gold bezel). Premultiplied over `dst`.
+let mb_lamp = fn(dst: vec4, p: vec2, c: vec2, hb: vec2, lit: float, ink: vec3, vivid: float, px: float, ground: vec3, room: float, raised: float) -> vec4 {
+    let rt = max(min(hb.x, hb.y), 0.4)
+    let d = Material.sd_box(p, c, hb, rt)
+    let bw = clamp(0.32 * rt, 0.7, 2.4)
+    let ds = d - bw
+    let L = clamp(lit, 0.0, 1.0)
+    let b = mb_lamp_full(ink)
+    let hue = mb_lamp_hue(ink, vivid)
+    let pw = L * sqrt(L)
+    let white = vec3(1.0, 1.0, 1.0)
+    let lum = vec3(0.2126, 0.7152, 0.0722)
+    let pale = smoothstep(0.35, 0.75, dot(ground, lum))
+    var res = dst
+    let x = max(ds, 0.0)
+    let reach = max(room, 1.0)
+    let win = 1.0 - smoothstep(0.55 * reach, reach, x)
+    let ex = max(hb.x - hb.y, 0.0)
+    let ey = max(hb.y - hb.x, 0.0)
+    let qx = p.x - c.x
+    let qy = p.y - c.y
+    let q = vec2(qx - clamp(qx, 0.0 - ex, ex), qy - clamp(qy, 0.0 - ey, ey)) / rt
+    let t = clamp(length(q), 0.0, 1.0)
+    let nrm = q / max(length(q), 0.001)
+    // What the setting throws on the ground: a soft shadow, down.
+    let shd = Finish.drop(p, c, hb + vec2(bw, bw), rt + bw, vec2(0.0, 0.2 * rt + 0.3), 0.28 * rt + px) * mix(0.16, 0.30, raised) * (1.0 - 0.6 * pw)
+    res = Finish.over(res, vec4(mb_shade() * shd, shd))
+    if L > 0.001 && pale > 0.001 {
+        let h = clamp(0.42 * pw * pow(2.0, -x / max(0.4 * reach, 0.5)) * win, 0.0, 0.45) * pale
+        let est = res.rgb + ground * (1.0 - res.a)
+        let w = clamp(dot(hue, lum) / max(dot(est, lum), 0.001), 0.0, 1.0)
+        res = Finish.over(res, vec4(hue * h * w, h * w))
+    }
+    // The setting: a polished gold bead round the lens, or a socket cut into
+    // what is under it, its upper wall in shadow and a catch light on its
+    // lower rim.
+    let a_s = Finish.cover(ds, px)
+    let u = clamp(1.0 - d / max(bw, 0.01), 0.0, 1.0)
+    let gold = mb_gold(mb_bead(u, nrm))
+    let under = res.rgb / max(res.a, 0.001) * step(0.001, res.a) + ground * (1.0 - step(0.001, res.a))
+    let gy = clamp(nrm.y * t, -1.0, 1.0)
+    var sc = under * mix(0.55, 0.92, smoothstep(-0.9, 0.9, gy))
+    sc = mix(sc, min(under * 1.06 + vec3(0.28, 0.28, 0.28), white), Finish.band(ds, 0.0, max(px, 0.45), px) * smoothstep(0.2, 0.95, nrm.y) * 0.85)
+    sc = mix(sc, gold, clamp(raised, 0.0, 1.0))
+    sc = mix(sc, sc * 0.55, Finish.band(d, -px, 0.0, px) * 0.8)
+    res = Finish.over(res, vec4(sc * a_s, a_s))
+    // The light: a tight hot halo and a short bloom in its hue, falling on
+    // the setting too.
+    if L > 0.001 {
+        let xl = max(d, 0.0)
+        let halo = exp(-xl / max(0.30 * rt, 0.4)) * 1.5 + exp(-xl / max(0.65 * rt, 0.7)) * 0.32
+        let hwin = 1.0 - smoothstep(1.1 * rt, 2.0 * rt + 1.0, xl)
+        res = mb_lamp_add(res, mix(hue, white, 0.15 * pw) * halo * pw * hwin * win, ground)
+    }
+    // THE STONE: a glossy dome of coloured glass, faintly faceted. Its
+    // colour deepens toward the top; light pools low inside; lit, its
+    // middle burns toward white at full current and its rim is its most
+    // saturated colour.
+    let top = smoothstep(-1.0, 0.6, q.y)
+    let pool = exp(-(q.y - 0.55) * (q.y - 0.55) / 0.09 - q.x * q.x / 0.30)
+    let fac = Finish.hash(vec2(floor((atan2(q.y, q.x) + PI) / (PI / 4.0)), floor(t * 2.2) + 3.0))
+    var on = mix(hue * mix(0.55, 0.8, L), mix(b, hue, 0.5), top)
+    on = on * (0.86 + 0.28 * fac * smoothstep(0.3, 0.6, t))
+    on = mix(on, min(mix(b, hue, 0.4) + vec3(0.35, 0.35, 0.35), white), pool * 0.5)
+    on = mix(on, vec3(1.0, 0.995, 0.985), exp(-t * t / 0.26) * smoothstep(0.5, 1.0, L) * 0.95)
+    on = mix(on, hue * (0.82 + 0.18 * L), smoothstep(0.62, 1.0, t))
+    on = on * (0.42 + 0.58 * L)
+    // Out: dark tinted glass, its colour barely there, the same facets, a
+    // catch light along its lower rim.
+    let offc = mix(vec3(0.075, 0.068, 0.060), b * 0.40, 0.16)
+    var off = mix(offc * 0.62, offc * 1.15, top) * (0.85 + 0.35 * fac * smoothstep(0.3, 0.6, t))
+    off = mix(off, min(offc + vec3(0.18, 0.18, 0.18), white), pool * 0.35)
+    let catchl = smoothstep(0.62, 0.9, t) * (1.0 - smoothstep(0.9, 1.0, t)) * smoothstep(0.2, 0.9, nrm.y)
+    off = off + vec3(0.30, 0.28, 0.26) * catchl
+    var col = mix(off, min(on, white), smoothstep(0.0, 0.35, L))
+    let e = length(vec2(q.x / 0.62, (q.y + 0.46) / 0.30))
+    let spec = (1.0 - smoothstep(0.55, 1.0, e)) * mix(1.0, 0.3, clamp((q.y + 0.76) / 0.6, 0.0, 1.0))
+    col = mix(col, white, spec * mix(0.8, 0.55, L) * smoothstep(0.9, 2.2, rt))
+    col = min(col, white)
+    let a_l = Finish.cover(d, px)
+    return Finish.over(res, vec4(col * a_l, a_l))
+}
+let mb_led = fn(dst: vec4, p: vec2, c: vec2, rd: float, lit: float, ink: vec3, px: float) -> vec4 {
+    return mb_lamp(dst, p, c, vec2(rd, rd), lit, ink, 0.6, px, mb_ground(), 3.0 * rd + 2.5, 1.0)
+}
+
+// ---------------------------------------------------------------- shadows
+
+// What a piece of jewellery standing on the stone throws: a soft warm
+// shadow falling a little down, drawn in a point from the sides, half gone
+// two points under the foot and gone by five (within half of the eight
+// point gap to a neighbour), and a close contact shadow. Held, the piece
+// sits down and most of it goes. Returns the coverage.
+let mb_shadow = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, hover: float, down: float, dis: float) -> float {
+    let sink = 1.0 - 0.7 * down
+    let hs = vec2(max(h.x - 1.0, 0.5), h.y)
+    let amb = Finish.drop(p, c, hs, min(r, min(hs.x, hs.y)), vec2(0.0, (1.3 + 0.3 * hover) * sink), 1.1 + 0.2 * hover + px * 0.5) * (0.30 + 0.05 * hover) * sink * (1.0 - 0.8 * dis)
+    let con = Finish.drop(p, c, h, r, vec2(0.0, 0.45 + px * 0.5), 0.45 + px * 0.5) * mix(0.30, 0.15, down) * (1.0 - 0.6 * dis)
+    return 1.0 - (1.0 - amb) * (1.0 - con)
+}
+
+// The warm gold light the focus frame spills outward: a tint one device
+// pixel out, gone within 2.5 points. Premultiplied, laid under the face.
+let mb_leak = fn(d: float, a: float) -> vec4 {
+    let s = 1.1
+    let g = 0.55 * exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * s * s)) * (1.0 - a)
+    return vec4(vec3(0.95, 0.74, 0.30) * g, g)
+}
+// Focus over a gold rim: the rim burns brighter, toward the white-gold.
+let mb_focus_rim = fn(col: vec3, d: float, w: float, px: float, fo: float) -> vec3 {
+    if fo < 0.001 {
+        return col
+    }
+    let band = Finish.band(d, 0.0, w, px)
+    return mix(col, min(col * 1.25 + vec3(0.10, 0.08, 0.02), vec3(1.0, 0.97, 0.86)), band * fo * 0.8)
+}
+
+// A JEWEL BOX: the shape every raised control is cut from: a face set in a
+// polished gold rim `rw` wide, sunk a little under the rim (a soft shade
+// under its upper edge and a dark device pixel where face meets gold), the
+// whole throwing its shadow on the stone. `face` is the colour the caller
+// worked out for the face at this point. Held, the box sits half a point
+// lower. Premultiplied, over the shadow and focus spill it lays first.
+// The same box; `dbl` 1 gives it the double rim.
+let mb_box2 = fn(p: vec2, lo: vec2, hi: vec2, r: float, rw: float, px: float, face: vec3, hover: float, down: float, dis: float, focus: float, lift: float, dbl: float) -> vec4 {
+    let live = 1.0 - dis
+    let sink = 0.8 * down * live
+    let c0 = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let c = c0 + vec2(0.0, sink)
+    let sc = mb_shadow(p, c0, h, r, px, hover, down, dis) * lift
+    var res = vec4(mb_shade() * sc, sc)
+    let d = Material.sd_box(p, c, h, r)
+    let a = Finish.cover(d, px)
+    let fo = focus * live
+    if fo > 0.001 {
+        res = Finish.over(res, mb_leak(d, a) * fo)
+    }
+    let n = mb_normal(p, c, h, r)
+    var col = face
+    let hi_in = h - vec2(rw, rw)
+    let ri = max(r - rw, 0.0)
+    let insh = Finish.inset(p, c, hi_in, ri, vec2(0.0, 1.0), 1.2)
+    col = mix(col, col * 0.80, clamp(insh, 0.0, 1.0) * (0.45 + 0.35 * down * live) * Finish.cover(d + rw, px))
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, rw, rw + px, px) * 0.55)
+    let rim = Finish.band(d, 0.0, rw, px)
+    var gold = mix(mb_rim(d, rw, n, p), mb_rim2(d, rw, n, p, px), dbl)
+    gold = mix(gold, mix(vec3(0.80, 0.77, 0.70), gold, 0.35), 0.6 * dis)
+    col = mix(col, gold, rim)
+    col = mb_focus_rim(col, d, rw, px, fo)
+    return Finish.over(res, vec4(col * a, a))
+}
+
+// The jewel box with the single rim.
+let mb_box = fn(p: vec2, lo: vec2, hi: vec2, r: float, rw: float, px: float, face: vec3, hover: float, down: float, dis: float, focus: float, lift: float) -> vec4 {
+    return mb_box2(p, lo, hi, r, rw, px, face, hover, down, dis, focus, lift, 0.0)
+}
+
+// ---------------------------------------------------------------- buttons
+
+// Every button is a jewel box: 26 points on a 12 point line, 12 points
+// either side, a 3.5 point corner, its gold rim about four points wide. Its shadow and its light fall outside
+// the box.
+mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlat.min_height = 26.0
+mod.widgets.ButtonFlat.icon_walk.width = 14.0
+mod.widgets.ButtonIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlatIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlatterIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 4.0 bottom: 4.0}
+// The size rungs keep heights of their own.
+mod.widgets.ButtonXs.min_height = 18.0
+mod.widgets.ButtonSm.min_height = 22.0
+mod.widgets.ButtonLg.min_height = 30.0
+mod.widgets.ButtonXl.min_height = 34.0
+mod.widgets.ButtonFlat.draw_bg.border_radius = uniform(3.5)
+mod.widgets.ButtonFlat.draw_bg.border_size = uniform(0.34)
+mod.widgets.ButtonFlat.clip_x = false
+mod.widgets.ButtonFlat.clip_y = false
+mod.widgets.ButtonFlat.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+
+// The button and its variants share one face; `kind` picks it: 0 a bar of
+// polished gold (the plain, small and large buttons), 1 white marble in a
+// gold rim (the default button), 2 an emerald baguette (primary), 3 a
+// champagne quartz (secondary), 4 a smoky quartz (tertiary), 5 a ruby
+// (danger), 6 an outline of gold wire, 7 no face (a gold wash under the
+// hand). A cut stone catches a star glint at its upper right corner,
+// brighter under the hand.
+// A JEWEL BUTTON'S STONE (kinds 2 to 5) at this pixel, traced in the face
+// the button below lays out: an emerald, a champagne or a smoky quartz, or a
+// ruby, step cut. A quartz is a pale stone: it absorbs far less along its
+// path than an emerald or a ruby. Only the jewel variants call it, so the
+// plain buttons' shaders carry no tracer.
+let mb_button_gem = fn(pos: vec2, size: vec2, o: vec2, dpi: float, down: float, dis: float, kind: float) -> vec3 {
+    let m = 12.0
+    let px = mb_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(size.x, o.x, px), mb_snap(size.y, o.y, px))
+    let cf = (lo + hi) * 0.5 + vec2(0.0, 0.8 * down * (1.0 - dis))
+    let rw = clamp(0.15 * (hi.y - lo.y), 2.6, 4.6)
+    var gem = mb_emerald()
+    var dens = 1.0
+    if kind > 2.5 && kind < 3.5 {
+        gem = mb_champagne()
+        dens = 0.2
+    }
+    if kind > 3.5 && kind < 4.5 {
+        gem = mb_smoky()
+        dens = 0.25
+    }
+    if kind > 4.5 {
+        gem = mb_ruby()
+    }
+    return mb_gstep(p - cf, (hi - lo) * 0.5 - vec2(rw, rw), gem, 3.0, 0.55, dens)
+}
+
+// `gem` is the jewel's stone from the function above (ignored by the
+// other kinds).
+let mb_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, down: float, dis: float, focus: float, loading: float, anim: float, kind: float, dash: float, gem: vec3) -> vec4 {
+    let m = 12.0
+    let px = mb_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(size.x, o.x, px), mb_snap(size.y, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let hh = hi.y - lo.y
+    let r = min(3.5, min(h.x, h.y))
+    let live = 1.0 - dis
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    var ink = mb_ink()
+    if kind > 5.5 {
+        let d = Material.sd_box(p, c, h, r)
+        let a = Finish.cover(d, px)
+        let n = mb_normal(p, c, h, r)
+        if focus * live > 0.001 {
+            res = Finish.over(res, mb_leak(d, a) * focus * live)
+        }
+        // Under the hand a faint white wash on the stone, held a faint gold one.
+        let wash = 0.45 * hover * (1.0 - down) * live * a
+        res = Finish.over(res, vec4(vec3(1.0, 1.0, 1.0) * wash * 0.6, wash * 0.6))
+        let press = 0.14 * down * live * a
+        res = Finish.over(res, vec4(vec3(0.72, 0.59, 0.31) * press, press))
+        if kind < 6.5 {
+            // The outline: a round gold wire, its contact shadow under it.
+            let rw = 2.4
+            var ring = Finish.band(d, 0.0, rw, px)
+            if dash > 0.0 {
+                ring = ring * step(0.5, fract((p.x + p.y) / (dash * 2.0)))
+            }
+            let sh = Finish.drop(p, c, h, r, vec2(0.0, 0.6), 0.6) * (1.0 - Finish.cover(d + rw, px)) * 0.25 * live
+            res = Finish.over(res, vec4(mb_shade() * sh, sh))
+            var gold = mb_rim(d, rw, n, p)
+            gold = mix(gold, vec3(0.80, 0.77, 0.70), 0.55 * dis)
+            gold = mb_focus_rim(gold, d, rw, px, focus * live)
+            res = Finish.over(res, vec4(gold * ring, ring))
+        }
+    } else {
+        let sink = 0.8 * down * live
+        let cf = c + vec2(0.0, sink)
+        let rw = clamp(0.15 * hh, 2.6, 4.6)
+        let hf = h - vec2(rw, rw)
+        let rf = max(r - rw, 0.5)
+        let df = Material.sd_box(p, cf, hf, rf)
+        let nf = mb_normal(p, cf, hf, rf)
+        var face = vec3(0.0, 0.0, 0.0)
+        if kind < 0.5 {
+            face = mb_goldface(p, cf, hf, df, nf, 2.2)
+            ink = vec3(0.20, 0.14, 0.04)
+        } else if kind < 1.5 {
+            let t = clamp((p.y - lo.y) / max(hh, 1.0), 0.0, 1.0)
+            face = mb_stone(p + mb_seed(size), px, 0.55)
+            face = face * (1.015 - 0.045 * t)
+            face = mb_milgrain(face, p, cf, h, r, rw + 1.0, 0.6, 1.9, px)
+        } else {
+            face = gem
+            ink = vec3(1.0, 0.98, 0.94)
+        }
+        face = face * (1.0 + 0.05 * hover * live - 0.11 * down * live)
+        let fl = dot(face, vec3(0.3, 0.5, 0.2))
+        face = mix(face, mix(mb_ground(), vec3(fl, fl, fl), 0.3), 0.6 * dis)
+        res = mb_box(p, lo, hi, r, rw, px, face, hover, down, dis, focus, 1.0)
+        if kind > 1.5 && dis < 0.5 {
+            let gq = p - vec2(hi.x - rw - 4.5, lo.y + rw + 3.2 + sink)
+            let g = mb_glint(gq, 5.0 + 1.5 * hover, px) * (0.5 + 0.5 * hover) * Finish.cover(df, px)
+            res = Finish.over(res, vec4(g, g, g, g))
+        }
+    }
+    if loading > 0.001 {
+        let rad = max(min(h.x, h.y) - 5.5, 2.0)
+        let sdf = Sdf2d.viewport(p)
+        let a0 = anim * 2.0 * PI
+        sdf.arc_round_caps(c.x, c.y, rad, a0, a0 + 1.5 * PI, 1.5)
+        sdf.fill(vec4(ink, loading))
+        res = Finish.over(res, sdf.result)
+    }
+    return res * mb_fade(pos, size, m)
+}
+
+mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
+    return self.host_over(mb_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 0.0, 0.0, vec3(0.0, 0.0, 0.0)), 12.0)
+}
+mod.widgets.Button.draw_bg.pixel = fn() {
+    return self.host_over(mb_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 1.0, 0.0, vec3(0.0, 0.0, 0.0)), 12.0)
+}
+mod.widgets.ButtonPrimary.draw_bg.pixel = fn() {
+    let gem = mb_button_gem(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.down, self.disabled, 2.0)
+    return self.host_over(mb_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 2.0, 0.0, gem), 12.0)
+}
+mod.widgets.ButtonSecondary.draw_bg.pixel = fn() {
+    let gem = mb_button_gem(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.down, self.disabled, 3.0)
+    return self.host_over(mb_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 3.0, 0.0, gem), 12.0)
+}
+mod.widgets.ButtonTertiary.draw_bg.pixel = fn() {
+    let gem = mb_button_gem(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.down, self.disabled, 4.0)
+    return self.host_over(mb_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 4.0, 0.0, gem), 12.0)
+}
+mod.widgets.ButtonDanger.draw_bg.pixel = fn() {
+    let gem = mb_button_gem(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.down, self.disabled, 5.0)
+    return self.host_over(mb_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 5.0, 0.0, gem), 12.0)
+}
+mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
+    return self.host_over(mb_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 6.0, self.border_dash, vec3(0.0, 0.0, 0.0)), 12.0)
+}
+mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
+    return self.host_over(mb_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 7.0, 0.0, vec3(0.0, 0.0, 0.0)), 12.0)
+}
+
+// The legends are set in the sheet's serif (the theme's bold face).
+mod.widgets.ButtonFlat.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.Button.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.ButtonPrimary.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.ButtonSecondary.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.ButtonTertiary.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.ButtonDanger.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.ButtonOutline.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.ButtonFlatter.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.ButtonSm.draw_text.text_style = mod.theme.font_bold{font_size: 8.5}
+mod.widgets.ButtonLg.draw_text.text_style = mod.theme.font_bold{font_size: 11.0}
+mod.widgets.ButtonXs.draw_text.text_style = mod.theme.font_bold{font_size: 7.5}
+mod.widgets.ButtonXl.draw_text.text_style = mod.theme.font_bold{font_size: 12.5}
+
+// Label ink: a dark brown on the gold bars (7:1 on the body) and on the
+// white stone, a warm white on the cut stones.
+mod.widgets.ButtonFlat.draw_text.color = #33230a
+mod.widgets.ButtonFlat.draw_text.color_hover = #26190a
+mod.widgets.ButtonFlat.draw_text.color_down = #26190a
+mod.widgets.ButtonFlat.draw_text.color_focus = #33230a
+mod.widgets.ButtonFlat.draw_text.color_disabled = #a89c86
+mod.widgets.ButtonFlat.draw_icon.color = #33230a
+mod.widgets.Button.draw_text.color = #3a2e1c
+mod.widgets.Button.draw_text.color_hover = #2a2112
+mod.widgets.Button.draw_text.color_down = #2a2112
+mod.widgets.Button.draw_text.color_focus = #3a2e1c
+mod.widgets.Button.draw_text.color_disabled = #a89c86
+mod.widgets.ButtonPrimary.draw_text.color = #fffaf0
+mod.widgets.ButtonPrimary.draw_text.color_hover = #ffffff
+mod.widgets.ButtonPrimary.draw_text.color_down = #f2ece0
+mod.widgets.ButtonPrimary.draw_text.color_focus = #fffaf0
+mod.widgets.ButtonPrimary.draw_text.color_disabled = #f2efe8
+mod.widgets.ButtonPrimary.draw_icon.color = #fffaf0
+mod.widgets.ButtonSecondary.draw_text.color = #fffaf0
+mod.widgets.ButtonSecondary.draw_text.color_hover = #ffffff
+mod.widgets.ButtonSecondary.draw_text.color_down = #f2ece0
+mod.widgets.ButtonSecondary.draw_text.color_focus = #fffaf0
+mod.widgets.ButtonSecondary.draw_text.color_disabled = #f2efe8
+mod.widgets.ButtonSecondary.draw_icon.color = #fffaf0
+mod.widgets.ButtonTertiary.draw_text.color = #fffaf0
+mod.widgets.ButtonTertiary.draw_text.color_hover = #ffffff
+mod.widgets.ButtonTertiary.draw_text.color_down = #f2ece0
+mod.widgets.ButtonTertiary.draw_text.color_focus = #fffaf0
+mod.widgets.ButtonTertiary.draw_icon.color = #fffaf0
+mod.widgets.ButtonDanger.draw_text.color = #fffaf0
+mod.widgets.ButtonDanger.draw_text.color_hover = #ffffff
+mod.widgets.ButtonDanger.draw_text.color_down = #f2ece0
+mod.widgets.ButtonDanger.draw_text.color_focus = #fffaf0
+mod.widgets.ButtonDanger.draw_text.color_disabled = #f2efe8
+mod.widgets.ButtonDanger.draw_icon.color = #fffaf0
+mod.widgets.ButtonOutline.draw_text.color = #3a2e1c
+mod.widgets.ButtonOutline.draw_text.color_hover = #2a2112
+mod.widgets.ButtonOutline.draw_text.color_down = #2a2112
+mod.widgets.ButtonOutline.draw_text.color_focus = #3a2e1c
+mod.widgets.ButtonOutline.draw_text.color_disabled = #a89c86
+mod.widgets.ButtonOutline.draw_icon.color = #6e521c
+mod.widgets.ButtonFlatter.draw_text.color = #3a2e1c
+mod.widgets.ButtonFlatter.draw_text.color_hover = #2a2112
+mod.widgets.ButtonFlatter.draw_text.color_down = #2a2112
+mod.widgets.ButtonFlatter.draw_text.color_focus = #3a2e1c
+mod.widgets.ButtonFlatter.draw_text.color_disabled = #a89c86
+mod.widgets.ButtonFlatter.draw_icon.color = #6e521c
+// A compound button's second line: the second voice.
+mod.widgets.ButtonFlat.draw_description.color = #33230a
+mod.widgets.ButtonOutline.draw_description.color = #5c4a2e
+mod.widgets.ButtonFlatter.draw_description.color = #5c4a2e
+// A link is words on the stone: brown, turning emerald under the hand.
+mod.widgets.LinkLabel.draw_text.color = #3a2e1c
+mod.widgets.LinkLabel.draw_text.color_hover = #0d6a39
+mod.widgets.LinkLabel.draw_text.color_down = #0b5028
+mod.widgets.LinkLabel.draw_text.color_focus = #2a2112
+mod.widgets.LinkLabel.draw_text.color_disabled = #a89c86
+mod.widgets.CloseButton.draw_bg.cross_color = #5c4a2e
+
+// ---------------------------------------------------------------- selection
+
+// The small controls' quads grow by this much, for their shadow and their
+// focus spill.
+mod.widgets.CheckBoxFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.CheckBoxFlat.clip_x = false
+mod.widgets.CheckBoxFlat.clip_y = false
+mod.widgets.CheckBoxFlat.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.CheckBoxFlat.draw_bg.size = uniform(15.0)
+mod.widgets.CheckBoxFlat.draw_bg.border_radius = uniform(1.5)
+mod.widgets.CheckBoxFlat.label_walk.margin.left = 14.0
+
+// A gold mark (a check or a dash) in a warm white with a dark brown edge,
+// so it reads on gold. `dk` its distance.
+let mb_mark = fn(dst: vec4, dk: float, px: float, amt: float, dis: float) -> vec4 {
+    let ea = Finish.cover(dk - 0.55, px) * amt
+    var res = Finish.over(dst, vec4(vec3(0.24, 0.16, 0.04) * ea * 0.85, ea * 0.85))
+    let ma = Finish.cover(dk, px) * amt
+    let mc = mix(vec3(1.0, 0.975, 0.90), vec3(0.93, 0.91, 0.86), dis)
+    return Finish.over(res, vec4(mc * ma, ma))
+}
+
+// The check box: a 15 point gold tile with a 3 point corner, its rim a
+// polished bead; empty, its middle is a satin gold sunk a little under the
+// rim; set, the middle is polished and a warm white check stands on it (a
+// dash when mixed).
+mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sz = self.size
+    let x0 = (self.rect_size.x - sz) * self.mark_at_end
+    let y0 = self.rect_size.y * 0.5 - sz * 0.5
+    let lo = vec2(mb_snap(x0, o.x, px), mb_snap(y0, o.y, px))
+    let hi = vec2(mb_snap(x0 + sz, o.x, px), mb_snap(y0 + sz, o.y, px))
+    let held = max(self.down, self.pressed)
+    let on = max(self.active, self.mixed)
+    let live = 1.0 - self.disabled
+    let sink = 0.5 * held * live
+    let c = (lo + hi) * 0.5 + vec2(0.0, sink)
+    let h = (hi - lo) * 0.5
+    let r = 3.0
+    let rw = 1.7
+    let hf = h - vec2(rw, rw)
+    let df = Material.sd_box(p, c, hf, r - rw * 0.5)
+    let nf = mb_normal(p, c, hf, r - rw * 0.5)
+    var face = mb_goldface(p, c, hf, df, nf, 1.4)
+    // Empty: satin, a step deeper; set: polished.
+    let satin = mb_gold(0.36 + 0.06 * (1.0 - smoothstep(-1.0, 1.0, (p.y - c.y) / max(hf.y, 1.0))))
+    face = mix(satin, face, on)
+    face = face * (1.0 + 0.06 * self.hover * live - 0.12 * held * live)
+    face = mix(face, vec3(0.82, 0.79, 0.72), 0.6 * self.disabled)
+    var res = mb_box(p, lo, hi, r, rw, px, face, self.hover, held, self.disabled, self.focus, 1.0)
+    // The error: the rim turns ruby.
+    let d = Material.sd_box(p, c, h, r)
+    res = Finish.over(res, vec4(0.70, 0.08, 0.15, 1.0) * Finish.band(d, 0.0, 1.2, px) * self.error * live)
+    let cm = c + vec2(0.0, 0.2)
+    let dm = min(mb_seg(p, vec2(cm.x - 3.4, cm.y + 0.1), vec2(cm.x - 1.1, cm.y + 2.5)), mb_seg(p, vec2(cm.x - 1.1, cm.y + 2.5), vec2(cm.x + 3.5, cm.y - 2.6)))
+    let dd = mb_seg(p, vec2(cm.x - 3.2, cm.y), vec2(cm.x + 3.2, cm.y))
+    let dk = mix(dm - 0.85, dd - 0.95, self.mixed)
+    res = mb_mark(res, dk, px, on, self.disabled)
+    return res * mb_fade(self.pos, self.rect_size, m)
+}
+
+// THE TOGGLE, the pictures' gold key in a gold frame: a 36 x 20 point frame
+// with a 4 point corner, its floor a satin gold sunk under its rim, and in
+// it a square key of polished gold standing up, at the left while off and
+// at the right while on. On, the key carries a round brilliant diamond set
+// in it, glinting; off, an engraved dash. The key follows a drag.
+mod.widgets.ToggleFlat.draw_bg.size = uniform(20.0)
+mod.widgets.ToggleFlat.draw_bg.pill_aspect = uniform(1.9)
+mod.widgets.ToggleFlat.label_walk.margin.left = 38.0
+let mb_toggle = fn(pos: vec2, size: vec2, o: vec2, dpi: float, th0: float, aspect: float, at_end: float, hover: float, held: float, dis: float, on: float, kt: float, focus: float, error: float) -> vec4 {
+    let m = 10.0
+    let px = mb_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let tw = th0 * aspect
+    let th = th0
+    let x0 = (size.x - tw) * at_end
+    let y0 = size.y * 0.5 - th * 0.5
+    let lo = vec2(mb_snap(x0, o.x, px), mb_snap(y0, o.y, px))
+    let hi = vec2(mb_snap(x0 + tw, o.x, px), mb_snap(y0 + th, o.y, px))
+    let r = 4.0
+    let rw = 1.7
+    let live = 1.0 - dis
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    // The frame's floor: satin gold, deeper under the rim.
+    let floor_col = mix(mb_gold(0.30), mb_gold(0.40 + 0.06 * on), smoothstep(-1.0, 1.0, (p.y - c.y) / max(h.y, 1.0)))
+    var face = mix(floor_col, vec3(0.82, 0.79, 0.72), 0.6 * dis)
+    var res = mb_box(p, lo, hi, r, rw, px, face, hover * 0.4, 0.0, dis, focus, 0.8)
+    // The key: a square of polished gold standing in the frame, its own
+    // shadow on the floor.
+    let ks = th - 2.0 * rw - 1.0
+    let kh = vec2(ks, ks) * 0.5
+    let travel = (hi.x - lo.x) - 2.0 * rw - ks - 1.0
+    let sink = 0.8 * held * live
+    let kc = vec2(lo.x + rw + 0.5 + kh.x + travel * clamp(kt, 0.0, 1.0), c.y + sink)
+    let fl = Finish.cover(Material.sd_box(p, c, h - vec2(rw, rw), r - rw), px)
+    let ksh = Finish.drop(p, kc, kh, 2.5, vec2(0.5, 1.1), 1.0 + px) * 0.45 * (1.0 - 0.6 * held) * live * fl
+    res = Finish.over(res, vec4(mb_shade() * ksh, ksh))
+    let kd = Material.sd_box(p, kc, kh, 2.5)
+    let kn = mb_normal(p, kc, kh, 2.5)
+    var kcol = mb_goldface(p, kc, kh, kd, kn, 2.0)
+    kcol = kcol * (1.0 + 0.06 * hover * live - 0.12 * held * live)
+    kcol = mix(kcol, mb_gold(0.28), Finish.band(kd, 0.0, px, px) * 0.6)
+    kcol = mix(kcol, vec3(0.84, 0.81, 0.75), 0.6 * dis)
+    let ka = Finish.cover(kd, px)
+    res = Finish.over(res, vec4(kcol * ka, ka))
+    // On: a diamond set in the key, glinting; off: an engraved dash.
+    let gr = ks * 0.30
+    let gd = length(p - kc) - gr
+    if on > 0.001 {
+        let seat = Finish.cover(gd - 0.7, px) * on
+        res = Finish.over(res, vec4(mb_gold(0.25) * seat, seat))
+        let gcol = mix(mb_gem(p - kc, gr, vec3(1.0, 1.0, 1.0), 0.3, 2.0), vec3(0.85, 0.84, 0.80), 0.6 * dis)
+        let ga = Finish.cover(gd, px) * on
+        res = Finish.over(res, vec4(gcol * ga, ga))
+        let gl = mb_glint(p - kc - vec2(gr * 0.35, -gr * 0.4), gr * 2.6, px) * on * live
+        res = Finish.over(res, vec4(gl, gl, gl, gl))
+    }
+    let dsh = mb_seg(p, kc - vec2(ks * 0.22, 0.0), kc + vec2(ks * 0.22, 0.0)) - 0.75
+    res = mb_mark(res, dsh, px, 1.0 - on, dis)
+    let ed = Material.sd_box(p, c, h, r)
+    res = Finish.over(res, vec4(0.70, 0.08, 0.15, 1.0) * Finish.band(ed, 0.0, 1.2, px) * error * live)
+    return res * mb_fade(pos, size, m)
+}
+mod.widgets.ToggleFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ToggleSlide.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ToggleRocker.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
+    return mb_toggle(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.size, self.pill_aspect, self.mark_at_end, self.hover, max(self.pressed, self.down), self.disabled, self.active, mix(self.active, self.drag_pos, self.drag), self.focus, self.error)
+}
+
+// The slide switch is the toggle: the same gold frame and key.
+mod.widgets.ToggleSlide.draw_bg.size = uniform(20.0)
+mod.widgets.ToggleSlide.draw_bg.pill_aspect = uniform(1.9)
+mod.widgets.ToggleSlide.label_walk.margin.left = 38.0
+mod.widgets.ToggleSlide.draw_bg.pixel = fn() {
+    return mb_toggle(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.size, self.pill_aspect, self.mark_at_end, self.hover, max(self.pressed, self.down), self.disabled, self.active, mix(self.active, self.drag_pos, self.drag), self.focus, self.error)
+}
+
+// The rocker: a white marble plate in a gold rim, split at its middle. The
+// half in force is pressed in and turned to polished gold, its legend a
+// warm white; the raised half is the white stone, its legend brown: the O
+// at the left while off, the I at the right while on.
+mod.widgets.ToggleRocker.draw_bg.size = uniform(20.0)
+mod.widgets.ToggleRocker.draw_bg.pill_aspect = uniform(2.3)
+mod.widgets.ToggleRocker.label_walk.margin.left = 46.0
+mod.widgets.ToggleRocker.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let tw = self.size * self.pill_aspect
+    let th = self.size
+    let x0 = (self.rect_size.x - tw) * self.mark_at_end
+    let y0 = self.rect_size.y * 0.5 - th * 0.5
+    let lo = vec2(mb_snap(x0, o.x, px), mb_snap(y0, o.y, px))
+    let hi = vec2(mb_snap(x0 + tw, o.x, px), mb_snap(y0 + th, o.y, px))
+    let r = 4.0
+    let rw = 1.7
+    let c = (lo + hi) * 0.5
+    let live = 1.0 - self.disabled
+    let on = self.active
+    let held = max(self.pressed, self.down)
+    var face = mb_stone(p + mb_seed(self.rect_size), px, 0.5)
+    face = mix(face, mb_ground(), 0.5 * self.disabled)
+    var res = mb_box(p, lo, hi, r, rw, px, face, self.hover, 0.0, self.disabled, self.focus, 1.0)
+    // The half in force: polished gold, pressed in under the rim, a dark
+    // seam at the middle.
+    let hw = (hi.x - lo.x) * 0.5
+    let sx = mix(lo.x + rw, c.x, on)
+    let slo = vec2(sx, lo.y + rw)
+    let shi = vec2(sx + hw - rw, hi.y - rw)
+    let sc = (slo + shi) * 0.5
+    let sh = (shi - slo) * 0.5
+    let sd = Material.sd_box(p, sc, sh, max(r - rw, 0.5))
+    let sn = mb_normal(p, sc, sh, max(r - rw, 0.5))
+    var gcol = mb_goldface(p, sc, sh, sd, sn, 1.6) * (1.0 - 0.08 * held)
+    let ins = Finish.inset(p, sc, sh, max(r - rw, 0.5), vec2(0.0, 1.2), 1.3)
+    gcol = mix(gcol, gcol * 0.70, clamp(ins, 0.0, 1.0) * 0.6)
+    gcol = mix(gcol, vec3(0.84, 0.81, 0.75), 0.6 * self.disabled)
+    let ga = Finish.cover(sd, px)
+    res = Finish.over(res, vec4(gcol * ga, ga))
+    let seam = Finish.cover(abs(p.x - c.x) - 0.5 * px, px) * Finish.cover(abs(p.y - c.y) - (th * 0.5 - rw), px)
+    res = Finish.over(res, vec4(vec3(0.30, 0.21, 0.07) * seam * 0.7, seam * 0.7))
+    // The legends.
+    let lc_o = vec2(lo.x + hw * 0.5 + 0.5, c.y)
+    let lc_i = vec2(c.x + hw * 0.5 - 0.5, c.y)
+    let s = th / 20.0
+    let d_o = abs(length((p - lc_o) * vec2(1.25, 1.0)) - 3.4 * s) - 0.65 * s
+    let d_i = mb_seg(p, lc_i - vec2(0.0, 3.5 * s), lc_i + vec2(0.0, 3.5 * s)) - 0.65 * s
+    let cream = vec3(1.0, 0.975, 0.90)
+    let brown = vec3(0.30, 0.23, 0.12)
+    let fade = mix(1.0, 0.45, self.disabled)
+    let ao = Finish.cover(d_o, px) * fade
+    let ai = Finish.cover(d_i, px) * fade
+    res = Finish.over(res, vec4(mix(cream, brown, on) * ao, ao))
+    res = Finish.over(res, vec4(mix(brown, cream, on) * ai, ai))
+    let d = Material.sd_box(p, c, (hi - lo) * 0.5, r)
+    res = Finish.over(res, vec4(0.70, 0.08, 0.15, 1.0) * Finish.band(d, 0.0, 1.2, px) * self.error * live)
+    return res * mb_fade(self.pos, self.rect_size, m)
+}
+
+// The radio: a 15 point gold dome; chosen, it opens into a gold bezel with
+// a round brilliant diamond set in it, glinting.
+mod.widgets.RadioButtonFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RadioButtonFlat.clip_x = false
+mod.widgets.RadioButtonFlat.clip_y = false
+mod.widgets.RadioButtonFlat.draw_bg.size = uniform(15.0)
+mod.widgets.RadioButtonFlat.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.RadioButtonFlat.label_walk.margin.left = 14.0
+
+// A gold dome `rad` round `c`, satin rather than mirror: lit from the top,
+// a soft highlight high on it, its lower side a deeper gold, its foot
+// rolling under.
+let mb_golddome = fn(p: vec2, c: vec2, rad: float) -> vec3 {
+    let q = (p - c) / max(rad, 0.5)
+    let ql = min(length(q), 1.0)
+    let n = q / max(length(q), 0.001)
+    let e = sin(ql * 1.4) * dot(n, mb_lv()) / sin(1.4)
+    var l = 0.50 + 0.26 * e + 0.30 * exp(-(e - 0.55) * (e - 0.55) / 0.03)
+    l = l - 0.12 * smoothstep(0.82, 1.0, ql)
+    return mb_gold(l)
+}
+mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sz = self.size
+    let y0 = self.rect_size.y * 0.5 - sz * 0.5
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(y0, o.y, px))
+    let hi = vec2(mb_snap(sz, o.x, px), mb_snap(y0 + sz, o.y, px))
+    let live = 1.0 - self.disabled
+    let on = self.active
+    let rad = sz * 0.5
+    let sink = 0.4 * self.down * live
+    let c = (lo + hi) * 0.5 + vec2(0.0, sink)
+    let sc = mb_shadow(p, (lo + hi) * 0.5, vec2(rad, rad), rad, px, self.hover, self.down, self.disabled)
+    var res = vec4(mb_shade() * sc, sc)
+    let d = length(p - c) - rad
+    let a = Finish.cover(d, px)
+    if self.focus * live > 0.001 {
+        res = Finish.over(res, mb_leak(d, a) * self.focus * live)
+    }
+    var col = mb_golddome(p, c, rad) * (1.0 + 0.06 * self.hover * live - 0.12 * self.down * live)
+    // Chosen: the bezel's rim and the stone in it.
+    let rw = 1.8
+    let n = (p - c) / max(length(p - c), 0.001)
+    let bez = mb_rim(d, rw, n, p)
+    let gr = rad - rw - 0.3
+    let gd = length(p - c) - gr
+    let gem = mb_gem(p - c, gr, vec3(1.0, 1.0, 1.0), 0.2, 2.0)
+    var chosen = mix(bez, gem, Finish.cover(gd, px))
+    chosen = mix(chosen, vec3(0.30, 0.21, 0.07), Finish.band(gd, -px, 0.0, px) * 0.6)
+    col = mix(col, chosen, on)
+    col = mix(col, vec3(0.84, 0.81, 0.75), 0.6 * self.disabled)
+    col = mb_focus_rim(col, d, rw, px, self.focus * live)
+    res = Finish.over(res, vec4(col * a, a))
+    let gl = mb_glint(p - c - vec2(gr * 0.3, -gr * 0.35), gr * 2.4, px) * on * live
+    res = Finish.over(res, vec4(gl, gl, gl, gl))
+    return res * mb_fade(self.pos, self.rect_size, m)
+}
+
+// The radio tab: a cell of white marble in a gold rim; chosen, it is
+// pressed in and its floor turns to polished gold.
+mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RadioButtonTabFlat.clip_x = false
+mod.widgets.RadioButtonTabFlat.clip_y = false
+mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 0.0 right: 12.0 top: 4.0 bottom: 4.0}
+mod.widgets.RadioButtonTabFlat.min_height = 26.0
+mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(self.rect_size.x, o.x, px), mb_snap(self.rect_size.y, o.y, px))
+    let sel = self.active
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let rw = 3.0
+    let hf = h - vec2(rw, rw)
+    let df = Material.sd_box(p, c, hf, 2.0)
+    let nf = mb_normal(p, c, hf, 2.0)
+    var face = mb_stone(p + mb_seed(self.rect_size), px, 0.45) * (1.0 + 0.03 * self.hover)
+    var gold = mb_goldface(p, c, hf, df, nf, 1.8)
+    let ins = Finish.inset(p, c, hf, 2.0, vec2(0.0, 1.4), 1.6)
+    gold = mix(gold, gold * 0.68, clamp(ins, 0.0, 1.0) * 0.65)
+    face = mix(face, gold, sel)
+    face = mix(face, mb_ground(), 0.5 * self.disabled)
+    return mb_box(p, lo, hi, 3.5, rw, px, face, self.hover, max(self.down, sel), self.disabled, self.focus, 1.0) * mb_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.RadioButtonTabFlat.draw_text.color = #5c4a2e
+mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #2a2112
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #26190a
+mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #a89c86
+mod.widgets.RadioButtonTabFlat.draw_text.get_color = fn() {
+    return self.color
+        .mix(self.color_focus, self.focus)
+        .mix(self.color_hover, self.hover)
+        .mix(self.color_down, self.down)
+        .mix(self.color_active, self.active)
+        .mix(self.color_disabled, self.disabled)
+}
+
+// ---------------------------------------------------------------- sliders
+
+// THE RAIL: a gold tube from `lo` to `hi` with round ends, a polished bead
+// along each edge round a satin gold floor a step deeper; the value lies in
+// it as a row of pavé diamonds from `f0` to `f1`. Premultiplied over `dst`.
+let mb_rail = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, px: float, f0: float, f1: float, dis: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let r = min(h.x, h.y)
+    let d = Material.sd_box(p, c, h, r)
+    let n = mb_normal(p, c, h, r)
+    let a = Finish.cover(d, px)
+    let sh = Finish.drop(p, c, h, r, vec2(0.0, 0.8), 0.8 + px * 0.5) * 0.25 * (1.0 - a) * (1.0 - 0.6 * dis)
+    var res = Finish.over(dst, vec4(mb_shade() * sh, sh))
+    let rw = clamp(0.30 * (hi.y - lo.y), 1.0, 1.8)
+    let t = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    var col = mix(mb_gold(0.26), mb_gold(0.42), t)
+    col = mix(col, mb_rim(d, rw, n, p), Finish.band(d, 0.0, rw, px))
+    col = mix(col, vec3(0.84, 0.81, 0.75), 0.6 * dis)
+    res = Finish.over(res, vec4(col * a, a))
+    let prad = max(h.y - rw - 0.15, 0.6)
+    if f1 > f0 + 0.5 && dis < 0.5 {
+        res = mb_pave_row(res, p, f0, f1, c.y, prad, prad * 2.15, px)
+    }
+    return res
+}
+
+// THE THUMB: a step-cut stone (an emerald cut, `hw` x `hv` either side of
+// `c`, its corners cut) held in a polished gold frame with a claw at each
+// corner, throwing its own shadow; under the hand it glints, held it sits
+// down. `ink` the stone.
+let mb_thumb = fn(dst: vec4, p: vec2, c0: vec2, hw: float, hv: float, ink: vec3, px: float, hover: float, drag: float, focus: float, dis: float) -> vec4 {
+    let live = 1.0 - dis
+    let c = c0 + vec2(0.0, 0.4 * drag * live)
+    let h = vec2(hw, hv)
+    let sc = mb_shadow(p, c0, h, 1.5, px, hover, drag, dis)
+    var res = Finish.over(dst, vec4(mb_shade() * sc, sc))
+    let d = Finish.sd_chamfer(p, c, h, 2.0)
+    let a = Finish.cover(d, px)
+    if focus * live > 0.001 {
+        res = Finish.over(res, mb_leak(d, a) * focus * live)
+    }
+    let rw = 1.3
+    let n = mb_normal(p, c, h, 1.5)
+    let hg = h - vec2(rw, rw)
+    var gem = mb_gstep(p - c, hg, ink, 3.0, 0.0, 1.0)
+    gem = gem * (1.0 + 0.06 * hover * live)
+    var col = mix(mb_rim(d, rw, n, p), gem, Finish.cover(d + rw, px))
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, rw, rw + px, px) * 0.5)
+    col = mix(col, vec3(0.84, 0.81, 0.75), 0.6 * dis)
+    col = mb_focus_rim(col, d, rw, px, focus * live)
+    res = Finish.over(res, vec4(col * a, a))
+    // The claws: four gold beads at the corners.
+    let q = abs(p - c) - (h - vec2(1.1, 1.1))
+    let cd = length(q) - 1.15
+    let ca = Finish.cover(cd, px)
+    let cn = (p - c) / max(length(p - c), 0.001)
+    let ccol = mix(mb_gold(mb_env(dot(cn, mb_lv()) * 0.7)), vec3(0.84, 0.81, 0.75), 0.6 * dis)
+    res = Finish.over(res, vec4(ccol * ca, ca))
+    let gl = mb_glint(p - c - vec2(hw * 0.35, -hv * 0.45), 4.0 + 3.0 * hover, px) * (0.35 + 0.65 * max(hover, drag)) * live
+    return Finish.over(res, vec4(gl, gl, gl, gl))
+}
+
+// A ROUND STONE THUMB: a round brilliant `rad` round `c` in a gold bezel,
+// its shadow under it; for the band's ends and the minimal slider. Its
+// stone is traced (`flat` 0) or, for the tiny stones (the progress bar's
+// head, the divider's stone, the needle's pivot), the flat sparkle of facets
+// (`flat` 1), which costs no tracer.
+// The setting round a stone whose colour here is `gem`.
+let mb_gemset = fn(dst: vec4, p: vec2, c0: vec2, rad: float, gem0: vec3, px: float, hover: float, drag: float, focus: float, dis: float) -> vec4 {
+    let live = 1.0 - dis
+    let c = c0 + vec2(0.0, 0.4 * drag * live)
+    let sc = mb_shadow(p, c0, vec2(rad, rad), rad, px, hover, drag, dis)
+    var res = Finish.over(dst, vec4(mb_shade() * sc, sc))
+    let d = length(p - c) - rad
+    let a = Finish.cover(d, px)
+    if focus * live > 0.001 {
+        res = Finish.over(res, mb_leak(d, a) * focus * live)
+    }
+    let rw = clamp(0.24 * rad, 1.1, 1.8)
+    let n = (p - c) / max(length(p - c), 0.001)
+    var gem = gem0 * (1.0 + 0.06 * hover * live)
+    var col = mix(mb_rim(d, rw, n, p), gem, Finish.cover(d + rw, px))
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, rw, rw + px, px) * 0.5)
+    col = mix(col, vec3(0.84, 0.81, 0.75), 0.6 * dis)
+    col = mb_focus_rim(col, d, rw, px, focus * live)
+    res = Finish.over(res, vec4(col * a, a))
+    let gl = mb_glint(p - c - vec2(rad * 0.25, -rad * 0.3), rad * 1.6 + 2.0 * hover, px) * (0.45 + 0.55 * max(hover, drag)) * live
+    return Finish.over(res, vec4(gl, gl, gl, gl))
+}
+let mb_gemthumb = fn(dst: vec4, p: vec2, c0: vec2, rad: float, ink: vec3, px: float, hover: float, drag: float, focus: float, dis: float) -> vec4 {
+    let c = c0 + vec2(0.0, 0.4 * drag * (1.0 - dis))
+    let rw = clamp(0.24 * rad, 1.1, 1.8)
+    let gem = mb_gem(p - c, rad - rw, mb_gink(ink), 0.4, 2.0)
+    return mb_gemset(dst, p, c0, rad, gem, px, hover, drag, focus, dis)
+}
+let mb_gemdot = fn(dst: vec4, p: vec2, c0: vec2, rad: float, px: float) -> vec4 {
+    let rw = clamp(0.24 * rad, 1.1, 1.8)
+    let gem = mb_brilliant(p - c0, rad - rw, mb_diamond(), 0.4, px)
+    return mb_gemset(dst, p, c0, rad, gem, px, 0.0, 0.0, 0.0, 0.0)
+}
+
+// The bar slider: an 8 point gold rail under its label row, the value a row
+// of pavé diamonds in it, and a citrine emerald-cut riding it, 13 x 16
+// points in its claws.
+mod.widgets.SliderFlat.clip_x = false
+mod.widgets.SliderFlat.clip_y = false
+mod.widgets.SliderFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let rad = 8.0
+    let cy = mb_snap(20.0 + (self.rect_size.y - 20.0) * 0.5, o.y, px)
+    let lo = vec2(mb_snap(0.0, o.x, px), cy - 4.0)
+    let hi = vec2(mb_snap(self.rect_size.x, o.x, px), cy + 4.0)
+    let span = self.rect_size.x - rad * 2.0
+    let hx = rad + self.slide_pos * span
+    let ox = rad + self.origin_pos * span
+    let f0 = mix(lo.x + 2.0, min(ox, hx), self.arc_origin)
+    let f1 = mix(hx - 5.0, max(ox, hx), self.arc_origin)
+    var res = mb_rail(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, px, f0, f1, self.disabled)
+    return mb_thumb(res, p, vec2(hx, cy), 6.5, 8.2, mb_citrine_gem(), px, self.hover, self.drag, self.focus, self.disabled) * mb_fade(self.pos, self.rect_size, m)
+}
+
+// The minimal slider: a slim gold rail with the value in pavé, and a small
+// round diamond riding it.
+mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let cy = mb_snap(self.offset_y + (self.rect_size.y - self.offset_y) * 0.5, o.y, px)
+    let lo = vec2(mb_snap(0.0, o.x, px), cy - 2.5)
+    let hi = vec2(mb_snap(self.rect_size.x, o.x, px), cy + 2.5)
+    let lo2 = min(self.origin_pos, self.slide_pos)
+    let hi2 = max(self.origin_pos, self.slide_pos)
+    let f0 = mix(1.5, lo2 * self.rect_size.x, self.arc_origin)
+    let f1 = mix(self.slide_pos * self.rect_size.x - 3.0, hi2 * self.rect_size.x, self.arc_origin)
+    var res = mb_rail(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, px, f0, f1, self.disabled)
+    let hx = clamp(self.slide_pos * self.rect_size.x, 4.5, self.rect_size.x - 4.5)
+    return mb_gemthumb(res, p, vec2(hx, cy), 4.5, mb_diamond(), px, self.hover, self.drag, 0.0, self.disabled)
+}
+
+// The range slider: the bar slider's rail under its label row, the band in
+// pavé between its ends, and at each end a round emerald in a gold bezel.
+mod.widgets.RangeSliderFlat.handle_size = 13.0
+mod.widgets.RangeSliderFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RangeSliderFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let top = self.label_px
+    let track_h = self.rect_size.y - top
+    let mid = mb_snap(top + track_h * 0.5, o.y, px)
+    let lo = vec2(mb_snap(self.inset_px * 0.5, o.x, px), mid - 3.5)
+    let hi = vec2(mb_snap(self.rect_size.x - self.inset_px * 0.5, o.x, px), mid + 3.5)
+    let span_x = self.rect_size.x - self.inset_px * 2.0 - self.handle_px
+    let s0 = self.inset_px + self.handle_px * 0.5 + self.start_pos * span_x
+    let s1 = self.inset_px + self.handle_px * 0.5 + self.end_pos * span_x
+    var res = mb_rail(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, px, s0 + 4.0, s1 - 4.0, self.disabled)
+    let rad = clamp(track_h * 0.5 - 0.5, 4.5, 6.5)
+    // Each pixel traces only the nearer of the two stones.
+    let ns = step(abs(p.x - s0), abs(p.x - s1))
+    let hot_t = mix(self.hot_end, self.hot_start, ns)
+    return mb_gemthumb(res, p, vec2(mix(s1, s0, ns), mid), rad, mb_emerald(), px, hot_t, self.drag * hot_t, self.focus, self.disabled) * mb_fade(self.pos, self.rect_size, m)
+}
+
+// The round slider: a label column, then the bar slider's rail, pavé and
+// citrine; the rail ends short of the right edge for the value.
+mod.widgets.SliderRoundFlat.clip_x = false
+mod.widgets.SliderRoundFlat.clip_y = false
+mod.widgets.SliderRoundFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let rad = 7.0
+    let cy = mb_snap(self.rect_size.y * 0.5, o.y, px)
+    let x0 = mb_snap(self.label_size, o.x, px)
+    let lo = vec2(x0, cy - 4.0)
+    let hi = vec2(mb_snap(self.rect_size.x - 37.0, o.x, px), cy + 4.0)
+    let span = hi.x - lo.x - rad * 2.0
+    let hx = lo.x + rad + self.slide_pos * span
+    var res = mb_rail(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, px, lo.x + 2.0, hx - 5.0, self.disabled)
+    return mb_thumb(res, p, vec2(hx, cy), 6.5, 8.2, mb_citrine_gem(), px, self.hover, self.drag, self.focus, self.disabled) * mb_fade(self.pos, self.rect_size, m)
+}
+
+// THE FADER: a slim gold rail standing in the fader's middle, its value in
+// pavé from the stop to the cap, gold ticks either side (every fifth long),
+// and the cap an emerald baguette 22 points across and 14 along, held in a
+// polished gold frame with claws. Laid out in the fader's own frame (`ab`:
+// along the track from the value's zero, up the screen when it stands;
+// across it), so SliderFaderY is the same drawing stood on end. The travel
+// law is the widget's, so what is drawn is what is dragged.
+mod.widgets.SliderFader.cap_size = 22.0
+mod.widgets.SliderFader.track_inset = 4.0
+mod.widgets.SliderFader.draw_bg.track_size = uniform(5.0)
+mod.widgets.SliderFader.draw_bg.cap_cross = uniform(0.24)
+mod.widgets.SliderFader.clip_x = false
+mod.widgets.SliderFader.clip_y = false
+mod.widgets.SliderFader.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderFader.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let sz = self.rect_size
+    let p = self.pos * (sz + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let v = self.is_vertical
+    let dis = self.disabled
+    let live = 1.0 - dis
+    let along = mix(sz.x, sz.y, v)
+    let across = mix(sz.y, sz.x, v)
+    // Work in the fader's frame, then hand screen points to the helpers.
+    let ab = vec2(mix(p.x, sz.y - p.y, v), mix(p.y, p.x, v))
+    let mid = across * 0.5
+    let travel = max(along - self.inset_px * 2.0 - self.cap_px, 1.0)
+    let foot = self.inset_px + self.cap_px * 0.5
+    let at = foot + self.slide_pos * travel
+    // A frame-space point to a screen point.
+    let tin = self.inset_px + 3.0
+    let tw = self.track_size
+    // The ticks, gold hairlines either side of the rail.
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    let n = 24.0
+    let k = floor((ab.x - foot) / travel * n + 0.5)
+    let tk = foot + k / n * travel
+    let major = 1.0 - step(0.5, k - 5.0 * floor(k / 5.0 + 0.0001))
+    let tlen = mix(3.0, 5.0, major)
+    let side = abs(ab.y - mid) - (tw * 0.5 + 2.5)
+    let inrange = step(-0.01, k) * step(k, n + 0.01)
+    let tick = Finish.cover(abs(ab.x - tk) - px * mix(0.5, 0.8, major), px) * Finish.cover(max(-side, side - tlen), px) * inrange
+    let tcol = mix(mb_gold(0.45), vec3(0.84, 0.81, 0.75), 0.6 * dis)
+    res = Finish.over(res, vec4(tcol * tick * 0.9, tick * 0.9))
+    // The rail and its value, laid out across the screen axis.
+    var lo = foot + self.fill_lo * travel
+    var hi = foot + self.fill_hi * travel
+    if self.fill_lo < 0.0005 {
+        lo = tin
+    }
+    if self.fill_hi > 0.9995 {
+        hi = along - tin
+    }
+    let q = vec2(ab.x, ab.y)
+    let rail = mb_rail(vec4(0.0, 0.0, 0.0, 0.0), q, vec2(tin, mid - tw * 0.5), vec2(along - tin, mid + tw * 0.5), px, lo + 1.0, hi - 1.0, dis)
+    res = Finish.over(res, rail)
+    // The cap, in screen orientation so its light falls from the top.
+    let cs = mix(vec2(at, mid), vec2(mid, sz.y - at), v)
+    let capw = min(across * 0.5 - 1.0, 11.0)
+    let thumb = mb_thumb(vec4(0.0, 0.0, 0.0, 0.0), p, cs, mix(7.0, capw, v), mix(capw, 7.0, v), mb_emerald(), px, self.hover, self.drag, self.focus, dis)
+    res = Finish.over(res, thumb)
+    return res * mb_fade(self.pos, self.rect_size, m)
+}
+
+// ---------------------------------------------------------------- knobs
+
+// A KNOB is a cut stone in a gold bezel, the pictures' gem knobs: a round
+// brilliant that turns with the value, in a polished gold bezel whose outer
+// edge is milgrained (a row of fine beads), the pointer an engraved notch
+// across the bezel. Round it a slim gold ring over the whole sweep, and lit
+// from the start of the sweep (or from the origin) to the value a row of
+// pavé diamonds set in it. The big dial adds a ring of gold ticks outside.
+// Under the hand the stone glints and the bezel brightens; held, it glints
+// more; focus lays the gold light round the bezel; disabled, all fades
+// toward the stone. Angles run from straight down, clockwise, the gap at
+// the bottom.
+
+// The distance from `q` (at the angle `aq`) to a band `hw` either side of
+// the arc of radius `ra` from the angle `a0` to `a1`, its ends round; in .y
+// how far along the arc (0..1) the nearest point lies.
+let mb_arc_d = fn(q: vec2, aq: float, ra: float, hw: float, a0: float, a1: float) -> vec2 {
+    let r = length(q)
+    if aq >= a0 && aq <= a1 {
+        return vec2(abs(r - ra) - hw, (aq - a0) / max(a1 - a0, 0.0001))
+    }
+    let d0 = length(q - vec2(-sin(a0), cos(a0)) * ra)
+    let d1 = length(q - vec2(-sin(a1), cos(a1)) * ra)
+    if d0 < d1 {
+        return vec2(d0 - hw, 0.0)
+    }
+    return vec2(d1 - hw, 1.0)
+}
+
+let mb_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: float, arc_origin: float, gap: float, hover: float, held: float, focus: float, dis: float, ink: vec3, ticks: float) -> vec4 {
+    let q = p - c
+    let ql = length(q)
+    let live = 1.0 - dis
+    let one = PI / 180.0
+    let sweep = 2.0 * PI - gap * one
+    let start = gap * one * 0.5
+    let ve = start + sweep * slide
+    let oe = start + sweep * origin
+    let a0 = mix(start, min(oe, ve), arc_origin)
+    let a1 = mix(ve, max(oe, ve), arc_origin)
+    var aq = atan2(-q.x, q.y)
+    if aq < 0.0 {
+        aq = aq + 2.0 * PI
+    }
+    // The sizes: the ticks (on the dial) outermost, then the ring and its
+    // pavé, then the bezel and the stone.
+    let tk = ticks * clamp(0.10 * rr, 3.0, 6.0)
+    let prad = clamp(0.045 * rr, 1.05, 2.1)
+    let ra = rr - tk - prad - 0.6
+    let rb = ra - prad - clamp(0.06 * rr, 1.8, 4.0)
+    let bw = clamp(0.16 * rb, 1.8, 5.5)
+    let rg = rb - bw
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    // THE TICKS (the dial only): eleven gold strokes outside the ring.
+    if ticks > 0.5 {
+        let tn = 10.0
+        let ti = floor(clamp((aq - start) / sweep, 0.0, 1.0) * tn + 0.5)
+        let ta = start + sweep * ti / tn
+        let td = vec2(-sin(ta), cos(ta))
+        let tdist = mb_seg(q, td * (rr - tk + 0.8), td * (rr - 0.8)) - 0.55
+        let tcov = Finish.cover(tdist, px)
+        let tcol = mix(mb_gold(0.5), vec3(0.84, 0.81, 0.75), 0.6 * dis)
+        res = Finish.over(res, vec4(tcol * tcov, tcov))
+    }
+    // THE RING: a slim gold wire over the whole sweep, its shadow under it.
+    let tr = mb_arc_d(q, aq, ra, prad * 0.55, start, start + sweep)
+    let rsh = Finish.cover(tr.x - 0.9, 1.2) * 0.18 * (1.0 - Finish.cover(tr.x, px))
+    res = Finish.over(res, vec4(mb_shade() * rsh, rsh))
+    let ta2 = Finish.cover(tr.x, px)
+    let rn = clamp((ql - ra) / max(prad * 0.55, 0.3), -1.0, 1.0)
+    var rcol = mb_gold(mb_env(rn * dot(q / max(ql, 0.01), mb_lv()) * 0.9))
+    rcol = mix(rcol, vec3(0.84, 0.81, 0.75), 0.6 * dis)
+    res = Finish.over(res, vec4(rcol * ta2, ta2))
+    // THE PAVÉ: from the start (or the origin) to the value, a diamond every
+    // so many degrees on the ring.
+    if dis < 0.5 {
+        let pitch = prad * 2.3 / max(ra, 1.0)
+        let ci = floor((aq - a0) / pitch)
+        let ca = a0 + (ci + 0.5) * pitch
+        let inside = step(a0, ca) * step(ca, a1)
+        let pc = vec2(-sin(ca), cos(ca)) * ra
+        res = Finish.over(res, mb_pave(q - pc, prad, Finish.hash(vec2(ci, 9.1)), px) * inside)
+    }
+    // THE BEZEL'S SHADOW on the stone ground.
+    let sc = Finish.drop(p, c, vec2(rb, rb), rb, vec2(0.0, 0.10 * rb + 0.6), 0.10 * rb + 0.6) * 0.32 * (1.0 - 0.6 * dis)
+    let db = ql - rb
+    let ab_ = Finish.cover(db, px)
+    res = Finish.over(res, vec4(mb_shade() * sc * (1.0 - ab_), sc * (1.0 - ab_)))
+    if focus * live > 0.001 {
+        res = Finish.over(res, mb_leak(db, ab_) * focus * live)
+    }
+    // THE BEZEL: a polished bead, milgrained along its outer third.
+    let n = q / max(ql, 0.01)
+    let u = clamp(-db / bw, 0.0, 1.0)
+    var l = mb_bead(u, n)
+    let nb = max(floor(2.0 * PI * rb / 1.5), 8.0)
+    let mg = cos(aq * nb) * (1.0 - smoothstep(0.18, 0.36, u))
+    l = l + 0.16 * mg * smoothstep(0.0, 0.08, u)
+    var bcol = mb_gold(l) * (1.0 + 0.05 * hover * live)
+    bcol = mix(bcol, vec3(0.30, 0.21, 0.07), Finish.band(db, 0.0, px, px) * 0.35)
+    // The pointer: an engraved notch across the bezel at the value.
+    let dirv = vec2(-sin(ve), cos(ve))
+    let nw = max(0.15 * bw, 0.75)
+    let nd = mb_seg(q, dirv * (rg - 0.2), dirv * (rb - 0.3)) - nw
+    let notch = Finish.cover(nd, px)
+    let lip = Finish.cover(mb_seg(q - vec2(0.0, 0.6), dirv * (rg - 0.2), dirv * (rb - 0.3)) - nw, px) * (1.0 - notch)
+    bcol = mix(bcol, vec3(1.0, 0.95, 0.78), lip * 0.6)
+    bcol = mix(bcol, vec3(0.20, 0.13, 0.03), notch * 0.9)
+    // THE STONE, turning with the value; a dark seat where it meets gold.
+    let dg = ql - rg
+    var gcol = mb_gem_aa(q, rg, mb_gink(ink), ve, px, 4.0, 2.0) * (1.0 + 0.04 * hover * live)
+    gcol = mix(gcol, vec3(0.25, 0.18, 0.06), Finish.band(dg, -px, 0.0, px) * 0.6)
+    var col = mix(bcol, gcol, Finish.cover(dg, px))
+    col = mix(col, mix(mb_ground(), vec3(0.80, 0.78, 0.72), 0.5), 0.55 * dis)
+    col = mb_focus_rim(col, db, bw, px, focus * live)
+    res = Finish.over(res, vec4(col * ab_, ab_))
+    // The glints, the larger one brighter under the hand.
+    let g1 = mb_glint(q - vec2(rg * 0.32, -rg * 0.38), rg * 0.95 + 2.0 * hover, px) * (0.55 + 0.45 * max(hover, held))
+    let g2 = mb_glint(q - vec2(-rg * 0.45, rg * 0.30), rg * 0.45, px) * 0.45
+    var gsum = g1 + g2
+    // A white diamond glints at its facet corners instead.
+    if max(ink.x, max(ink.y, ink.z)) - min(ink.x, min(ink.y, ink.z)) < 0.15 {
+        gsum = mb_dia_glints(q, rg, ve, px) * (0.75 + 0.25 * max(hover, held))
+    }
+    let gl = clamp(gsum, 0.0, 1.0) * live * Finish.cover(dg + 0.5, px)
+    return Finish.over(res, vec4(gl, gl, gl, gl))
+}
+
+// The panel knob is 36 points across with no side margin: in a row beside
+// a big dial it then keeps inside its own column, its ring a few points
+// clear of the next column's frame.
+mod.widgets.RotaryKnob.width = 36.0
+mod.widgets.RotaryKnob.height = 56.0
+mod.widgets.RotaryKnob.margin = mod.turtle.Inset{left: 0.0 right: 0.0 top: 4.0 bottom: 4.0}
+mod.widgets.RotaryKnob.clip_x = false
+mod.widgets.RotaryKnob.clip_y = false
+mod.widgets.RotaryKnob.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+// The panel knob is an emerald.
+mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let dia = min(self.rect_size.x, self.rect_size.y)
+    let c = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x, Finish.snap(self.rect_pos.y + self.rect_size.y - dia * 0.5, px) - self.rect_pos.y)
+    return mb_knob(p, c, dia * 0.5 - 0.5, px, self.slide_pos, self.origin_pos, self.arc_origin, self.gap, self.hover, self.drag, self.focus, self.disabled, mb_emerald(), 0.0) * mb_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.RotaryFlat.clip_x = false
+mod.widgets.RotaryFlat.clip_y = false
+mod.widgets.RotaryFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+// The dial is a white diamond with its ring of ticks.
+mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let dia = min(self.rect_size.x, self.rect_size.y - 22.0)
+    let c = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x, Finish.snap(self.rect_pos.y + 20.0 + dia * 0.5, px) - self.rect_pos.y)
+    return mb_knob(p, c, dia * 0.5 - 0.5, px, self.slide_pos, self.origin_pos, self.arc_origin, self.gap, self.hover, self.drag, self.focus, self.disabled, mb_diamond(), 1.0) * mb_fade(self.pos, self.rect_size, m)
+}
+// The dial's readout stands as a plain line under it.
+mod.widgets.Rotary.text_input.min_height = 0.0
+mod.widgets.Rotary.text_input.padding.top = 0.0
+mod.widgets.Rotary.text_input.padding.bottom = 0.0
+mod.widgets.RotaryKnob.draw_text.text_style = mod.theme.font_bold{font_size: 8.5}
+
+// ---------------------------------------------------------------- fields
+
+// A FIELD is white marble set in a double gold rim (a broad bead, a dark
+// groove, a slim bead), sunk a little under it: a soft shade under its upper
+// rim, a line of milgrain beads inside it, the veins calm under the words.
+// Focused, the rim burns brighter and spills its gold light. `lift` how
+// much shadow it throws.
+let mb_field = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, seed: vec2, hover: float, focus: float, dis: float, lift: float) -> vec4 {
+    let hh = hi.y - lo.y
+    let full = step(20.0, hh)
+    let rw = clamp(0.177 * hh, 1.8, 4.6)
+    var face = mb_stone(p + seed, px, 0.42) * (1.0 + 0.02 * hover)
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let ins = Finish.inset(p, c, h - vec2(rw, rw), max(r - rw, 0.5), vec2(0.0, 1.5), 1.8)
+    face = mix(face, face * 0.88, clamp(ins, 0.0, 1.0) * 0.6)
+    face = mix(face, mb_milgrain(face, p, c, h, r, rw + 1.0, 0.6, 1.9, px), full)
+    face = mix(face, mb_ground(), 0.45 * dis)
+    return mb_box2(p, lo, hi, min(r, 0.3 * hh), rw, px, face, hover * 0.3, 0.0, dis, focus, lift, full)
+}
+
+mod.widgets.TextInputFlat.clip_x = false
+mod.widgets.TextInputFlat.clip_y = false
+mod.widgets.TextInputFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
+    if self.color.a < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let m = 8.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(self.rect_size.x, o.x, px), mb_snap(self.rect_size.y, o.y, px))
+    return mb_field(p, lo, hi, 5.0, px, mb_seed(self.rect_size), self.hover, self.focus, self.disabled, 0.7) * mb_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.TextInputFlat.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
+// A field well (a field whose input is drawn by another widget) wears the
+// same face.
+mod.widgets.FieldWell.clip_x = false
+mod.widgets.FieldWell.clip_y = false
+mod.widgets.FieldWell.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.FieldWell.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(self.rect_size.x, o.x, px), mb_snap(self.rect_size.y, o.y, px))
+    return mb_field(p, lo, hi, 5.0, px, mb_seed(self.rect_size), self.hover, self.focus, self.disabled, 0.7) * mb_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.TextInputFlat.draw_cursor.color = #3a2e1c
+mod.widgets.TextInputFlat.draw_text.color = #3a2e1c
+mod.widgets.TextInputFlat.draw_text.color_empty = #6e5f46
+mod.widgets.TextInputFlat.draw_text.color_disabled = #8f826a
+
+// The number field: a field; its stepper two small gold keys stacked at
+// the right, parted by a dark seam, their chevrons engraved.
+mod.widgets.NumberField.clip_x = false
+mod.widgets.NumberField.clip_y = false
+mod.widgets.NumberField.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.NumberField.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(self.rect_size.x, o.x, px), mb_snap(self.rect_size.y, o.y, px))
+    return mb_field(p, lo, hi, 5.0, px, mb_seed(self.rect_size), self.hover, self.focus, self.disabled, 0.7) * mb_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.NumberField.spin_width = 16.0
+mod.widgets.NumberSpin.width = 16.0
+mod.widgets.NumberSpin.draw_text.color = #00000000
+mod.widgets.NumberSpin.draw_text.color_disabled = #00000000
+mod.widgets.NumberSpin.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let x0 = mb_snap(0.5, o.x, px)
+    let x1 = mb_snap(self.rect_size.x - 4.6, o.x, px)
+    let y0 = mb_snap(5.2, o.y, px)
+    let y1 = mb_snap(self.rect_size.y - 5.2, o.y, px)
+    let mid = mb_snap(self.rect_size.y * 0.5, o.y, px)
+    let live = 1.0 - self.disabled
+    let tu = step(p.y, mid)
+    let hot = mix(max(0.0, -self.hot), max(0.0, self.hot), tu) * live
+    let dn = mix(max(0.0, -self.down), max(0.0, self.down), tu) * live
+    let lo = vec2(x0, mix(mid + px * 0.5, y0, tu))
+    let hi = vec2(x1, mix(y1, mid - px * 0.5, tu))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = Material.sd_box(p, c, h, 1.5)
+    let n = mb_normal(p, c, h, 1.5)
+    let a = Finish.cover(d, px)
+    var col = mb_goldface(p, c, h, d, n, 1.2) * (1.0 + 0.07 * hot - 0.10 * dn)
+    col = mix(col, vec3(0.84, 0.81, 0.75), 0.6 * self.disabled)
+    var res = vec4(min(col, vec3(1.0, 1.0, 1.0)) * a, a)
+    let cx = (x0 + x1) * 0.5
+    let cu = (y0 + mid) * 0.5
+    let cd = (mid + y1) * 0.5
+    let du = min(mb_seg(p, vec2(cx - 2.2, cu + 0.9), vec2(cx, cu - 1.0)), mb_seg(p, vec2(cx, cu - 1.0), vec2(cx + 2.2, cu + 0.9)))
+    let dd = min(mb_seg(p, vec2(cx - 2.2, cd - 0.9), vec2(cx, cd + 1.0)), mb_seg(p, vec2(cx, cd + 1.0), vec2(cx + 2.2, cd - 0.9)))
+    let k = Finish.cover(min(du, dd) - 0.55, px) * mix(1.0, 0.4, self.disabled)
+    return Finish.over(res, vec4(vec3(0.20, 0.13, 0.03) * k, k))
+}
+
+// The chevron of a drop-down, engraved: 7 x 4 points in a 1.4 point stroke.
+let mb_chevron = fn(dst: vec4, p: vec2, cc: vec2, ink: vec3, open: float, px: float) -> vec4 {
+    let s = mix(1.0, -1.0, open)
+    let dk = min(mb_seg(p, vec2(cc.x - 3.5, cc.y - 1.8 * s), vec2(cc.x, cc.y + 1.9 * s)), mb_seg(p, vec2(cc.x, cc.y + 1.9 * s), vec2(cc.x + 3.5, cc.y - 1.8 * s))) - 0.7
+    let k = Finish.cover(dk, px)
+    return Finish.over(dst, vec4(ink * k, k))
+}
+
+// THE DROP-DOWN: white marble in a chunky gold rim, a line of milgrain
+// inside it, with a square key of polished
+// gold at its right end carrying the chevron, as the pictures' selectors;
+// open, the key is pressed in and its chevron turns up.
+mod.widgets.DropDownFlat.padding = mod.turtle.Inset{left: 12.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.DropDownFlat.clip_x = false
+mod.widgets.DropDownFlat.clip_y = false
+mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+let mb_dropdown = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, down: float, open: float, dis: float, focus: float, lift: float) -> vec4 {
+    let m = 10.0
+    let px = mb_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(size.x, o.x, px), mb_snap(size.y, o.y, px))
+    let live = 1.0 - dis
+    let rw = 3.8
+    let held = max(down, open)
+    var face = mb_stone(p + mb_seed(size), px, 0.42) * (1.0 + 0.03 * hover * live)
+    face = mb_milgrain(face, p, (lo + hi) * 0.5, (hi - lo) * 0.5, 4.5, rw + 1.0, 0.6, 1.9, px)
+    // The key: a square of gold inside the rim at the right end.
+    let ks = (hi.y - lo.y) - 2.0 * rw
+    let kc = vec2(hi.x - rw - ks * 0.5, (lo.y + hi.y) * 0.5)
+    let kh = vec2(ks * 0.5, ks * 0.5)
+    let kd = Material.sd_box(p, kc, kh, 1.5)
+    let kn = mb_normal(p, kc, kh, 1.5)
+    var kcol = mb_goldface(p, kc, kh, kd, kn, 1.6) * (1.0 + 0.06 * hover * live - 0.10 * held * live)
+    let kin = Finish.inset(p, kc, kh, 1.5, vec2(0.0, 1.2), 1.3)
+    kcol = mix(kcol, kcol * 0.72, clamp(kin, 0.0, 1.0) * 0.6 * held)
+    kcol = mix(kcol, vec3(0.30, 0.21, 0.07), Finish.band(kd, 0.0, px, px) * 0.4 * step(p.x, kc.x - kh.x + 0.6))
+    face = mix(face, kcol, Finish.cover(kd, px))
+    face = mix(face, mb_ground(), 0.45 * dis)
+    var res = mb_box(p, lo, hi, 4.5, rw, px, face, hover, 0.0, dis, focus, lift)
+    res = mb_chevron(res, p, kc, mix(vec3(0.20, 0.13, 0.03), vec3(0.55, 0.50, 0.42), dis), open, px)
+    return res * mb_fade(pos, size, m)
+}
+mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
+    return mb_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.active, self.disabled, self.focus, 1.0)
+}
+mod.widgets.DropDownFlat.draw_text.color = #3a2e1c
+mod.widgets.DropDownFlat.draw_text.color_hover = #2a2112
+mod.widgets.DropDownFlat.draw_text.color_focus = #3a2e1c
+mod.widgets.DropDownFlat.draw_text.color_disabled = #a89c86
+
+// The select wears a button of its own, built before this sheet: it is
+// given the drop-down's face, its grown quad and its room here.
+mod.widgets.Select.clip_x = false
+mod.widgets.Select.clip_y = false
+mod.widgets.MultiSelect.clip_x = false
+mod.widgets.MultiSelect.clip_y = false
+mod.widgets.Select.face.clip_x = false
+mod.widgets.Select.face.clip_y = false
+mod.widgets.MultiSelect.face.clip_x = false
+mod.widgets.MultiSelect.face.clip_y = false
+mod.widgets.Select.face.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.MultiSelect.face.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Select.face.draw_bg.pixel = fn() {
+    return mb_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, 0.0, self.disabled, self.focus, 1.0)
+}
+mod.widgets.MultiSelect.face.draw_bg.pixel = fn() {
+    return mb_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, 0.0, self.disabled, self.focus, 1.0)
+}
+mod.widgets.Select.face.padding = mod.turtle.Inset{left: 12.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.MultiSelect.face.padding = mod.turtle.Inset{left: 12.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.Select.face.min_height = 26.0
+mod.widgets.MultiSelect.face.min_height = 26.0
+
+// The combo box: the drop-down one can type in, set a little lower (its
+// shadow shorter).
+mod.widgets.ComboBoxFlat.padding = mod.turtle.Inset{left: 12.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.ComboBoxFlat.input.min_height = 0.0
+mod.widgets.ComboBoxFlat.clip_x = false
+mod.widgets.ComboBoxFlat.clip_y = false
+mod.widgets.ComboBoxFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ComboBoxFlat.draw_bg.pixel = fn() {
+    return mb_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, 0.0, 0.0, self.disabled, self.focus, 0.6)
+}
+
+// Open lists: a card of white marble in a gold rim; a row under the hand
+// takes a pale gold wash; the chosen row is a strip of pavé in a gold rim.
+let mb_menu = fn(p: vec2, size: vec2, px: float) -> vec4 {
+    let c = size * 0.5
+    let d = Material.sd_box(p, c, c, 4.0)
+    let n = mb_normal(p, c, c, 4.0)
+    let rw = 3.0
+    var col = mb_stone(p + mb_seed(size), px, 0.35)
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, rw, rw + px, px) * 0.5)
+    col = mix(col, mb_rim(d, rw, n, p), Finish.band(d, 0.0, rw, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+// The pavé strip of a chosen row: a hexagonal field of tiny diamonds in a
+// gold rim.
+let mb_pave_strip = fn(p: vec2, lo: vec2, hi: vec2, px: float, amt: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let r = min(3.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let n = mb_normal(p, c, h, r)
+    let a = Finish.cover(d, px) * amt
+    let rw = 1.3
+    let pitch = 2.5
+    let row = floor((p.y - lo.y) / (pitch * 0.866))
+    let shift = fract(row * 0.5) * pitch
+    let cell = floor((p.x - lo.x - shift) / pitch)
+    let cc = vec2(lo.x + shift + (cell + 0.5) * pitch, lo.y + (row + 0.5) * pitch * 0.866)
+    var col = mb_gold(0.58)
+    let dot = mb_pave(p - cc, 1.12, Finish.hash(vec2(cell, row + 1.7)), px)
+    col = col * (1.0 - dot.a) + dot.rgb
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, rw, rw + px, px) * 0.6)
+    col = mix(col, mb_rim(d, rw, n, p), Finish.band(d, 0.0, rw, px))
+    let sh = Finish.drop(p, c, h, r, vec2(0.0, 0.7), 0.7) * 0.22 * amt * (1.0 - a)
+    return Finish.over(vec4(mb_shade() * sh, sh), vec4(col * a, a))
+}
+let mb_row = fn(p: vec2, size: vec2, px: float, hover: float, active: float, dis: float) -> vec4 {
+    let wash = 0.10 * hover * (1.0 - dis)
+    var res = vec4(vec3(0.78, 0.63, 0.30) * wash, wash)
+    if active > 0.001 {
+        res = Finish.over(res, mb_pave_strip(p, vec2(3.0, 1.5), size - vec2(3.0, 2.0), px, active))
+    }
+    return res
+}
+mod.widgets.PopupMenuFlat.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    return mb_menu(self.pos * self.rect_size, self.rect_size, px)
+}
+mod.widgets.PopupMenuItem.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    return mb_row(self.pos * self.rect_size, self.rect_size, px, self.hover, self.active, self.disabled)
+}
+mod.widgets.PopupMenuItem.draw_text.color = #3a2e1c
+mod.widgets.PopupMenuItem.draw_text.color_hover = #2a2112
+mod.widgets.PopupMenuItem.draw_text.color_active = #2a2112
+mod.widgets.ComboBoxFlat.draw_popup_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    return mb_menu(self.pos * self.rect_size, self.rect_size, px)
+}
+mod.widgets.ComboBoxFlat.draw_item.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    return mb_row(self.pos * self.rect_size, self.rect_size, px, self.hover, self.active, 0.0)
+}
+mod.widgets.ComboBoxFlat.draw_item_text.color_active = #2a2112
+
+// ---------------------------------------------------------------- tabs
+
+// The segmented control: a row of white marble in a chunky gold rim; the chosen
+// answer is pressed down into it, its floor polished gold sunk under a deep
+// shade along its upper edge, its word engraved dark in the gold.
+mod.widgets.SegmentedControl.segment_height = 22.0
+mod.widgets.SegmentedControlFlat.segment_height = 22.0
+mod.widgets.SegmentedControlFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(self.rect_size.x, o.x, px), mb_snap(self.rect_size.y, o.y, px))
+    let face = mb_stone(p + mb_seed(self.rect_size), px, 0.42)
+    return mb_box(p, lo, hi, 4.0, 3.4, px, face, 0.0, 0.0, 0.0, 0.0, 1.0) * mb_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
+    let m = 4.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let m = 4.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    // Kept inside the strip's wider rim.
+    let lo = vec2(mb_snap(1.4, o.x, px), mb_snap(1.4, o.y, px))
+    let hi = vec2(mb_snap(self.rect_size.x - 1.4, o.x, px), mb_snap(self.rect_size.y - 1.4, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let r = min(2.5, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let n = mb_normal(p, c, h, r)
+    let a = Finish.cover(d, px)
+    // Concave gold: the far wall lit, the near wall in shade.
+    var col = mb_goldface(p, c, h, d, vec2(-n.x, -n.y), 2.4)
+    let ins = Finish.inset(p, c, h, r, vec2(0.0, 1.6), 1.6)
+    col = mix(col, col * 0.55, clamp(ins, 0.0, 1.0) * 0.75)
+    col = mix(col, vec3(0.22, 0.15, 0.04), Finish.band(d, 0.0, px, px) * 0.7)
+    return vec4(col * a, a) * mb_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.SegmentedControlFlat.draw_text.text_style.font_size = 9.0
+mod.widgets.SegmentedControlFlat.draw_text_selected.text_style.font_size = 9.0
+mod.widgets.SegmentedControlFlat.draw_text.color = #5c4a2e
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #26190a
+// The chosen word takes its ink from the role palette: the dark brown.
+mod.widgets.SegmentedControlFlat.palette.on_primary_container = #26190a
+mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #26190a
+mod.widgets.SegmentedControlFlat.palette.on_secondary_container = #26190a
+mod.widgets.SegmentedControl.palette.on_primary_container = #26190a
+mod.widgets.SegmentedControl.palette.on_neutral_container = #26190a
+mod.widgets.SegmentedControl.palette.on_secondary_container = #26190a
+
+// Tabs: words on the stone parted by a short gold line; the tab in use a
+// white marble tab in a gold rim with a gold bar under its word; under the
+// hand a pale gold wash.
+mod.widgets.Tabs.height = 26.0
+mod.widgets.Tabs.clip_x = false
+mod.widgets.Tabs.clip_y = false
+let mb_tab = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, active: float) -> vec4 {
+    let m = 8.0
+    let px = mb_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(1.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(size.x - 1.0, o.x, px), mb_snap(size.y, o.y, px))
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    if active > 0.5 {
+        let face = mb_stone(p + mb_seed(size), px, 0.42)
+        res = mb_box(p, lo, hi, 3.5, 3.0, px, face, hover, 0.0, 0.0, 0.0, 1.0)
+        let c = (lo + hi) * 0.5
+        let bar = Material.sd_box(p, vec2(c.x, hi.y - 6.2), vec2(clamp(0.22 * (hi.x - lo.x), 5.0, 12.0), 0.8), 0.8)
+        let ba = Finish.cover(bar, px)
+        res = Finish.over(res, vec4(mb_gold(0.42) * ba, ba))
+    } else {
+        if hover > 0.001 {
+            let d = Material.sd_box(p, (lo + hi) * 0.5, (hi - lo) * 0.5, 3.0)
+            let w = Finish.cover(d, px) * 0.10 * hover
+            res = vec4(vec3(0.78, 0.63, 0.30) * w, w)
+        }
+    }
+    return res * mb_fade(pos, size, m)
+}
+mod.widgets.Tabs.draw_tab.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_tab_hover.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_tab_active.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_bg.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab.pixel = fn() {
+    return mb_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_hover.pixel = fn() {
+    return mb_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 1.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_active.pixel = fn() {
+    return mb_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 0.0, 1.0)
+}
+mod.widgets.Tabs.draw_sep.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let x = Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x
+    let span = step(self.rect_size.y * 0.25, p.y) * step(p.y, self.rect_size.y * 0.75)
+    let l = step(x, p.x) * step(p.x, x + px) * span
+    let w = step(x + px, p.x) * step(p.x, x + px * 2.0) * span
+    return vec4(mb_gold(0.40), 1.0) * l + vec4(mb_gold(0.85), 1.0) * w * (1.0 - l)
+}
+mod.widgets.Tabs.draw_mark.color = #b8964e
+mod.widgets.Tabs.draw_text.color = #5c4a2e
+mod.widgets.Tabs.draw_text_active.color = #2a2112
+mod.widgets.Tabs.draw_text.text_style.font_size = 9.0
+mod.widgets.Tabs.draw_text_active.text_style.font_size = 9.0
+
+// ---------------------------------------------------------------- feedback
+
+// The progress bar: a gold tube, the value an emerald enamel rod in it
+// (deep green with a lit line along its middle and a crystalline sparkle),
+// a small round diamond at its head.
+mod.widgets.ProgressBarFlat.height = 10.0
+mod.widgets.ProgressBarFlat.clip_x = false
+mod.widgets.ProgressBarFlat.clip_y = false
+mod.widgets.ProgressBarFlat.draw_bg.vertex = fn() {
+    let m = 5.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
+    let m = 5.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let th = min(8.0, self.rect_size.y)
+    let y0 = mb_snap((self.rect_size.y - th) * 0.5, o.y, px)
+    let x0 = mb_snap(self.rect_size.x * self.start + 1.0, o.x, px)
+    let x1 = mb_snap(self.rect_size.x * self.end - 1.0, o.x, px)
+    let lo = vec2(x0, y0)
+    let hi = vec2(x1, y0 + th)
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    if self.track > 0.5 {
+        res = mb_rail(res, p, lo, hi, px, 0.0, 0.0, 0.0)
+    }
+    let rw = 1.5
+    let span = hi.x - lo.x - rw * 2.0
+    var f0 = lo.x + rw
+    var f1 = f0 + span * clamp((self.value - self.start) / max(self.end - self.start, 0.001), 0.0, 1.0)
+    let unknown = step(self.value, -0.0001)
+    if unknown > 0.5 {
+        f0 = lo.x + span * 0.3
+        f1 = lo.x + span * 0.7
+    }
+    let fc = vec2((f0 + f1) * 0.5, (lo.y + hi.y) * 0.5)
+    let fh = vec2(max((f1 - f0) * 0.5, 0.01), th * 0.5 - rw)
+    let fd = Material.sd_box(p, fc, fh, fh.y)
+    let fa = Finish.cover(fd, px) * step(0.5, fh.x)
+    let t = (p.y - fc.y) / max(fh.y, 0.5)
+    // The enamel: an intent other than the plain one tints it.
+    let ic = self.fill_color()
+    let tint = step(0.5, self.intent)
+    let ink = mix(mb_emerald(), ic.rgb, tint * 0.8)
+    var col = mix(ink * 0.55, ink * 1.05, smoothstep(1.0, -0.6, t))
+    col = mix(col, mix(ink, vec3(1.0, 1.0, 1.0), 0.55), exp(-(t + 0.25) * (t + 0.25) / 0.06) * 0.55)
+    let sp = Finish.hash(floor(p / (px * 1.5)) + vec2(3.7, 1.1))
+    col = col * (0.88 + 0.24 * sp)
+    col = mix(col, vec3(1.0, 1.0, 1.0), step(0.985, sp) * 0.6)
+    var fill = vec4(col * fa, fa)
+    if unknown > 0.5 {
+        fill = fill * smoothstep(f0 - 1.0, f0 + span * 0.1, p.x) * smoothstep(f1 + 1.0, f1 - span * 0.1, p.x)
+    }
+    res = Finish.over(res, fill)
+    if unknown < 0.5 && f1 > f0 + 2.0 {
+        res = mb_gemdot(res, p, vec2(f1, fc.y), 3.9, px)
+    }
+    return res * self.opacity * mb_fade(self.pos, self.rect_size, m)
+}
+
+// THE LEVEL METER: a row of small square-cut stones set in a gold channel,
+// the pictures' jewelled meter: emeralds to 70 %, citrines to 90 %, rubies
+// past it; a lit stone is light itself (white at its heart), an unlit one
+// dark tinted glass. A stone held at the peak, a ruby clip lamp.
+mod.widgets.LevelMeter.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let sz = self.rect_size
+    let p = self.pos * sz
+    let v = self.vertical
+    let along = mix(sz.x, sz.y, v)
+    let across = mix(sz.y, sz.x, v)
+    let a = mix(p.x, sz.y - p.y, v)
+    let b = mix(p.y, p.x, v)
+    let lamp_room = self.lamp * (across + 3.0)
+    let bar = max(4.0, along - lamp_room)
+    let wa = min(across, 8.0)
+    let wb0 = (across - wa) * 0.5
+    let wlo = mix(vec2(0.0, wb0), vec2(wb0, sz.y - bar), v)
+    let whi = mix(vec2(bar, wb0 + wa), vec2(wb0 + wa, sz.y), v)
+    let lo = vec2(mb_snap(wlo.x, o.x, px), mb_snap(wlo.y, o.y, px))
+    let hi = vec2(mb_snap(whi.x, o.x, px), mb_snap(whi.y, o.y, px) - px)
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let r = min(2.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let n = mb_normal(p, c, h, r)
+    let ca = Finish.cover(d, px)
+    let rw = clamp(0.18 * wa, 0.8, 1.4)
+    var col = mb_gold(0.22)
+    col = mix(col, mb_rim(d, rw, n, p), Finish.band(d, 0.0, rw, px))
+    var res = vec4(col * ca, ca)
+    let pad = rw + 0.6
+    let span = max(1.0, bar - pad * 2.0)
+    let pitch = 4.5
+    let ga = a - pad
+    let ci = floor(ga / pitch)
+    let cl = (ga - ci * pitch) - 1.85
+    let gb = b - (wb0 + wa * 0.5)
+    let ghw = max(wa * 0.5 - rw - 0.5, 0.6)
+    let sd = max(abs(cl) - 1.75, abs(gb) - ghw)
+    let cell = Finish.cover(sd, px)
+    let share = clamp((ci * pitch + 1.85) / span, 0.0, 1.0)
+    let inb = step(pad, a) * step(a, bar - pad)
+    let ha = max(self.hot_at, 0.7)
+    var ink = mb_emerald()
+    ink = mix(ink, mb_citrine(), step(ha, share))
+    ink = mix(ink, mb_ruby(), step(max(self.hot_to, 0.9), share))
+    let on = step(share, self.level) * step(0.001, self.level)
+    let hc = step(abs(ci * pitch - floor((span * self.hold) / pitch) * pitch), 0.1) * step(0.002, self.hold)
+    let lit = max(on, hc * 0.9)
+    let gq = vec2(cl / 1.75, gb / ghw)
+    let core = exp(-dot(gq, gq) / 0.35)
+    var lcol = mix(mb_lamp_hue(ink, 0.6) * 0.9, vec3(1.0, 0.99, 0.96), core * 0.55)
+    lcol = lcol * (0.88 + 0.22 * Finish.hash(vec2(ci, 4.4)))
+    var dcol = mix(vec3(0.07, 0.065, 0.055), mb_lamp_full(ink) * 0.35, 0.18)
+    dcol = dcol + vec3(0.18, 0.17, 0.15) * smoothstep(0.5, 0.95, gq.y) * 0.5
+    let gcol = mix(dcol, lcol, lit)
+    res = Finish.over(res, vec4(gcol, 1.0) * cell * inb * self.opacity)
+    if self.lamp > 0.5 {
+        let lc = mix(vec2(bar + 3.0 + across * 0.5, sz.y * 0.5), vec2(sz.x * 0.5, across * 0.5), v)
+        let rl = max(across * 0.5 - 2.0, 1.0)
+        res = mb_lamp(res, p, lc, vec2(rl * 0.62, rl * 0.62), step(0.5, self.over), mb_ruby(), 0.6, px, mb_ground(), 2.0, 1.0)
+    }
+    return res * self.opacity
+}
+
+// The spinner keeps the library's own turning face and takes the gold.
+mod.widgets.SpinnerFlat.draw_bg.color = #b8964e
+mod.widgets.SpinnerFlat.draw_bg.track_alpha = 0.18
+
+// The rings, the arc and the stock bars keep their own faces; the plain
+// intent reads in emerald.
+mod.widgets.ProgressRingFlat.draw_bg.color_primary = #0f7a42
+mod.widgets.ProgressRing.draw_bg.color_primary = #0f7a42
+mod.widgets.ProgressArc.draw_bg.color_primary = #0f7a42
+mod.widgets.ActivityRings.draw_bg.color_primary = #0f7a42
+mod.widgets.ProgressBarFlat.draw_bg.color_primary = #0f7a42
+mod.widgets.ProgressBar.draw_bg.color_primary = #0f7a42
+mod.widgets.ProgressBarGradientX.draw_bg.color_primary = #0f7a42
+mod.widgets.ProgressBarGradientY.draw_bg.color_primary = #0f7a42
+
+// Words in the error intent beside a check box or a toggle: a ruby red that
+// reads on the stone.
+mod.widgets.CheckBoxFlat.draw_text.color_error = #9c1830
+mod.widgets.ToggleFlat.draw_text.color_error = #9c1830
+
+// ---------------------------------------------------------------- surfaces
+
+// The scroll bar: a slim gold rod for its gutter and a polished gold bead
+// for its thumb, brighter under the hand.
+mod.widgets.ScrollBar.bar_size = 8.0
+mod.widgets.ScrollBar.bar_side_margin = 1.0
+mod.widgets.ScrollBar.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let sz = self.rect_size
+    let p = self.pos * sz
+    let v = self.is_vertical
+    let t0 = mix(sz.x * self.norm_scroll, sz.y * self.norm_scroll, v)
+    let t1 = t0 + mix(sz.x * self.norm_handle, sz.y * self.norm_handle, v)
+    let mid = mix(sz.y * 0.5, sz.x * 0.5, v)
+    let glo = mix(vec2(1.0, mid - 1.0), vec2(mid - 1.0, 1.0), v)
+    let ghi = mix(vec2(sz.x - 1.0, mid + 1.0), vec2(mid + 1.0, sz.y - 1.0), v)
+    let gd = Material.sd_box(p, (glo + ghi) * 0.5, (ghi - glo) * 0.5, 1.0)
+    let gutter = Finish.cover(gd, px) * 0.55
+    var res = vec4(mb_gold(0.45) * gutter, gutter)
+    let tlo = mix(vec2(t0, mid - 2.6), vec2(mid - 2.6, t0), v)
+    let thi = mix(vec2(t1, mid + 2.6), vec2(mid + 2.6, t1), v)
+    let lo = vec2(mb_snap(tlo.x, o.x, px), mb_snap(tlo.y, o.y, px))
+    let hi = vec2(mb_snap(thi.x, o.x, px), mb_snap(thi.y, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = Material.sd_box(p, c, h, 2.6)
+    let n = mb_normal(p, c, h, 2.6)
+    let across = mix((p.y - c.y) / max(h.y, 0.5), (p.x - c.x) / max(h.x, 0.5), v)
+    let nn = mix(vec2(0.0, 1.0), vec2(1.0, 0.0), v)
+    var col = mb_gold(mb_env(across * dot(nn, mb_lv()) * 0.9)) * (1.0 + 0.10 * max(self.hover, self.drag))
+    let a = Finish.cover(d, px) * 0.95
+    res = Finish.over(res, vec4(col * a, a))
+    return res * self.opacity
+}
+
+// A RAISED PANEL, the pictures' framed marble slab: white marble (its veins
+// calm under the words) in a double polished gold frame 5.4 points wide (a
+// broad bead, a dark groove, a slim bead), a dark seam and a line of
+// milgrain beads inside the frame, a small gold scroll in each corner (kept within
+// the corner's nine points, clear of anything the panel holds) and a soft
+// warm shadow under it, drawn in from the sides so it stays in the gap.
+// `sunk` 1 makes it a well: the stone under the frame, shaded under its top
+// edge, no shadow out. `orn` 0 leaves the scrolls off.
+let mb_panel = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, hover: float, lift: float, sunk: float, orn: float) -> vec4 {
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(size.x, o.x, px), mb_snap(size.y, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = Material.sd_box(p, c, h, r)
+    let a = Finish.cover(d, px)
+    let n = mb_normal(p, c, h, r)
+    let hs = vec2(max(h.x - 3.0, 1.0), h.y)
+    let amb = Finish.drop(p, c, hs, min(r, min(hs.x, hs.y)), vec2(0.0, 3.0 + 0.6 * hover), 2.6) * (0.26 + 0.04 * hover) * lift
+    let con = Finish.drop(p, c, h, r, vec2(0.0, 0.6 + px * 0.5), 0.6 + px * 0.5) * 0.30 * (1.0 - 0.5 * sunk)
+    let sc = (1.0 - (1.0 - amb * (1.0 - sunk)) * (1.0 - con)) * (1.0 - a)
+    var res = vec4(mb_shade() * sc, sc)
+    let rw = 5.4
+    var face = mb_stone(p + mb_seed(size) + vec2(37.0, 11.0), px, 0.6)
+    let t = clamp((p.y - lo.y) / max(size.y, 1.0), 0.0, 1.0)
+    face = face * mix(1.012 - 0.03 * t, 0.955, sunk) + vec3(0.006, 0.006, 0.005) * hover
+    let insh = Finish.inset(p, c, h - vec2(rw, rw), max(r - rw, 0.0), vec2(0.0, mix(1.2, 3.4, sunk)), mix(1.5, 4.0, sunk))
+    face = mix(face, face * mix(0.86, 0.72, sunk), clamp(insh, 0.0, 1.0) * mix(0.45, 0.9, sunk))
+    var col = mb_milgrain(face, p, c, h, r, rw + 1.0, 0.62, 1.9, px)
+    // The corner scrolls, with their own small shadow on the stone.
+    if orn > 0.5 && size.x > 60.0 && size.y > 40.0 {
+        let dl = p - lo
+        let dr = hi - p
+        let m = vec2(min(dl.x, dr.x), min(dl.y, dr.y)) - vec2(2.6, 2.6)
+        let sx = mix(1.0, -1.0, step(dr.x, dl.x))
+        let sy = mix(1.0, -1.0, step(dr.y, dl.y))
+        let lv = vec2(mb_lv().x * sx, mb_lv().y * sy)
+        let g = mb_corner(m, 0.9, lv, px)
+        let shm = vec2(min(dl.x - 0.3, dr.x + 0.3), min(dl.y - 0.8, dr.y + 0.8)) - vec2(2.6, 2.6)
+        let gs = mb_corner(shm, 0.9, lv, px)
+        col = mix(col, col * 0.72, gs.x * 0.6)
+        col = mix(col, mb_gold(g.y), g.x)
+        // The small stone in each corner's eye.
+        let eye = vec2(mix(hi.x - 8.9, lo.x + 8.9, step(0.0, sx)), mix(hi.y - 8.9, lo.y + 8.9, step(0.0, sy)))
+        let ed = length(p - eye) - 1.55
+        col = mix(col, mb_gold(0.3), Finish.cover(ed - 0.45, px))
+        col = mix(col, mb_brilliant(p - eye, 1.55, mb_diamond(), 0.4, px), Finish.cover(ed, px))
+    }
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, rw, rw + px, px) * 0.55)
+    col = mix(col, mb_rim2(d, rw, n, p, px), Finish.band(d, 0.0, rw, px))
+    return Finish.over(res, vec4(col * a, a))
+}
+
+mod.widgets.PanelView.clip_x = false
+mod.widgets.PanelView.clip_y = false
+mod.widgets.PanelView.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 10.0 bottom: 10.0}
+mod.widgets.PanelView.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.PanelView.draw_bg.pixel = fn() {
+    let m = 12.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return mb_panel(p, self.rect_size, self.rect_pos, px, 5.0, 0.0, 1.0, step(0.5, self.sunken), 1.0) * mb_fade(self.pos, self.rect_size, m)
+}
+
+// The rounded view keeps the colour its caller gives it, with a true
+// corner and, when it is opaque, a fine gold edge.
+mod.widgets.RoundedView.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let lo = vec2(self.border_inset.x, self.border_inset.y)
+    let hi = self.rect_size - vec2(self.border_inset.z, self.border_inset.w)
+    let c = (lo + hi) * 0.5
+    let h = max((hi - lo) * 0.5, vec2(0.5, 0.5))
+    let r = min(2.0 * max(1.0, self.border_radius), min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    var fill = self.color
+    if self.color_2.x > -0.5 {
+        fill = mix(self.color, self.color_2, mix(self.pos.y, self.pos.x, self.gradient_fill_horizontal))
+    }
+    var ink = self.border_color
+    if self.border_size < 0.01 {
+        ink = vec4(mb_gold(0.5), fill.a)
+    }
+    let a = Finish.cover(d, px)
+    let bd = Finish.band(d, 0.0, max(self.border_size, px), px)
+    var col = mix(fill.rgb, ink.rgb, bd * ink.a)
+    return vec4(col * a * fill.a, a * fill.a) + vec4(ink.rgb * ink.a, ink.a) * bd * a * (1.0 - fill.a)
+}
+
+// The card: its three appearances told apart. Elevated, a framed marble
+// slab standing off the stone with its scrolls and a deeper shadow, more of
+// it under the hand; filled, a framed slab seated with its contact shadow
+// only; outlined, the stone inside a fine gold wire.
+mod.widgets.Card.clip_x = false
+mod.widgets.Card.clip_y = false
+mod.widgets.Card.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 13.0 bottom: 13.0}
+mod.widgets.Card.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Card.draw_bg.pixel = fn() {
+    let m = 14.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let fade = mb_fade(self.pos, self.rect_size, m)
+    if self.border_size > 0.01 {
+        let o = self.rect_pos
+        let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+        let hi = vec2(mb_snap(self.rect_size.x, o.x, px), mb_snap(self.rect_size.y, o.y, px))
+        let c = (lo + hi) * 0.5
+        let h = (hi - lo) * 0.5
+        let d = Material.sd_box(p, c, h, 5.0)
+        let n = mb_normal(p, c, h, 5.0)
+        let ring = Finish.band(d, 0.0, 2.4, px)
+        let col = mb_rim(d, 2.4, n, p)
+        let wash = 0.3 * self.hover * Finish.cover(d, px)
+        var res = vec4(vec3(1.0, 1.0, 1.0) * wash, wash)
+        return Finish.over(res, vec4(col * ring, ring)) * fade
+    }
+    if self.shadow_radius < 0.01 {
+        return mb_panel(p, self.rect_size, self.rect_pos, px, 5.0, self.hover, 0.0, 0.0, 1.0) * fade
+    }
+    return mb_panel(p, self.rect_size, self.rect_pos, px, 5.0, self.hover, 1.3, 0.0, 1.0) * fade
+}
+
+// LISTS: the rows stand in a white marble well framed in a gold rim, each
+// row drawing the part of the well it covers (the well is the clip the rows
+// are drawn in, the list's own box, so it stays put while the rows scroll).
+// The well is held four points in from the box's leading edge and a point
+// from the others, so whatever stands beside the list keeps its room. Under the hand a row takes a pale gold wash; the chosen row is a
+// strip of pavé diamonds in a gold rim. The words are the ink.
+mod.widgets.ListItem.padding = mod.turtle.Inset{left: 14.0 right: 10.0 top: 0.0 bottom: 0.0}
+// A one-line row is 25 points, so a short list ends on a whole row.
+mod.widgets.ListItemOne.height = 25.0
+mod.widgets.ListItem.clip_x = false
+mod.widgets.ListItem.clip_y = false
+mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let live = 1.0 - self.disabled
+    let tlo = vec2(mb_snap(self.draw_clip.x - o.x + 4.0, o.x, px), mb_snap(self.draw_clip.y - o.y + 1.0, o.y, px))
+    let thi = vec2(mb_snap(self.draw_clip.z - o.x - 1.0, o.x, px), mb_snap(self.draw_clip.w - o.y - 1.0, o.y, px))
+    let tc = (tlo + thi) * 0.5
+    let th = max((thi - tlo) * 0.5, vec2(1.0, 1.0))
+    let tr = min(4.0, min(th.x, th.y))
+    let d = Material.sd_box(p, tc, th, tr)
+    let n = mb_normal(p, tc, th, tr)
+    let a = Finish.cover(d, px)
+    // The well's stone is laid in the well's own frame, so it holds still
+    // under the scrolling rows.
+    let wq = p - tlo + mb_seed(thi - tlo)
+    var col = mb_stone(wq, px, 0.4) * 0.985
+    col = mix(col, col * 0.84, clamp(Finish.inset(p, tc, th - vec2(2.2, 2.2), tr, vec2(0.0, 2.0), 2.4), 0.0, 1.0) * 0.6)
+    col = col + vec3(0.06, 0.045, 0.01) * self.hover * live
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, 2.2, 2.2 + px, px) * 0.5)
+    col = mix(col, mb_rim(d, 2.2, n, p), Finish.band(d, 0.0, 2.2, px))
+    var res = vec4(col * a, a)
+    if self.selected > 0.001 {
+        let lo = vec2(mb_snap(8.0, o.x, px), mb_snap(2.0, o.y, px))
+        let hi = vec2(mb_snap(self.rect_size.x - 5.0, o.x, px), mb_snap(self.rect_size.y - 2.0, o.y, px))
+        res = Finish.over(res, mb_pave_strip(p, lo, hi, px, self.selected) * a)
+    }
+    return res
+}
+mod.widgets.ListItem.draw_text.color = #3a2e1c
+mod.widgets.ListItem.draw_text_2.color = #5c4a2e
+
+// A chip is a small white marble box in a gold rim; its label the ink
+// whatever its role.
+mod.widgets.ChipFlat.draw_text.text_style = mod.theme.font_bold{font_size: 9.0}
+mod.widgets.ChipFlat.palette.on_neutral = #3a2e1c
+mod.widgets.ChipFlat.palette.on_neutral_container = #3a2e1c
+mod.widgets.ChipFlat.palette.neutral = #3a2e1c
+mod.widgets.ChipFlat.palette.on_primary = #3a2e1c
+mod.widgets.ChipFlat.palette.on_primary_container = #3a2e1c
+mod.widgets.ChipFlat.palette.primary = #3a2e1c
+mod.widgets.ChipFlat.palette.on_secondary_container = #3a2e1c
+mod.widgets.ChipFlat.palette.on_tertiary_container = #3a2e1c
+mod.widgets.ChipFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ChipFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(self.rect_size.x, o.x, px), mb_snap(self.rect_size.y, o.y, px))
+    let face = mb_stone(p + mb_seed(self.rect_size), px, 0.45) * (1.0 + 0.04 * self.hover - 0.06 * self.down)
+    return mb_box(p, lo, hi, 3.5, 2.6, px, face, self.hover, self.down, 0.0, self.keyed, 1.0) * mb_fade(self.pos, self.rect_size, m)
+}
+
+// A count is a small white marble box in a gold rim with brown figures.
+mod.widgets.BadgePalette.neutral = #f6f5f1
+mod.widgets.BadgePalette.on_neutral = #3a2e1c
+mod.widgets.BadgeFlat.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(self.rect_size.x - px * 0.49, o.x, px), mb_snap(self.rect_size.y - px * 0.49, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let r = min(3.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let n = mb_normal(p, c, h, r)
+    let rw = 2.2
+    var col = mb_stone(p + mb_seed(self.rect_size), px, 0.3)
+    col = mix(col, self.color.rgb, 0.3 * step(self.color.a, 0.99))
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, rw, rw + px, px) * 0.5)
+    col = mix(col, mb_rim(d, rw, n, p), Finish.band(d, 0.0, rw, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+
+// LAMPS. The Lamp and the bar lamp are the sheet's LED gem (above) in its
+// gold bezel. The halo's room is held in the lamp's own box, so the light is
+// never cut at its edge; the bar lamp keeps to the left of its cell, short
+// enough that it and its light end well before whatever stands beside it.
+mod.widgets.Lamp.halo = 0.3
+mod.widgets.Lamp.halo_reach = 1.0
+mod.widgets.Lamp.draw_bg.color_accent = uniform(#18b864)
+mod.widgets.Lamp.draw_bg.color_success = uniform(#22c76a)
+mod.widgets.Lamp.draw_bg.color_warning = uniform(#f5a52e)
+mod.widgets.Lamp.draw_bg.color_error = uniform(#ec2f4a)
+mod.widgets.Lamp.draw_bg.color_plain = uniform(#ffe6b8)
+mod.widgets.Lamp.draw_bg.vertex = fn() {
+    let m = 2.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Lamp.draw_bg.pixel = fn() {
+    let m = 2.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let reach = clamp(self.reach, 0.0, 1.0)
+    let t = self.rect_size.y / (1.0 + 2.0 * reach)
+    let room = t * reach
+    let c = self.rect_size * 0.5
+    // A bar is a short light pipe a little slimmer than the round lamp,
+    // set at the left of its cell, its light kept within two and a half
+    // points of its bezel.
+    let tb = mix(t, t * 0.78, self.bar)
+    let half_len = min(max((self.rect_size.x - 2.0 * room) * 0.5, t * 0.5), tb * 1.1)
+    let bwb = clamp(0.32 * tb * 0.5, 0.7, 2.4)
+    let cb = vec2(mix(c.x, 1.0 + bwb + half_len, self.bar), c.y)
+    let hb = vec2(mix(t * 0.5, half_len, self.bar), tb * 0.5)
+    let res = mb_lamp(vec4(0.0, 0.0, 0.0, 0.0), p, cb, hb, self.lit, self.intent_color().rgb, 0.35 * (1.0 - step(3.5, self.intent)), px, mb_ground(), mix(max(room - 0.5, 2.0), 2.5, self.bar), 1.0)
+    return res * self.opacity
+}
+
+// Dividers are a fine gold wire: a bright line over a dark one, a small
+// round diamond set at the middle of a long one.
+mod.widgets.Hr.draw_bg.vertex = fn() {
+    let m = 4.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Hr.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let y = Finish.snap(self.rect_pos.y + self.rect_size.y * 0.5, px) - self.rect_pos.y
+    let span = step(4.0, p.x) * step(p.x, self.rect_size.x - 4.0)
+    let l = step(y, p.y) * step(p.y, y + px) * span
+    let w = step(y + px, p.y) * step(p.y, y + px * 2.0) * (1.0 - l) * span
+    var res = vec4(mb_gold(0.80), 1.0) * l + vec4(mb_gold(0.30), 1.0) * w
+    if self.rect_size.x > 80.0 {
+        res = mb_gemdot(res, p, vec2(self.rect_size.x * 0.5, y + px), 2.6, px)
+    }
+    return res * mb_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.Vr.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let x = Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x
+    let l = step(x, p.x) * step(p.x, x + px)
+    let w = step(x + px, p.x) * step(p.x, x + px * 2.0) * (1.0 - l)
+    return vec4(mb_gold(0.80), 1.0) * l + vec4(mb_gold(0.30), 1.0) * w
+}
+
+// ---------------------------------------------------------------- screens
+
+// A SCREEN is black onyx glass in a polished gold bezel: the face the
+// screen colour with a few faint grey veins in it (a black marble, calm
+// enough for the figures), darkest under its top edge where the bezel
+// shades it (`recess` points deep), a dark device pixel where the face
+// meets the gold; the bezel (`bezel` points, at least two) a round bead lit
+// from the top; a contact shadow on the stone under it. Figures on it are
+// champagne gold.
+let mb_screen = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, bezel: float, recess: float, face_ink: vec3) -> vec4 {
+    let lo = vec2(mb_snap(0.0, o.x, px), mb_snap(0.0, o.y, px))
+    let hi = vec2(mb_snap(size.x, o.x, px), mb_snap(size.y, o.y, px) - px)
+    let c = (lo + hi) * 0.5
+    let ho = (hi - lo) * 0.5
+    let ro = min(r, min(ho.x, ho.y))
+    let outer = Material.sd_box(p, c, ho, ro)
+    let n = mb_normal(p, c, ho, ro)
+    let b = Finish.snap(max(bezel, 2.2), px)
+    let hf = max(ho - vec2(b, b), vec2(0.5, 0.5))
+    let rf = max(ro - b, 0.0)
+    let fd = Material.sd_box(p, c, hf, rf)
+    let sh = Finish.drop(p, c, ho, ro, vec2(0.0, 1.0), 1.1) * 0.30 * (1.0 - Finish.cover(outer, px))
+    var res = vec4(mb_shade() * sh, sh)
+    // The black marble: the stone's veins, inverted and faint.
+    let st = mb_stone(p + mb_seed(size) + vec2(91.0, 17.0), px, 1.0)
+    let vein = clamp((0.965 - dot(st, vec3(0.333, 0.333, 0.334))) * 3.0, 0.0, 1.0)
+    var face = face_ink + vec3(0.11, 0.105, 0.095) * vein * 0.55
+    if recess > 0.0 {
+        let insh = Finish.inset(p, c, hf, rf, vec2(0.0, recess * 0.5), max(recess * 0.45, 0.3))
+        face = mix(face, face * 0.35, 0.8 * insh)
+    }
+    face = mix(face, vec3(0.02, 0.015, 0.008), Finish.band(fd, 0.0, px, px) * 0.8)
+    let col = mix(mb_rim(outer, b, n, p), face, Finish.cover(fd, px))
+    let a = Finish.cover(outer, px)
+    return Finish.over(res, vec4(col * a, a))
+}
+mod.widgets.ScreenView.draw_bg.border_radius = uniform(5.0)
+mod.widgets.ScreenView.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    var res = mb_screen(p, self.rect_size, self.rect_pos, px, self.border_radius, self.bezel, self.recess, self.color.rgb)
+    // The screen's status light, an emerald lit in its top right corner;
+    // its light stays on the face.
+    let b = max(self.bezel, 2.2)
+    let fdist = Material.sd_box(p, self.rect_size * 0.5, max(self.rect_size * 0.5 - vec2(b, b), vec2(0.5, 0.5)), max(self.border_radius - b, 0.0))
+    res = mix(res, mb_lamp(res, p, vec2(self.rect_size.x - b - 5.5, b + 5.5), vec2(1.5, 1.5), 1.0, mb_emerald(), 0.6, px, vec3(0.08, 0.07, 0.06), 6.0, 0.0), Finish.cover(fdist + 0.5, px))
+    if self.scan > 0.0 {
+        let s = Finish.scan(p.y, px, 3.0 * px, self.scan)
+        res = vec4(res.rgb * mix(1.0, s, 0.6), res.a)
+    }
+    return res * self.color.a
+}
+// The glass: a faint diagonal band over the face.
+mod.widgets.ScreenView.sheen = 0.035
+mod.widgets.ScreenView.draw_glass.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let lo = vec2(Finish.snap(self.rect_pos.x, px), Finish.snap(self.rect_pos.y, px)) - self.rect_pos
+    let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px) - px) - self.rect_pos
+    let c = (lo + hi) * 0.5
+    let ho = (hi - lo) * 0.5
+    let b = Finish.snap(max(self.bezel, 2.2), px)
+    let hf = max(ho - vec2(b, b), vec2(0.5, 0.5))
+    let fd = Material.sd_box(p, c, hf, max(min(self.face_radius, min(ho.x, ho.y)) - b, 0.0))
+    let u = (p - (c - hf)) / max(hf * 2.0, vec2(1.0, 1.0))
+    let diag = u.x + u.y * 0.6
+    let band = smoothstep(0.0, 0.12, diag) * (1.0 - smoothstep(0.28, 0.5, diag))
+    let a = clamp(self.sheen * band, 0.0, 1.0) * Finish.cover(fd + px, px)
+    return vec4(vec3(1.0, 0.95, 0.85) * a, a)
+}
+
+// THE NEEDLE METER is a screen: the same onyx in its gold bezel, its scale
+// printed in gold (a tick at every division, the majors two device pixels
+// wide and the minors one and dimmer, a faint arc under them), the red
+// zone a ruby band just outside the arc, the needle a fine gold line with a
+// soft warm light along it, its root under a small round diamond in a gold
+// bezel.
+mod.widgets.NeedleMeter.draw_bg.border_radius = uniform(5.0)
+mod.widgets.NeedleMeter.draw_bg.color_zone = uniform(#d0203e)
+mod.widgets.NeedleMeter.draw_bg.color_scale = uniform(#e2c886)
+mod.widgets.NeedleMeter.draw_bg.color_needle = uniform(#f6dc98)
+mod.widgets.NeedleMeter.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let pv = self.pivot()
+    let rr = self.scale_radius()
+    let q = p - pv
+    let r = length(q)
+    let ang = atan2(q.x, 0.0 - q.y)
+    let sweep = self.sweep * 0.017453293
+    let t = ang / sweep + 0.5
+    let on_scale = step(-0.0001, t) * step(t, 1.0001)
+    let res = mb_screen(p, self.rect_size, self.rect_pos, px, self.border_radius, 2.4, 4.0, self.color.rgb)
+    var col = res.rgb / max(res.a, 0.001)
+    let ink = self.color_scale.rgb
+    let arc = Finish.cover(abs(r - rr) - px * 0.5, px) * on_scale
+    let n = max(floor(self.majors + 0.5), 1.0) * max(floor(self.minors + 0.5), 1.0)
+    let k = floor(clamp(t, 0.0, 1.0) * n + 0.5)
+    let ak = (k / n - 0.5) * sweep
+    let perp = abs(q.x * cos(ak) + q.y * sin(ak))
+    let mn = max(floor(self.minors + 0.5), 1.0)
+    let major = 1.0 - step(0.5, k - mn * floor(k / mn + 0.0001))
+    let len = mix(self.tick_minor, self.tick_major, major)
+    let radial = max(rr - len - r, r - rr)
+    let tick = Finish.cover(perp - px * mix(0.5, 1.0, major), px) * Finish.cover(radial, px) * step(0.0, -q.y * cos(ak) + q.x * sin(ak))
+    col = mix(col, ink, max(arc * 0.4, tick * mix(0.55, 0.95, major)))
+    if self.zone < 0.999 {
+        let zone_t = Finish.cover((self.zone - t) * sweep * r, px) * Finish.cover((t - 1.0) * sweep * r, px)
+        let zone_r = Finish.cover(max(rr + px - r, r - rr - 2.5), px)
+        col = mix(col, self.color_zone.rgb, zone_t * zone_r * 0.9)
+    }
+    let na = self.needle_angle(self.value)
+    let nd = vec2(sin(na), 0.0 - cos(na))
+    let tail = max(self.pivot_size - px, 0.0)
+    let along = dot(q, nd)
+    let across = abs(q.x * nd.y - q.y * nd.x)
+    let span = smoothstep(-1.0, 1.0, rr + 3.0 - along) * smoothstep(-1.0, 1.0, along + tail)
+    let halo = 0.30 / (1.0 + (across / 1.2) * (across / 1.2)) * span
+    col = col + (vec3(1.0, 1.0, 1.0) - exp(-vec3(0.95, 0.70, 0.30) * halo)) * max(vec3(1.0, 1.0, 1.0) - col, vec3(0.0, 0.0, 0.0))
+    let needle = Finish.cover(across - 0.55, px) * Finish.cover(along - (rr + 3.0), px) * Finish.cover(0.0 - along - tail, px)
+    col = mix(col, self.color_needle.rgb, needle)
+    let pr = max(self.pivot_size + 0.5, 2.0)
+    let piv = mb_gemdot(vec4(0.0, 0.0, 0.0, 0.0), p, pv, pr, px)
+    col = col * (1.0 - piv.a) + piv.rgb
+    return vec4(col * res.a, res.a) * self.opacity
+}
+
+// ---------------------------------------------------------------- own faces
+
+// Templates that draw a face of their own on top of these roots keep the
+// plain quad: the grown one is only for the faces written here.
+mod.widgets.CloseButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CopyButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.BurgerButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloating.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloatingSm.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CheckBoxCustom.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.glass.CutButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.glass.RadioButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+// The icon of a face-less icon button stands on the stone: gold-brown.
+mod.widgets.ButtonFlatterIcon.draw_icon.color = #6e521c
+mod.widgets.BurgerButton.draw_bg.bar_color = #5c4a2e
+mod.widgets.BurgerButton.draw_bg.bar_color_hover = #2a2112
+mod.widgets.BurgerButton.draw_bg.bar_color_disabled = #a89c86
+mod.widgets.CloseButton.draw_bg.cross_color_hover = #2a2112
+
+// ---------------------------------------------------------------- field row
+
+// A ROW OF FIELDS IS ONE HEIGHT. Left to themselves the library's fields each
+// come out at a size of their own, so the box metrics are stated ONCE here
+// and handed to each field below; a field added to the library later joins
+// the row by being named here rather than by having these numbers copied
+// into it. Fields and buttons share the one 26 point row.
+let field_height = 26.0
+let field_pad_v = 4.0
+// Stock faces draw the corner doubled: 1.75 is a 3.5 point corner.
+let field_radius = 1.75
+// One device pixel; the faces written above draw their own edges.
+let field_border = 0.34
+
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+// The chrome-less input a well holds must impose no height of its own.
+mod.widgets.WellInput.min_height = 0.0
+
+// ---------------------------------------------------------------- ground
+
+// Plain views stop clipping so a shadow or a light can fall past their
+// edge; scroll views keep clipping their content.
+mod.widgets.View.clip_x = false
+mod.widgets.View.clip_y = false
+mod.widgets.ConcedingRow.clip_x = false
+mod.widgets.ConcedingRow.clip_y = false
+mod.widgets.Window.pass.clear_color = #efeee9
+// THE WINDOW'S GROUND: one slab of white marble, fixed in window space (it
+// never moves with what scrolls over it), its veins at their strongest
+// along the window's frame and calmed to under half of that under the
+// content, so words read on it; a soft pool of light high in the middle, a
+// faint fall toward the corners. Round its edge a polished gold frame 2.4
+// points wide, set 3 points in, and in each corner a gold scroll.
+mod.widgets.Window.show_bg = true
+mod.widgets.Window.draw_bg.pixel = fn() {
+    let px = mb_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let de = min(min(p.x, p.y), min(sz.x - p.x, sz.y - p.y))
+    let edge = 1.0 - smoothstep(20.0, 120.0, de)
+    let k = mix(0.58, 1.0, edge)
+    var col = mb_marble(p + vec2(311.0, 127.0), px, k)
+    let qv = (p - vec2(sz.x * 0.5, sz.y * 0.2)) / vec2(max(sz.x * 0.8, 1.0), max(sz.y * 1.1, 1.0))
+    col = col * (1.0 + 0.012 * exp(-dot(qv, qv) * 6.0) - 0.03 * smoothstep(0.5, 1.2, length(qv)))
+    // The frame.
+    let lo = vec2(3.0, 3.0)
+    let hi = sz - vec2(3.0, 3.0)
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = Material.sd_box(p, c, h, 6.0)
+    let n = mb_normal(p, c, h, 6.0)
+    let fw = 3.6
+    let fb = Finish.band(d, 0.0, fw, px)
+    col = mix(col, vec3(0.30, 0.21, 0.07), Finish.band(d, fw, fw + px, px) * 0.45)
+    col = mix(col, mb_rim(d, fw, vec2(-n.x, -n.y), p), fb)
+    // The corner scrolls, inside the frame.
+    let dl = p - lo
+    let dr = hi - p
+    let m = vec2(min(dl.x, dr.x), min(dl.y, dr.y)) - vec2(fw - 0.5, fw - 0.5)
+    let sx = mix(1.0, -1.0, step(dr.x, dl.x))
+    let sy = mix(1.0, -1.0, step(dr.y, dl.y))
+    let lv = vec2(mb_lv().x * sx, mb_lv().y * sy)
+    if m.x < 60.0 && m.y < 60.0 {
+        let g = mb_corner(m, 1.35, lv, px)
+        let gs = mb_corner(m - vec2(0.3 * sx, 0.8 * sy), 1.35, lv, px)
+        col = mix(col, col * 0.75, gs.x * 0.5)
+        col = mix(col, mb_gold(g.y), g.x)
+    }
+    return vec4(col, 1.0)
+}
+
+// ---------------------------------------------------------------- states
+
+// Every held state is written as a plain value that cuts in at once (the
+// library writes some as snap() values, which a state held as a default --
+// the states page -- never applies). Live, the cut is the same as the snap.
+mod.widgets.ButtonFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.ButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.CheckBoxFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.CheckBoxFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.RadioButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.RadioButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+true

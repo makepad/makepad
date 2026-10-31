@@ -1,12 +1,12 @@
 use std::f32::consts::PI;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Winding {
     CCW,
     CW,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FillRule {
     NonZero,
     EvenOdd,
@@ -26,7 +26,7 @@ pub enum LineJoin {
     Bevel,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PathCmd {
     MoveTo(f32, f32),
     LineTo(f32, f32),
@@ -35,9 +35,13 @@ pub enum PathCmd {
     Winding(Winding),
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct VectorPath {
     pub cmds: Vec<PathCmd>,
+    /// The fill rule when it is not implied by explicit contour windings
+    /// (`None`: non-zero when a contour carries a `Winding`, else even-odd).
+    /// Font outlines are non-zero: a variable font's contours overlap.
+    pub fill_rule: Option<FillRule>,
 }
 
 impl VectorPath {
@@ -46,6 +50,11 @@ impl VectorPath {
     }
     pub fn clear(&mut self) {
         self.cmds.clear();
+        self.fill_rule = None;
+    }
+
+    pub fn set_fill_rule(&mut self, rule: FillRule) {
+        self.fill_rule = Some(rule);
     }
 
     pub fn move_to(&mut self, x: f32, y: f32) {

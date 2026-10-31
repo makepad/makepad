@@ -1,0 +1,2083 @@
+use mod.prelude.widgets_internal.*
+use mod.sdf.Cap
+
+// THE MATERIAL. One pale ground, pushed up into raised parts or pressed into
+// wells. Every face below is built from the same few pieces, written once
+// here and handed what each template knows about itself. Light comes from
+// the top left: dark falls down-right, light up-left. No edge is a drawn
+// line: an edge is light or shade on a shoulder, and the shadows either side
+// of it. Distances are points, and a face's shadows are drawn OUTSIDE its
+// layout box, in a quad grown in `vertex`, so they cost no padding.
+
+// The page, and the grain every surface shares, so a face and the ground
+// round it read as one material: one value per device pixel, about one
+// level of 255, taken in window space.
+let nm_grain = fn(q: vec2, px: float) -> float {
+    return Finish.grain(q / px, 2.4 / 255.0)
+}
+
+let nm_ground = fn() -> vec3 {
+    return vec3(0.914, 0.929, 0.941)
+}
+
+// The slate every shadow on this material is cast in: the page's cool white
+// taken down to about two thirds of its light, toward blue.
+let nm_slate_a = fn() -> vec3 {
+    return vec3(0.541, 0.596, 0.690)
+}
+
+// What a raised part throws round itself, premultiplied: a slate shadow down
+// and right, deepest at the foot of the edge (about 0.7 of the page there),
+// a tight contact shadow under the edge, and up and left a halo of light.
+// The halo is light, not paint: it lifts what it falls on, the page to white,
+// and covers nothing, so an accent fill beside a knob keeps its colour. `s`
+// is the part's own height and `k` their strength. The shadows keep the
+// part's proportions, gone about three tenths of its height out, and stop
+// growing at a 40 point part: a quad grown by three tenths of its part's
+// height, or by twelve points, holds the whole cast.
+let nm_cast = fn(p: vec2, c: vec2, h: vec2, r: float, s: float, k: float) -> vec4 {
+    let t = min(s, 40.0)
+    let amb = Finish.drop(p, c, h, r, vec2(0.09, 0.11) * t, max(0.1 * t, 0.9)) * 0.9 * k
+    let con = Finish.drop(p, c, h, r, vec2(0.012, 0.03) * t, max(0.025 * t, 0.5)) * 0.28 * k
+    // Held at white, so a hovered part cannot push the page past it.
+    let lit = min(Finish.drop(p, c, h, r, vec2(-0.08, -0.1) * t, max(0.09 * t, 0.8)) * k, 1.0)
+    var acc = vec4(nm_slate_a() * amb, amb)
+    acc = Finish.over(acc, vec4(vec3(0.478, 0.525, 0.608) * con, con))
+    return acc + vec4((vec3(1.0, 1.0, 1.0) - nm_ground()) * lit, 0.0)
+}
+
+// The light on a face's shoulder, signed: up to 1 where the edge faces the
+// top left, down to -1 where it faces the bottom right, fading from the edge
+// to nothing `w` points in. The edge is taken to turn as if the face's
+// corners were rounded by `m`: exact on a disc or a pill given its half
+// height, and round the tighter corners of a box the light turns a little
+// more gently than the outline does.
+let nm_shoulder_a = fn(p: vec2, c: vec2, h: vec2, m: float, d: float, w: float) -> float {
+    let e = max(abs(p - c) - h + vec2(m, m), vec2(0.0, 0.0))
+    let n = sign(p - c) * e / max(length(e), 0.0001)
+    return dot(n, vec2(-0.6, -0.8)) * (1.0 - smoothstep(0.0, w, -d))
+}
+
+// A raised face: the page a little lighter toward the top left and a little
+// darker toward the bottom right, corner to corner, and on its shoulder, the
+// outer two and a half points (never under three device pixels), the light
+// the edge catches where it faces the top left and the shade where it faces
+// away, both fading in from the edge. No line is drawn on it. `rim` is how
+// much light and shade the shoulder takes.
+let nm_face = fn(p: vec2, c: vec2, h: vec2, d: float, px: float, lift: float, rim: float) -> vec3 {
+    let u = clamp(((p.x - c.x) / max(h.x, 1.0) + (p.y - c.y) / max(h.y, 1.0)) * 0.25 + 0.5, 0.0, 1.0)
+    let g = mix(0.028, -0.024, u) + lift
+    var col = nm_ground() + vec3(g, g, g)
+    let sh = nm_shoulder_a(p, c, h, min(h.x, h.y), d, max(2.5, 3.0 * px)) * rim
+    col = mix(col, vec3(0.984, 0.988, 1.0), max(sh, 0.0) * 0.85)
+    col = mix(col, vec3(0.745, 0.776, 0.831), max(-sh, 0.0) * 0.55)
+    return col
+}
+
+// A well: the surround's shadow falls in deep from the top left and light
+// collects along the bottom right, both soft, deep enough to read as a hole,
+// and no line is drawn on the rim. `k` is its depth (a well asked for more
+// than full depth holds at the slate and at white), `s` the well's own
+// height.
+let nm_well = fn(col: vec3, p: vec2, c: vec2, h: vec2, r: float, d: float, px: float, s: float, k: float) -> vec3 {
+    let dk = Finish.inset(p, c, h, r, vec2(0.08 * s, 0.12 * s), max(0.13 * s, 1.0))
+    let lt = Finish.inset(p, c, h, r, vec2(-0.05 * s, -0.07 * s), max(0.1 * s, 0.8))
+    let o = mix(col, nm_slate_a(), clamp(dk * 1.0 * k, 0.0, 1.0))
+    return mix(o, vec3(1.0, 1.0, 1.0), clamp(lt * 0.9 * k, 0.0, 1.0))
+}
+
+// The focus mark: a one-pixel accent ring two points outside the face, and a
+// short soft fall-off either side of it.
+let nm_focus = fn(d: float, px: float, f: float) -> vec4 {
+    let ring = Finish.ring_out(d, 2.0, 2.0 + px, px) * 0.6
+    let soft = (1.0 - smoothstep(0.0, 2.0, abs(d - 2.0))) * 0.15 * step(0.0, d)
+    let a = max(ring, soft) * f
+    return vec4(vec3(0.290, 0.486, 0.965) * a, a)
+}
+
+// The distance to an arc of radius R about c, running clockwise from a0 to
+// a1 measured from straight down, with round ends, w wide. Written here
+// because the stock arc gives up on any sweep past half a turn.
+let nm_arc = fn(p: vec2, c: vec2, R: float, a0: float, a1: float, w: float) -> float {
+    let q = p - c
+    var ap = atan2(-q.x, q.y)
+    if ap < 0.0 {
+        ap = ap + 2.0 * PI
+    }
+    let rel = ap - a0 - floor((ap - a0) / (2.0 * PI)) * 2.0 * PI
+    let on = step(rel, a1 - a0)
+    let band = abs(length(q) - R) - 0.5 * w
+    let e0 = length(q - vec2(-sin(a0), cos(a0)) * R) - 0.5 * w
+    let e1 = length(q - vec2(-sin(a1), cos(a1)) * R) - 0.5 * w
+    return mix(min(e0, e1), band, on)
+}
+
+// BUTTONS. No line is drawn round a face: every edge is light on a
+// shoulder, and a raised face throws its two shadows into a quad grown by
+// 8 points. The last quarter of that room fades whatever reaches it, along
+// a box rounded like the face, so a cast never ends on the quad's edge.
+let nm_room_b = fn(pq: vec2, size: vec2, r: float, m: float) -> float {
+    let qc = size * 0.5
+    let edge = -Material.sd_box(pq, qc, qc + vec2(m, m), r + m)
+    return smoothstep(0.0, 0.25 * m, edge)
+}
+
+// A button face. `rest` is how raised it stands at rest (1 raised, 0 flat
+// on the page), `ghost` how far a flat face rises under the pointer (0
+// halfway, 1 the whole way), `hollow` shows nothing until the pointer asks,
+// and `fill` is the colour the face is filled with, its alpha how far: the
+// face keeps its gradient, its shoulders and its shadows, and only its
+// colour moves. Held, any of them is the same shape pressed into a well.
+let nm_button = fn(pq: vec2, size: vec2, org: vec2, px: float, hover: float, down: float, focus: float, disabled: float, loading: float, anim: float, ink: vec4, rest: float, ghost: float, hollow: float, fill: vec4) -> vec4 {
+    let lo = vec2(Finish.snap(org.x, px), Finish.snap(org.y, px)) - org
+    let hi = vec2(Finish.snap(org.x + size.x, px), Finish.snap(org.y + size.y, px)) - org
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let hh = min(size.y, 28.0)
+    // Round and generous: a 10 point corner on a row of 26, growing with a
+    // taller face to 16, and a full pill on a face too short for 10.
+    let r = min(clamp(0.36 * size.y, 10.0, 16.0), min(h.x, h.y))
+    let d = Material.sd_box(pq, c, h, r)
+    let en = 1.0 - disabled
+    let press = down * en
+    // How far the face stands up: raised faces lift a little under the
+    // hand, flat ones rise halfway or the whole way, hollow ones stay down.
+    let up = mix(mix(mix(0.6, 1.0, ghost) * hover, rest * (1.0 + 0.3 * hover), step(0.5, rest)), 0.0, hollow) * (1.0 - press)
+    let k = up * mix(1.0, 0.35, disabled)
+    var acc = nm_cast(pq, c, h, r, hh, k) * nm_room_b(pq, size, r, 8.0)
+    let a = Finish.cover(d, px)
+    // The shoulders stand up with the face and fade with it when disabled.
+    var col = nm_face(pq, c, h, d, px, 0.018 * hover * en, min(up, 1.0) * mix(1.0, 0.35, disabled))
+    // A flat face is the page itself until it rises.
+    let flatness = (1.0 - step(0.5, rest)) * (1.0 - min(up * 1.8, 1.0))
+    col = mix(col, nm_ground(), flatness)
+    // Pressed, or the faint well a hollow face shows under the pointer.
+    let sink = max(press, hollow * hover * 0.4 * en)
+    col = mix(col, nm_well(col - vec3(0.013, 0.013, 0.013) * press, pq, c, h, r, d, px, hh, 1.0), sink)
+    // The fill moves the whole face from the page's colour to its own, so
+    // the light on it, its shoulders and its well move along; disabled, it
+    // is the page's face again.
+    col = clamp(col + (fill.rgb - nm_ground()) * fill.a * en, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+    col = col + vec3(nm_grain(org + pq, px))
+    acc = Finish.over(acc, vec4(col * a, a))
+    acc = Finish.over(acc, nm_focus(d, px, focus * en))
+    // The wait spinner is drawn by the face, so a face that replaces the
+    // stock one has to draw it again; on a filled face it is white, as the
+    // label it stands in for.
+    let rr = max(min(h.x, h.y) - 5.0, 2.0)
+    let a0 = anim * 2.0 * PI
+    let sa = Finish.cover(nm_arc(pq, c, rr, a0, a0 + 1.5 * PI, 1.5), px) * ink.a * loading
+    let si = mix(ink.rgb, vec3(1.0, 1.0, 1.0), fill.a * en)
+    return Finish.over(acc, vec4(si * sa, sa))
+}
+
+// The room round every button for its shadows and its focus ring.
+mod.widgets.ButtonFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ButtonFlat.clip_x = false
+mod.widgets.ButtonFlat.clip_y = false
+// A view lets what it holds draw past its edge; scroll views still clip.
+mod.widgets.View.clip_x = false
+mod.widgets.View.clip_y = false
+
+// The flat button: the page until the pointer raises it.
+mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 0.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+// The standard, sized and compound buttons stand up off the page.
+mod.widgets.Button.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+mod.widgets.ButtonXs.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+mod.widgets.ButtonSm.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+mod.widgets.ButtonLg.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+mod.widgets.ButtonXl.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+mod.widgets.ButtonCompound.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+// The primary is the one filled face: the accent all over, raised and lit
+// as the page's faces are, with a white label. The rest of its family keep
+// the page's face and speak through their labels alone, the destructive one
+// in red.
+mod.widgets.ButtonPrimary.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.220, 0.376, 0.839, 1.0)), m)
+}
+mod.widgets.ButtonSecondary.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+mod.widgets.ButtonTertiary.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+mod.widgets.ButtonDanger.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+// The outlined button is the page with an accent label and nothing drawn
+// round it; under the pointer it rises the whole way, as far as a standard
+// button stands.
+mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 0.0, 1.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+// The borderless button shows nothing until the pointer finds it, and then
+// only a faint hollow.
+mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 0.0, 0.0, 1.0, vec4(0.0, 0.0, 0.0, 0.0)), m)
+}
+
+// Rows of 26: 5 above and below a 16 point line, 14 either side.
+mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 5.0 bottom: 5.0}
+// NOTHING PAINTS OVER A NEIGHBOUR, whatever row an app puts it in. The
+// casts stay long and soft; instead every raised part keeps room for them
+// as its own margin, so two parts set edge to edge, or rows wrapped with no
+// gap between them, still stand 8 points apart: the shadow of one and the
+// halo of the other may meet in that gap, and each has faded out before the
+// other's face. The room is paid in layout: a 26 point row of buttons takes
+// 34 points, and buttons on a page's 8 point spacing stand 16 apart.
+mod.widgets.ButtonFlat.margin = mod.turtle.Inset{left: 4.0 right: 4.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlat.spacing = 6.0
+mod.widgets.ButtonFlat.icon_walk.width = 14.0
+mod.widgets.ButtonIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 5.0 bottom: 5.0}
+mod.widgets.ButtonFlatIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 5.0 bottom: 5.0}
+mod.widgets.ButtonFlatterIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 5.0 bottom: 5.0}
+mod.widgets.ButtonFlat.draw_bg.loading_color = #4a7cf6
+
+// Label inks. White at a medium weight on the primary's accent face; on the
+// page's faces the slate on the secondary, the accent on the tertiary and
+// the outlined, and the error ink on the destructive one, its only red.
+// The weight re-weights the theme family's first member and keeps its
+// fallbacks.
+let nm_medium = mod.theme.font_regular{font_family +: {ibm_plex_text := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 540.0 asc: 0.0 desc: 0.0}}}
+mod.widgets.ButtonPrimary.draw_text.color = #ffffff
+mod.widgets.ButtonPrimary.draw_text.color_hover = #ffffff
+mod.widgets.ButtonPrimary.draw_text.color_down = #ffffff
+mod.widgets.ButtonPrimary.draw_text.color_focus = #ffffff
+mod.widgets.ButtonPrimary.draw_text.color_disabled = #b3bac6
+mod.widgets.ButtonPrimary.draw_text.text_style = nm_medium
+mod.widgets.ButtonPrimary.draw_icon.color = #ffffff
+mod.widgets.ButtonSecondary.draw_text.color = #535a6a
+mod.widgets.ButtonSecondary.draw_text.color_hover = #474e5e
+mod.widgets.ButtonSecondary.draw_text.color_down = #474e5e
+mod.widgets.ButtonSecondary.draw_text.color_focus = #535a6a
+mod.widgets.ButtonSecondary.draw_icon.color = #535a6a
+mod.widgets.ButtonTertiary.draw_text.color = #3860d6
+mod.widgets.ButtonTertiary.draw_text.color_hover = #2f55c8
+mod.widgets.ButtonTertiary.draw_text.color_down = #2f55c8
+mod.widgets.ButtonTertiary.draw_text.color_focus = #3860d6
+mod.widgets.ButtonTertiary.draw_text.text_style = mod.theme.font_regular
+mod.widgets.ButtonTertiary.draw_icon.color = #3860d6
+mod.widgets.ButtonDanger.draw_text.color = #bd3a31
+mod.widgets.ButtonDanger.draw_text.color_hover = #a8322a
+mod.widgets.ButtonDanger.draw_text.color_down = #a8322a
+mod.widgets.ButtonDanger.draw_text.color_focus = #bd3a31
+mod.widgets.ButtonDanger.draw_icon.color = #bd3a31
+mod.widgets.ButtonOutline.draw_text.color = #3860d6
+mod.widgets.ButtonOutline.draw_text.color_hover = #2f55c8
+mod.widgets.ButtonOutline.draw_text.color_down = #2f55c8
+mod.widgets.ButtonOutline.draw_text.color_focus = #3860d6
+mod.widgets.ButtonOutline.draw_icon.color = #3860d6
+
+// CHECK BOX. A 16 point well with a 5 point corner, pressed deep into the
+// page, and no line round it: focused, the well is pressed a touch deeper,
+// and under the error intent its floor blushes with the error ink. On, the
+// check lies in it as a flat accent fill two points wide with round ends;
+// mixed, a dash of the same.
+// The distance to the check in a box of side `box` about `c`: a short
+// stroke down from the left and a long one up to the right, `w` wide.
+let nm_tick_c = fn(p: vec2, c: vec2, box: float, w: float) -> float {
+    let a = c + vec2(-0.24 * box, 0.01 * box)
+    let b = c + vec2(-0.06 * box, 0.19 * box)
+    let e = c + vec2(0.25 * box, -0.17 * box)
+    let pa = p - a
+    let ba = b - a
+    let pb = p - b
+    let eb = e - b
+    let t0 = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0)
+    let t1 = clamp(dot(pb, eb) / dot(eb, eb), 0.0, 1.0)
+    return min(length(pa - ba * t0), length(pb - eb * t1)) - 0.5 * w
+}
+// An accent fill lit as the faces are, a shade lighter toward the top left
+// and darker toward the bottom right; `q` is the point from the fill's
+// middle over its half size.
+let nm_lit_c = fn(ink: vec3, q: vec2) -> vec3 {
+    return min(ink * (1.0 + 0.08 * clamp(-0.6 * q.x - 0.8 * q.y, -1.0, 1.0)), vec3(1.0, 1.0, 1.0))
+}
+let nm_check = fn(pq: vec2, size: vec2, org: vec2, px: float, box: float, hover: float, down: float, focus: float, active: float, disabled: float, mixed: float, error: float, round: float, at_end: float) -> vec4 {
+    let y0 = Finish.snap(org.y + size.y * 0.5 - box * 0.5, px) - org.y
+    let x0 = Finish.snap(org.x + (size.x - box) * at_end, px) - org.x
+    let c = vec2(x0 + box * 0.5, y0 + box * 0.5)
+    let h = vec2(box * 0.5, box * 0.5)
+    let r = mix(5.0, box * 0.5, round)
+    let d = Material.sd_box(pq, c, h, r)
+    let en = 1.0 - disabled
+    // The well: hovered, held or focused, it is pressed a touch deeper.
+    let base = mix(vec3(0.918, 0.929, 0.957), vec3(0.741, 0.227, 0.192), 0.14 * error)
+    let k = min(1.25 + 0.12 * hover + 0.1 * down + 0.25 * focus * en, 1.5) * mix(1.0, 0.35, disabled)
+    var col = nm_well(base, pq, c, h, r, d, px, 18.0, k)
+    col = col + vec3(nm_grain(org + pq, px))
+    let a = Finish.cover(d, px)
+    // The mark: the check, or the dash while mixed.
+    let ink = mix(mix(vec3(0.290, 0.486, 0.965), vec3(0.741, 0.227, 0.192), error), vec3(0.725, 0.776, 0.902), disabled)
+    let tick = Finish.cover(nm_tick_c(pq, c, box, 2.0), px) * active * (1.0 - mixed)
+    let dash = Finish.cover(Material.sd_box(pq, c, vec2(0.22 * box, 1.0), 1.0), px) * mixed
+    let mk = max(tick, dash) * a
+    return Finish.over(vec4(col * a, a), vec4(nm_lit_c(ink, (pq - c) / (0.5 * box)) * mk, mk))
+}
+mod.widgets.CheckBoxFlat.draw_bg.vertex = fn() {
+    let m = 4.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.CheckBoxFlat.clip_x = false
+mod.widgets.CheckBoxFlat.clip_y = false
+mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return nm_check(pq, self.rect_size, self.rect_pos, px, 16.0, self.hover, self.down, self.focus, self.active, self.disabled, self.mixed, self.error, 0.0, self.mark_at_end)
+}
+mod.widgets.CheckBoxCircle.draw_bg.pixel = fn() {
+    let m = 4.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return nm_check(pq, self.rect_size, self.rect_pos, px, 16.0, self.hover, self.down, self.focus, self.active, self.disabled, self.mixed, self.error, 1.0, self.mark_at_end)
+}
+// The size stays a uniform, as the library declares it.
+mod.widgets.CheckBoxFlat.draw_bg.size = uniform(16.0)
+mod.widgets.CheckBoxFlat.padding = mod.turtle.Inset{left: 0.0 right: 4.0 top: 5.0 bottom: 5.0}
+mod.widgets.CheckBoxFlat.label_walk.margin.left = 24.0
+
+// TOGGLE. A 34 by 18 point pill well with a 14 point knob lying in it, two
+// points clear of the wall all round, and no line anywhere: focused, the
+// well is pressed a touch deeper. The knob is a low dome lit from the top
+// left, and it throws its own two shadows on the floor, the dark one down
+// and right and the white one up and left, both cut off by the wall. On,
+// the well fills with the accent and the knob turns white; the accent is
+// darkened and lit wherever the pale floor would be, so the well's relief
+// and the knob's shadows carry over in the accent's own hue.
+// How a knob's low dome turns to the light, 0 at its middle: its upper left
+// catches a little more, its lower right falls away. `q` is the point from
+// the knob's centre, `r` its radius.
+let nm_dome_c = fn(q: vec2, r: float) -> float {
+    let n = normalize(vec3(0.55 * q.x / r, 0.55 * q.y / r, 1.0))
+    return dot(n, vec3(-0.45, -0.6, 0.66)) - 0.66
+}
+let nm_toggle = fn(pq: vec2, size: vec2, org: vec2, px: float, hover: float, down: float, focus: float, active: float, disabled: float, error: float, t: float, at_end: float) -> vec4 {
+    let w = 34.0
+    let hh = 9.0
+    let kr = 7.0
+    let x0 = (size.x - w) * at_end
+    let cy = Finish.snap(org.y + size.y * 0.5, px) - org.y
+    let tc = vec2(x0 + w * 0.5, cy)
+    let th = vec2(w * 0.5, hh)
+    let td = Material.sd_box(pq, tc, th, hh)
+    let en = 1.0 - disabled
+    let dis = mix(1.0, 0.35, disabled)
+    // The knob's place, centred in the well's height at both ends of its
+    // travel, and what it throws.
+    let kc = vec2(x0 + hh + (w - 2.0 * hh) * t, cy)
+    let kh = vec2(kr, kr)
+    let kd = length(pq - kc) - kr
+    let sh = nm_cast(pq, kc, kh, kr, 2.0 * kr, (1.0 + 0.3 * hover * en) * (1.0 - 0.4 * down * en) * dis)
+    // The floor: the well with the knob's shadows on it, and on, the accent
+    // shaded as that floor is.
+    let base = vec3(0.918, 0.933, 0.945)
+    let pale = nm_well(base, pq, tc, th, hh, td, px, 18.0, (1.15 + 0.12 * hover + 0.25 * focus * en) * dis)
+    let under = sh.rgb + pale * (1.0 - sh.a)
+    let fillc = mix(mix(vec3(0.290, 0.486, 0.965), vec3(0.741, 0.227, 0.192), error), vec3(0.725, 0.776, 0.902), disabled)
+    let fc = min(fillc * (Finish.lum(under) / Finish.lum(base)), vec3(1.0, 1.0, 1.0))
+    var col = mix(under, fc, active)
+    col = col + vec3(nm_grain(org + pq, px))
+    let ta = Finish.cover(td, px)
+    let acc = vec4(col * ta, ta)
+    // The knob's face: the low dome, a step whiter when on.
+    var kcol = nm_face(pq, kc, kh, kd, px, 0.018 * hover * en - 0.012 * down * en + 0.065 * active, en)
+    kcol = kcol + vec3(0.05 * nm_dome_c(pq - kc, kr) * dis)
+    kcol = min(kcol + vec3(nm_grain(org + pq, px)), vec3(1.0, 1.0, 1.0))
+    let ka = Finish.cover(kd, px)
+    return Finish.over(acc, vec4(kcol * ka, ka))
+}
+mod.widgets.ToggleFlat.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
+    let m = 6.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let t = mix(self.active, self.drag_pos, self.drag)
+    return nm_toggle(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.active, self.disabled, self.error, t, self.mark_at_end)
+}
+// Size and aspect stay uniforms: the widget reads them back, with the
+// knob's inset, to carry an icon on the knob and to measure a drag. The
+// knob stands centred in the well's height at both ends, two points in from
+// the wall, so it travels the well's length less its height.
+mod.widgets.ToggleFlat.draw_bg.size = uniform(18.0)
+mod.widgets.ToggleFlat.draw_bg.pill_aspect = uniform(1.889)
+mod.widgets.ToggleFlat.draw_bg.knob_centred = uniform(1.0)
+mod.widgets.ToggleFlat.draw_bg.knob_inset = uniform(2.0)
+mod.widgets.ToggleFlat.label_walk.margin.left = 42.0
+
+// RADIO. A 16 point round well pressed deep into the page, and no line
+// round it: focused, the well is pressed a touch deeper. On, an accent dot
+// half its width lies in the middle as a flat fill, lit as the check is.
+let nm_radio = fn(pq: vec2, size: vec2, org: vec2, px: float, hover: float, down: float, focus: float, active: float, disabled: float) -> vec4 {
+    let rr = 8.0
+    let cy = Finish.snap(org.y + size.y * 0.5, px) - org.y
+    let c = vec2(rr, cy)
+    let h = vec2(rr, rr)
+    let d = length(pq - c) - rr
+    let en = 1.0 - disabled
+    let k = min(1.25 + 0.12 * hover + 0.1 * down + 0.25 * focus * en, 1.5) * mix(1.0, 0.35, disabled)
+    var col = nm_well(vec3(0.918, 0.929, 0.957), pq, c, h, rr, d, px, 18.0, k)
+    // The dot.
+    let dr = 0.49 * rr
+    let ink = mix(vec3(0.290, 0.486, 0.965), vec3(0.725, 0.776, 0.902), disabled)
+    col = mix(col, nm_lit_c(ink, (pq - c) / dr), Finish.cover(length(pq - c) - dr, px) * active)
+    col = col + vec3(nm_grain(org + pq, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+mod.widgets.RadioButtonFlat.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RadioButtonFlat.clip_x = false
+mod.widgets.RadioButtonFlat.clip_y = false
+mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
+    let m = 6.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return nm_radio(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.active, self.disabled)
+}
+mod.widgets.RadioButtonFlatter.draw_bg.pixel = fn() {
+    let m = 6.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return nm_radio(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.active, self.disabled)
+}
+// The size stays a uniform, as the library declares it.
+mod.widgets.RadioButtonFlat.draw_bg.size = uniform(16.0)
+mod.widgets.RadioButtonFlat.padding = mod.turtle.Inset{left: 0.0 right: 4.0 top: 5.0 bottom: 5.0}
+mod.widgets.RadioButtonFlat.label_walk.margin.left = 24.0
+
+// A distance to a segment, for the few strokes the faces draw by hand.
+let nm_seg = fn(p: vec2, a: vec2, b: vec2) -> float {
+    let pa = p - a
+    let ba = b - a
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return length(pa - ba * t)
+}
+
+// A 7 by 4 point chevron, 1.5 point round-capped stroke, pointing down.
+let nm_chevron = fn(p: vec2, cx: float, cy: float, px: float) -> float {
+    let d = min(nm_seg(p, vec2(cx - 3.5, cy - 2.0), vec2(cx, cy + 2.0)), nm_seg(p, vec2(cx, cy + 2.0), vec2(cx + 3.5, cy - 2.0)))
+    return Finish.cover(d - 0.75, px)
+}
+
+// TEXT FIELDS. A well pressed into the page with a 6 point corner and no
+// line round it: the surround's shadow falls in from the top left and light
+// collects at the bottom right. The floor is the page's own material one
+// step down, never a paler card laid in the hole, and one step only, so body
+// ink still reads 4.5:1 on it. The pointer deepens the well a little and
+// focus a touch more; focus draws no ring, the caret the stock draws in the
+// accent says which field has the keys.
+let nm_field = fn(pq: vec2, size: vec2, org: vec2, px: float, r: float, hover: float, focus: float, disabled: float) -> vec4 {
+    let lo = vec2(Finish.snap(org.x, px), Finish.snap(org.y, px)) - org
+    let hi = vec2(Finish.snap(org.x + size.x, px), Finish.snap(org.y + size.y, px)) - org
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let rr = min(r, min(h.x, h.y))
+    let d = Material.sd_box(pq, c, h, rr)
+    let en = 1.0 - disabled
+    // Deeper is a shadow reaching further in and falling a little harder on
+    // a floor a little darker. The shadows keep a one-line field's
+    // proportions however tall the box grows.
+    let deep = max(focus, 0.35 * hover) * en
+    let s = min(2.0 * h.y, 26.0) * (1.0 + 0.12 * deep)
+    let sink = 0.010 + 0.004 * deep - 0.004 * disabled
+    var col = nm_ground() - vec3(sink, sink, sink)
+    col = nm_well(col, pq, c, h, rr, d, px, s, (1.0 + 0.1 * deep) * mix(1.0, 0.35, disabled))
+    col = col + vec3(nm_grain(org + pq, px))
+    // All of it inside the field's own box: a field clips what it draws,
+    // and a long line of text must not spill past it.
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+// The inputs a slider, a combo box, a number or a well carries inside
+// themselves draw nothing: the control round them is the box.
+mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
+    if self.color.w < 0.01 || self.border_radius < 0.5 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let pq = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return nm_field(pq, self.rect_size, self.rect_pos, px, self.border_radius, self.hover, self.focus, self.disabled)
+}
+mod.widgets.TextInputFlat.padding.left = 10.0
+mod.widgets.TextInputFlat.padding.right = 10.0
+
+// The box a field's input sits in, and the box of chosen tags, are the same
+// well. A refused tag warms the tag field's floor instead of ringing it.
+mod.widgets.FieldWell.draw_bg.pixel = fn() {
+    if self.color.w < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let pq = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return nm_field(pq, self.rect_size, self.rect_pos, px, self.border_radius, self.hover, self.focus, self.disabled)
+}
+mod.widgets.TagField.draw_bg.pixel = fn() {
+    if self.color.w < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let pq = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let acc = nm_field(pq, self.rect_size, self.rect_pos, px, self.border_radius, self.hover, self.focus, self.disabled)
+    let hs = self.rect_size * 0.5
+    let d = Material.sd_box(pq, hs, hs, min(self.border_radius, min(hs.x, hs.y)))
+    let warm = Finish.cover(d + 1.0, px) * self.alarm * (1.0 - self.disabled) * 0.14
+    return Finish.over(acc, vec4(self.border_color_alarm.rgb * warm, warm))
+}
+
+// The number field: the same well, its stepper standing in the right end
+// with nothing cut round it. The two chevrons lie on the well's floor; the
+// half under the pointer rises as a small round key, and the half held is
+// pressed into the floor.
+mod.widgets.NumberField.draw_bg.pixel = fn() {
+    let pq = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return nm_field(pq, self.rect_size, self.rect_pos, px, 6.0, self.hover, self.focus, self.disabled)
+}
+mod.widgets.NumberField.pad_left = 10.0
+// One key of the stepper, a disc of radius r about c. Risen, it is a face
+// with its two shadows; held, it is a dimple in the floor.
+let nm_key_d = fn(p: vec2, org: vec2, c: vec2, r: float, px: float, rise: float, press: float) -> vec4 {
+    let h = vec2(r, r)
+    let d = length(p - c) - r
+    let acc = nm_cast(p, c, h, r, 2.0 * r, rise * (1.0 - press))
+    var col = nm_face(p, c, h, d, px, 0.006, 1.0)
+    col = mix(col, nm_well(nm_ground() - vec3(0.02, 0.02, 0.02), p, c, h, r, d, px, 3.0 * r, 1.0), press)
+    col = col + vec3(nm_grain(org + p, px))
+    let a = Finish.cover(d, px) * max(rise, press)
+    return Finish.over(acc, vec4(col * a, a))
+}
+// The stepper's chevrons: the drop-down's, drawn five points wide so a key
+// keeps a margin round its own, and the upper one turned to point up.
+let nm_spin_vee_d = fn(p: vec2, c: vec2, up: float, px: float) -> float {
+    let q = (p - c) * 1.4
+    return nm_chevron(c + vec2(q.x, mix(q.y, -q.y, up)), c.x, c.y, px * 1.4)
+}
+mod.widgets.NumberSpin.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let w = self.rect_size.x
+    let h = self.rect_size.y
+    let mid = Finish.snap(self.rect_pos.y + h * 0.5, px) - self.rect_pos.y
+    let live = 1.0 - self.disabled
+    // The pointer and the press each name a half: 1 the upper, -1 the lower.
+    let hu = max(0.0, self.hot) * live
+    let hl = max(0.0, -self.hot) * live
+    let du = max(0.0, self.down) * live
+    let dl = max(0.0, -self.down) * live
+    // A key leaves free round itself the three tenths of its size its cast
+    // reaches, so the shadows fade out inside the stepper's own box and the
+    // well's edge never cuts them.
+    let kr = clamp(min(0.3 * w, 0.15 * h), 3.0, 6.0)
+    let cu = vec2(0.5 * w, 0.5 * mid)
+    let cl = vec2(0.5 * w, 0.5 * (mid + h))
+    var acc = nm_key_d(p, self.rect_pos, cu, kr, px, max(hu, du), du)
+    acc = Finish.over(acc, nm_key_d(p, self.rect_pos, cl, kr, px, max(hl, dl), dl))
+    // Slate chevrons, a step darker on the half the hand is on.
+    let dim = mix(1.0, 0.4, self.disabled)
+    let au = nm_spin_vee_d(p, cu, 1.0, px) * dim
+    let al = nm_spin_vee_d(p, cl, 0.0, px) * dim
+    let iu = mix(vec3(0.388, 0.416, 0.478), vec3(0.310, 0.337, 0.400), max(hu, du))
+    let il = mix(vec3(0.388, 0.416, 0.478), vec3(0.310, 0.337, 0.400), max(hl, dl))
+    acc = Finish.over(acc, vec4(iu * au, au))
+    return Finish.over(acc, vec4(il * al, al))
+}
+// The printed arrow glyphs are hidden; the face draws its own chevrons.
+mod.widgets.NumberSpin.draw_text.color = #636a7a00
+mod.widgets.NumberSpin.draw_text.color_disabled = #636a7a00
+
+// The drag-number: the field's well. A track field fills it back up toward
+// the page as far as its value, a wash of light over the floor rather than
+// an accent, under slate digits.
+mod.widgets.ValueInput.draw_bg.pixel = fn() {
+    let pq = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let acc = nm_field(pq, self.rect_size, self.rect_pos, px, 5.0, max(self.hover, self.drag), self.focus, 0.0)
+    let d = Material.sd_box(pq, self.rect_size * 0.5, self.rect_size * 0.5, 5.0)
+    let xe = 1.0 + (self.rect_size.x - 2.0) * max(self.fill, 0.0)
+    let wash = step(0.0, self.fill) * Finish.cover(pq.x - xe, px) * Finish.cover(d + 1.0, px) * 0.3
+    return Finish.over(acc, vec4(wash, wash, wash, wash))
+}
+mod.widgets.ValueInput.draw_text.color = #4f5666
+mod.widgets.ValueInput.arrow_color = #7f8796
+mod.widgets.ValueInput.text_input.draw_bg.color = #00000000
+
+// DROP-DOWN. A button: the buttons' own raised face, shadows and press, and
+// a chevron at the right end; open, it is pressed in.
+// The chevron every choice wears, its tip ten points in from the right end:
+// slate, a step darker under the pointer, faded when nothing answers.
+let nm_choice_vee_d = fn(pq: vec2, size: vec2, px: float, hover: float, disabled: float) -> vec4 {
+    let a = nm_chevron(pq, size.x - 13.5, size.y * 0.5 + 0.5, px) * mix(1.0, 0.4, disabled)
+    let ink = mix(vec3(0.388, 0.416, 0.478), vec3(0.325, 0.353, 0.416), hover * (1.0 - disabled))
+    return vec4(ink * a, a)
+}
+mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.DropDownFlat.clip_x = false
+mod.widgets.DropDownFlat.clip_y = false
+mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let face = nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, max(self.down, self.active), self.focus, self.disabled, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0))
+    return Finish.over(face, nm_choice_vee_d(pq, self.rect_size, px, self.hover, self.disabled))
+}
+mod.widgets.DropDownFlat.padding.left = 12.0
+mod.widgets.DropDownFlat.padding.right = 28.0
+// The room its cast reaches, as on a button.
+mod.widgets.DropDownFlat.margin = mod.turtle.Inset{left: 4.0 right: 4.0 top: 4.0 bottom: 4.0}
+
+// The select wears a button of its own, built before this sheet: it is
+// given the drop-down's face, chevron and all.
+// Being built first, the select's face does not inherit the button's grown
+// quad either, so it is given the same one here: without it the face is
+// squeezed eight points in and its shadows cut off.
+mod.widgets.Select.face.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Select.face.clip_x = false
+mod.widgets.Select.face.clip_y = false
+mod.widgets.MultiSelect.face.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.MultiSelect.face.clip_x = false
+mod.widgets.MultiSelect.face.clip_y = false
+// The select round the face is a view of its own, and clips unless told.
+mod.widgets.Select.clip_x = false
+mod.widgets.Select.clip_y = false
+mod.widgets.MultiSelect.clip_x = false
+mod.widgets.MultiSelect.clip_y = false
+mod.widgets.Select.face.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let face = nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0))
+    return Finish.over(face, nm_choice_vee_d(pq, self.rect_size, px, self.hover, self.disabled))
+}
+mod.widgets.Select.face.padding.right = 28.0
+mod.widgets.MultiSelect.face.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let face = nm_button(pq, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, self.loading_color, 1.0, 0.0, 0.0, vec4(0.0, 0.0, 0.0, 0.0))
+    return Finish.over(face, nm_choice_vee_d(pq, self.rect_size, px, self.hover, self.disabled))
+}
+mod.widgets.MultiSelect.face.padding.right = 28.0
+// The face is a button, so it already keeps the button's four points of room
+// for its cast; the select round it adds none of its own.
+
+// COMBO BOX. A field one can type in, so a well, with the same chevron.
+mod.widgets.ComboBoxFlat.draw_bg.pixel = fn() {
+    let pq = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let face = nm_field(pq, self.rect_size, self.rect_pos, px, 6.0, self.hover, self.focus, self.disabled)
+    return Finish.over(face, nm_choice_vee_d(pq, self.rect_size, px, self.hover, self.disabled))
+}
+mod.widgets.ComboBoxFlat.padding.left = 10.0
+mod.widgets.ComboBoxFlat.padding.right = 28.0
+mod.widgets.ComboBoxFlat.input.min_height = 0.0
+
+// SLIDERS. The track is a pill well; the travelled part of it is filled
+// flat with the accent and laid over the thumb's shadows, so the white one
+// never pales it; the thumb is a round raised disc throwing its two
+// shadows. Every slider face draws its thumb and its shadows past its own
+// box, so the family's root grows the quad and stops clipping.
+mod.widgets.SliderMinimal.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderMinimal.clip_x = false
+mod.widgets.SliderMinimal.clip_y = false
+
+// A raised disc of radius `r` at `hc`, laid over `acc`: the two shadows of
+// a part `s` points tall, dark down and to the right and white up and to
+// the left, kept to where `clip` lets them fall; then `lay`, what lies round
+// the disc clean of those shadows (a slider's fill, a knob's value arc);
+// then the face, a shade lighter than the page, and the focus mark.
+let nm_disc_e = fn(acc: vec4, lay: vec4, pq: vec2, org: vec2, hc: vec2, r: float, s: float, clip: float, px: float, hover: float, drag: float, focus: float, disabled: float) -> vec4 {
+    let en = 1.0 - disabled
+    let dis = mix(1.0, 0.35, disabled)
+    let kh = vec2(r, r)
+    let hd = length(pq - hc) - r
+    var o = Finish.over(acc, nm_cast(pq, hc, kh, r, s, (1.0 + 0.3 * max(hover, drag)) * dis) * clip)
+    o = Finish.over(o, lay)
+    var col = nm_face(pq, hc, kh, hd, px, 0.016 + 0.012 * hover * en - 0.012 * drag * en, en)
+    col = col + vec3(nm_grain(org + pq, px))
+    let ha = Finish.cover(hd, px)
+    o = Finish.over(o, vec4(col * ha, ha))
+    return Finish.over(o, nm_focus(hd, px, focus * en))
+}
+
+// A thumb: that disc standing on the page with nothing laid round it, its
+// shadows those of a part a quarter taller than it is wide, which keeps
+// them inside the eight points a slider's quad grows by.
+let nm_thumb = fn(acc: vec4, pq: vec2, org: vec2, hc: vec2, r: float, px: float, hover: float, drag: float, focus: float, disabled: float) -> vec4 {
+    return nm_disc_e(acc, vec4(0.0, 0.0, 0.0, 0.0), pq, org, hc, r, 2.5 * r, 1.0, px, hover, drag, focus, disabled)
+}
+
+// The groove a thumb runs in: a pill well, cool slate, its shadow in
+// proportion to its height, so a thin groove reads as deep as a thick one.
+let nm_groove = fn(col: vec3, pq: vec2, c: vec2, h: vec2, px: float, k: float) -> vec3 {
+    let r = min(h.x, h.y)
+    let d = Material.sd_box(pq, c, h, r)
+    return nm_well(col, pq, c, h, r, d, px, max(4.0 * r, 10.0), k)
+}
+
+// The accent laid flat on a well's floor, where the well's shadow still
+// falls on it: a little darker along its upper edge and a little lighter
+// along its lower one, so the fill lies in the hole rather than on it. `c`,
+// `h` and `r` are the well's, `s` how far its shade reaches, `k` its depth.
+let nm_fill_e = fn(ink: vec3, pq: vec2, c: vec2, h: vec2, r: float, s: float, k: float) -> vec3 {
+    let dk = Finish.inset(pq, c, h, r, vec2(0.05 * s, 0.12 * s), max(0.12 * s, 0.6))
+    let lt = Finish.inset(pq, c, h, r, vec2(-0.03 * s, -0.08 * s), max(0.1 * s, 0.5))
+    let o = mix(ink, ink * vec3(0.70, 0.74, 0.84), dk * 0.6 * k)
+    return mix(o, vec3(1.0, 1.0, 1.0), lt * 0.16 * k)
+}
+
+// How much of a pixel the travelled part of a pill well covers: the well's
+// own shape from the stop, or from the default when the slider asks, to the
+// thumb's centre. `x0` and `x1` are the thumb's centre at the two stops; a
+// fill that starts or ends at a stop runs on into the well's round end.
+let nm_span_e = fn(pq: vec2, c: vec2, h: vec2, x0: float, x1: float, at: float, org_at: float, from_org: float, px: float) -> float {
+    let f0 = mix(0.0, min(org_at, at), from_org)
+    let f1 = mix(at, max(org_at, at), from_org)
+    let e0 = mix(mix(x0, x1, f0), c.x - h.x, step(f0, 0.0001))
+    let e1 = mix(mix(x0, x1, f1), c.x + h.x, step(0.9999, f1))
+    let fd = Material.sd_box(pq, vec2((e0 + e1) * 0.5, c.y), vec2(max((e1 - e0) * 0.5, h.y), h.y), h.y)
+    return Finish.cover(fd, px) * step(0.0005, f1 - f0)
+}
+
+// The plain slider: an 8 point pill well, the accent filling it from the
+// stop (or from the default) to a 16 point raised thumb. The label and the
+// readout stand in the 20 points above.
+mod.widgets.SliderFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let dis = mix(1.0, 0.35, self.disabled)
+    let gr = vec3(nm_grain(org + pq, px))
+    let top = 20.0
+    let cy = Finish.snap(org.y + top + (self.rect_size.y - top) * 0.5, px) - org.y
+    let hr = 8.0
+    let x0 = hr + 1.0
+    let x1 = self.rect_size.x - hr - 1.0
+    let gc = vec2(self.rect_size.x * 0.5, cy)
+    let gh = vec2(self.rect_size.x * 0.5 - 1.0, 4.0)
+    let ga = Finish.cover(Material.sd_box(pq, gc, gh, 4.0), px)
+    let col = nm_groove(vec3(0.878, 0.898, 0.925), pq, gc, gh, px, dis) + gr
+    let ink = mix(vec3(0.290, 0.486, 0.965), vec3(0.725, 0.776, 0.902), self.disabled)
+    let fcol = nm_fill_e(ink, pq, gc, gh, 4.0, 8.0, dis) + gr
+    let fa = nm_span_e(pq, gc, gh, x0, x1, self.slide_pos, self.origin_pos, self.arc_origin, px)
+    return nm_disc_e(vec4(col * ga, ga), vec4(fcol * fa, fa), pq, org, vec2(mix(x0, x1, self.slide_pos), cy), hr, 2.5 * hr, 1.0, px, self.hover, self.drag, self.focus, self.disabled)
+}
+
+// The minimal slider: a 4 point pill groove with no line drawn along it,
+// the accent filling it from the stop (or from the default) to a 10 point
+// raised dot.
+mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let dis = mix(1.0, 0.35, self.disabled)
+    let gr = vec3(nm_grain(org + pq, px))
+    let top = self.offset_y
+    let cy = Finish.snap(org.y + top + (self.rect_size.y - top) * 0.5, px) - org.y
+    let hr = 5.0
+    let x0 = hr
+    let x1 = self.rect_size.x - hr
+    let gc = vec2(self.rect_size.x * 0.5, cy)
+    let gh = vec2(self.rect_size.x * 0.5, 2.0)
+    let ga = Finish.cover(Material.sd_box(pq, gc, gh, 2.0), px)
+    let col = nm_groove(vec3(0.878, 0.898, 0.925), pq, gc, gh, px, 0.9 * dis) + gr
+    let ink = mix(vec3(0.290, 0.486, 0.965), vec3(0.725, 0.776, 0.902), self.disabled)
+    let fcol = nm_fill_e(ink, pq, gc, gh, 2.0, 4.0, dis) + gr
+    let fa = nm_span_e(pq, gc, gh, x0, x1, self.slide_pos, self.origin_pos, self.arc_origin, px)
+    return nm_disc_e(vec4(col * ga, ga), vec4(fcol * fa, fa), pq, org, vec2(mix(x0, x1, self.slide_pos), cy), hr, 2.5 * hr, 1.0, px, self.hover, self.drag, self.focus, self.disabled)
+}
+
+// The round slider: the track is a pill well the height of the control
+// beside its label, the travelled part of it filled flat with the accent,
+// and the thumb a raised disc standing in the well two points clear of its
+// edge, its shadows kept to the well.
+mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let dis = mix(1.0, 0.35, self.disabled)
+    let gr = vec3(nm_grain(org + pq, px))
+    let cy = Finish.snap(org.y + self.rect_size.y * 0.5, px) - org.y
+    let sx0 = self.label_size
+    let sh = min(self.rect_size.y * 0.5, 10.0)
+    let sc = vec2((sx0 + self.rect_size.x) * 0.5, cy)
+    let shh = vec2((self.rect_size.x - sx0) * 0.5, sh)
+    let sd = Material.sd_box(pq, sc, shh, sh)
+    let sa = Finish.cover(sd, px)
+    let col = nm_well(vec3(0.918, 0.929, 0.957), pq, sc, shh, sh, sd, px, 2.0 * sh + 4.0, dis) + gr
+    let x0 = sx0 + sh
+    let x1 = self.rect_size.x - sh
+    let ink = mix(vec3(0.290, 0.486, 0.965), vec3(0.725, 0.776, 0.902), self.disabled)
+    let fcol = nm_fill_e(ink, pq, sc, shh, sh, 2.0 * sh, dis) + gr
+    let fa = nm_span_e(pq, sc, shh, x0, x1, self.slide_pos, self.origin_pos, self.arc_origin, px)
+    let hr = sh - 2.0
+    return nm_disc_e(vec4(col * sa, sa), vec4(fcol * fa, fa), pq, org, vec2(mix(x0, x1, self.slide_pos), cy), hr, 2.5 * hr, sa, px, self.hover, self.drag, self.focus, self.disabled)
+}
+
+// The fader: the slider bench's white spheres puck. A round white cap 16
+// points across and 8 tall, its top cut by a sphere into a shallow dish
+// inside a rounded rim, lit by one key light from the top left and throwing
+// a soft shadow down and to the right. It rides a 6 point pill well sunk in
+// the page, this sheet's own well in place of the bench's slot, with twenty
+// ticks on the far side, every fifth long, and no value fill: the cap is
+// the value. The shape, its curves, the material numbers and the inks are
+// the bench preset's; the ground and the well are this sheet's. The puck is
+// as wide as it is long, so `cap_cross` is not read. Lying down or standing
+// up.
+mod.widgets.SliderFader.cap_size = 16.0
+mod.widgets.SliderFader.track_inset = 8.0
+mod.widgets.SliderFader.draw_bg.track_size = uniform(6.0)
+mod.widgets.SliderFader.clip_x = false
+mod.widgets.SliderFader.clip_y = false
+// The material, live in the tweaker: the key light in screen space (x
+// right, y down, z toward the viewer) and its intensity; the highlight, its
+// roughness, the broad gloss sheen and the rim toward grazing; the
+// occlusion at the foot and how far up it reaches; the plain sky's
+// reflection and how close the eye sits over the cap (0 far above); metal,
+// turned grain and self-light, all off here; the exposure in stops and the
+// highlight roll-off; the cast shadow's strength and its softest edge (held
+// to the cap's height) and the contact shadow's strength.
+mod.widgets.SliderFader.draw_bg.cap_light = uniform(vec3(-0.36, -0.6, 0.72))
+mod.widgets.SliderFader.draw_bg.cap_light_intensity = uniform(0.9)
+mod.widgets.SliderFader.draw_bg.cap_specular = uniform(0.08)
+mod.widgets.SliderFader.draw_bg.cap_roughness = uniform(0.38)
+mod.widgets.SliderFader.draw_bg.cap_gloss = uniform(0.16)
+mod.widgets.SliderFader.draw_bg.cap_rim = uniform(0.54)
+mod.widgets.SliderFader.draw_bg.cap_ao = uniform(0.32)
+mod.widgets.SliderFader.draw_bg.cap_ao_reach = uniform(1.4)
+mod.widgets.SliderFader.draw_bg.cap_reflection = uniform(0.16)
+mod.widgets.SliderFader.draw_bg.cap_reflection_perspective = uniform(0.35)
+mod.widgets.SliderFader.draw_bg.cap_metal = uniform(0.0)
+mod.widgets.SliderFader.draw_bg.cap_spun = uniform(0.0)
+mod.widgets.SliderFader.draw_bg.cap_glow = uniform(0.0)
+mod.widgets.SliderFader.draw_bg.cap_exposure = uniform(0.0)
+mod.widgets.SliderFader.draw_bg.cap_rolloff = uniform(0.6)
+mod.widgets.SliderFader.draw_bg.cap_shadow = uniform(0.45)
+mod.widgets.SliderFader.draw_bg.cap_shadow_blur = uniform(18.0)
+mod.widgets.SliderFader.draw_bg.cap_contact = uniform(0.25)
+// The inks, the preset's: a white cap, a white light, a slate-blue shade (a
+// multiplier: what a full shadow does to what it falls on) and pale ticks.
+// The ground is the page's own colour, so the fader, laid over the page
+// premultiplied, leaves the page itself untouched.
+mod.widgets.SliderFader.draw_bg.cap_ground = uniform(mod.theme.color_bg_app)
+mod.widgets.SliderFader.draw_bg.cap_body = uniform(#ffffff)
+mod.widgets.SliderFader.draw_bg.cap_light_ink = uniform(#ffffff)
+mod.widgets.SliderFader.draw_bg.cap_shadow_ink = uniform(#9aa4b8)
+mod.widgets.SliderFader.draw_bg.cap_tick_ink = uniform(#c0c3ca)
+
+// The puck's solid at `q`, a point in the cap's own frame (x along the
+// track, y across it), `hs` its half size and `r` its corner: the height
+// 0..1 in .x, its gradient per point in .yz, and in .w the footprint's
+// distance, negative inside. The curves are the preset's, handles resolved
+// by the bench: along, across and plan level at full (a round footprint
+// under a flat top), and the edge rising from the outline and rounding level
+// over the whole radius. Shape: corner and edge width the whole half size,
+// blend 0.02, 8 points tall. No ribs, no mark. The cut is a sphere (2) at
+// the middle (0), its radius 1.17 of the half length, its centre 1.38
+// heights up. On the preset's 16 point cap the wall leaves the outline at 45
+// degrees and the cut takes the top down to a fifth of the height at the
+// middle, a dish inside a rim; the height and the cut's centre are in
+// points, so a longer cap dishes deeper, as it does on the bench.
+let nm_puck_solid = fn(q: vec2, hs: vec2, r: float) -> vec4 {
+    let plan = Cap.curve((q.x / hs.x + 1.0) * 0.5, 2.0, vec2(0.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
+    let fp = Cap.sd_cap(q, hs, r, plan)
+    let along = Cap.curve((q.x / hs.x + 1.0) * 0.5, 2.0, vec2(0.0, 1.0), vec2(0.1667, 0.0), vec2(-0.1667, 0.0), vec2(1.0, 1.0), vec2(0.1667, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
+    let across = Cap.curve(abs(q.y) / hs.y, 2.0, vec2(0.0, 1.0), vec2(0.1667, 0.0), vec2(-0.1667, 0.0), vec2(1.0, 1.0), vec2(0.1667, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
+    // The edge is read no further out than the outline: past it the curve
+    // has no slope, and the pixels the outline half covers would take the
+    // flat top's light, a dotted bright line along the shaded foot.
+    let edge = Cap.curve(Cap.edge_x(min(fp.x, 0.0), hs, 1.0), 2.0, vec2(0.0, 0.0), vec2(0.1667, 0.1667), vec2(-0.1667, 0.0), vec2(1.0, 1.0), vec2(0.1667, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(0.0, 0.0), vec2(1.0, 1.0))
+    let f = Cap.field(q, hs, fp, along, across, edge, vec2(1.0, 0.0), vec4(1.0, 1.0, 0.02, 8.0), vec4(0.0, 0.0, 0.0, 1.0), vec4(0.0, 0.0, 0.0, 0.0), vec4(0.0, 0.5, 1.0, 0.0), vec4(2.0, 0.0, 1.17, 1.38))
+    return vec4(f.x, f.y, f.z, fp.x)
+}
+
+// A colour drawn on a page of colour `ground`, handed back premultiplied so
+// the page itself is left as it is: the least cover that keeps every
+// channel, and the light it adds over what shows through. Exact over that
+// ground, so a shade keeps the slate-blue of the shadow ink; the engine's
+// `on_ground` covers by the darkest channel alone and greys it.
+let nm_on_page = fn(col: vec3, ground: vec3) -> vec4 {
+    let dark = max(ground - col, vec3(0.0, 0.0, 0.0)) / max(ground, vec3(0.01, 0.01, 0.01))
+    let a = clamp(max(dark.x, max(dark.y, dark.z)), 0.0, 1.0)
+    return vec4(max(col - ground * (1.0 - a), vec3(0.0, 0.0, 0.0)), a)
+}
+
+// The quad grows past the layout box by the cast shadow's reach (its throw,
+// five and a half points from this light, and its softest edge, the cap's 8
+// point height), the focus ring's four points, and whatever of the cap is
+// wider than the control, so a cap at a stop never has its shadow or its
+// ring cut at the quad's edge.
+mod.widgets.SliderFader.draw_bg.vertex = fn() {
+    let across = mix(self.rect_size.y, self.rect_size.x, self.is_vertical)
+    let m = 14.0 + max(self.cap_px - across, 0.0) * 0.5
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderFader.draw_bg.pixel = fn() {
+    let v = self.is_vertical
+    let sz = self.rect_size
+    let along = mix(sz.x, sz.y, v)
+    let across = mix(sz.y, sz.x, v)
+    let m = 14.0 + max(self.cap_px - across, 0.0) * 0.5
+    let pq = self.pos * (sz + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let en = 1.0 - self.disabled
+    let dis = mix(1.0, 0.35, self.disabled)
+    // Track space: `ab.x` along the track from the value's zero (up the
+    // screen when the fader stands), `ab.y` across it.
+    let ab = vec2(mix(pq.x, sz.y - pq.y, v), mix(pq.y, pq.x, v))
+    let inset = self.inset_px
+    let travel = max(along - inset * 2.0 - self.cap_px, 1.0)
+    let foot = inset + self.cap_px * 0.5
+    let mid = across * 0.5
+    let ground = self.cap_ground.rgb
+    let body = self.cap_body.rgb
+    let light_ink = self.cap_light_ink.rgb
+    let shadow_ink = self.cap_shadow_ink.rgb
+    // The key light on screen for the cap's shading, and turned into track
+    // space for everything laid out along the track.
+    let l = normalize(self.cap_light)
+    let lt = Cap.light(self.cap_light, v)
+
+    // The ground: the scale beside the track, faded toward the page when
+    // disabled as this sheet's ticks are. The track itself is this sheet's
+    // pill well from one inset end to the other, worked out on screen so the
+    // light falls on it as on every other well, and kept as what it changes
+    // on the page, to go on after the tone below: through the roll-off its
+    // light would come out at half strength.
+    let tw = min(self.track_size, across)
+    let tlen = max(along - inset * 2.0, 1.0)
+    let at = foot + self.slide_pos * travel
+    let hs = vec2(self.cap_px * 0.5, self.cap_px * 0.5)
+    let wc = mix(vec2(inset + tlen * 0.5, mid), vec2(mid, sz.y - inset - tlen * 0.5), v)
+    let wh = mix(vec2(tlen * 0.5, tw * 0.5), vec2(tw * 0.5, tlen * 0.5), v)
+    let wa = Finish.cover(Material.sd_box(pq, wc, wh, tw * 0.5), px)
+    let wv = (nm_groove(vec3(0.878, 0.898, 0.925), pq, wc, wh, px, dis) - ground) * wa
+    var col = Cap.ticks(ground, ab, mid, foot, travel, 20.0, 1.0, 5.0, tw, 0.0, px, self.cap_tick_ink.rgb)
+    col = mix(ground, col, dis)
+
+    // The cap, worked out only where it, its shadow or its focus ring can
+    // reach. Under the hand it lifts as this sheet's raised parts do: its
+    // shadows deepen by three tenths and its face lightens a hair. Held, it
+    // sinks half a point, so its shadow shortens, and its face darkens as
+    // this sheet's held caps do. Disabled, its relief falls to a third as
+    // this sheet's does: its shadows and its own modelling, and its rim
+    // light goes, as this sheet's disabled faces lose their lit edge.
+    let q = ab - vec2(at, mid)
+    let r = min(hs.x, hs.y)
+    let height = 8.0
+    let rise = height - 0.5 * self.drag
+    let reach = rise * 0.7 * length(lt.xy) / max(lt.z, 0.25) + max(rise, 1.0) + 5.0
+    var capc = ground
+    var cov = 0.0
+    var shd = 0.0
+    var halo = 0.0
+    var cap_d = 100.0
+    if max(abs(q.x) - hs.x, abs(q.y) - hs.y) < reach {
+        let s = nm_puck_solid(q, hs, r)
+        let n = Cap.normal(s.yz, height, v)
+        let eye = Cap.view(q, hs, self.cap_reflection_perspective, v)
+        capc = Cap.shade(n, l, eye, s.x, body, 0.0, 0.0, 1.0, self.cap_specular, self.cap_roughness, self.cap_gloss, self.cap_rim * en, self.cap_ao, self.cap_ao_reach, self.cap_reflection, self.cap_metal, self.cap_light_intensity, body, light_ink, shadow_ink, ground)
+        if self.cap_spun > 0.001 {
+            let grain = Cap.spun(q, hs, lt.xy) * self.cap_spun
+            capc = Cap.in_shadow(Cap.in_light(capc, clamp(grain, 0.0, 1.0) * 0.55, light_ink), clamp(-grain, 0.0, 1.0) * 0.42, shadow_ink)
+        }
+        if self.cap_glow > 0.001 {
+            capc = Cap.emit(capc, s.x, body, light_ink, self.cap_glow)
+        }
+        if self.disabled > 0.001 {
+            // The cap as a flat disc would read, the relief laid back over
+            // it at a third.
+            let level = Cap.shade(vec3(0.0, 0.0, 1.0), l, vec3(0.0, 0.0, 1.0), 1.0, body, 0.0, 0.0, 1.0, self.cap_specular, self.cap_roughness, self.cap_gloss, 0.0, self.cap_ao, self.cap_ao_reach, self.cap_reflection, self.cap_metal, self.cap_light_intensity, body, light_ink, shadow_ink, ground)
+            capc = mix(level, capc, dis)
+        }
+        cov = Cap.cover(s.w, px)
+        // Under it: the cast shadow, thrown from the top outline the bench
+        // gives for this cap, and the contact shadow round its foot.
+        let cast_sh = Cap.shadow(q, hs, r, vec3(0.3529, 0.3529, 1.0), lt, rise, self.cap_shadow_blur, self.cap_shadow * (1.0 + 0.3 * max(self.hover, self.drag)) * dis, px)
+        let contact_sh = Cap.contact(s.w, max(rise * 0.3, 1.0), self.cap_contact * dis)
+        shd = clamp(cast_sh + contact_sh, 0.0, 1.0)
+        halo = Cap.glow(s.w, hs, self.cap_glow)
+        cap_d = s.w
+    }
+    col = mix(col, col * shadow_ink, shd * (1.0 - cov))
+    col = col + body * halo * 0.9 * (1.0 - cov)
+    col = mix(col, capc, cov)
+    // Toned, the page's colour toned alike. The face's lift under the hand,
+    // its darkening when held and the well, where the cap leaves it showing,
+    // go on after the tone, as displayed, so the roll-off does not swallow
+    // them. Then the fader is laid over the page without painting it, and
+    // this sheet's focus ring goes round the cap.
+    let ev = pow(2.0, self.cap_exposure)
+    let lift = (0.006 * self.hover - 0.012 * self.drag) * en * cov
+    let shown = Cap.tone(col, ev, self.cap_rolloff) + vec3(lift, lift, lift) + wv * (1.0 - cov)
+    let res = nm_on_page(shown, Cap.tone(ground, ev, self.cap_rolloff))
+    return Finish.over(res, nm_focus(cap_d, px, self.focus * en))
+}
+
+// KNOBS. A raised disc standing in a sunken ring: a round well a little
+// wider than the disc, whose floor carries the value as a flat accent arc
+// in its outer part. The disc's two shadows fall into the ring and stop at
+// its edge, for the disc stands no higher than the page round it; the arc
+// lies over them, clean. A flat accent dot on the disc points at the value.
+let nm_cap = fn(dish: vec4, ring: vec4, pq: vec2, org: vec2, c: vec2, r: float, px: float, ang: float, hover: float, drag: float, focus: float, disabled: float) -> vec4 {
+    // The shadows of a part a quarter as tall as the disc is wide, held
+    // between 14 and 30 points.
+    let o = nm_disc_e(dish, ring, pq, org, c, r, clamp(0.5 * r, 14.0, 30.0), dish.a, px, hover, drag, focus, disabled)
+    let pr = clamp(0.07 * r, 1.5, 4.0)
+    let pc = c + vec2(-sin(ang), cos(ang)) * (r - max(0.2 * r, 3.5))
+    let pa = Finish.cover(length(pq - pc) - pr, px)
+    let ink = mix(vec3(0.290, 0.486, 0.965), vec3(0.725, 0.776, 0.902), disabled)
+    return Finish.over(o, vec4(ink * pa, pa))
+}
+
+// The ring a knob stands in: a round well of radius `rr` with the fields'
+// pale floor, its shade reaching in as far as the `w` points of floor that
+// show round the disc.
+let nm_dish_e = fn(pq: vec2, org: vec2, c: vec2, rr: float, w: float, px: float, disabled: float) -> vec4 {
+    let d = length(pq - c) - rr
+    var col = nm_well(vec3(0.918, 0.929, 0.957), pq, c, vec2(rr, rr), rr, d, px, 4.0 * w, mix(1.0, 0.35, disabled))
+    col = col + vec3(nm_grain(org + pq, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+
+// The value on that floor: an accent arc half the ring wide in its outer
+// part, from `a0` to `a1`, shaded by the well as a slider's fill is.
+let nm_ring_e = fn(pq: vec2, org: vec2, c: vec2, rr: float, w: float, a0: float, a1: float, px: float, disabled: float) -> vec4 {
+    let ink = mix(vec3(0.290, 0.486, 0.965), vec3(0.725, 0.776, 0.902), disabled)
+    var col = nm_fill_e(ink, pq, c, vec2(rr, rr), rr, 1.5 * w, mix(1.0, 0.35, disabled))
+    col = col + vec3(nm_grain(org + pq, px))
+    let a = Finish.cover(nm_arc(pq, c, rr - 0.45 * w, a0, max(a1, a0 + 0.001), 0.5 * w), px) * step(0.0005, a1 - a0)
+    return vec4(col * a, a)
+}
+
+// The panel knob: the ring in the biggest circle the box holds, pinned to
+// the bottom under its legend, the ring never under 4.5 points wide.
+mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let dia = min(self.rect_size.x, self.rect_size.y)
+    let c = vec2(self.rect_size.x * 0.5, self.rect_size.y - dia * 0.5)
+    let rr = dia * 0.5 - 1.0
+    let w = clamp(0.16 * rr, 4.5, 10.0)
+    let one = PI / 180.0
+    let sweep = 2.0 * PI - self.gap * one
+    let start = self.gap * one * 0.5
+    let val = start + sweep * self.slide_pos
+    let org_a = start + sweep * self.origin_pos
+    let a0 = mix(start, min(org_a, val), self.arc_origin)
+    let a1 = mix(val, max(org_a, val), self.arc_origin)
+    let dish = nm_dish_e(pq, org, c, rr, w, px, self.disabled)
+    let ring = nm_ring_e(pq, org, c, rr, w, a0, a1, px, self.disabled)
+    return nm_cap(dish, ring, pq, org, c, rr - w, px, val, self.hover, self.drag, self.focus, self.disabled)
+}
+mod.widgets.RotaryKnob.width = 44.0
+mod.widgets.RotaryFlat.text_input.draw_bg.color = #00000000
+mod.widgets.RotaryKnob.height = 62.0
+
+// The dial: the same ring and disc, centred under the legend and the
+// readout, which stand in the 22 points above.
+mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let top = 22.0
+    let dia = min(self.rect_size.x, self.rect_size.y - top)
+    let c = vec2(self.rect_size.x * 0.5, top + dia * 0.5)
+    let rr = dia * 0.5 - 1.5
+    let w = clamp(0.16 * rr, 4.5, 10.0)
+    let one = PI / 180.0
+    let sweep = 2.0 * PI - self.gap * one
+    let start = self.gap * one * 0.5
+    let val = start + sweep * self.slide_pos
+    let org_a = start + sweep * self.origin_pos
+    let a0 = mix(start, min(org_a, val), self.arc_origin)
+    let a1 = mix(val, max(org_a, val), self.arc_origin)
+    let dish = nm_dish_e(pq, org, c, rr, w, px, self.disabled)
+    let ring = nm_ring_e(pq, org, c, rr, w, a0, a1, px, self.disabled)
+    return nm_cap(dish, ring, pq, org, c, rr - w, px, val, self.hover, self.drag, self.focus, self.disabled)
+}
+
+// PROGRESS. A pill well as thick as the bar asks, six points unless told
+// otherwise; the fill a flat pill of the accent inset by a point, with no
+// line along it. Without a value the bar holds one soft segment in the
+// middle of the well: a shader may not read the clock, so the sweep stands
+// still. A bar that asks for its stop wears a dot of the fill at the far
+// end of the well.
+mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let w = self.rect_size.x
+    let t = max(min(self.thickness, self.rect_size.y), 2.0)
+    let cy = Finish.snap(org.y + self.rect_size.y * 0.5, px) - org.y
+    let x0 = w * self.start
+    let x1 = w * self.end
+    let gc = vec2((x0 + x1) * 0.5, cy)
+    let gh = vec2((x1 - x0) * 0.5, t * 0.5)
+    let gd = Material.sd_box(p, gc, gh, t * 0.5)
+    var col = nm_well(vec3(0.878, 0.898, 0.925), p, gc, gh, t * 0.5, gd, px, max(14.0, 2.0 * t), 1.0)
+    col = col + vec3(nm_grain(org + p, px))
+    let ga = Finish.cover(gd, px) * step(0.5, self.track)
+    var acc = vec4(col * ga, ga)
+    let fr = max(t * 0.5 - 1.0, t * 0.3)
+    let xv = w * clamp(self.value, self.start, self.end)
+    let det = step(0.0, self.value)
+    let fa0 = mix(x0 + w * 0.3, x0 + 1.0, det)
+    let fa1 = mix(x0 + w * 0.65, max(xv - 1.0, x0 + 1.0 + 2.0 * fr), det)
+    let fd = Material.sd_box(p, vec2((fa0 + fa1) * 0.5, cy), vec2((fa1 - fa0) * 0.5, fr), fr)
+    let fcol = mix(vec3(0.290, 0.486, 0.965), self.fill_color().rgb, step(0.5, self.intent))
+    // The still sweep fades in and out at both ends.
+    let soft = mix(smoothstep(fa0, fa0 + w * 0.12, p.x) * smoothstep(fa1, fa1 - w * 0.12, p.x), 1.0, det)
+    let show = mix(1.0, step(x0 + 0.5, xv), det)
+    let fA = Finish.cover(fd, px) * soft * show
+    acc = Finish.over(acc, vec4(fcol * fA, fA))
+    let stop_d = length(p - vec2(x1 - 1.0 - fr, cy)) - fr
+    let stop_a = Finish.cover(stop_d, px) * step(0.5, self.stop_indicator) * step(0.5, self.track)
+    acc = Finish.over(acc, vec4(fcol * stop_a, stop_a))
+    return acc * self.opacity
+}
+mod.widgets.ProgressBarFlat.height = 8.0
+// Written as a uniform, since the face reads it and an app may set it.
+mod.widgets.ProgressBarFlat.draw_bg.thickness = uniform(6.0)
+
+// LEVEL METER. A pill well with a ladder of three point cells, one point
+// apart, lit in the accent, then warm past seven tenths and hot past
+// eighty-five hundredths; unlit cells keep an eighth of their colour. The
+// well is shaded where it stands in the window, so a standing meter takes
+// its light from the top left like everything round it. The lamp at the
+// end is a small well that fills flat when it latches.
+mod.widgets.LevelMeter.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let v = self.vertical
+    let along = mix(self.rect_size.x, self.rect_size.y, v)
+    let across = mix(self.rect_size.y, self.rect_size.x, v)
+    let q = vec2(mix(p.x, self.rect_size.y - p.y, v), mix(p.y, p.x, v))
+    let lamp_room = self.lamp * (6.0 + self.lamp_gap)
+    let bar = max(4.0, along - lamp_room)
+    let r = min(across, bar) * 0.5
+    // The well in the window's frame: lying down it runs from the left,
+    // standing up it rises from the bottom.
+    let gc = vec2(mix(bar * 0.5, across * 0.5, v), mix(across * 0.5, self.rect_size.y - bar * 0.5, v))
+    let gh = vec2(mix(bar * 0.5, across * 0.5, v), mix(across * 0.5, bar * 0.5, v))
+    let gd = Material.sd_box(p, gc, gh, r)
+    var col = nm_well(vec3(0.878, 0.898, 0.925), p, gc, gh, r, gd, px, 14.0, 1.0)
+    let pad = 1.5
+    let span = max(1.0, bar - pad * 2.0)
+    let share = clamp((q.x - pad) / span, 0.0, 1.0)
+    var zone = vec3(0.290, 0.486, 0.965)
+    zone = mix(zone, vec3(0.910, 0.635, 0.227), step(0.7, share))
+    zone = mix(zone, vec3(0.878, 0.325, 0.235), step(0.85, share))
+    let cell = step(0.25, fract((q.x - pad) / 4.0))
+    let inside = step(pad, q.x) * step(q.x, bar - pad) * step(abs(q.y - across * 0.5), across * 0.5 - pad)
+    let lit = step(q.x, pad + span * self.level)
+    col = mix(col, zone, cell * inside * mix(0.12, 1.0, lit))
+    // The high-water mark: a slate bar a point and a half wide.
+    let hx = pad + span * self.hold
+    let hm = step(abs(q.x - hx), 0.75) * inside * step(0.002, self.hold)
+    col = mix(col, vec3(0.388, 0.416, 0.478), hm * 0.8)
+    col = col + vec3(nm_grain(org + p, px))
+    let ga = Finish.cover(gd, px)
+    var acc = vec4(col * ga, ga)
+    // The lamp.
+    let lq = vec2(along - 3.0, across * 0.5)
+    let lc = vec2(mix(lq.x, lq.y, v), mix(lq.y, self.rect_size.y - lq.x, v))
+    let lr = min(3.0, across * 0.5)
+    let ld = length(p - lc) - lr
+    var lcol = nm_well(vec3(0.878, 0.898, 0.925), p, lc, vec2(lr, lr), lr, ld, px, 10.0, 1.0)
+    lcol = mix(lcol, vec3(0.878, 0.325, 0.235), self.over)
+    let la = Finish.cover(ld, px) * self.lamp
+    acc = Finish.over(acc, vec4(lcol * la, la))
+    return acc * self.opacity
+}
+mod.widgets.LevelMeter.height = 8.0
+mod.widgets.LevelMeterColumn.width = 8.0
+
+// A raised part's shadows kept to the room round it: `g` points of it all
+// round the face of half size `h` about `c`, faded out over the last `f`,
+// so they end inside a strip's rim, or inside the quad that draws them,
+// and never at a hard edge.
+let nm_kept_f = fn(sh: vec4, p: vec2, c: vec2, h: vec2, r: float, g: float, f: float) -> vec4 {
+    let dr = Material.sd_box(p, c, h + vec2(g, g), r + g)
+    return sh * smoothstep(0.0, max(f, 0.01), -dr)
+}
+
+// A raised pill seated in a strip's well with `g` points of floor round
+// it: its face, and its two shadows kept to that floor, so neither the
+// light thrown up nor the shade thrown down climbs out over the rim onto
+// the page. `k` is how far it stands, 1 all the way up.
+let nm_seat_f = fn(p: vec2, c: vec2, h: vec2, r: float, g: float, px: float, org: vec2, k: float) -> vec4 {
+    let d = Material.sd_box(p, c, h, r)
+    let acc = nm_kept_f(nm_cast(p, c, h, r, 16.0, k), p, c, h, r, g, g * 0.75)
+    let up = clamp(k, 0.0, 1.0)
+    var col = mix(nm_ground(), nm_face(p, c, h, d, px, 0.0, up), up)
+    col = col + vec3(nm_grain(org + p, px))
+    let a = Finish.cover(d, px)
+    return Finish.over(acc, vec4(col * a, a))
+}
+
+// SCROLL BAR. An 8 point well at half depth with a 6 point raised pill in
+// it: the pill's face, and its two shadows kept to the point of floor
+// round it.
+mod.widgets.ScrollBar.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let v = self.is_vertical
+    let along = mix(self.rect_size.x, self.rect_size.y, v)
+    let across = mix(self.rect_size.y, self.rect_size.x, v)
+    let q = vec2(mix(p.x, p.y, v), mix(p.y, p.x, v))
+    let w = min(8.0, across)
+    let mb = across * 0.5
+    let tc = vec2(along * 0.5, mb)
+    let th = vec2(along * 0.5, w * 0.5)
+    let td = Material.sd_box(q, tc, th, w * 0.5)
+    var col = nm_well(vec3(0.898, 0.914, 0.937), q, tc, th, w * 0.5, td, px, 10.0, 0.5)
+    col = col + vec3(nm_grain(self.rect_pos + p, px))
+    let ta = Finish.cover(td, px)
+    var acc = vec4(col * ta, ta)
+    let hw = max(w * 0.5 - 1.0, 1.0)
+    let s0 = along * self.norm_scroll + 1.0
+    let s1 = along * (self.norm_scroll + self.norm_handle) - 1.0
+    let hc = vec2((s0 + s1) * 0.5, mb)
+    let hh = vec2(max((s1 - s0) * 0.5, hw), hw)
+    let hd = Material.sd_box(q, hc, hh, hw)
+    let k = (1.0 + 0.3 * self.hover) * (1.0 - 0.5 * self.drag)
+    acc = Finish.over(acc, nm_kept_f(nm_cast(q, hc, hh, hw, 8.0, k), q, hc, hh, hw, 1.0, 0.75))
+    var hcol = nm_face(q, hc, hh, hd, px, 0.006 + 0.008 * self.hover - 0.012 * self.drag, 1.0)
+    hcol = hcol + vec3(nm_grain(self.rect_pos + p, px))
+    let ha = Finish.cover(hd, px)
+    acc = Finish.over(acc, vec4(hcol * ha, ha))
+    return acc * self.opacity
+}
+mod.widgets.ScrollBar.bar_size = 10.0
+
+// SEGMENTED CONTROL. A 28 point pill well; the current answer stands up in
+// it as a raised 24 point pill with its two shadows, kept to the two points
+// of floor round it, and its label in the accent ink.
+mod.widgets.SegmentedControlFlat.segment_height = 24.0
+mod.widgets.SegmentedControlFlat.segment_padding = 12.0
+mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let h = self.rect_size * 0.5
+    let r = min(14.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    var col = nm_well(vec3(0.910, 0.925, 0.945), p, c, h, r, d, px, 24.0, 1.0)
+    col = col + vec3(nm_grain(self.rect_pos + p, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
+    let m = 4.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let m = 4.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let h = self.rect_size * 0.5
+    return nm_seat_f(pq, c, h, min(h.x, h.y), 2.0, px, self.rect_pos, 1.0)
+}
+mod.widgets.SegmentedControlFlat.draw_text.color = #636a7a
+mod.widgets.SegmentedControlFlat.intent = mod.widgets.BadgeIntent.Primary
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #3860d6
+mod.widgets.SegmentedControlFlat.draw_text_selected.text_style = nm_medium
+
+// TABS. The strip is the same pill well; the tab in use stands up in it as
+// a raised pill two points in from the well's edge, its two shadows kept
+// to that floor, and the tab under the pointer rises part of the way. The
+// quiet tabs lie flat on the floor, with nothing drawn between them.
+mod.widgets.Tabs.height = 28.0
+mod.widgets.Tabs.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let h = self.rect_size * 0.5
+    let r = min(14.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    var col = nm_well(vec3(0.910, 0.925, 0.945), p, c, h, r, d, px, 24.0, 1.0)
+    col = col + vec3(nm_grain(self.rect_pos + p, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+mod.widgets.Tabs.draw_tab.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_hover.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let h = self.rect_size * 0.5 - vec2(2.0, 2.0)
+    return nm_seat_f(p, c, h, min(h.x, h.y), 2.0, px, self.rect_pos, 0.4)
+}
+mod.widgets.Tabs.draw_tab_active.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let h = self.rect_size * 0.5 - vec2(2.0, 2.0)
+    return nm_seat_f(p, c, h, min(h.x, h.y), 2.0, px, self.rect_pos, 1.0)
+}
+mod.widgets.Tabs.draw_sep.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_mark.color = #636a7a
+mod.widgets.Tabs.draw_text.color = #636a7a
+mod.widgets.Tabs.draw_text_active.color = #3860d6
+mod.widgets.Tabs.draw_text_active.text_style = nm_medium
+
+// RADIO TABS. A pill flat on the page at rest that rises part of the way
+// under the pointer; the one in use stands all the way up with its two
+// shadows and its label in the accent ink, and a held one is pressed in.
+// The quad grows by six points, and the shadows fade out inside it.
+mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
+    let m = 6.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let lo = vec2(Finish.snap(org.x, px), Finish.snap(org.y, px)) - org
+    let hi = vec2(Finish.snap(org.x + self.rect_size.x, px), Finish.snap(org.y + self.rect_size.y, px)) - org
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let r = min(h.x, h.y)
+    let d = Material.sd_box(pq, c, h, r)
+    let en = 1.0 - self.disabled
+    let press = self.down * en
+    let up = max(self.active, 0.4 * self.hover * en) * (1.0 - press)
+    var acc = nm_kept_f(nm_cast(pq, c, h, r, 20.0, up * mix(1.0, 0.35, self.disabled)), pq, c, h, r, m - 0.5, 2.5)
+    let rise = min(up * 2.0, 1.0)
+    var col = mix(nm_ground(), nm_face(pq, c, h, d, px, 0.012 * self.hover * en, rise), rise)
+    col = mix(col, nm_well(col, pq, c, h, r, d, px, 20.0, 0.8), press)
+    col = col + vec3(nm_grain(org + pq, px))
+    let a = Finish.cover(d, px)
+    acc = Finish.over(acc, vec4(col * a, a))
+    return Finish.over(acc, nm_focus(d, px, self.focus * en))
+}
+mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 0.0 right: 8.0 top: 5.0 bottom: 5.0}
+mod.widgets.RadioButtonTabFlat.draw_text.color = #636a7a
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #3860d6
+
+// CHIPS. A small raised pill, pressed in while held, its shadows fading out
+// inside the six points the quad grows by. A chip whose role gives it a
+// solid fill, a chosen one or a filled one, wears that fill as its face,
+// shaded like the page's own faces; a pale tint keeps the page's face. A
+// keyed chip wears the focus mark.
+mod.widgets.ChipFlat.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ChipFlat.draw_bg.pixel = fn() {
+    let m = 6.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let h = self.rect_size * 0.5
+    let r = min(self.radius, min(h.x, h.y))
+    let d = Material.sd_box(pq, c, h, r)
+    var acc = nm_kept_f(nm_cast(pq, c, h, r, 20.0, (1.0 + 0.3 * self.hover) * (1.0 - self.down)), pq, c, h, r, m - 0.5, 2.5)
+    let lit = nm_face(pq, c, h, d, px, 0.018 * self.hover, 1.0 - self.down)
+    // How much of the role's fill shows: none of a pale tint, all of a
+    // saturated colour.
+    let fill = self.color
+    let chroma = max(fill.x, max(fill.y, fill.z)) - min(fill.x, min(fill.y, fill.z))
+    let solid = smoothstep(0.12, 0.3, chroma) * fill.w
+    var col = mix(lit, fill.rgb + (lit - nm_ground()), solid)
+    col = mix(col, nm_well(col - vec3(0.013, 0.013, 0.013), pq, c, h, r, d, px, 20.0, 0.75), self.down)
+    col = col + vec3(nm_grain(self.rect_pos + pq, px))
+    let a = Finish.cover(d, px)
+    acc = Finish.over(acc, vec4(col * a, a))
+    return Finish.over(acc, nm_focus(d, px, self.keyed))
+}
+mod.widgets.ChipFlat.draw_text.color = #636a7a
+mod.widgets.ChipFlat.margin = mod.turtle.Inset{left: 4.0 right: 4.0 top: 4.0 bottom: 4.0}
+
+// SURFACES. A panel is the page raised by a fixed, shallow step whatever
+// its size, with a 12 point corner and the light line on its top edge; an
+// inset panel is a tray pressed a step into the page, with a lit lip.
+let nm_panel = fn(pq: vec2, size: vec2, org: vec2, px: float, face: vec3, r: float, raised: float, sunken: float, lift: float) -> vec4 {
+    let c = size * 0.5
+    let h = size * 0.5
+    let rr = min(r, min(h.x, h.y))
+    let d = Material.sd_box(pq, c, h, rr)
+    // Raised: a slate shadow three and a half points right and four and a
+    // half down and a halo of light as far up and left, each blurred by three
+    // and a half, both gone inside the
+    // ten to twelve points a panel's quad grows by. Under the pointer the
+    // shadow deepens a step.
+    let dark = Finish.drop(pq, c, h, rr, vec2(3.5, 4.5), 3.5) * (0.65 + 0.1 * lift) * raised
+    let light = Finish.drop(pq, c, h, rr, vec2(-3.5, -4.5), 3.5) * 1.0 * raised
+    var acc = vec4(nm_slate_a() * dark, dark)
+    acc = acc + vec4((vec3(1.0, 1.0, 1.0) - nm_ground()) * light, 0.0)
+    // The face: a long, faint fall from the top left to the bottom right, and
+    // a three point shoulder lit and shaded as a raised part's is, by the
+    // same amounts whatever colour the panel is given. No line on any edge.
+    let u = clamp((pq.x / max(size.x, 1.0) + pq.y / max(size.y, 1.0)) * 0.5, 0.0, 1.0)
+    let g = (mix(0.01, -0.008, u) + 0.006 * lift) * raised
+    var col = face + vec3(g, g, g)
+    let sh = nm_shoulder_a(pq, c, h, max(rr, 3.0), d, max(3.0, 3.0 * px)) * raised
+    col = col + (vec3(0.984, 0.988, 1.0) - nm_ground()) * max(sh, 0.0) * 0.7
+    col = col + (vec3(0.745, 0.776, 0.831) - nm_ground()) * max(-sh, 0.0) * 0.45
+    // The tray: a step down, the page's shadow falling in deep along its top
+    // and left and light gathering along its bottom and right, with no lip.
+    let tray = face - vec3(0.015, 0.015, 0.015)
+    let dk = Finish.inset(pq, c, h, rr, vec2(2.4, 3.2), 3.6)
+    let lt = Finish.inset(pq, c, h, rr, vec2(-1.6, -2.2), 2.8)
+    var tcol = mix(tray, nm_slate_a(), clamp(dk * 0.7, 0.0, 1.0))
+    tcol = mix(tcol, vec3(1.0, 1.0, 1.0), clamp(lt * 0.6, 0.0, 1.0))
+    col = mix(col, tcol, sunken)
+    col = col + vec3(nm_grain(org + pq, px))
+    let a = Finish.cover(d, px)
+    return Finish.over(acc, vec4(col * a, a))
+}
+mod.widgets.RoundedView.clip_x = false
+mod.widgets.RoundedView.clip_y = false
+mod.widgets.PanelView.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.PanelView.draw_bg.pixel = fn() {
+    let m = 12.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let r = mix(12.0, 10.0, self.sunken)
+    return nm_panel(pq, self.rect_size, self.rect_pos, px, self.color.rgb, r, 1.0 - self.sunken, self.sunken, 0.0)
+}
+mod.widgets.PanelView.draw_bg.color = #e9edf0
+
+// A card is a raised panel too; a pressable one lifts under the pointer.
+// Elevated stands up and filled is a shallow tray; outlined lies flat on
+// the page with no line round it, and rises part of the way under the
+// pointer when it can be pressed. The shadows fade out inside the twelve
+// points the quad grows by.
+mod.widgets.Card.radius = 12.0
+mod.widgets.Card.clip_x = false
+mod.widgets.Card.clip_y = false
+mod.widgets.Card.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Card.draw_bg.pixel = fn() {
+    let m = 12.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let lift = self.hover * (1.0 - self.down)
+    let outlined = step(0.01, self.border_size)
+    let rest = clamp(self.shadow_radius / 4.0, 0.0, 1.0)
+    let raised = max(rest, 0.6 * lift) * (1.0 - self.down)
+    let sunk = max((1.0 - rest) * (1.0 - outlined) * 0.6 * (1.0 - lift), 0.6 * self.down)
+    let c = self.rect_size * 0.5
+    let r = min(self.border_radius, min(c.x, c.y))
+    return nm_kept_f(nm_panel(pq, self.rect_size, self.rect_pos, px, nm_ground(), self.border_radius, raised, sunk, lift), pq, c, c, r, m - 0.5, 3.5)
+}
+
+// The rounded view keeps whatever colour it is given; a view the colour of
+// the page is a surface of the page, and stands up off it as a panel does,
+// with the panel's own face and shadows, the shadows fading out inside the
+// ten points the quad grows by. A line is drawn only round a view that asks
+// for one.
+mod.widgets.RoundedView.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RoundedView.draw_bg.pixel = fn() {
+    let m = 10.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var fill = self.color
+    if self.color_2.x > -0.5 {
+        let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x else self.pos.y
+        fill = mix(self.color, self.color_2, dir)
+    }
+    let lower = vec2(self.border_inset.x, self.border_inset.y)
+    let upper = self.rect_size - vec2(self.border_inset.z, self.border_inset.w)
+    let c = (lower + upper) * 0.5
+    let h = max((upper - lower) * 0.5, vec2(0.5, 0.5))
+    // The corner as the stock face draws it, so a view keeps its shape.
+    let r = min(2.0 * max(1.0, self.border_radius), min(h.x, h.y))
+    let d = Material.sd_box(pq, c, h, r)
+    let near = (1.0 - smoothstep(0.02, 0.06, abs(Finish.lum(fill.rgb) - 0.927))) * step(0.99, fill.w)
+    let a = Finish.cover(d, px)
+    var acc = vec4(fill.rgb * a, a)
+    if near > 0.001 {
+        acc = nm_kept_f(nm_panel(pq - lower, h * 2.0, self.rect_pos + lower, px, fill.rgb, r, near, 0.0, 0.0), pq, c, h, r, m - 0.5, 3.0)
+    }
+    acc = acc * fill.w
+    let bd = Finish.band(d, 0.0, max(self.border_size, 0.0), px) * step(0.001, self.border_size) * self.border_color.w
+    return Finish.over(acc, vec4(self.border_color.rgb * bd, bd))
+}
+
+// LIST ROWS. Flat on their list: no shadow, no well and no line between
+// rows. Under the pointer a faint band of slate, held a breath deeper; the
+// chosen row a faint band of the accent's tone. A band is a tint laid over
+// whatever the list stands on, four points in from the row's ends and two
+// from its top and bottom, with a 10 point corner.
+mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let h = max(self.rect_size * 0.5 - vec2(4.0, 2.0), vec2(1.0, 1.0))
+    let r = min(10.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let en = 1.0 - self.disabled
+    let cov = Finish.cover(d, px)
+    let ca = 0.085 * self.selected * mix(1.0, 0.5, self.disabled) * cov
+    let sa = (0.045 * self.hover + 0.035 * self.down) * en * cov
+    let acc = vec4(vec3(0.290, 0.486, 0.965) * ca, ca)
+    return Finish.over(acc, vec4(vec3(0.388, 0.427, 0.502) * sa, sa))
+}
+mod.widgets.ListItem.draw_text.color = #4f5666
+
+// THE OPEN LIST. A raised panel with a 12 point corner. It floats over
+// everything else, so its quad grows by sixteen points and the panel's
+// shadows fade out inside them. The row under the pointer is a faint band
+// of slate with an 8 point corner; the chosen row carries its label in the
+// accent ink and a check at its right end.
+mod.widgets.PopupMenuFlat.draw_bg.vertex = fn() {
+    let m = 16.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.PopupMenuFlat.draw_bg.pixel = fn() {
+    let m = 16.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let r = min(12.0, min(c.x, c.y))
+    return nm_kept_f(nm_panel(pq, self.rect_size, self.rect_pos, px, nm_ground(), 12.0, 1.0, 0.0, 0.0), pq, c, c, r, m - 0.5, 4.0)
+}
+mod.widgets.PopupMenuFlat.clip_x = false
+mod.widgets.PopupMenuFlat.clip_y = false
+mod.widgets.PopupMenuItem.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let h = max(self.rect_size * 0.5 - vec2(0.0, 1.0), vec2(1.0, 1.0))
+    let r = min(8.0, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    let sa = 0.045 * self.hover * (1.0 - self.disabled) * Finish.cover(d, px)
+    let acc = vec4(vec3(0.388, 0.427, 0.502) * sa, sa)
+    let cx = self.rect_size.x - 12.0
+    let cy = c.y
+    let ck = Finish.cover(min(nm_seg(p, vec2(cx - 3.5, cy), vec2(cx - 1.0, cy + 2.5)), nm_seg(p, vec2(cx - 1.0, cy + 2.5), vec2(cx + 3.5, cy - 2.5))) - 0.75, px) * self.active
+    return Finish.over(acc, vec4(vec3(0.290, 0.486, 0.965) * ck, ck))
+}
+mod.widgets.PopupMenuItem.draw_text.color_active = #3860d6
+
+// Templates that draw a face of their own on top of these roots keep the
+// plain quad: the grown one is only for the faces written here.
+mod.widgets.CloseButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CopyButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.BurgerButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloating.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloatingSm.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CheckBoxCustom.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.glass.CutButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.glass.RadioButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+
+// INSTRUMENTS. The displays, lamps and hardware switches are the same pale
+// material as the controls round them: a display is a window pressed into
+// the page, a lamp a small raised dome on it, and a switch a pill well with
+// a raised round key in it. None of them draws a line: every edge is light
+// or shade on a shoulder.
+
+// The well an instrument is cut into, a step under the page and a hair
+// cooler: the shade of a screen's face (`theme.color_screen`) and of a
+// switch's slot.
+let nm_well_shade_g = fn() -> vec3 {
+    return vec3(0.886, 0.902, 0.925)
+}
+
+// A window pressed into the page, `base` its face: the page's shadow falls
+// in from the top left and light gathers at the bottom right, as deep as
+// the sheet's wells go and held to the window's own scale up to 40 points,
+// so a tall screen does not take a panel's shadow. `depth` 1 is the stock
+// recess of 4 points, 0 a face flush with the page.
+let nm_window_g = fn(base: vec3, p: vec2, c: vec2, h: vec2, r: float, d: float, px: float, depth: float) -> vec3 {
+    let s = clamp(2.0 * min(h.x, h.y), 16.0, 40.0)
+    return nm_well(base, p, c, h, r, d, px, s, 1.15 * clamp(depth, 0.0, 1.5))
+}
+
+// An accent fill lying in a well: the page's shadow still falls in across
+// its top left and light still gathers at its bottom right, in the fill's
+// own colour, so a lit well sits as deep as an unlit one. `s` is the well's
+// own height.
+let nm_fill_well_g = fn(fill: vec3, p: vec2, c: vec2, h: vec2, r: float, s: float) -> vec3 {
+    let dk = Finish.inset(p, c, h, r, vec2(0.04 * s, 0.06 * s), max(0.075 * s, 0.9))
+    let lt = Finish.inset(p, c, h, r, vec2(-0.03 * s, -0.05 * s), max(0.07 * s, 0.8))
+    let o = fill * (1.0 - 0.28 * dk)
+    return mix(o, min(fill * 1.16, vec3(1.0, 1.0, 1.0)), lt * 0.45)
+}
+
+// A small dome of colour `face` over the box centred on `c` with half size
+// `h` and round ends: lighter toward the top left where the light falls,
+// deeper toward the bottom right, its shoulder rolling into light on the
+// one side and into shade on the other. Soft all over: no rim, no glint.
+let nm_dome_g = fn(face: vec3, p: vec2, c: vec2, h: vec2) -> vec3 {
+    let ex = max(h.x - h.y, 0.0)
+    let dx = p.x - c.x
+    let q = vec2(dx - clamp(dx, 0.0 - ex, ex), p.y - c.y) / max(h.y, 0.5)
+    // -1 at the top left, toward the light, to 1 at the bottom right.
+    let g = clamp((q.x + q.y) * 0.7071, -1.0, 1.0)
+    let shoulder = smoothstep(0.4, 1.0, length(q))
+    var col = min(face * (1.0 - 0.07 * g), vec3(1.0, 1.0, 1.0))
+    col = mix(col, face * 0.82, shoulder * smoothstep(-0.2, 0.9, g) * 0.6)
+    col = mix(col, min(face + vec3(0.12, 0.12, 0.12), vec3(1.0, 1.0, 1.0)), shoulder * (1.0 - smoothstep(-0.9, 0.2, g)) * 0.5)
+    return col
+}
+
+// SCREENS. A display is a window let into the page, not a pane of glass in
+// a bezel: no ring, no frame and no lip, only the well itself, its face the
+// screen's shade and its corner 10 points, and what it holds sits in it in
+// slate. `recess` still sets how deep it lies, and scan lines still draw.
+mod.widgets.ScreenView.draw_bg.border_radius = uniform(10.0)
+mod.widgets.ScreenView.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let lo = vec2(Finish.snap(org.x, px), Finish.snap(org.y, px)) - org
+    let hi = vec2(Finish.snap(org.x + self.rect_size.x, px), Finish.snap(org.y + self.rect_size.y, px)) - org
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let r = min(self.border_radius, min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    var face = self.color.rgb
+    if self.scan > 0.0 {
+        face = face * Finish.scan(p.y - (c.y - h.y), px, 3.0 * px, self.scan)
+    }
+    var col = nm_window_g(face, p, c, h, r, d, px, self.recess / 4.0)
+    col = col + vec3(nm_grain(org + p, px))
+    let a = Finish.cover(d, px) * self.color.a
+    return vec4(col * a, a)
+}
+// The glass keeps only its soft diagonal band, at the strength a page asks
+// for and none by default; the light line the stock laid inside its top
+// edge goes with the frame.
+mod.widgets.ScreenView.sheen = 0.0
+mod.widgets.ScreenView.draw_glass.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let c = self.rect_size * 0.5
+    let d = Material.sd_box(p, c, c, min(self.face_radius, min(c.x, c.y)))
+    let u = p / max(self.rect_size, vec2(1.0, 1.0))
+    let diag = u.x + u.y * 0.6
+    let band = smoothstep(0.0, 0.12, diag) * (1.0 - smoothstep(0.28, 0.5, diag))
+    let a = clamp(self.sheen * band, 0.0, 1.0) * Finish.cover(d + px, px)
+    return vec4(a, a, a, a)
+}
+
+// THE NEEDLE METER. Its face is a window like a screen's, with a 10 point
+// corner and the scale printed on it in slate: a tick at every division,
+// the majors two device pixels wide and the minors one and paler, a faint
+// arc under them, and the red zone a band just outside the arc. The needle
+// is slate, a point wide, with a soft shadow on the face under it, and its
+// root stands under a small raised dome of the page that throws the
+// sheet's two shadows. No rim and no sheen.
+mod.widgets.NeedleMeter.draw_bg.border_radius = uniform(10.0)
+mod.widgets.NeedleMeter.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let lo = vec2(Finish.snap(org.x, px), Finish.snap(org.y, px)) - org
+    let hi = vec2(Finish.snap(org.x + self.rect_size.x, px), Finish.snap(org.y + self.rect_size.y, px)) - org
+    let c = (lo + hi) * 0.5
+    let hc = (hi - lo) * 0.5
+    let fr = min(self.border_radius, min(hc.x, hc.y))
+    let face_d = Material.sd_box(p, c, hc, fr)
+    let pv = self.pivot()
+    let rr = self.scale_radius()
+    let q = p - pv
+    let r = length(q)
+    let ang = atan2(q.x, 0.0 - q.y)
+    let sweep = self.sweep * 0.017453293
+    let t = ang / sweep + 0.5
+    let on_scale = step(-0.0001, t) * step(t, 1.0001)
+    var col = self.color.rgb
+    // The scale: a tick at every division over a faint arc.
+    let arc = Finish.cover(abs(r - rr) - px * 0.5, px) * on_scale
+    let n = max(floor(self.majors + 0.5), 1.0) * max(floor(self.minors + 0.5), 1.0)
+    let k = floor(clamp(t, 0.0, 1.0) * n + 0.5)
+    let ak = (k / n - 0.5) * sweep
+    let perp = abs(q.x * cos(ak) + q.y * sin(ak))
+    let mn = max(floor(self.minors + 0.5), 1.0)
+    let major = 1.0 - step(0.5, k - mn * floor(k / mn + 0.0001))
+    let len = mix(self.tick_minor, self.tick_major, major)
+    let radial = max(rr - len - r, r - rr)
+    let tick = Finish.cover(perp - px * mix(0.5, 1.0, major), px) * Finish.cover(radial, px) * step(0.0, -q.y * cos(ak) + q.x * sin(ak))
+    col = mix(col, self.color_scale.rgb, max(arc * 0.4, tick * mix(0.6, 1.0, major)))
+    // The red zone: a band just outside the arc from `zone` on.
+    if self.zone < 0.999 {
+        let zone_t = Finish.cover((self.zone - t) * sweep * r, px) * Finish.cover((t - 1.0) * sweep * r, px)
+        let zone_r = Finish.cover(max(rr + px - r, r - rr - 2.5), px)
+        col = mix(col, self.color_zone.rgb, zone_t * zone_r * 0.85)
+    }
+    // The window over the printed face.
+    col = nm_window_g(col, p, c, hc, fr, face_d, px, 1.0)
+    // The needle, from under the pivot dome to just past the scale, and its
+    // soft shadow a point down and to the right of it.
+    let na = self.needle_angle(self.value)
+    let nd = vec2(sin(na), 0.0 - cos(na))
+    let tail = max(self.pivot_size - px, 0.0)
+    let sq = q - vec2(0.8, 1.2)
+    let s_along = dot(sq, nd)
+    let s_across = abs(sq.x * nd.y - sq.y * nd.x)
+    let shade = (1.0 - smoothstep(0.0, 1.6, s_across)) * smoothstep(-1.0, 1.0, rr + 3.0 - s_along) * smoothstep(-1.0, 1.0, s_along + tail)
+    col = col * (1.0 - 0.12 * shade)
+    let along = dot(q, nd)
+    let across = abs(q.x * nd.y - q.y * nd.x)
+    let needle = Finish.cover(across - 0.5, px) * Finish.cover(along - (rr + 3.0), px) * Finish.cover(0.0 - along - tail, px)
+    col = mix(col, self.color_needle.rgb, needle)
+    // The pivot: a dome of the page over the needle's root, and its shadows.
+    let pr = max(self.pivot_size, 1.0)
+    let ph = vec2(pr, pr)
+    let thrown = nm_cast(p, pv, ph, pr, max(2.0 * pr + 2.0, 8.0), 1.0)
+    col = col * (1.0 - thrown.a) + thrown.rgb
+    let pd = r - pr
+    col = mix(col, nm_dome_g(nm_ground() + vec3(0.01, 0.01, 0.01), p, pv, ph), Finish.cover(pd, px))
+    col = col + vec3(nm_grain(org + p, px))
+    let a = Finish.cover(face_d, px) * self.color.a
+    return vec4(col * a, a) * self.opacity
+}
+
+// LAMPS. A lamp is a small raised dome on the page: out, a dome of the page
+// itself with the faintest trace of the colour it would light; lit, the
+// same dome filled with its intent's colour; half lit, half way between. A
+// bar is the dome drawn out into a pill. Either throws the sheet's two
+// shadows, so the quad grows 6 points round the lens and the lamp keeps 3
+// of them inside its own box as padding: two lamps set edge to edge stand
+// 6 points apart, and each one's shadow is gone before the other's dome. A
+// halo a page asks for is drawn as the stock draws it, in the room the lamp
+// then takes for it.
+mod.widgets.Lamp.padding = mod.turtle.Inset{left: 3.0 right: 3.0 top: 3.0 bottom: 3.0}
+mod.widgets.Lamp.draw_bg.bar_radius = uniform(16.0)
+mod.widgets.Lamp.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Lamp.draw_bg.pixel = fn() {
+    let m = 6.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    // The lens in the middle of the lamp's box, its thickness read back
+    // from the room the box holds for a halo, as the stock reads it.
+    let reach = clamp(self.reach, 0.0, 1.0)
+    let t = self.rect_size.y / (1.0 + 2.0 * reach)
+    let room = t * reach
+    let c = self.rect_size * 0.5
+    let half_len = max((self.rect_size.x - 2.0 * room) * 0.5, t * 0.5)
+    let hb = vec2(mix(t * 0.5, half_len, self.bar), t * 0.5)
+    let corner = mix(t * 0.5, min(self.bar_radius, t * 0.5), self.bar)
+    let d = Material.sd_box(pq, c, hb, corner)
+    let lit = clamp(self.lit, 0.0, 1.0)
+    let tone = self.intent_color()
+    let ink = tone.rgb
+    let glow = max(self.halo_at(d, t, px, self.halo * lit, reach), 0.0)
+    var acc = self.halo_light(ink, glow)
+    acc = Finish.over(acc, nm_cast(pq, c, hb, corner, max(1.25 * t, 6.0), 1.0))
+    let unlit = mix(nm_ground(), ink, self.lens_tint * 0.3)
+    var col = nm_dome_g(mix(unlit, ink, lit), pq, c, hb)
+    col = col + vec3(nm_grain(self.rect_pos + pq, px))
+    let a = Finish.cover(d, px)
+    acc = Finish.over(acc, vec4(col * a, a))
+    return acc * self.opacity
+}
+
+// SWITCHES. Both hardware switches are a pill well the switch's height with
+// a raised round key in it, the key's shadows kept inside the well; on, the
+// well fills with the accent as a toggle's does. The rocker's key carries
+// the side in force, a slate O at the left while off and the I in the
+// accent ink at the right while on, and crosses on a click with the state's
+// own short ease; it is never dragged. The slide switch's key follows a
+// drag, and the end of the slot it has left holds a small mark: a quiet
+// slate dot while off, a white one on the fill while on. The quad grows 6
+// points for the focus mark, and the label stands 8 points clear of the
+// well, as it does beside a toggle.
+
+// One switch: the pill `sz` at the start of the row, or at its end, its key
+// `inset` points in from the well's edge and `t` along its travel. `slide`
+// is 1 for the slide switch's mark in the slot, 0 for the rocker's legend
+// on the key.
+let nm_switch_g = fn(pq: vec2, size: vec2, org: vec2, px: float, sz: vec2, at_end: float, inset: float, t: float, hover: float, down: float, focus: float, active: float, disabled: float, error: float, slide: float) -> vec4 {
+    let o0 = vec2((size.x - sz.x) * at_end, size.y * 0.5 - sz.y * 0.5)
+    let lo = vec2(Finish.snap(org.x + o0.x, px), Finish.snap(org.y + o0.y, px)) - org
+    let hi = vec2(Finish.snap(org.x + o0.x + sz.x, px), Finish.snap(org.y + o0.y + sz.y, px)) - org
+    let tc = (lo + hi) * 0.5
+    let th = (hi - lo) * 0.5
+    let td = Material.sd_box(pq, tc, th, th.y)
+    let ta = Finish.cover(td, px)
+    let en = 1.0 - disabled
+    let dis = mix(1.0, 0.35, disabled)
+    // The well, the accent coming into it as the switch turns on.
+    var col = nm_well(nm_well_shade_g(), pq, tc, th, th.y, td, px, 2.0 * th.y, (1.1 + 0.3 * hover) * dis)
+    let fillc = mix(mix(vec3(0.290, 0.486, 0.965), vec3(0.741, 0.227, 0.192), error), vec3(0.725, 0.776, 0.902), disabled)
+    col = mix(col, nm_fill_well_g(fillc, pq, tc, th, th.y, 2.0 * th.y), active)
+    // The slide's mark, in the end of the slot the key has left.
+    let free = vec2(mix(lo.x + 2.0 * th.x - th.y, lo.x + th.y, t), tc.y)
+    let mark = Finish.cover(length(pq - free) - sz.y * 0.15, px) * slide * mix(0.3, 0.92, active) * dis
+    col = mix(col, mix(vec3(0.388, 0.416, 0.478), vec3(1.0, 1.0, 1.0), active), mark)
+    col = col + vec3(nm_grain(org + pq, px))
+    var acc = vec4(col * ta, ta)
+    // The key, and what it throws on the well.
+    let kr = max(th.y - inset, 2.0)
+    let kc = vec2(lo.x + th.y + 2.0 * (th.x - th.y) * t, tc.y)
+    let kh = vec2(kr, kr)
+    let kd = length(pq - kc) - kr
+    acc = Finish.over(acc, nm_cast(pq, kc, kh, kr, 2.0 * kr, (1.0 + 0.3 * hover) * dis) * ta)
+    var kcol = nm_face(pq, kc, kh, kd, px, 0.018 * hover * en - 0.01 * down * en, en)
+    // The rocker's legend on the key: the O fading out as the I comes in.
+    let lq = pq - kc
+    let ring = Finish.cover(abs(length(lq) - kr * 0.34) - 0.55, px) * (1.0 - active)
+    let bar = Finish.cover(max(abs(lq.x) - 0.55, abs(lq.y) - kr * 0.38), px) * active
+    let ink = mix(mix(vec3(0.388, 0.416, 0.478), vec3(0.220, 0.376, 0.839), active), vec3(0.725, 0.776, 0.902), disabled)
+    kcol = mix(kcol, ink, (ring + bar) * (1.0 - slide))
+    kcol = kcol + vec3(nm_grain(org + pq, px))
+    let ka = Finish.cover(kd, px)
+    acc = Finish.over(acc, vec4(kcol * ka, ka))
+    return Finish.over(acc, nm_focus(td, px, focus * en))
+}
+mod.widgets.ToggleRocker.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ToggleRocker.draw_bg.pixel = fn() {
+    let m = 6.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let sz = vec2(self.size * self.pill_aspect, self.size)
+    return nm_switch_g(pq, self.rect_size, self.rect_pos, px, sz, self.mark_at_end, self.border_size + self.knob_inset, self.active, self.hover, self.down, self.focus, self.active, self.disabled, self.error, 0.0)
+}
+mod.widgets.ToggleRocker.label_walk.margin.left = 44.0
+mod.widgets.ToggleSlide.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ToggleSlide.draw_bg.pixel = fn() {
+    let m = 6.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let sz = vec2(self.size * self.pill_aspect, self.size)
+    let t = mix(self.active, self.drag_pos, self.drag)
+    return nm_switch_g(pq, self.rect_size, self.rect_pos, px, sz, self.mark_at_end, self.border_size + self.knob_inset, t, self.hover, self.down, self.focus, self.active, self.disabled, self.error, 1.0)
+}
+mod.widgets.ToggleSlide.label_walk.margin.left = 44.0
+
+// THE PAGE. The window's own ground: the slate-white, a long gradient a
+// quarter as strong as a studio shot's, and the shared grain.
+mod.widgets.Window.show_bg = true
+mod.widgets.Window.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let t = (self.pos.x + self.pos.y) * 0.5
+    let g = 0.008 - 0.016 * t
+    return vec4(nm_ground() + vec3(g, g, g) + vec3(nm_grain(self.rect_pos + p, px)), 1.0)
+}
+
+// A ROW OF FIELDS IS ONE HEIGHT. Left to themselves the library's fields each
+// come out at a size of their own -- in the widget catalogue's toolbar the
+// search box, the number beside it and the drop down after it stood at three
+// different heights -- and a sheet that reshapes the text box alone widens
+// that gap instead of closing it. So the box metrics are stated ONCE here and
+// handed to each field below, and a field added to the library later joins
+// the row by being named here rather than by having these numbers copied
+// into it.
+// Twenty-six, the same row the buttons stand in.
+let field_height = 26.0
+let field_pad_v = 5.0
+let field_radius = 6.0
+// No borders: the relief draws the edge.
+let field_border = 0.0
+
+// The room a Fit field takes. A minimum height rather than a height,
+// because a line of text is shorter than a row, and the padding with it:
+// where a field is Fit, the padding IS its height, and two fields padded
+// differently part company again the moment the type grows.
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+// The box a field draws. Given the draw object and not the widget, because
+// not every field draws its own box, and because writing a corner onto a
+// draw struct that has no corner would add a slot its shader never reads.
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+// A field that states a frame and lays its own parts out inside it: a number
+// with a stepper, a date, a time. The height is all these take. A padding
+// here would NOT hold the line off the box -- each of them measures its
+// parts against the turtle's whole rect and draws them from the content
+// origin, so the padding displaces the line instead of insetting it, and the
+// number came out sitting on the bottom edge with its arrows split around it.
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+// The number's box strokes its own hairline and declares no border size.
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+// The drag-number's corner is written into its own shader, so it takes the
+// room and keeps the box it draws.
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+// A picker is a date field in an anchor: the field inside fills the frame.
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+// The chrome-less input a well holds must impose no height of its own. It is
+// a TextInput, so it inherits the minimum above, and a minimum as tall as the
+// whole field, applied inside a well already that tall, pushed the line out
+// through the bottom of the box.
+mod.widgets.WellInput.min_height = 0.0
+mod.widgets.Window.pass.clear_color = #e9edf0
+// ---------------------------------------------------------------- band
+
+// THE BAND is the sheet's own slider with two thumbs: the same track, the
+// same lit value and the same thumb as the Slider, the value lit between
+// the two thumbs, its quad grown as the slider's is so the thumbs keep
+// their shape. The widget's grab geometry is set to the thumbs' own, so
+// what is drawn is what is dragged.
+mod.widgets.RangeSliderFlat.clip_x = false
+mod.widgets.RangeSliderFlat.clip_y = false
+mod.widgets.RangeSliderFlat.track_inset = 1.0
+mod.widgets.RangeSliderFlat.handle_size = 16.0
+mod.widgets.RangeSliderFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RangeSliderFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let pq = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let org = self.rect_pos
+    let dis = mix(1.0, 0.35, self.disabled)
+    let gr = vec3(nm_grain(org + pq, px))
+    let top = self.label_px
+    let cy = Finish.snap(org.y + top + (self.rect_size.y - top) * 0.5, px) - org.y
+    let hr = 8.0
+    let x0 = hr + 1.0
+    let x1 = self.rect_size.x - hr - 1.0
+    let gc = vec2(self.rect_size.x * 0.5, cy)
+    let gh = vec2(self.rect_size.x * 0.5 - 1.0, 4.0)
+    let ga = Finish.cover(Material.sd_box(pq, gc, gh, 4.0), px)
+    let col = nm_groove(vec3(0.878, 0.898, 0.925), pq, gc, gh, px, dis) + gr
+    let ink = mix(vec3(0.290, 0.486, 0.965), vec3(0.725, 0.776, 0.902), self.disabled)
+    let fcol = nm_fill_e(ink, pq, gc, gh, 4.0, 8.0, dis) + gr
+    let fa = nm_span_e(pq, gc, gh, x0, x1, self.end_pos, self.start_pos, 1.0, px)
+    let far = nm_disc_e(vec4(col * ga, ga), vec4(fcol * fa, fa), pq, org, vec2(mix(x0, x1, self.end_pos), cy), hr, 2.5 * hr, 1.0, px, self.hot_end, self.drag * self.hot_end, self.focus, self.disabled)
+    return nm_disc_e(far, vec4(0.0, 0.0, 0.0, 0.0), pq, org, vec2(mix(x0, x1, self.start_pos), cy), hr, 2.5 * hr, 1.0, px, self.hot_start, self.drag * self.hot_start, self.focus, self.disabled)
+}
+
+true

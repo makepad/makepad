@@ -411,6 +411,10 @@ pub struct FileTreeNode {
     /// What the tree parked for the next draw (see `FileTreeNodeDraw`).
     #[rust]
     pub pending_draw: Option<FileTreeNodeDraw>,
+    #[rust]
+    semantic_name: String,
+    #[rust]
+    semantic_level: u32,
     #[redraw]
     #[live]
     draw_bg: DrawBgQuad,
@@ -472,6 +476,10 @@ pub struct FileTree {
 
     #[live]
     node_height: f64,
+    /// The host lets rows be picked up and carried: the pointer over a
+    /// row is a hand, as it is over anything that can be dragged.
+    #[live]
+    pub drag_cursor: bool,
 
     #[live]
     draw_scroll_shadow: DrawScrollShadow,
@@ -487,6 +495,8 @@ pub struct FileTree {
     /// next draw (the tweaker's pin → tree sync).
     #[rust]
     scroll_to_pending: Option<LiveId>,
+    #[rust]
+    scroll_to_rect: Option<Rect>,
     #[rust]
     reveal_node: Option<LiveId>,
     #[rust]
@@ -580,6 +590,10 @@ impl FileTreeNode {
         depth: usize,
         scale: f64,
     ) {
+        if cx.a11y.on {
+            makepad_platform::a11y::set_string(&mut self.semantic_name, name);
+            self.semantic_level = depth as u32 + 1;
+        }
         self.set_draw_state(is_even, scale);
 
         self.draw_bg.begin(
@@ -612,6 +626,10 @@ impl FileTreeNode {
         depth: usize,
         scale: f64,
     ) {
+        if cx.a11y.on {
+            makepad_platform::a11y::set_string(&mut self.semantic_name, name);
+            self.semantic_level = depth as u32 + 1;
+        }
         self.set_draw_state(is_even, scale);
 
         self.draw_bg.begin(
@@ -717,6 +735,27 @@ impl FileTreeNode {
 }
 
 impl Widget for FileTreeNode {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TreeItem;
+        makepad_platform::a11y::set_string(&mut node.name, &self.semantic_name);
+        node.level = self.semantic_level;
+        node.states = a11y_tree::States::FOCUSABLE | a11y_tree::States::SELECTABLE;
+        node.states
+            .set(a11y_tree::States::SELECTED, self.active > 0.5);
+        node.states.set(
+            a11y_tree::States::EXPANDED,
+            self.is_folder && self.opened > 0.5,
+        );
+        node.states.set(
+            a11y_tree::States::COLLAPSED,
+            self.is_folder && self.opened <= 0.5,
+        );
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
         // Driven by `FileTree::handle_event` through `handle_event_with`, which
         // needs the tree's node id and action sink; nothing to do on the plain
@@ -773,6 +812,11 @@ impl FileTree {
         self.draw_scroll_shadow.draw(cx, dvec2(0., 0.));
         self.scroll_bars.end(cx);
 
+        // The viewport is only measured by end, especially on the first draw.
+        if let Some(rect) = self.scroll_to_rect.take() {
+            self.scroll_bars.scroll_into_view(cx, rect);
+        }
+
         let selected_node_id = self.selected_node_id;
         self.tree_nodes
             .retain_visible_and(|node_id, _| Some(*node_id) == selected_node_id);
@@ -798,6 +842,19 @@ impl FileTree {
         }
     }
 
+    fn measure_selection(&mut self, cx: &Cx2d, node_id: LiveId, scale: f64) {
+        if self.scroll_to_pending == Some(node_id) && scale > 0.01 {
+            self.scroll_to_pending = None;
+            // Measure even culled rows. The turtle's scrolled origin and
+            // cursor share coordinates, so their difference is content-local.
+            self.scroll_to_rect = Some(Rect {
+                pos: dvec2(self.scroll_bars.get_scroll_pos().x,
+                    cx.turtle().pos().y - cx.turtle().origin().y),
+                size: dvec2(0.0, self.node_height * scale),
+            });
+        }
+    }
+
     pub fn begin_folder_with_status(
         &mut self,
         cx: &mut Cx2d,
@@ -816,6 +873,8 @@ impl FileTree {
         }
 
         let is_open = self.open_nodes.contains(&node_id);
+
+        self.measure_selection(cx, node_id, scale);
 
         if self.should_node_draw(cx) {
             let tree_node = self.get_or_create_node(cx, node_id, true, is_open);
@@ -872,6 +931,7 @@ impl FileTree {
             self.reveal_y = Some(cx.turtle().pos().y);
         }
         let scale = self.stack.last().cloned().unwrap_or(1.0);
+        self.measure_selection(cx, node_id, scale);
 
         if scale > 0.2 {
             self.count += 1;
@@ -890,13 +950,6 @@ impl FileTree {
                 });
             }
             tree_node.draw_all(cx, &mut Scope::empty());
-            if self.scroll_to_pending == Some(node_id) {
-                self.scroll_to_pending = None;
-                let rect = tree_node.area().rect(cx);
-                if rect.size.y > 0.0 {
-                    self.scroll_bars.scroll_into_view(cx, rect);
-                }
-            }
         }
     }
 
@@ -1064,6 +1117,21 @@ impl FileTree {
         }
     }
 
+    /// The row drawn for `node_id`, in window points, when it is on screen.
+    pub fn node_rect(&self, cx: &Cx, node_id: LiveId) -> Option<Rect> {
+        let node = self.tree_nodes.get(&node_id)?;
+        let rect = node.area().clipped_rect_union(cx);
+        (rect.size.y > 0.0).then_some(rect)
+    }
+
+    /// The row under `abs`, with its rect, when a drawn row is there.
+    pub fn node_at(&self, cx: &Cx, abs: Vec2d) -> Option<(LiveId, Rect)> {
+        self.tree_nodes.iter().find_map(|(id, node)| {
+            let rect = node.area().clipped_rect_union(cx);
+            (rect.size.y > 0.0 && rect.contains(abs)).then_some((*id, rect))
+        })
+    }
+
     pub fn start_dragging_file_node(&mut self, cx: &mut Cx, node_id: LiveId, items: Vec<DragItem>) {
         self.dragging_node_id = Some(node_id);
         log!("makepad: start_dragging_file_node");
@@ -1097,6 +1165,12 @@ impl WidgetNode for FileTree {
 }
 
 impl Widget for FileTree {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tree;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 
@@ -1125,9 +1199,15 @@ impl Widget for FileTree {
                     self.open_nodes.remove(&node_id);
                 }
                 FileTreeNodeAction::WasHovered => {
+                    if self.drag_cursor {
+                        cx.set_cursor(MouseCursor::Hand);
+                    }
                     cx.widget_action(uid, FileTreeAction::NodeHovered(node_id));
                 }
                 FileTreeNodeAction::HoverEnded => {
+                    if self.drag_cursor {
+                        cx.set_cursor(MouseCursor::Default);
+                    }
                     cx.widget_action(uid, FileTreeAction::NodeHoverEnded(node_id));
                 }
                 FileTreeNodeAction::WasClicked => {

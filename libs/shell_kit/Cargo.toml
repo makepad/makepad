@@ -1,0 +1,9 @@
+[package]
+name = "makepad-shell-kit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The shell's drawing kit: theme tokens, colour helpers and ShellDraw, shared by the WM and the apps that draw its panels"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }

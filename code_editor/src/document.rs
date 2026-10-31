@@ -249,6 +249,95 @@ impl CodeDocument {
         self.update_after_edit(None, None, &edits);
     }
 
+    /// Replaces the text between `start` and `end` with `new_text` as it is:
+    /// one undo step, no autoindent, no delimiter injection. For a host
+    /// putting an outside change into the text, where typing's indent rules
+    /// would rewrite what it was given.
+    pub fn replace_range(&self, start: Position, end: Position, new_text: Text) {
+        if self.is_read_only() { return; }
+        let mut history = self.0.history.borrow_mut();
+        let delete_edit = Edit {
+            change: Change::Delete(start, end - start),
+            drift: Drift::Before,
+        };
+        let insert_edit = Edit {
+            change: Change::Insert(start, new_text),
+            drift: Drift::Before,
+        };
+        history.force_new_group();
+        history.push_or_extend_group(
+            SessionId::default(),
+            EditKind::Other,
+            &SelectionSet::default(),
+        );
+        history.apply_edit(delete_edit.clone());
+        history.apply_edit(insert_edit.clone());
+        drop(history);
+        self.update_after_edit(None, None, &[delete_edit, insert_edit]);
+    }
+
+    /// As `replace_range`, but joined to the undo step of the edit before
+    /// it: the steps of one gesture (a knob dragged, a number scrubbed)
+    /// undo as one.
+    pub fn replace_range_joined(&self, start: Position, end: Position, new_text: Text) {
+        if self.is_read_only() { return; }
+        let mut history = self.0.history.borrow_mut();
+        let delete_edit = Edit {
+            change: Change::Delete(start, end - start),
+            drift: Drift::Before,
+        };
+        let insert_edit = Edit {
+            change: Change::Insert(start, new_text),
+            drift: Drift::Before,
+        };
+        history.apply_edit(delete_edit.clone());
+        history.apply_edit(insert_edit.clone());
+        drop(history);
+        self.update_after_edit(None, None, &[delete_edit, insert_edit]);
+    }
+
+    /// Replaces several ranges as one undo step, as given (no autoindent).
+    /// `ranges` are disjoint, in ascending order of their starts; an empty
+    /// range at another's start comes before it. For a host writing one
+    /// gesture's several value changes.
+    pub fn replace_ranges(&self, ranges: &[(Position, Position, Text)]) {
+        if self.is_read_only() || ranges.is_empty() { return; }
+        let mut history = self.0.history.borrow_mut();
+        history.force_new_group();
+        history.push_or_extend_group(
+            SessionId::default(),
+            EditKind::Other,
+            &SelectionSet::default(),
+        );
+        // Back to front: an edit never moves the ones still to apply.
+        let mut edits = Vec::with_capacity(ranges.len() * 2);
+        for (start, end, text) in ranges.iter().rev() {
+            let delete_edit = Edit { change: Change::Delete(*start, *end - *start), drift: Drift::Before };
+            let insert_edit = Edit { change: Change::Insert(*start, text.clone()), drift: Drift::Before };
+            history.apply_edit(delete_edit.clone());
+            history.apply_edit(insert_edit.clone());
+            edits.push(delete_edit);
+            edits.push(insert_edit);
+        }
+        drop(history);
+        self.update_after_edit(None, None, &edits);
+    }
+
+    /// Highlight as the file at `path` (a rename that changed the
+    /// extension): retokenizes in place, keeping the text, history, anchors
+    /// and sessions.
+    pub fn set_language_for_path(&self, path: &str) {
+        let detection = makepad_code_language::detect_path(path, None);
+        let history = self.0.history.borrow();
+        let text = history.as_text();
+        let line_count = text.as_lines().len();
+        let mut tokenizer = Tokenizer::for_detection(detection, line_count);
+        let mut layout = self.0.layout.borrow_mut();
+        layout.tokens = vec![Vec::new(); line_count];
+        tokenizer.update(text, &mut layout.tokens);
+        *self.0.tokenizer.borrow_mut() = tokenizer;
+    }
+
     pub fn as_text(&self) -> Ref<'_, Text> {
         Ref::map(self.0.history.borrow(), |history| history.as_text())
     }
@@ -385,6 +474,44 @@ impl CodeDocument {
         self.0.decorations.borrow_mut().clear()
     }
 
+    /// Reserve rows above lines for content a host draws over the editor
+    /// itself (inline visualisations, block widgets): `(line, block)` pairs
+    /// in any order, replacing the previous set. The space is not moved by
+    /// edits; a host sets it again after the text changes, then calls
+    /// [`crate::CodeSession::relayout`] on each session of this document.
+    pub fn set_block_inlays(&self, mut inlays: Vec<(usize, crate::inlays::BlockInlay)>) {
+        inlays.sort_by_key(|(line, _)| *line);
+        self.0.layout.borrow_mut().block_inlays = inlays;
+    }
+
+    /// Whether `other` is this document (not a copy of its text).
+    pub fn is_same(&self, other: &CodeDocument) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Reserve columns inside lines for controls a host draws over the
+    /// editor (a colour swatch before a colour, a curve before an ease):
+    /// `(line, byte, inlay)` in any order, replacing the previous set. The
+    /// text after an inlay moves right by its columns; carets, selections
+    /// and hits skip it. Edits carry the inlays along with their text; a
+    /// host sets them again after the text changes, then calls
+    /// [`crate::CodeSession::relayout_inline`] on each session.
+    pub fn set_inline_inlays(&self, inlays: Vec<(usize, usize, crate::inlays::InlineInlay)>) {
+        let mut layout = self.0.layout.borrow_mut();
+        let lines = &mut layout.inline_inlays;
+        for line in lines.iter_mut() {
+            line.clear();
+        }
+        for (line, byte, inlay) in inlays {
+            if let Some(line) = lines.get_mut(line) {
+                line.push((byte, inlay));
+            }
+        }
+        for line in lines.iter_mut() {
+            line.sort_by_key(|(byte, _)| *byte);
+        }
+    }
+
     pub fn add_session(
         &mut self,
         session_id: SessionId,
@@ -462,7 +589,7 @@ impl CodeDocument {
                     })
                     .unwrap_or(false)
                 {
-                    desired_indentation_column_count -= 4;
+                    desired_indentation_column_count = desired_indentation_column_count.saturating_sub(4);
                 }
                 self.edit_lines_internal(line, edits, |line| {
                     crate::session::reindent(line, |_| desired_indentation_column_count)

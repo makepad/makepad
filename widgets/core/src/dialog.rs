@@ -731,6 +731,14 @@ impl Dialog {
 }
 
 impl Widget for Dialog {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        node.states = a11y_tree::States::MODAL;
+        node.states.set(a11y_tree::States::HIDDEN, !self.is_open());
+        makepad_platform::a11y::set_string(&mut node.name, &self.title);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.is_open() && !self.dressed {
             self.dressed = true;
@@ -1467,7 +1475,7 @@ mod tests {
         cx.with_vm(|vm| {
             // Registering the library is every other widget's business too.
             let _ = vm.take_errors();
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             let _ = crate::script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*

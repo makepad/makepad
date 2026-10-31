@@ -6,10 +6,8 @@ use {
         geom::{Point, Rect, Size},
         line_break::{find_first_line_break, find_line_breaks, FollowingContext, PrecedingContext},
         loader::{self, FontDefinition, FontFamilyDefinition, Loader},
-        msdfer,
         num::Zero,
         rasterizer::{self, RasterizedGlyph, Rasterizer},
-        sdfer,
         selection::{Cursor, CursorPosition, Selection},
         shaper::{self, Direction, ShapedGlyph, ShapedText},
         substr::Substr,
@@ -18,8 +16,6 @@ use {
     std::{
         borrow::Borrow,
         cell::RefCell,
-        collections::BTreeMap,
-        env,
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
@@ -40,24 +36,131 @@ const PTS_PER_INCH: f32 = 72.0;
 /// so the true footprint can exceed this only briefly and only by the visible set.
 pub const LAYOUT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
-/// A layout cache entry, tracked with its estimated size, the tick and frame generation it
-/// was last used in, and the tick under which it is registered in `Layouter::cache_lru_order`.
-///
-/// Hits only update `last_used`, so the registration falls behind until eviction gets to it.
+/// A layout cache entry, tracked with its estimated size, its position in the
+/// least-recently-used order (its slot in `Layouter::cache_lru_order`), and the
+/// frame generation it was last used in.
 #[derive(Debug)]
 struct CachedLayout {
     result: Rc<LaidoutText>,
     weight_in_bytes: usize,
-    last_used: u64,
-    registered_tick: u64,
+    slot: u32,
     generation: u64,
+}
+
+/// The recency order of the layout cache: a doubly linked list over a slab, oldest
+/// first. Moving an entry to the back is a relink, so a cache hit never allocates.
+/// Recency is per generation, not per hit: an entry moves to the back on its first
+/// use in a generation only, so within older generations the order is first use.
+#[derive(Debug, Default)]
+struct LruList {
+    nodes: Vec<LruNode>,
+    free: Vec<u32>,
+    oldest: u32,
+    newest: u32,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct LruNode {
+    prev: u32,
+    next: u32,
+    key: Option<OwnedLayoutParams>,
+}
+
+const LRU_NONE: u32 = u32::MAX;
+
+impl LruList {
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn clear(&mut self) {
+        self.nodes.clear();
+        self.free.clear();
+        self.len = 0;
+    }
+
+    fn front(&self) -> Option<&OwnedLayoutParams> {
+        if self.len == 0 {
+            return None;
+        }
+        self.nodes[self.oldest as usize].key.as_ref()
+    }
+
+    fn push_back(&mut self, key: OwnedLayoutParams) -> u32 {
+        let node = LruNode { prev: LRU_NONE, next: LRU_NONE, key: Some(key) };
+        let slot = match self.free.pop() {
+            Some(slot) => {
+                self.nodes[slot as usize] = node;
+                slot
+            }
+            None => {
+                self.nodes.push(node);
+                (self.nodes.len() - 1) as u32
+            }
+        };
+        self.link_back(slot);
+        self.len += 1;
+        slot
+    }
+
+    fn link_back(&mut self, slot: u32) {
+        let last = if self.len == 0 { LRU_NONE } else { self.newest };
+        self.nodes[slot as usize].prev = last;
+        self.nodes[slot as usize].next = LRU_NONE;
+        if last == LRU_NONE {
+            self.oldest = slot;
+        } else {
+            self.nodes[last as usize].next = slot;
+        }
+        self.newest = slot;
+    }
+
+    fn unlink(&mut self, slot: u32) {
+        let (prev, next) = (self.nodes[slot as usize].prev, self.nodes[slot as usize].next);
+        if prev == LRU_NONE {
+            self.oldest = next;
+        } else {
+            self.nodes[prev as usize].next = next;
+        }
+        if next == LRU_NONE {
+            self.newest = prev;
+        } else {
+            self.nodes[next as usize].prev = prev;
+        }
+    }
+
+    /// Make `slot` the newest.
+    fn touch(&mut self, slot: u32) {
+        if self.len > 1 && self.newest != slot {
+            self.unlink(slot);
+            self.link_back(slot);
+        }
+    }
+
+    fn remove(&mut self, slot: u32) {
+        self.unlink(slot);
+        self.nodes[slot as usize].key = None;
+        self.free.push(slot);
+        self.len -= 1;
+    }
+
+    fn pop_front(&mut self) -> Option<OwnedLayoutParams> {
+        if self.len == 0 {
+            return None;
+        }
+        let slot = self.oldest;
+        let key = self.nodes[slot as usize].key.take();
+        self.remove(slot);
+        key
+    }
 }
 
 #[derive(Debug)]
 pub struct Layouter {
     pub(crate) loader: Loader,
     cache_size: usize,
-    cache_tick: u64,
     cache_bytes: usize,
     /// Frame counter for working-set protection: eviction never removes entries
     /// used in the current generation, so the texts visible in one frame cannot
@@ -66,8 +169,104 @@ pub struct Layouter {
     /// [`Self::advance_cache_generation`].
     cache_generation: u64,
     cached_results: FxHashMap<OwnedLayoutParams, CachedLayout>,
-    cache_lru_order: BTreeMap<u64, OwnedLayoutParams>,
+    cache_lru_order: LruList,
+    /// While recording ([`Self::record_glyphs`]): every glyph a layout
+    /// returned, by font.
+    recorded_glyphs: Option<FxHashMap<FontId, RecordedFont>>,
+    /// The file hash of each font laid out while every layouter records
+    /// ([`record_all_glyphs`]).
+    font_hashes: FxHashMap<FontId, u64>,
+    /// (font, character) pairs already reported as missing.
+    missing_reported: std::collections::HashSet<(FontId, char)>,
+    missing_count: usize,
+    /// Moves when a family's faces change (a lazy CJK or emoji face arrives or gets asked for).
     pub(crate) font_family_generation: u64,
+}
+
+/// What a font laid out while recording ([`Layouter::record_glyphs`]):
+/// its glyphs, and the text of every row it appeared in.
+#[derive(Clone, Debug)]
+pub struct RecordedFont {
+    pub font: Rc<Font>,
+    pub glyphs: std::collections::BTreeSet<GlyphId>,
+    pub texts: std::collections::BTreeSet<String>,
+}
+
+impl RecordedFont {
+    /// The variation axis values the font is read at.
+    pub fn variation_coords(&self) -> Vec<(u32, f32)> {
+        self.font.variation_coords()
+    }
+}
+
+/// Every layouter's glyphs, on any thread: a trace host's record of which
+/// glyphs of which font files a program draws ([`record_all_glyphs`]).
+static RECORD_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Default)]
+struct GlyphRecord {
+    drawn: std::collections::BTreeMap<u64, std::collections::BTreeSet<GlyphId>>,
+    chars: std::collections::BTreeMap<u64, std::collections::BTreeSet<char>>,
+}
+
+fn recorded_all() -> &'static std::sync::Mutex<GlyphRecord> {
+    static ALL: std::sync::OnceLock<std::sync::Mutex<GlyphRecord>> = std::sync::OnceLock::new();
+    ALL.get_or_init(Default::default)
+}
+
+/// FNV-1a 64 over a font file's bytes (how a trace names the file).
+fn fnv64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+}
+
+/// Starts (or stops) recording the glyphs every layouter lays out, by the
+/// font file's content hash (FNV-1a 64). Stopping keeps what was recorded.
+pub fn record_all_glyphs(on: bool) {
+    RECORD_ALL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The glyphs recorded since [`record_all_glyphs`] or the last call: per
+/// font file hash, the glyph ids laid out.
+pub fn take_all_recorded_glyphs() -> Vec<(u64, std::collections::BTreeSet<GlyphId>)> {
+    std::mem::take(&mut recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner).drawn).into_iter().collect()
+}
+
+/// The trace host's switch (`makepad-web-trace`): record every layout's
+/// glyphs from now on (`on` non-zero) or stop.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_record_glyphs(on: u32) {
+    record_all_glyphs(on != 0);
+}
+
+/// The trace host's read of the record: a block of u64 words, `[words,
+/// fonts, (file hash, glyph count, glyph id...)...]` (the host keeps it).
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_take_recorded_glyphs() -> u32 {
+    let fonts = take_all_recorded_glyphs();
+    glyph_record_words(fonts.into_iter().map(|(hash, glyphs)| (hash, glyphs.into_iter().map(|g| g as u64).collect())).collect())
+}
+
+/// Source characters, separate from drawn glyphs: the subsetter needs the cmap inputs of
+/// substitutions and normalization, but they are not evidence that a glyph was drawn.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_take_recorded_glyph_chars() -> u32 {
+    let fonts = std::mem::take(&mut recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner).chars);
+    glyph_record_words(fonts.into_iter().map(|(hash, chars)| (hash, chars.into_iter().map(|c| c as u64).collect())).collect())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn glyph_record_words(fonts: Vec<(u64, Vec<u64>)>) -> u32 {
+    let mut words = vec![0u64, fonts.len() as u64];
+    for (hash, glyphs) in fonts {
+        words.push(hash);
+        words.push(glyphs.len() as u64);
+        words.extend(glyphs);
+    }
+    words[0] = words.len() as u64;
+    Box::leak(words.into_boxed_slice()).as_ptr() as usize as u32
 }
 
 impl Layouter {
@@ -75,15 +274,118 @@ impl Layouter {
         Self {
             loader: Loader::new(settings.loader),
             cache_size: settings.cache_size,
-            cache_tick: 0,
             cache_bytes: 0,
             cache_generation: 0,
             cached_results: FxHashMap::with_capacity_and_hasher(
                 settings.cache_size,
                 Default::default(),
             ),
-            cache_lru_order: BTreeMap::new(),
+            cache_lru_order: LruList::default(),
+            recorded_glyphs: None,
+            font_hashes: Default::default(),
+            missing_reported: Default::default(),
+            missing_count: 0,
             font_family_generation: 0,
+        }
+    }
+
+    /// Moves whenever a font family's faces change, e.g. when a lazy CJK or
+    /// emoji face arrives on a glyph miss or gets asked for. A widget that keeps
+    /// glyphs or text measurements of its own past a layout (a terminal's
+    /// per-character cache) compares it to tell when they're stale: the boxes it
+    /// kept for the missing glyphs have real faces now.
+    pub fn font_family_generation(&self) -> u64 {
+        self.font_family_generation
+    }
+
+    /// Starts (or stops) keeping every glyph that layouts return, cached
+    /// or not, so a build tool learns exactly which glyphs of which fonts
+    /// a program draws (for instance to ship only those). Stopping drops
+    /// what was kept.
+    pub fn record_glyphs(&mut self, on: bool) {
+        self.recorded_glyphs = on.then(FxHashMap::default);
+    }
+
+    /// The glyphs recorded since recording started or the last call, by
+    /// font (the font gives its data and id).
+    pub fn take_recorded_glyphs(&mut self) -> Vec<RecordedFont> {
+        match &mut self.recorded_glyphs {
+            Some(map) => map.drain().map(|(_, v)| v).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn note_glyphs(&mut self, text: &LaidoutText) {
+        if RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed) {
+            // Hashing font files and collecting text never holds the cross-thread lock.
+            let mut record = GlyphRecord::default();
+            for row in &text.rows {
+                let mut fonts = std::collections::HashSet::new();
+                for glyph in &row.glyphs {
+                    let hash = *self.font_hashes.entry(glyph.font.id()).or_insert_with(|| fnv64(glyph.font.data().as_slice()));
+                    record.drawn.entry(hash).or_default().insert(glyph.id);
+                    if fonts.insert(hash) {
+                        record.chars.entry(hash).or_default().extend(row.text.chars());
+                    }
+                }
+            }
+            let mut all = recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (hash, glyphs) in record.drawn {
+                all.drawn.entry(hash).or_default().extend(glyphs);
+            }
+            for (hash, chars) in record.chars {
+                all.chars.entry(hash).or_default().extend(chars);
+            }
+        }
+        let Some(map) = &mut self.recorded_glyphs else { return };
+        for row in &text.rows {
+            let mut last: Option<FontId> = None;
+            for glyph in &row.glyphs {
+                let entry = map.entry(glyph.font.id()).or_insert_with(|| RecordedFont {
+                    font: glyph.font.clone(),
+                    glyphs: Default::default(),
+                    texts: Default::default(),
+                });
+                entry.glyphs.insert(glyph.id);
+                if last != Some(glyph.font.id()) {
+                    last = Some(glyph.font.id());
+                    if !entry.texts.contains(row.text.as_str()) {
+                        entry.texts.insert(row.text.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Glyphs no font of their family had (shaped to `.notdef`) since
+    /// start: each (font, character) is logged once, with the character's
+    /// code point, so a font shipped without a glyph it needs shows up.
+    pub fn missing_glyphs(&self) -> usize {
+        self.missing_count
+    }
+
+    fn check_missing(&mut self, text: &LaidoutText) {
+        for row in &text.rows {
+            for glyph in &row.glyphs {
+                if glyph.id != 0 {
+                    continue;
+                }
+                let Some(c) = row.text.get(glyph.cluster..).and_then(|s| s.chars().next()) else { continue };
+                if c.is_whitespace() || c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{feff}') {
+                    continue;
+                }
+                self.missing_count += 1;
+                // The OS font lookup says it, once it failed too.
+                if super::system_fallback::reports_miss(c) {
+                    continue;
+                }
+                if self.missing_reported.insert((glyph.font.id(), c)) {
+                    let face = glyph.font.with_ttf_parser_face(|f| {
+                        f.names().into_iter().filter(|n| n.name_id == 4 && n.is_unicode()).find_map(|n| n.to_string())
+                    });
+                    makepad_platform::log!("text: no glyph for U+{:04X} '{}' in {}", c as u32, c, face.unwrap_or_else(|| format!("font {:?}", glyph.font.id())));
+                }
+            }
         }
     }
 
@@ -101,13 +403,6 @@ impl Layouter {
     /// Bytes retained by the laid-out text cache.
     pub fn cache_bytes(&self) -> usize {
         self.cache_bytes
-    }
-
-    /// Goes up whenever a font family changes, like when a fallback font arrives or gets asked for.
-    ///
-    /// Anyone who keeps their own text measurements can compare it to tell when they're stale.
-    pub fn font_family_generation(&self) -> u64 {
-        self.font_family_generation
     }
 
     pub fn rasterizer(&self) -> &Rc<RefCell<Rasterizer>> {
@@ -131,6 +426,7 @@ impl Layouter {
         id: FontFamilyId,
         definition: FontFamilyDefinition,
     ) {
+        // The layouts stay valid when the family didn't change.
         if self.loader.set_font_family_definition(id, definition) {
             self.font_family_generation += 1;
             self.cached_results.clear();
@@ -143,47 +439,74 @@ impl Layouter {
         self.loader.define_font(id, definition);
     }
 
+    /// Appends an OS face to every family (see
+    /// [`Loader::add_system_fallback`]): the laid-out texts are dropped, so
+    /// the boxes they drew lay out again with real glyphs.
+    pub fn add_system_fallback(&mut self, id: FontId, definition: FontDefinition, bold: bool) {
+        if !self.loader.is_font_known(id) {
+            self.loader.define_font(id, definition);
+        }
+        self.loader.add_system_fallback(id, bold);
+        self.font_family_generation += 1;
+        self.cached_results.clear();
+        self.cache_lru_order.clear();
+        self.cache_bytes = 0;
+    }
+
     pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
         self.loader.get_or_load_font_family_rc(id)
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
+        let result = self.get_or_layout_uncounted(params);
+        if self.recorded_glyphs.is_some() || RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed) {
+            self.note_glyphs(&result);
+        }
+        result
+    }
+
+    fn get_or_layout_uncounted(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
         if self.cache_size == 0 {
-            return Rc::new(self.layout(params.to_owned()));
+            let result = Rc::new(self.layout(params.to_owned()));
+            self.check_missing(&result);
+            return result;
         }
         if let Some(entry) = self.cached_results.get_mut(&params as &dyn LayoutParams) {
             // Refresh recency so texts that are drawn every frame (e.g. all the
-            // visible items of a scrolling list) survive eviction.
-            self.cache_tick += 1;
-            entry.last_used = self.cache_tick;
-            entry.generation = self.cache_generation;
+            // visible items of a scrolling list) survive eviction. An entry
+            // already refreshed in this generation stays put: eviction never
+            // touches current-generation entries. The move is a relink, no
+            // allocation.
+            if entry.generation != self.cache_generation {
+                self.cache_lru_order.touch(entry.slot);
+                entry.generation = self.cache_generation;
+            }
             return entry.result.clone();
         }
         let params = params.to_owned();
         let cache_key = params.clone();
         let result = Rc::new(self.layout(params));
+        self.check_missing(&result);
         self.insert_cached_result(cache_key, result.clone());
         result
     }
 
     fn insert_cached_result(&mut self, cache_key: OwnedLayoutParams, result: Rc<LaidoutText>) {
         let weight_in_bytes = Self::entry_weight_in_bytes(&cache_key, &result);
-        self.cache_tick += 1;
         self.cache_bytes = self.cache_bytes.saturating_add(weight_in_bytes);
-        self.cache_lru_order.insert(self.cache_tick, cache_key.clone());
+        let slot = self.cache_lru_order.push_back(cache_key.clone());
         if let Some(old) = self.cached_results.insert(
             cache_key,
             CachedLayout {
                 result,
                 weight_in_bytes,
-                last_used: self.cache_tick,
-                registered_tick: self.cache_tick,
+                slot,
                 generation: self.cache_generation,
             },
         ) {
             // Replacing an existing entry: drop its LRU registration and weight
             // so the bookkeeping stays consistent.
-            self.cache_lru_order.remove(&old.registered_tick);
+            self.cache_lru_order.remove(old.slot);
             self.cache_bytes = self.cache_bytes.saturating_sub(old.weight_in_bytes);
         }
         self.evict_lru_to_limits();
@@ -191,33 +514,30 @@ impl Layouter {
 
     /// Evicts least-recently-used entries until both the entry-count cap and the
     /// byte budget are respected, at a cost proportional to the number of entries
-    /// evicted or registered again. Entries used in the current frame generation
-    /// are never evicted: once the oldest remaining entry is current-generation,
-    /// everything newer is too, and eviction stops. The budget is therefore
-    /// soft-exceeded while a single frame's visible texts collectively outweigh it
-    /// (they would otherwise evict each other and re-layout every frame); the
-    /// excess is bounded by the visible working set and drains once scrolling
-    /// moves on.
+    /// evicted. Entries used in the current frame generation are never evicted:
+    /// once the oldest remaining entry is current-generation, everything newer is
+    /// too, and eviction stops. The budget is therefore soft-exceeded while a
+    /// single frame's visible texts collectively outweigh it (they would otherwise
+    /// evict each other and re-layout every frame); the excess is bounded by the
+    /// visible working set and drains once scrolling moves on.
     fn evict_lru_to_limits(&mut self) {
         while self.cached_results.len() > 1
             && (self.cached_results.len() > self.cache_size
                 || self.cache_bytes > LAYOUT_CACHE_MAX_BYTES)
         {
-            let Some((tick, key)) = self.cache_lru_order.pop_first() else {
+            let Some(front) = self.cache_lru_order.front() else {
                 break;
             };
-            if let Some(entry) = self.cached_results.get_mut(&key) {
-                // It was used since we registered it, so it goes back in under its last use.
-                if entry.last_used != tick {
-                    entry.registered_tick = entry.last_used;
-                    self.cache_lru_order.insert(entry.last_used, key);
-                    continue;
-                }
-                if entry.generation == self.cache_generation {
-                    self.cache_lru_order.insert(tick, key);
-                    break;
-                }
+            if self
+                .cached_results
+                .get(front)
+                .is_some_and(|entry| entry.generation == self.cache_generation)
+            {
+                break;
             }
+            let Some(key) = self.cache_lru_order.pop_front() else {
+                break;
+            };
             if let Some(entry) = self.cached_results.remove(&key) {
                 self.cache_bytes = self.cache_bytes.saturating_sub(entry.weight_in_bytes);
             }
@@ -256,73 +576,14 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        let atlas_size = default_text_atlas_size();
         Self {
             loader: loader::Settings {
                 shaper: shaper::Settings { cache_size: 4096 },
-                rasterizer: rasterizer::Settings {
-                    sdfer: sdfer::Settings {
-                        padding: 4,
-                        radius: 8.0,
-                        cutoff: 0.25,
-                    },
-                    msdfer: msdfer::Settings {
-                        padding: 4,
-                        radius: 8.0,
-                        cutoff: 0.25,
-                        corner_angle_threshold: 3.0,
-                    },
-                    msdf_resolution: rasterizer::MsdfResolutionSettings {
-                        min_request_dpxs_per_em: 20.0,
-                        min_dpxs_per_em: 32.0,
-                        base_dpxs_per_em: 64.0,
-                        max_dpxs_per_em: 128.0,
-                        target_feature_texels: 1.75,
-                        dpx_quantum: 8.0,
-                        min_feature_floor_ems: 1.0 / 1024.0,
-                    },
-                    msdf_complexity: rasterizer::MsdfComplexitySettings {
-                        max_outline_commands: 180,
-                        max_estimated_segments: 1000,
-                    },
-                    outline_rasterization_mode: rasterizer::OutlineRasterizationMode::Msdf,
-                    atlas_size,
-                },
+                rasterizer: rasterizer::Settings::default(),
             },
             cache_size: 4096,
         }
     }
-}
-
-fn default_text_atlas_size() -> Size<usize> {
-    atlas_size_override_from_env().unwrap_or_else(|| Size::new(2048, 2048))
-}
-
-fn atlas_size_override_from_env() -> Option<Size<usize>> {
-    let raw = env::var("MAKEPAD_TEXT_ATLAS_SIZE").ok()?;
-    parse_text_atlas_size_value(raw.trim())
-}
-
-fn parse_text_atlas_size_value(value: &str) -> Option<Size<usize>> {
-    if value.is_empty() {
-        return None;
-    }
-
-    fn parse_dim(dim: &str) -> Option<usize> {
-        let parsed = dim.trim().parse::<usize>().ok()?;
-        if (256..=8192).contains(&parsed) {
-            Some(parsed)
-        } else {
-            None
-        }
-    }
-
-    if let Some((w, h)) = value.split_once('x').or_else(|| value.split_once('X')) {
-        return Some(Size::new(parse_dim(w)?, parse_dim(h)?));
-    }
-
-    let dim = parse_dim(value)?;
-    Some(Size::new(dim, dim))
 }
 
 #[derive(Debug)]
@@ -668,19 +929,22 @@ impl LayoutContext {
     }
 
     fn append_glyphs(&mut self, glyphs: &[ShapedGlyph], cluster_start: usize) {
-        for glyph in glyphs {
+        for shaped in glyphs {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
-                font: glyph.font.clone(),
+                font: shaped.font.clone(),
                 font_size_in_lpxs: self.style.font_size_in_lpxs(),
                 color: self.style.color,
-                id: glyph.id,
-                cluster: cluster_start + glyph.cluster,
-                direction: glyph.direction,
-                advance_in_ems: glyph.advance_in_ems,
-                offset_in_ems: glyph.offset_in_ems,
+                id: shaped.id,
+                cluster: cluster_start + shaped.cluster,
+                direction: shaped.direction,
+                advance_in_ems: shaped.advance_in_ems,
+                offset_in_ems: shaped.offset_in_ems,
             };
             glyph.origin_in_lpxs.x = self.current_point_in_lpxs.x;
+            // The font's vertical mark positioning (GPOS: Devanagari, Arabic
+            // and Thai marks stacked above or below their base), y down.
+            glyph.origin_in_lpxs.y = -shaped.y_offset_in_ems * glyph.font_size_in_lpxs;
             self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
             self.glyphs.push(glyph);
         }
@@ -1930,29 +2194,10 @@ impl LaidoutGlyph {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_text_atlas_size_value, LaidoutText, LayoutOptions, Layouter, OwnedLayoutParams,
-        Settings, Size, Style, LAYOUT_CACHE_MAX_BYTES,
+        LaidoutText, LayoutOptions, Layouter, OwnedLayoutParams, Settings, Size, Style,
+        LAYOUT_CACHE_MAX_BYTES,
     };
     use std::rc::Rc;
-
-    #[test]
-    fn parses_text_atlas_size_from_env_value() {
-        assert_eq!(
-            parse_text_atlas_size_value("1024"),
-            Some(Size::new(1024, 1024))
-        );
-        assert_eq!(
-            parse_text_atlas_size_value("1024x2048"),
-            Some(Size::new(1024, 2048))
-        );
-        assert_eq!(
-            parse_text_atlas_size_value("1024X2048"),
-            Some(Size::new(1024, 2048))
-        );
-        assert_eq!(parse_text_atlas_size_value(""), None);
-        assert_eq!(parse_text_atlas_size_value("64"), None);
-        assert_eq!(parse_text_atlas_size_value("bogus"), None);
-    }
 
     fn cache_test_params(text: &str) -> OwnedLayoutParams {
         OwnedLayoutParams {
@@ -3487,5 +3732,83 @@ mod tests {
             }
         }
         assert!(taken_count > 0 && shaped_count > 0);
+    }
+
+    #[test]
+    fn crlf_and_lone_cr_break_lines_like_lf() {
+        let mut layouter = real_font_layouter();
+        let rows = |text: &LaidoutText| -> Vec<(String, usize, bool, f32)> {
+            text.rows
+                .iter()
+                .map(|row| {
+                    let text = row.text.to_string();
+                    (text, row.glyphs.len(), row.newline, row.width_in_lpxs)
+                })
+                .collect()
+        };
+        let lf = wrapped_layout(&mut layouter, LATIN_FAMILY, "one\ntwo\nthree\n", 400.0, None, false);
+        let crlf = wrapped_layout(&mut layouter, LATIN_FAMILY, "one\r\ntwo\rthree\r\n", 400.0, None, false);
+        assert_eq!(rows(&crlf), rows(&lf), "a \\r is a line break, never a glyph");
+        assert!(crlf.rows.iter().flat_map(|row| &row.glyphs).all(|glyph| glyph.id != 0), "no .notdef");
+        let starts: Vec<_> = crlf.rows.iter().map(|row| row.text.start_in_parent()).collect();
+        assert_eq!(starts, [0, 5, 9, 16]);
+
+        // max_rows sees the same lines, so truncation agrees too.
+        for max_rows in 1..=4 {
+            let lf = wrapped_layout(&mut layouter, LATIN_FAMILY, "one\ntwo\nthree\n", 400.0, Some(max_rows), true);
+            let crlf = wrapped_layout(&mut layouter, LATIN_FAMILY, "one\r\ntwo\r\nthree\r\n", 400.0, Some(max_rows), true);
+            assert_eq!(crlf.rows.len(), lf.rows.len(), "max_rows {max_rows}");
+            assert_eq!(crlf.is_truncated, lf.is_truncated, "max_rows {max_rows}");
+        }
+    }
+
+    /// A multi-line text whose first line `max_rows` cuts off mid-line: the row end is
+    /// where layout stopped, not a line break, so the next line must not step one byte
+    /// past it (Sandbox panicked on a status "… 'hud_panel' — game.api() …\n…" when the
+    /// cut fell right before the 3-byte em dash).
+    #[test]
+    fn max_rows_cut_mid_line_before_a_multibyte_char() {
+        let mut layouter = real_font_layouter();
+        let text = "game failed: game.splash:314:14: unknown game verb 'hud_panel' — game.api() lists every verb\n\
+                    game.splash:315:14: unknown game verb 'hud_panel' — game.api() lists every verb";
+        let mut cut_before_dash = false;
+        for max_rows in 1..=3 {
+            for ellipsis in [true, false] {
+                for width in (40..=900).step_by(3) {
+                    let laidout =
+                        wrapped_layout(&mut layouter, LATIN_FAMILY, text, width as f32, Some(max_rows), ellipsis);
+                    assert!(laidout.rows.len() <= max_rows, "width {width} max_rows {max_rows}");
+                    for row in &laidout.rows {
+                        let start = row.text.start_in_parent();
+                        assert!(text.is_char_boundary(start), "row start {start} at width {width}");
+                        assert!(text.is_char_boundary(start + row.text.len()), "row end at width {width}");
+                    }
+                    let first = &laidout.rows[0];
+                    if max_rows == 1 && first.text.start_in_parent() + first.text.len() == text.find('—').unwrap() {
+                        cut_before_dash = true;
+                    }
+                }
+            }
+        }
+        assert!(cut_before_dash, "some width must cut the first line right before the em dash");
+    }
+
+    /// The recency list pops oldest first, a touch moves an entry to the back,
+    /// and a removed slot is reused.
+    #[test]
+    fn lru_list_orders_by_recency() {
+        let mut lru = super::LruList::default();
+        let a = lru.push_back(cache_test_params("a"));
+        let b = lru.push_back(cache_test_params("b"));
+        let _c = lru.push_back(cache_test_params("c"));
+        lru.touch(a);
+        assert_eq!(lru.pop_front().unwrap().text.as_str(), "b");
+        lru.remove(a);
+        assert_eq!(lru.len(), 1);
+        let d = lru.push_back(cache_test_params("d"));
+        assert!(d == a || d == b, "a freed slot is reused");
+        assert_eq!(lru.pop_front().unwrap().text.as_str(), "c");
+        assert_eq!(lru.pop_front().unwrap().text.as_str(), "d");
+        assert!(lru.pop_front().is_none() && lru.front().is_none());
     }
 }

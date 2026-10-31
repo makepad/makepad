@@ -306,6 +306,12 @@ pub fn tab_width_for(count: usize, room: f64, max: f64, min: f64) -> f64 {
 }
 
 impl Widget for Tabs {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TabList;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // A strip declared in markup has to show its tabs without a host
         // saying anything. Seeding on the first draw rather than waiting for

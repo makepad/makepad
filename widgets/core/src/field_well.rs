@@ -261,6 +261,12 @@ impl FieldWell {
 }
 
 impl Widget for FieldWell {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.states.set(a11y_tree::States::DISABLED, self.disabled);
+        node.role = a11y_tree::Role::Group;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // Asked every pass rather than tracked: the focus can leave for
         // reasons this well never hears about — another widget taking it,

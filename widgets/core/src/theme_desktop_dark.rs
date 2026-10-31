@@ -458,6 +458,54 @@ script_mod! {
         color_inverse_primary: #xA53D27FF
         color_scrim: #x000000FF
         color_elevation_shadow: #x000000FF
+
+        // MATERIAL
+        // Off. The moulded stylesheets raise material_level; every value
+        // below is the default they start from, not a look this theme wears.
+        material_level: 0.
+        material_light_x: -0.35
+        material_light_y: -0.55
+        material_light_z: 0.76
+        material_light_intensity: 1.0
+        material_led_radius: 24.
+        material_led_intensity: 1.0
+        material_bevel_width: 3.
+        material_bevel_curve: 0.35
+        material_specular: 0.25
+        material_roughness: 0.55
+        material_ao: 0.35
+        material_rim: 0.5
+        material_gloss: 0.
+        material_glow: 0.
+        material_ink_glow: 0.
+        material_ink_lift: 1.6
+        material_face_gradient: 0.
+        material_hairline: 0.
+        material_ao_reach: 1.
+        material_inner_shadow: 0.
+        material_inner_radius: 6.
+        material_shadow: 0.
+        material_shadow_blur: 8.
+        material_shadow_falloff: 1.
+        material_contact_ao: 0.
+        material_ground_lip: 0.
+        material_press_invert: 0.
+        material_raise: 3.
+        material_sink: 3.
+        material_press_depth: -6.
+        material_margin: 0.
+        color_material_light: #xFFFFFFFF
+        color_material_shadow: #x000000FF
+        color_material_glow: #x4DD0E1FF
+        // INSTRUMENTS
+        // A near-black glass lit in a pale cool ink, a dark lens for a lamp
+        // that is out, and a halo well under the ceiling a lamp holds.
+        color_screen: #x0E1114FF
+        color_screen_ink: #xC4DCF0FF
+        screen_ghost: 0.1
+        color_lamp_off: #x1A1D22FF
+        color_lamp_plain: #xEEF2F6FF
+        lamp_halo: 0.25
         // Surface and outline roles on the opaque ladder.
         color_surface: theme.color_bg_app
         color_surface_container: theme.color_fg_app
@@ -696,7 +744,7 @@ script_mod! {
 
 #[cfg(test)]
 mod crate_tint_role_tests {
-    use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+    use crate::desktop_style::{catalogue, install, StyleSheet};
     use crate::makepad_platform::*;
     use crate::script_eval;
 
@@ -783,10 +831,7 @@ mod crate_tint_role_tests {
         for family in 1..=11 {
             for (k, suf) in SUFFIXES.iter().enumerate() {
                 let name = format!("color_map_{family}_{suf}");
-                let color = vm
-                    .bx
-                    .heap
-                    .value(theme, LiveId::from_str(&name).into(), NoTrap)
+                let color = vm.value(theme, LiveId::from_str(&name))
                     .as_color();
                 assert_eq!(
                     color,
@@ -810,10 +855,7 @@ mod crate_tint_role_tests {
     fn assert_design_kind_roles(vm: &mut ScriptVm, label: &str) {
         let theme = vm.module(id!(theme));
         for name in DESIGN_KIND_ROLES {
-            let color = vm
-                .bx
-                .heap
-                .value(theme, LiveId::from_str(name).into(), NoTrap)
+            let color = vm.value(theme, LiveId::from_str(name))
                 .as_color();
             assert!(color.is_some(), "{label} {name} does not resolve");
         }
@@ -831,27 +873,13 @@ mod crate_tint_role_tests {
                 mod.theme = mod.themes.light
             });
             assert_design_kind_roles(vm, "light-default");
-            for (style, dark) in [
-                (DesktopStyle::Omarchy, false),
-                (DesktopStyle::BlackOrange, false),
-                (DesktopStyle::Macos, false),
-                (DesktopStyle::Macos, true),
-                (DesktopStyle::Windows, false),
-                (DesktopStyle::Windows, true),
-                (DesktopStyle::Windows2000, false),
-                (DesktopStyle::NextStep, false),
-                (DesktopStyle::Ios, false),
-                (DesktopStyle::Ios, true),
-                (DesktopStyle::Android, false),
-                (DesktopStyle::Android, true),
-            ] {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
-                vm.bx.captured_errors = Some(Vec::new());
+            for entry in catalogue() {
+                install(vm, StyleSheet::load(entry));
+                vm.capture_errors();
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
-                let label = StyleSheet::load_with_appearance(style, dark).name;
-                assert!(errors.is_empty(), "{label}: {errors:?}");
-                assert_design_kind_roles(vm, &label);
+                assert!(errors.is_empty(), "{}: {errors:?}", entry.id);
+                assert_design_kind_roles(vm, entry.id);
             }
         });
     }
@@ -871,31 +899,23 @@ mod crate_tint_role_tests {
 
     #[test]
     fn crate_tint_roles_resolve_in_every_shipped_theme() {
-        let sheets = [
-            (DesktopStyle::Omarchy, false, &DARK_TINTS),
-            (DesktopStyle::BlackOrange, false, &DARK_TINTS),
-            (DesktopStyle::Macos, false, &LIGHT_TINTS),
-            (DesktopStyle::Macos, true, &DARK_TINTS),
-            (DesktopStyle::Windows, false, &LIGHT_TINTS),
-            (DesktopStyle::Windows, true, &DARK_TINTS),
-            (DesktopStyle::Windows2000, false, &LIGHT_TINTS),
-            (DesktopStyle::NextStep, false, &LIGHT_TINTS),
-            (DesktopStyle::Ios, false, &LIGHT_TINTS),
-            (DesktopStyle::Ios, true, &DARK_TINTS),
-            (DesktopStyle::Android, false, &LIGHT_TINTS),
-            (DesktopStyle::Android, true, &DARK_TINTS),
-        ];
+        // The palette a sheet leaves alone is its base theme's, so which of
+        // the two it must resolve to is the sheet's own appearance group.
+        let sheets = catalogue().into_iter().map(|entry| {
+            let light = crate::theme_tokens::BlendTheme::Sheet(entry.id).appearance()
+                == crate::theme_tokens::Appearance::Light;
+            (entry, if light { &LIGHT_TINTS } else { &DARK_TINTS })
+        });
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            for (style, dark, expected) in sheets {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
-                vm.bx.captured_errors = Some(Vec::new());
+            for (entry, expected) in sheets {
+                install(vm, StyleSheet::load(entry));
+                vm.capture_errors();
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
-                let label = StyleSheet::load_with_appearance(style, dark).name;
-                assert!(errors.is_empty(), "{label}: {errors:?}");
-                assert_tints(vm, expected, &label);
+                assert!(errors.is_empty(), "{}: {errors:?}", entry.id);
+                assert_tints(vm, expected, entry.id);
             }
         });
     }

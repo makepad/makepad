@@ -102,6 +102,11 @@ impl GaussStack {
         cx.begin_root_turtle(root_size, Layout::flow_overlay());
     }
 
+    /// The pass the scene is recorded into.
+    pub(crate) fn scene_pass_id(&self) -> DrawPassId {
+        self.scene_pass.draw_pass_id()
+    }
+
     /// Passes in producer-before-consumer order. Layered compositors explicitly
     /// link this chain, so recycled pool IDs cannot reorder texture dependencies.
     pub(crate) fn dependencies(&self, count: usize) -> Vec<DrawPassId> {

@@ -205,6 +205,11 @@ impl KeyboardView {
 }
 
 impl Widget for KeyboardView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(e) = self.next_frame.is_event(event) {
             match self.anim_state {
@@ -327,10 +332,13 @@ impl Widget for KeyboardView {
         if self.draw_state.begin_with(cx, &(), |cx, _| {
             // The parent already placed this widget with its full walk —
             // margin included — through the outer turtle in `begin`. The
-            // inner view re-uses the same walk for the content, so its
+            // inner view re-uses its own walk for the content, so its
             // margin must be stripped here or any margin on a KeyboardView
-            // is applied twice (the tweaker's body compression made this
-            // latent bug visible: margin.right 280 vacated 560).
+            // is applied twice. The walk the parent passed can carry more
+            // than the view's own margin: the room a window keeps back for
+            // a docked design panel (`View::set_child_reserve`) and the AI
+            // slot's left inset both arrive in it, and both would vacate
+            // twice their width without the strip.
             let mut walk = self.view.walk(cx);
             walk.margin = Inset::default();
             walk

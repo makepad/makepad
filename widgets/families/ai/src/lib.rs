@@ -1,4 +1,4 @@
-//! The AI chat slot (F10) a Window carries when the app links the `makepad-aichat` crate.
+//! The AI chat slot (F10) a Window carries when the app links the `makepad-app-aichat` crate.
 //!
 //! A family crate of `makepad-widgets`: it builds on `makepad-widgets-core`
 //! alone, has no features of its own, and compiles once whatever mix of

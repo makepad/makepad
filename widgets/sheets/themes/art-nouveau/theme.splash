@@ -1,0 +1,236 @@
+mod.theme = mod.themes.light
+
+// Art nouveau. An aged cream parchment ground; every control is framed by a
+// thin bronze-gold line with a metallic sheen, its face a flat matte enamel:
+// a deep teal-green for the working colour (the default button, a set mark,
+// the chosen segment, a value), ochre for the primary action and the chosen
+// row, a terracotta for the one that deletes. Botanical ornament (lilies,
+// leaves and whiplash tendrils) lives only in the window frame's corners and
+// the corners of the big surfaces. The faces are drawn in widgets.splash;
+// this file holds the tokens every face and every stock widget reads.
+use mod.res.*
+use mod.text.*
+
+// The parchment.
+mod.theme.color_bg_app = #d8c29c
+mod.theme.color_fg_app = #e2d0ad
+mod.theme.color_bg_container = #d8c29c
+mod.theme.color_surface_container = #93a898
+mod.theme.color_surface_container_lowest = #ebdfc4
+mod.theme.color_bg_even = #00000000
+mod.theme.color_bg_odd = #00000000
+mod.theme.color_highlight = #d8a654
+mod.theme.color_bg_highlight = #e2d0ad
+mod.theme.color_bg_highlight_inline = #d8a65450
+
+// Raised faces the sheet does not redraw: teal enamel.
+mod.theme.color_outset = #46635a
+mod.theme.color_outset_1 = #557367
+mod.theme.color_outset_2 = #3a554d
+mod.theme.color_outset_hover = #4f6d63
+mod.theme.color_outset_1_hover = #5e7c70
+mod.theme.color_outset_2_hover = #415c54
+mod.theme.color_outset_down = #3a554d
+mod.theme.color_outset_1_down = #324b44
+mod.theme.color_outset_2_down = #46635a
+mod.theme.color_outset_focus = #46635a
+mod.theme.color_outset_1_focus = #557367
+mod.theme.color_outset_2_focus = #3a554d
+mod.theme.color_outset_active = #3a554d
+mod.theme.color_outset_1_active = #324b44
+mod.theme.color_outset_2_active = #46635a
+mod.theme.color_outset_disabled = #a3a68f
+mod.theme.color_outset_1_disabled = #a3a68f
+mod.theme.color_outset_2_disabled = #a3a68f
+
+// Wells: the ivory field, opaque in every state (a translucent well reads
+// as black to a contrast check).
+mod.theme.color_inset = #ebdfc4
+mod.theme.color_inset_1 = #ebdfc4
+mod.theme.color_inset_2 = #ebdfc4
+mod.theme.color_inset_hover = #efe5cd
+mod.theme.color_inset_1_hover = #efe5cd
+mod.theme.color_inset_2_hover = #efe5cd
+mod.theme.color_inset_focus = #efe5cd
+mod.theme.color_inset_1_focus = #efe5cd
+mod.theme.color_inset_2_focus = #efe5cd
+mod.theme.color_inset_active = #ebdfc4
+mod.theme.color_inset_1_active = #ebdfc4
+mod.theme.color_inset_2_active = #ebdfc4
+mod.theme.color_inset_down = #e4d6b8
+mod.theme.color_inset_1_down = #e4d6b8
+mod.theme.color_inset_2_down = #e4d6b8
+mod.theme.color_inset_drag = #e4d6b8
+mod.theme.color_inset_1_drag = #e4d6b8
+mod.theme.color_inset_2_drag = #e4d6b8
+mod.theme.color_inset_empty = #ebdfc4
+mod.theme.color_inset_1_empty = #ebdfc4
+mod.theme.color_inset_2_empty = #ebdfc4
+mod.theme.color_inset_disabled = #d3bf99
+mod.theme.color_inset_1_disabled = #d3bf99
+mod.theme.color_inset_2_disabled = #d3bf99
+
+// One edge, the bronze of the frames, on every stock part the faces do not
+// redraw.
+mod.theme.color_bevel = #8a6a32
+mod.theme.color_bevel_hover = #a07c3c
+mod.theme.color_bevel_focus = #2f4842
+mod.theme.color_bevel_down = #6e5226
+mod.theme.color_bevel_active = #6e5226
+mod.theme.color_bevel_empty = #8a6a32
+mod.theme.color_bevel_disabled = #b09c78
+mod.theme.color_bevel_inset_1 = #8a6a32
+mod.theme.color_bevel_inset_2 = #8a6a32
+mod.theme.color_bevel_outset_1 = #c9a35e
+mod.theme.color_bevel_outset_2 = #6e5226
+mod.theme.beveling = 0.5
+
+// Working ink: a deep sepia, about 9:1 on the parchment.
+mod.theme.color_text = #2a2116
+mod.theme.color_text_hover = #1f180f
+mod.theme.color_text_focus = #1f180f
+mod.theme.color_text_active = #1f180f
+mod.theme.color_text_down = #1f180f
+mod.theme.color_text_disabled = #8c7a5c
+mod.theme.color_text_placeholder = #6a5940
+mod.theme.color_text_placeholder_hover = #5e4e37
+mod.theme.color_text_val = #2a2116
+mod.theme.color_text_meta = #4a3d2a
+mod.theme.color_text_hl = #2a2116
+mod.theme.color_text_cursor = #2a2116
+mod.theme.color_cursor = #2a2116
+mod.theme.color_label = #2a2116
+mod.theme.color_label_hover = #1f180f
+mod.theme.color_label_focus = #1f180f
+mod.theme.color_label_active = #1f180f
+mod.theme.color_label_down = #1f180f
+mod.theme.color_label_disabled = #8c7a5c
+mod.theme.color_label_inner = #2a2116
+mod.theme.color_label_inner_hover = #1f180f
+mod.theme.color_label_inner_focus = #2a2116
+mod.theme.color_label_inner_down = #1f180f
+mod.theme.color_label_inner_drag = #1f180f
+mod.theme.color_label_inner_active = #1f180f
+mod.theme.color_label_inner_inactive = #2a2116
+mod.theme.color_label_inner_disabled = #8c7a5c
+mod.theme.color_label_outer = #2a2116
+mod.theme.color_label_outer_off = #2a2116
+mod.theme.color_label_outer_hover = #1f180f
+mod.theme.color_label_outer_down = #1f180f
+mod.theme.color_label_outer_drag = #1f180f
+mod.theme.color_label_outer_focus = #1f180f
+mod.theme.color_label_outer_active = #1f180f
+mod.theme.color_label_outer_active_focus = #1f180f
+mod.theme.color_label_outer_disabled = #8c7a5c
+mod.theme.color_icon = #2a2116
+mod.theme.color_icon_hover = #1f180f
+mod.theme.color_icon_focus = #2a2116
+mod.theme.color_icon_active = #1f180f
+mod.theme.color_icon_down = #1f180f
+mod.theme.color_icon_disabled = #8c7a5c
+// The inks on the surface ladder hold 5:1 (body) and 4.5:1 (second voice)
+// even on the darkest rung, the sage of a raised panel.
+mod.theme.color_on_surface = #2a2116
+mod.theme.color_on_surface_variant = #x2a2116
+
+// The accent seed: the primary, secondary and tertiary families are grown
+// from it. The deep teal, so the grown roles keep their contrast.
+mod.theme.color_ctrl_selected = #3a554d
+mod.theme.color_focus = #2f6f62
+mod.theme.color_ctrl_active = #3a554d
+mod.theme.color_text_on_accent = #f3e8cf
+// Fills are teal enamel.
+mod.theme.color_val = #46635a
+mod.theme.color_val_hover = #46635a
+mod.theme.color_val_focus = #46635a
+mod.theme.color_val_drag = #3a554d
+mod.theme.color_val_disabled = #a3a68f
+mod.theme.color_mark = #2a2116
+mod.theme.color_mark_active = #2a2116
+mod.theme.color_selection_hover = #d8a6544d
+mod.theme.color_selection_focus = #d8a65473
+mod.theme.color_selection_down = #d8a65473
+mod.theme.color_handle = #c9a35e
+mod.theme.color_handle_hover = #d6b06a
+mod.theme.color_handle_1 = #e2c27e
+mod.theme.color_handle_2 = #8a6a32
+
+// Screens: deep teal glass with warm amber figures.
+mod.theme.color_screen = #213530
+mod.theme.color_screen_ink = #ecc77c
+mod.theme.screen_ghost = 0.07
+mod.theme.color_lamp_plain = #f6eedb
+mod.theme.color_lamp_off = #2a2a24
+mod.theme.color_terminal_bg = #213530
+mod.theme.color_terminal_text = #ecc77c
+
+// SLIM. Rows of 26, gaps of 8, a panel's padding 12. The rungs below were
+// frozen as numbers when the base was read, so they are stated again here.
+mod.theme.space_factor = 6.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 20.0
+mod.theme.space_6 = 24.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 22.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 32.0
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 26.0
+mod.theme.data_item_height = 22.0
+mod.theme.corner_radius = 6.0
+mod.theme.container_corner_radius = 8.0
+mod.theme.textselection_corner_radius = 1.5
+mod.theme.radius_xs = 2.0
+mod.theme.radius_s = 4.0
+mod.theme.radius_m = 6.0
+mod.theme.radius_l = 8.0
+
+// TYPE. Cormorant Garamond, an old-style serif of the period's book faces:
+// medium for working text (its small x-height wants the weight and a size a
+// step up from a sans), semibold on the controls, bold for the captions and
+// titles. A font size draws 1.333 layout points per unit.
+mod.theme.font_size_p = 10.0
+mod.theme.font_size_base = 10.0
+mod.theme.type_title_l_size = 17.0
+mod.theme.type_title_m_size = 14.0
+mod.theme.type_title_s_size = 12.0
+mod.theme.type_body_l_size = 10.5
+mod.theme.type_body_m_size = 10.0
+mod.theme.type_body_s_size = 9.5
+mod.theme.type_label_l_size = 10.0
+mod.theme.type_label_m_size = 9.5
+mod.theme.type_label_s_size = 9.0
+mod.theme.font_size_4 = 12.0
+mod.theme.font_regular = mod.theme.font_regular{font_size: 10.0 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/CormorantGaramond-Variable.ttf") weight: 560.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 10.0 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/CormorantGaramond-Variable.ttf") weight: 620.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 12.0 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/CormorantGaramond-Variable.ttf") weight: 680.0 asc: 0.0 desc: 0.0}}}
+// The type roles were frozen from the base's faces; stated again so every
+// role reads in the one family.
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 17.0 line_spacing: 1.15}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 14.0 line_spacing: 1.15}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 12.0 line_spacing: 1.15}
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 10.5 line_spacing: 1.3}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 10.0 line_spacing: 1.3}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 9.5 line_spacing: 1.3}
+mod.theme.font_label_l = mod.theme.font_bold{font_size: 10.0 line_spacing: 1.15}
+mod.theme.font_label_m = mod.theme.font_bold{font_size: 9.5 line_spacing: 1.15}
+mod.theme.font_label_s = mod.theme.font_bold{font_size: 9.0 line_spacing: 1.15}
+
+// No surface material: every face that matters is drawn by the sheet.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+mod.theme.color_material_glow = #46635a
+true

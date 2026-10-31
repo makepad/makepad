@@ -104,7 +104,7 @@ impl ScriptHook for CachedWidget {
         }
 
         // Each heap has its own singletons, so isolates never share widgets with the app or each other.
-        let key = (vm.bx.heap.heap_key(), self.template_id);
+        let key = (vm.heap_key(), self.template_id);
 
         // If widget already exists, apply updates to it
         if let Some(widget) = &mut self.widget {
@@ -193,6 +193,11 @@ impl WidgetNode for CachedWidget {
 }
 
 impl Widget for CachedWidget {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(widget) = &self.widget {
             widget.handle_event(cx, event, scope);

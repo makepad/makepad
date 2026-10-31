@@ -1,0 +1,2437 @@
+use mod.prelude.widgets_internal.*
+
+// Kraft corrugated board, hand made, lit from straight above. A control is
+// a PIECE of board cut out and laid back in the window it was cut from
+// (button, segment, drop-down: a dark gap round it with the flutes of the
+// cut wall showing, a pale line where each cut liner catches the light), a
+// piece GLUED ON (knob, thumb, panel, card: its thin shadow and its cut edge
+// along its foot, the fluted layer between the two liners seen side on), or
+// a line of black felt MARKER drawn on the board (box, ring, track, scale,
+// tick), its width wandering as a hand does and its ink bleeding a little
+// into the fibres. What is chosen is black card or a marker fill; coloured
+// paper (blue, red, yellow) and cream paper are glued on where a role needs
+// a colour. Focus is a blue ballpoint line drawn round the control.
+
+// A ROW OF FIELDS IS ONE HEIGHT. Left to themselves the library's fields each
+// come out at a size of their own, so the box metrics are stated once here
+// and handed to each field below. A field is a piece of card as a button
+// is, its face the box and its cut edge under it, so the box is 32, the
+// height of a button.
+let field_height = 32.0
+let field_pad_v = mod.theme.mspace_1.top
+let field_radius = 3.0
+// A hairline, for the few stock fields the faces below do not redraw.
+let field_border = 0.6
+
+// The room a Fit field takes: where a field is Fit, the padding IS its
+// height.
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+// The box a field draws. Given the draw object and not the widget, because
+// not every field draws its own box.
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+// A field that states a frame and lays its own parts out inside it: the
+// height is all these take; a padding would displace its line.
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.TextInputFlat)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+// The chrome-less input a well holds must impose no height of its own.
+mod.widgets.WellInput.min_height = 0.0
+mod.widgets.Window.pass.clear_color = #b08659
+
+// Plain views stop clipping, so a shadow, a cut edge or a marker's bleed may
+// fall into the gap beside its control. Scroll views keep their own clip.
+mod.widgets.View.clip_x = false
+mod.widgets.View.clip_y = false
+
+// ---------------------------------------------------------------------------
+// SHARED PARTS. Distances in points, negative inside, y down; `px` is one
+// device pixel in points. Every texture is laid in the piece's own space (a
+// point from its corner, seeded by its size), so it rides with the piece and
+// nothing changes when a page scrolls.
+
+let g3 = fn(v: float) -> vec3 {
+    return vec3(v, v, v)
+}
+
+// A rounded box, true radius.
+let cb_rbox = fn(p: vec2, c: vec2, h: vec2, r: float) -> float {
+    let rr = clamp(r, 0.0, min(h.x, h.y))
+    let q = abs(p - c) - h + vec2(rr, rr)
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - rr
+}
+
+// A rounded box with a radius per corner (tl, tr, br, bl).
+let cb_rbox4 = fn(p: vec2, c: vec2, h: vec2, r4: vec4) -> float {
+    let q0 = p - c
+    let rt = mix(r4.y, r4.x, step(q0.x, 0.0))
+    let rb = mix(r4.z, r4.w, step(q0.x, 0.0))
+    let r = clamp(mix(rb, rt, step(q0.y, 0.0)), 0.0, min(h.x, h.y))
+    let q = abs(q0) - h + vec2(r, r)
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - r
+}
+
+// The corners a button group asks for: a corner written as 0 is a square
+// join, any other the family's radius.
+let cb_corners = fn(tl: float, tr: float, br: float, bl: float, r: float) -> vec4 {
+    return vec4(mix(r, step(0.5, tl) * r, step(0.0, tl)), mix(r, step(0.5, tr) * r, step(0.0, tr)), mix(r, step(0.5, br) * r, step(0.0, br)), mix(r, step(0.5, bl) * r, step(0.0, bl)))
+}
+
+let cb_seg = fn(p: vec2, a: vec2, b: vec2) -> float {
+    let pa = p - a
+    let ba = b - a
+    let k = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return length(pa - ba * k)
+}
+
+let cb_grow = fn(rp: vec2, rs: vec2, m: float) -> vec4 {
+    return vec4(rp.x - m, rp.y - m, rs.x + 2.0 * m, rs.y + 2.0 * m)
+}
+
+let cb_tri = fn(p: vec2, c: vec2, hw: float, hh: float, dir: float) -> float {
+    // a triangle hw wide either side, 2 hh tall, apex up (dir -1) or down (1)
+    let y = (p.y - c.y) * dir
+    let e = (abs(p.x - c.x) * 2.0 * hh + hw * (y - hh)) / sqrt(4.0 * hh * hh + hw * hw)
+    return max(-hh - y, e)
+}
+
+// THE PALETTE. The board's kraft #b08659; the marker #x18140e; shade is the
+// board's own brown gone dark, never grey.
+let cb_kraft_c = fn() -> vec3 {
+    return vec3(0.690, 0.525, 0.349)
+}
+let cb_ink_c = fn() -> vec3 {
+    return vec3(0.094, 0.078, 0.055)
+}
+let cb_dry_c = fn() -> vec3 {
+    return vec3(0.431, 0.353, 0.267)
+}
+let cb_shade_c = fn() -> vec3 {
+    return vec3(0.170, 0.105, 0.050)
+}
+let cb_liner_c = fn() -> vec3 {
+    return vec3(0.925, 0.835, 0.680)
+}
+let cb_cream_c = fn() -> vec3 {
+    return vec3(0.925, 0.878, 0.780)
+}
+let cb_black_c = fn() -> vec3 {
+    return vec3(0.165, 0.153, 0.141)
+}
+let cb_yellow_c = fn() -> vec3 {
+    return vec3(0.886, 0.722, 0.290)
+}
+let cb_blue_c = fn() -> vec3 {
+    return vec3(0.478, 0.608, 0.733)
+}
+let cb_red_c = fn() -> vec3 {
+    return vec3(0.808, 0.451, 0.380)
+}
+let cb_pen_c = fn() -> vec3 {
+    return vec3(0.184, 0.373, 0.620)
+}
+let cb_redink_c = fn() -> vec3 {
+    return vec3(0.690, 0.165, 0.125)
+}
+
+// THE FIBRES. One lattice of short straight fibres, at most one to a cell,
+// each at its own angle and a length between `l0` and `l1` cells; a point
+// looks at the four cells round it so a fibre is never cut at its cell's
+// edge. `.x` the dark fibres, `.y` the pale ones (six in ten), as coverage.
+let cb_fibres = fn(w: vec2, px: float, cell: float, seed: vec2, dens: float, thick: float, l0: float, l1: float) -> vec2 {
+    let q = w / cell
+    let g = floor(q)
+    let f = q - g
+    let o = vec2(step(0.5, f.x), step(0.5, f.y)) - vec2(1.0, 1.0)
+    var dk = 0.0
+    var lt = 0.0
+    var i = 0.0
+    for j in 0..4 {
+        let k = g + o + vec2(i - 2.0 * floor(i * 0.5), floor(i * 0.5))
+        let h0 = Finish.hash(k + seed)
+        let h1 = Finish.hash(k + seed + vec2(17.31, 41.73))
+        let h2 = Finish.hash(k + seed + vec2(-9.17, 23.41))
+        let h3 = Finish.hash(k + seed + vec2(5.53, -3.37))
+        let ctr = (k + vec2(h1, h2)) * cell
+        let an = h3 * 3.14159265
+        let hl = cell * (l0 + (l1 - l0) * fract(h0 * 7.13))
+        let dir = vec2(cos(an), sin(an)) * hl
+        let dd = cb_seg(w, ctr - dir, ctr + dir) - thick
+        let cov = Finish.cover(dd, px) * step(h0, dens)
+        let pale = step(0.4, fract(h1 * 13.7 + h2 * 3.1))
+        dk = max(dk, cov * (1.0 - pale))
+        lt = max(lt, cov * pale)
+        i = i + 1.0
+    }
+    return vec2(dk, lt)
+}
+
+// KRAFT at point `w` over `base`: a long drift of tone, a faint cloud
+// (small, so it never reads as blotches), a mottle at two fine scales, a
+// free grain per device pixel, and the felt of its fibres: short ones packed
+// close (a point and a half to a cell) and longer ones among them, the pale
+// ones more than the dark, both low in contrast, so the board reads as a
+// fine crinkled speckle rather than as hairs on a smooth ground. `amt`
+// scales the whole texture.
+let cb_kraft = fn(w: vec2, px: float, base: vec3, amt: float) -> vec3 {
+    let broad = Finish.noise(w * 0.006 + vec2(3.1, 1.7)) - 0.5
+    let cloud = Finish.fbm(w * 0.07 + vec2(13.1, 7.7)) - 0.5
+    let m1 = Finish.noise(w * 0.8 + vec2(5.3, 2.9)) - 0.5
+    let m2 = Finish.noise(w * 0.3 + vec2(1.3, 8.9)) - 0.5
+    let tone = (broad * 0.06 + cloud * 0.04 + m1 * 0.06 + m2 * 0.07) * amt + Finish.grain(w / px, 0.016 * amt)
+    var col = base * (1.0 + tone)
+    let fa = cb_fibres(w, px, 1.8, vec2(0.0, 0.0), 0.7, 0.22, 0.3, 1.0)
+    let fb = cb_fibres(w, px, 4.0, vec2(71.0, 23.0), 0.6, 0.28, 0.3, 1.0)
+    let dk = max(fa.x, fb.x * 0.8)
+    let lt = max(fa.y, fb.y * 0.8)
+    col = col * (1.0 - 0.11 * dk * amt)
+    col = col + (vec3(1.0, 1.0, 1.0) - col) * (0.17 * lt * amt)
+    return col
+}
+
+// PAPER, cream or coloured: finer and calmer than the board.
+let cb_paper = fn(w: vec2, px: float, base: vec3, amt: float) -> vec3 {
+    let cloud = Finish.fbm(w * 0.09 + vec2(2.3, 9.1)) - 0.5
+    let fine = Finish.noise(w * 0.9 + vec2(1.1, 4.4)) - 0.5
+    var col = base * (1.0 + (cloud * 0.05 + fine * 0.04) * amt + Finish.grain(w / px, 0.016 * amt))
+    let fa = cb_fibres(w, px, 3.0, vec2(13.0, 57.0), 0.5, 0.16, 0.3, 1.0)
+    col = mix(col, base * 0.88, fa.x * 0.40 * amt)
+    col = mix(col, Finish.lift(base, 0.35), fa.y * 0.45 * amt)
+    return col
+}
+
+// BLACK CARD: near black, a little cloud, and the pale scuffs of its fibres.
+let cb_blackcard = fn(w: vec2, px: float, amt: float) -> vec3 {
+    let base = cb_black_c()
+    let cloud = Finish.fbm(w * 0.08 + vec2(7.0, 3.0)) - 0.5
+    var col = base * (1.0 + cloud * 0.30 * amt) + g3(Finish.grain(w / px, 0.010 * amt))
+    let fa = cb_fibres(w, px, 2.6, vec2(37.0, 11.0), 0.6, 0.18, 0.3, 1.0)
+    col = mix(col, vec3(0.40, 0.37, 0.34), fa.y * 0.40 * amt)
+    col = mix(col, vec3(0.07, 0.065, 0.06), fa.x * 0.40 * amt)
+    return col
+}
+
+// THE CUT EDGE of the board seen side on: `u` along the edge, `v` 0..1 from
+// the face down to the foot of `th` points of board. The two liners as
+// bands, the fluted layer between them a wave over dark hollows; the edge
+// faces down, away from the light, so all of it is in shade.
+let cb_flute = fn(u: float, v: float, th: float, px: float, base: vec3) -> vec3 {
+    let liner = 0.2
+    let pitch = max(th * 1.2, 2.4)
+    let amp = 0.24
+    let ph = u / pitch * 6.2831853
+    let wy = 0.5 + amp * sin(ph)
+    let sl = amp * th * 6.2831853 / pitch * cos(ph)
+    let dist = abs(v - wy) * th / sqrt(1.0 + sl * sl)
+    let medium = Finish.cover(dist - max(th * 0.08, px * 0.45), px)
+    var col = mix(base * 0.24, base * 0.68, medium)
+    let top = 1.0 - smoothstep(liner - 0.06, liner + 0.06, v)
+    let bot = smoothstep(1.0 - liner - 0.06, 1.0 - liner + 0.06, v)
+    col = mix(col, base * 0.80, top)
+    col = mix(col, base * 0.48, bot)
+    return col
+}
+
+// What a piece glued on the board shows beyond its face: the shadow it
+// throws (a tight contact shade and a soft one, cast a little down, both
+// gone within half a gap) and its cut edge along its foot, `th` points of
+// board seen side on. `lift` 0..1 raises it (a softer, longer shadow).
+// Premultiplied; the face goes over it.
+let cb_under = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, th: float, base: vec3, lift: float) -> vec4 {
+    let cs = c + vec2(0.0, th)
+    let s1 = Finish.drop(p, cs, h, r, vec2(0.0, 0.4 + 0.5 * lift), 0.45 + 0.4 * lift) * 0.50
+    let s2 = Finish.drop(p, cs, h, r, vec2(0.0, 0.8 + 1.0 * lift), 1.1 + 0.8 * lift) * 0.22
+    let sa = 1.0 - (1.0 - s1) * (1.0 - s2)
+    var out = vec4(cb_shade_c() * sa, sa)
+    if th > 0.01 {
+        let df = cb_rbox(p, c, h, r)
+        let ds = cb_rbox(p, c + vec2(0.0, th * 0.5), h + vec2(0.0, th * 0.5), r)
+        let v = clamp(df / th, 0.0, 1.0)
+        let side = cb_flute(p.x, v, th, px, base)
+        let a2 = Finish.cover(ds, px)
+        out = Finish.over(out, vec4(side * a2, a2))
+    }
+    return out
+}
+
+// The face's own cut edge: a pale line where the top liner was cut,
+// brightest along the top, and the kraft a shade darker just inside it where
+// the knife pressed it down.
+let cb_cut_edge = fn(col: vec3, d: float, yrel: float, hy: float, px: float, amt: float) -> vec3 {
+    let up = 1.0 - smoothstep(0.0 - hy, hy, yrel)
+    var c2 = mix(col, col * 0.84, Finish.band(d, 1.2 * px, 2.6 * px, px) * 0.55 * amt)
+    c2 = mix(c2, mix(Finish.lift(col, 0.40), cb_liner_c(), 0.5), Finish.band(d, 0.0, 1.2 * px, px) * (0.30 + 0.60 * up) * amt)
+    return c2
+}
+
+// The window a piece was cut from, round the piece: the gap between them `g`
+// points wide, dark, the flutes of the window's wall showing in it as pale
+// flecks and the gap deepest under the window's top wall; and outside it a
+// pale line where the window's own liner was cut, brightest along its foot,
+// which faces up. `d` is the piece's distance. Premultiplied.
+let cb_gap = fn(p: vec2, d: float, yrel: float, hy: float, g: float, px: float, amt: float) -> vec4 {
+    let dw = d - g
+    let ring = Finish.cover(dw, px) * (1.0 - Finish.cover(d, px))
+    let up = 1.0 - smoothstep(0.0 - hy, hy, yrel)
+    let fl = smoothstep(0.52, 0.78, Finish.noise(p * 1.9 + vec2(3.0, 8.0)))
+    var col = mix(vec3(0.120, 0.078, 0.040), vec3(0.50, 0.37, 0.23), fl * 0.8)
+    col = col * (0.78 + 0.32 * (1.0 - up))
+    let ra = ring * amt
+    var out = vec4(col * ra, ra)
+    let lip = Finish.ring_out(dw, 0.0, 1.2 * px, px) * (0.30 + 0.55 * (1.0 - up)) * amt
+    out = Finish.over(out, vec4(cb_liner_c() * lip, lip))
+    return out
+}
+
+// A LINE OF FELT MARKER `hw` points either side of its middle; `dl` is the
+// unsigned distance from the middle. Its width wanders as a hand's does,
+// its ink is a shade thinner in streaks, and it bleeds a little way into
+// the fibres beside it (gone within a point and a half). Premultiplied.
+let cb_stroke = fn(dl: float, hw: float, p: vec2, px: float, ink: vec3, amt: float) -> vec4 {
+    let w = hw + clamp((Finish.noise(p * 0.22 + vec2(7.0, 3.0)) - 0.5) * 0.5 * hw, -0.2, 0.2)
+    let body = Finish.cover(dl - w, px)
+    let dens = 0.90 + 0.10 * Finish.noise(p * 1.3 + vec2(1.0, 9.0))
+    let x = max(dl - w, 0.0)
+    let bleed = exp(0.0 - x / 0.38) * (1.0 - smoothstep(1.0, 1.5, x)) * (1.0 - body) * 0.22 * (0.45 + Finish.noise(p * 3.1 + vec2(4.0, 4.0)))
+    let a = clamp(body * dens + bleed, 0.0, 1.0) * amt
+    return vec4(ink * a, a)
+}
+
+// A shape filled in with marker: `d` its signed distance.
+let cb_fill = fn(d: float, p: vec2, px: float, ink: vec3, amt: float) -> vec4 {
+    return cb_stroke(max(d + 0.5, 0.0), 0.5, p, px, ink, amt)
+}
+
+// A hand's wobble on a line, at most `k` points either way, slow along it.
+let cb_wob = fn(p: vec2, k: float, seed: vec2) -> float {
+    return (Finish.noise(p * 0.32 + seed) - 0.5) * 2.0 * k
+}
+
+// FOCUS: a blue ballpoint line drawn round the control, two and a half
+// points out.
+let cb_focus = fn(d: float, p: vec2, px: float, focus: float) -> vec4 {
+    let dd = d - 2.6 + cb_wob(p, 0.35, vec2(11.0, 3.0))
+    return cb_stroke(abs(dd), 0.42, p, px, cb_pen_c(), 0.9 * focus)
+}
+
+// The face of a piece: kind 0 the board, 1 black card, 2 blue paper, 4 red
+// paper, 7 paper of `tint`, 8 cream paper, 9 yellow paper, 10 board of the
+// colour `tint` (a paler slip).
+let cb_face = fn(q: vec2, px: float, kind: float, tint: vec3) -> vec3 {
+    if kind > 0.5 && kind < 1.5 {
+        return cb_blackcard(q, px, 1.0)
+    }
+    if kind > 1.5 && kind < 2.5 {
+        return cb_paper(q, px, cb_blue_c(), 1.0)
+    }
+    if kind > 3.5 && kind < 4.5 {
+        return cb_paper(q, px, cb_red_c(), 1.0)
+    }
+    if kind > 6.5 && kind < 7.5 {
+        return cb_paper(q, px, tint, 1.0)
+    }
+    if kind > 7.5 && kind < 8.5 {
+        return cb_paper(q, px, cb_cream_c(), 1.0)
+    }
+    if kind > 8.5 && kind < 9.5 {
+        return cb_paper(q, px, cb_yellow_c(), 1.0)
+    }
+    if kind > 9.5 {
+        return cb_kraft(q, px, tint, 0.85)
+    }
+    return cb_kraft(q, px, Finish.lift(cb_kraft_c(), 0.03), 1.0)
+}
+
+// A disc of board riding on what is under it: its shadow, its cut edge
+// along its foot (`th` points), a face a shade lighter at the top (the
+// board's kraft, or paper of a colour glued on it: `kind` as for a piece),
+// the pale cut line round its top and a line of shade round its foot.
+// Pressed it sits down on its edge. Premultiplied.
+let cb_disc_k = fn(p: vec2, c: vec2, r: float, px: float, th: float, hover: float, press: float, dis: float, kind: float) -> vec4 {
+    let live = 1.0 - dis
+    let ft = th * (1.0 - 0.45 * press)
+    let fc = c - vec2(0.0, ft * 0.5)
+    var out = cb_under(p, fc, vec2(r, r), r, px, ft, cb_kraft_c(), clamp(0.35 + 0.5 * hover * live - 0.35 * press, 0.0, 1.0))
+    out = out * mix(1.0, 0.55, dis)
+    let d = length(p - fc) - r
+    let q = (p - fc) / max(r, 0.5)
+    var face = cb_kraft(p - fc + vec2(31.0, 7.0), px, Finish.lift(cb_kraft_c(), 0.07), 1.0)
+    if kind > 0.5 {
+        face = cb_face(p - fc + vec2(31.0, 7.0), px, kind, vec3(0.0, 0.0, 0.0))
+    }
+    face = face * (1.05 - 0.12 * smoothstep(-1.0, 1.0, q.y))
+    face = Finish.lift(face, 0.16 * hover * live)
+    face = face * (1.0 - 0.07 * press)
+    face = mix(face, vec3(0.70, 0.64, 0.57), dis * 0.55)
+    face = cb_cut_edge(face, d, p.y - fc.y, r, px, 1.0 + 0.5 * hover * live)
+    face = mix(face, face * 0.55, Finish.band(d, 0.0, px, px) * smoothstep(-0.2, 0.8, q.y))
+    let a = Finish.cover(d, px)
+    return Finish.over(out, vec4(face * a, a))
+}
+let cb_disc = fn(p: vec2, c: vec2, r: float, px: float, th: float, hover: float, press: float, dis: float) -> vec4 {
+    return cb_disc_k(p, c, r, px, th, hover, press, dis, 0.0)
+}
+
+// ---------------------------------------------------------------------------
+// A PIECE OF CARD GLUED ON THE BOARD, the way every working control is
+// made: its face the box `c`, `h` (corners `r4`); under its foot the board's
+// cut edge `th` points deep, seen side on, the fluted layer between its two
+// liners; under it all a soft contact shadow, gone within four points of the
+// box (half the gap to a neighbour); the pale line where the face's liner
+// was cut; and a line of marker drawn round the face just inside its edge
+// (`ol` its strength). Under the pointer the piece stands a little prouder,
+// its shadow longer and its face a shade lighter; pressed it is pushed down
+// onto the board, its face slipping down into the depth of its edge and its
+// shadow drawn in close. Disabled it lies under a sheet of tracing paper.
+// `kind` and `tint` pick the face as `cb_face` does. Premultiplied.
+let cb_piece = fn(p: vec2, c: vec2, h: vec2, r4: vec4, px: float, th: float, hover: float, press: float, dis: float, kind: float, tint: vec3, ol: float, seed: vec2) -> vec4 {
+    let live = 1.0 - dis
+    let lift = hover * live * (1.0 - press)
+    let sink = th * 0.7 * press
+    let fc = c + vec2(0.0, sink)
+    let eth = th - sink
+    let wob = cb_wob(p, 0.16, seed * 0.01)
+    let d = cb_rbox4(p, fc, h, r4) + wob
+    let r = max(max(r4.x, r4.y), max(r4.z, r4.w))
+    // the shadow of the whole piece, face and edge together
+    let pc = c + vec2(0.0, th * 0.5)
+    let ph = h + vec2(0.0, th * 0.5)
+    let s1 = Finish.drop(p, pc, ph, r, vec2(0.3, 0.5 + 0.3 * lift - 0.3 * press), 0.6 + 0.25 * lift) * 0.62
+    let s2 = Finish.drop(p, pc, ph, r, vec2(0.6, 1.1 + 0.8 * lift - 0.7 * press), 1.3 + 0.5 * lift - 0.5 * press) * 0.42
+    let db = cb_rbox(p, c, h, r)
+    let fade = 1.0 - smoothstep(1.5, 4.0, db)
+    let sa = (1.0 - (1.0 - s1) * (1.0 - s2)) * fade * mix(1.0, 0.5, dis)
+    var out = vec4(cb_shade_c() * sa, sa)
+    // the cut edge, side on
+    if eth > 0.05 {
+        let de = cb_rbox4(p, fc + vec2(0.0, eth * 0.5), h + vec2(0.0, eth * 0.5), r4) + wob
+        var side = cb_flute(p.x + seed.x, clamp(d / eth, 0.0, 1.0), eth, px, cb_kraft_c())
+        side = mix(side, vec3(0.62, 0.56, 0.49), dis * 0.6)
+        let a2 = Finish.cover(de, px)
+        out = Finish.over(out, vec4(side * a2, a2))
+    }
+    var face = cb_face(p + seed, px, kind, tint)
+    face = face * (1.04 - 0.08 * smoothstep(0.0 - h.y, h.y, p.y - fc.y))
+    face = mix(face, mix(vec3(0.68, 0.62, 0.55), Finish.lift(face, 0.30), 0.25), dis * 0.78)
+    face = Finish.lift(face, 0.10 * lift)
+    face = face * (1.0 - 0.10 * press)
+    face = cb_cut_edge(face, d, p.y - fc.y, h.y, px, mix(1.0 + 0.4 * lift - 0.4 * press, 0.4, dis))
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    let ink = mix(cb_ink_c(), cb_dry_c(), dis)
+    let ow = 0.85 + 0.1 * clamp(h.y - 12.0, 0.0, 4.0) * 0.25
+    out = Finish.over(out, cb_stroke(abs(d + 1.2 + ow), ow, p, px, ink, ol * a * mix(1.0, 0.55, dis)))
+    return out
+}
+
+// BUTTONS. A piece of card glued on the board (`cb_piece`); `kind` picks the
+// face: 0 the board, 1 black card (primary, no outline: the marker does not
+// show on it), 2 blue paper (secondary), 4 red paper (danger), 7 paper of
+// `tint`; 5 a frame drawn in marker straight on the board (outline), 6 bare
+// until touched (flatter). The quad grows by `m` for the cut edge, the
+// shadow and the focus line.
+let cb_button = fn(pos: vec2, size: vec2, o: vec2, px: float, hover: float, down: float, focus: float, dis: float, loading: float, anim: float, r4: vec4, kind: float, m: float, tint: vec4, row: float) -> vec4 {
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - dis
+    let press = down * live
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let seed = size * vec2(1.37, 2.71)
+    let d = cb_rbox4(p, c, h, r4) + cb_wob(p, 0.16, seed * 0.01)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    if kind < 4.5 || kind > 6.5 {
+        let th = clamp(h.y * 0.21, 2.0, 3.4)
+        let ol = 1.0 - step(0.5, kind) * step(kind, 1.5)
+        out = cb_piece(p, c, h, r4, px, th, hover, press, dis, kind, tint.rgb, ol, seed)
+    } else {
+        let bare = step(5.5, kind)
+        let show = clamp(hover * live + press, 0.0, 1.0)
+        let wash = Finish.cover(d, px) * (0.05 * hover * live + 0.12 * press)
+        out = vec4(cb_shade_c() * wash, wash)
+        let hw = 1.0 + 0.15 * hover * live
+        let pencil = mix(vec3(0.30, 0.24, 0.17), cb_ink_c(), press)
+        let ink = mix(mix(cb_ink_c(), pencil, bare), cb_dry_c(), dis)
+        let amt = mix(1.0, 0.55 * show, bare) * mix(1.0, 0.6, dis)
+        out = Finish.over(out, cb_stroke(abs(d + hw + 0.3), hw * mix(1.0, 0.55, bare), p, px, ink, amt))
+    }
+    out = Finish.over(out, cb_focus(d, p, px, focus * live))
+    // The wait spinner, which the stock face drew and this one must too.
+    if loading > 0.0 {
+        let sdf = Sdf2d.viewport(p)
+        let rr = max(min(h.x, h.y) - 5.0, 2.0)
+        let a0 = anim * 2.0 * PI
+        sdf.arc_round_caps(c.x, c.y, rr, a0, a0 + 1.5 * PI, 1.4)
+        sdf.fill(vec4(0.094, 0.078, 0.055, loading))
+        out = Finish.over(out, sdf.result)
+    }
+    return out
+}
+
+// Every button template: the root and the sizes share its draw object, so
+// they wear the plain piece; the roles are specialised below.
+mod.widgets.ButtonFlat.clip_x = false
+mod.widgets.ButtonFlat.clip_y = false
+mod.widgets.ButtonFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cb_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.0), 0.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0), 6.0)
+}
+mod.widgets.Button.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cb_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.0), 0.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0), 6.0)
+}
+mod.widgets.ButtonPrimary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cb_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.0), 1.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0), 6.0)
+}
+mod.widgets.ButtonSecondary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cb_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.0), 2.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0), 6.0)
+}
+mod.widgets.ButtonTertiary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cb_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.0), 0.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0), 6.0)
+}
+mod.widgets.ButtonDanger.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cb_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.0), 4.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0), 6.0)
+}
+mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cb_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.0), 5.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0), 6.0)
+}
+mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return self.host_over(cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, cb_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 4.0), 6.0, 6.0, vec4(0.0, 0.0, 0.0, 0.0), 1.0), 6.0)
+}
+
+// Templates that draw a face of their own on top of these roots keep the
+// plain quad: the grown one is only for the faces written here.
+mod.widgets.CloseButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CopyButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.BurgerButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloating.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloatingSm.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.glass.CutButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+
+// Geometry: chunky pieces of card, one 32 point row, 15 points either side
+// of the word; the small one 26, the large one 40.
+mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 15.0 right: 15.0 top: 4.0 bottom: 4.0}
+mod.widgets.Button.padding = mod.turtle.Inset{left: 15.0 right: 15.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonPrimary.padding = mod.turtle.Inset{left: 15.0 right: 15.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonSecondary.padding = mod.turtle.Inset{left: 15.0 right: 15.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonDanger.padding = mod.turtle.Inset{left: 15.0 right: 15.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonTertiary.padding = mod.turtle.Inset{left: 15.0 right: 15.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonOutline.padding = mod.turtle.Inset{left: 15.0 right: 15.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonIcon.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.Button.icon_walk = mod.turtle.Walk{width: 16.0 height: Fit}
+mod.widgets.ButtonFlat.min_height = 32.0
+mod.widgets.Button.min_height = 32.0
+mod.widgets.ButtonFlat.draw_text.text_style.font_size = 13.0
+mod.widgets.ButtonXs.min_height = 0.0
+mod.widgets.ButtonXs.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
+mod.widgets.ButtonXs.draw_text.text_style.font_size = 10.5
+mod.widgets.ButtonSm.min_height = 0.0
+mod.widgets.ButtonSm.height = 26.0
+mod.widgets.ButtonSm.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+mod.widgets.ButtonSm.draw_text.text_style.font_size = 12.0
+mod.widgets.ButtonLg.height = 40.0
+mod.widgets.ButtonLg.padding = mod.turtle.Inset{left: 18.0 right: 18.0 top: 0.0 bottom: 0.0}
+mod.widgets.ButtonLg.draw_text.text_style.font_size = 15.0
+
+// The words on a piece are hand printed in marker, heavier than running
+// text; on black card they are written in a cream paint pen.
+mod.widgets.ButtonFlat.draw_text.text_style.font_family = mod.theme.font_label.font_family
+mod.widgets.ButtonPrimary.draw_text.color = #xf1e6cf
+mod.widgets.ButtonPrimary.draw_text.color_hover = #xfbf3e2
+mod.widgets.ButtonPrimary.draw_text.color_down = #xe6d8bc
+mod.widgets.ButtonPrimary.draw_text.color_focus = #xf1e6cf
+mod.widgets.ButtonPrimary.draw_text.color_disabled = #x6e5a44
+mod.widgets.ButtonPrimary.draw_icon.color = #xf1e6cf
+mod.widgets.ButtonPrimary.draw_text.text_style = mod.theme.font_label{font_size: 13.0}
+mod.widgets.ButtonSecondary.draw_text.color = #x18140e
+mod.widgets.ButtonSecondary.draw_text.color_hover = #100c08
+mod.widgets.ButtonSecondary.draw_text.color_down = #100c08
+mod.widgets.ButtonSecondary.draw_text.color_focus = #x18140e
+mod.widgets.ButtonSecondary.draw_icon.color = #x18140e
+mod.widgets.ButtonSecondary.draw_text.text_style = mod.theme.font_label{font_size: 13.0}
+mod.widgets.ButtonTertiary.draw_text.color = #x18140e
+mod.widgets.ButtonTertiary.draw_text.color_hover = #100c08
+mod.widgets.ButtonTertiary.draw_text.color_down = #100c08
+mod.widgets.ButtonTertiary.draw_text.color_focus = #x18140e
+mod.widgets.ButtonTertiary.draw_icon.color = #x18140e
+mod.widgets.ButtonTertiary.draw_text.text_style = mod.theme.font_label{font_size: 13.0}
+mod.widgets.ButtonDanger.draw_text.color = #x18140e
+mod.widgets.ButtonDanger.draw_text.color_hover = #100c08
+mod.widgets.ButtonDanger.draw_text.color_down = #100c08
+mod.widgets.ButtonDanger.draw_text.color_focus = #x18140e
+mod.widgets.ButtonDanger.draw_icon.color = #x18140e
+mod.widgets.ButtonDanger.draw_text.text_style = mod.theme.font_label{font_size: 13.0}
+mod.widgets.ButtonOutline.draw_text.color = #x18140e
+mod.widgets.ButtonOutline.draw_text.color_hover = #100c08
+mod.widgets.ButtonOutline.draw_text.color_down = #100c08
+mod.widgets.ButtonOutline.draw_text.color_focus = #x18140e
+mod.widgets.ButtonOutline.draw_text.color_disabled = #x6e5a44
+mod.widgets.ButtonOutline.draw_icon.color = #x18140e
+mod.widgets.ButtonFlat.draw_bg.loading_color = #x18140e
+
+// ---------------------------------------------------------------------------
+// CHECK BOXES. A square drawn in marker; set, a tick drawn in one stroke
+// that runs out past the box's top right corner, as a hand draws it; mixed,
+// a dash. Under the pointer the line is a little heavier and a breath of
+// pencil shades the inside; pressed, the inside is darker.
+mod.widgets.CheckBoxFlat.clip_x = false
+mod.widgets.CheckBoxFlat.clip_y = false
+mod.widgets.CheckBoxFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.CheckBoxCustom.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CheckBoxFlat.padding = mod.turtle.Inset{left: 0.0 right: 3.0 top: 3.0 bottom: 3.0}
+mod.widgets.CheckBoxFlat.label_walk.margin = mod.turtle.Inset{left: 24.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.CheckBoxFlat.draw_bg.size = uniform(16.0)
+mod.widgets.CheckBoxFlat.min_height = 26.0
+mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let sz = self.size
+    let live = 1.0 - self.disabled
+    let x0 = mix(1.0, size.x - sz - 1.0, self.mark_at_end)
+    let lo = vec2(Finish.snap(o.x + x0, px), Finish.snap(o.y + (size.y - sz) * 0.5, px)) - o
+    let h = vec2(sz * 0.5, sz * 0.5)
+    let c = lo + h
+    let rnd = step(20.0, self.border_radius)
+    let r = mix(1.5, h.y, rnd)
+    let d = cb_rbox(p, c, h - vec2(0.9, 0.9), r) + cb_wob(p, 0.22, vec2(4.0, 1.0))
+    let ink = mix(mix(cb_ink_c(), cb_redink_c(), self.error), cb_dry_c(), self.disabled)
+    let fade = mix(1.0, 0.6, self.disabled)
+    let wash = Finish.cover(d, px) * (0.07 * self.hover + 0.14 * self.down) * live
+    var out = vec4(cb_shade_c() * wash, wash)
+    out = Finish.over(out, cb_stroke(abs(d), 0.88 + 0.12 * self.hover * live, p, px, ink, fade))
+    let k = sz / 14.0
+    let m0 = lo + vec2(2.8, 7.2) * k
+    let m1 = lo + vec2(6.0, 11.0) * k
+    let m2 = lo + vec2(15.2, -1.6) * k
+    let ck = min(cb_seg(p, m0, m1), cb_seg(p, m1, m2))
+    let dash = cb_seg(p, lo + vec2(3.6, 7.3) * k, lo + vec2(10.6, 6.8) * k)
+    let show_ck = self.active * (1.0 - self.mixed)
+    out = Finish.over(out, cb_stroke(ck, 1.05 * k, p, px, ink, show_ck * fade))
+    out = Finish.over(out, cb_stroke(dash, 1.05 * k, p, px, ink, self.mixed * fade))
+    return Finish.over(out, cb_focus(d, p, px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// TOGGLES. A slot cut through the board, 38 by 18 points: the gap round it,
+// its floor the deeper board in the shade of its top wall; on, the floor is
+// black card. A disc of board 15 points across rides in it.
+mod.widgets.ToggleFlat.label_walk.margin = mod.turtle.Inset{left: 47.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.ToggleFlat.draw_bg.size = 18.0
+mod.widgets.ToggleFlat.min_height = 26.0
+mod.widgets.ToggleFlat.draw_bg.pill_aspect = 2.111
+mod.widgets.ToggleFlat.draw_bg.knob_inset = 9.0
+mod.widgets.ToggleFlat.clip_x = false
+mod.widgets.ToggleFlat.clip_y = false
+mod.widgets.ToggleFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+let cb_toggle = fn(pos: vec2, size: vec2, o: vec2, px: float, active: float, drag_pos: float, drag: float, hover: float, down: float, focus: float, dis: float, error: float, at_end: float, kind: float) -> vec4 {
+    let m = 5.0
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - dis
+    let tw = 38.0
+    let th = 18.0
+    let x0 = mix(1.0, size.x - tw - 1.0, at_end)
+    let lo = vec2(Finish.snap(o.x + x0, px), Finish.snap(o.y + (size.y - th) * 0.5, px)) - o
+    let h = vec2(tw * 0.5, th * 0.5)
+    let c = lo + h
+    let d = cb_rbox(p, c, h, h.y) + cb_wob(p, 0.14, vec2(2.0, 9.0))
+    let on = active
+    let g = 1.3
+    var out = cb_gap(p, d + g, p.y - c.y, h.y, g, px, mix(1.0, 0.5, dis))
+    let fd = d + g
+    let fa = Finish.cover(fd, px)
+    var flr = cb_kraft(p + vec2(17.0, 5.0), px, cb_kraft_c() * 0.84, 1.0)
+    // (the toggle's floor)
+    flr = mix(flr, cb_blackcard(p, px, 1.0), on)
+    flr = mix(flr, mix(cb_redink_c(), flr, 0.5), error * 0.5)
+    let ish = clamp(Finish.inset(p, c, h - vec2(g, g), h.y - g, vec2(0.0, 1.4), 1.1), 0.0, 1.0)
+    flr = mix(flr, cb_shade_c(), ish * 0.45)
+    flr = Finish.lift(flr, 0.06 * hover * live)
+    flr = mix(flr, vec3(0.62, 0.56, 0.49), dis * 0.6)
+    out = Finish.over(out, vec4(flr * fa, fa))
+    let kt = clamp(mix(on, drag_pos, drag), 0.0, 1.0)
+    let kr = 7.5
+    let kx = lo.x + h.y + kt * (tw - th)
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, c.y + 0.6)
+    out = Finish.over(out, cb_disc_k(p, kc, kr, px, 2.0, hover, down * live, dis, kind))
+    return Finish.over(out, cb_focus(d, p, px, focus * live))
+}
+mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_toggle(self.pos, self.rect_size, self.rect_pos, px, self.active, self.drag_pos, self.drag, self.hover, self.down, self.focus, self.disabled, self.error, self.mark_at_end, 0.0)
+}
+
+// ---------------------------------------------------------------------------
+// RADIOS. A ring drawn in marker; chosen, a heavier ring and a dot of
+// marker filled in at its middle.
+let cb_radio = fn(p: vec2, c: vec2, rad: float, px: float, hover: float, down: float, focus: float, active: float, dis: float) -> vec4 {
+    let live = 1.0 - dis
+    let q = p - c
+    let d = length(q) - (rad - 0.8) + cb_wob(p, 0.2, vec2(2.0, 5.0))
+    let ink = mix(cb_ink_c(), cb_dry_c(), dis)
+    let fade = mix(1.0, 0.6, dis)
+    let wash = Finish.cover(d, px) * (0.07 * hover + 0.14 * down) * live
+    var out = vec4(cb_shade_c() * wash, wash)
+    out = Finish.over(out, cb_stroke(abs(d), 0.88 + 0.25 * active + 0.12 * hover * live, p, px, ink, fade))
+    let dd = length(q) - rad * 0.40 + cb_wob(p, 0.12, vec2(9.0, 1.0))
+    out = Finish.over(out, cb_fill(dd, p, px, ink, active * fade))
+    return Finish.over(out, cb_focus(d, p, px, focus * live))
+}
+
+mod.widgets.RadioButtonFlat.clip_x = false
+mod.widgets.RadioButtonFlat.clip_y = false
+mod.widgets.RadioButtonFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.glass.RadioButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.RadioButtonFlat.padding = mod.turtle.Inset{left: 0.0 right: 3.0 top: 3.0 bottom: 3.0}
+mod.widgets.RadioButtonFlat.label_walk.margin = mod.turtle.Inset{left: 24.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.RadioButtonFlat.draw_bg.size = uniform(16.0)
+mod.widgets.RadioButtonFlat.min_height = 26.0
+mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let sz = self.size
+    let lo = vec2(Finish.snap(o.x + 1.0, px), Finish.snap(o.y + (self.rect_size.y - sz) * 0.5, px)) - o
+    let c = lo + vec2(sz * 0.5, sz * 0.5)
+    return cb_radio(p, c, sz * 0.5, px, self.hover, self.down, self.focus, self.active, self.disabled)
+}
+// The flatter radio is its word alone: chosen, the word is ringed round by
+// hand in marker; under the pointer a faint pencil ring.
+mod.widgets.RadioButtonFlatter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - self.disabled
+    let c = self.rect_size * 0.5
+    let ab = self.rect_size * 0.5 + vec2(3.0, 1.0)
+    let q = (p - c) / ab
+    let d = (length(q) - 1.0) * min(ab.x, ab.y) + cb_wob(p, 0.3, vec2(6.0, 2.0))
+    let pencil = vec3(0.30, 0.24, 0.17)
+    var out = cb_stroke(abs(d), 0.45, p, px, pencil, 0.45 * self.hover * live * (1.0 - self.active))
+    out = Finish.over(out, cb_stroke(abs(d), 0.8, p, px, mix(cb_ink_c(), cb_dry_c(), self.disabled), self.active))
+    return Finish.over(out, cb_focus(d, p, px, self.focus * live))
+}
+
+// Radio tabs: each a piece in its window; the chosen one is black card,
+// pressed in, its word in cream.
+mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 6.0 bottom: 4.0}
+mod.widgets.RadioButtonTabFlat.label_walk.margin = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.RadioButtonTabFlat.min_height = 30.0
+mod.widgets.RadioButtonTabFlat.clip_x = false
+mod.widgets.RadioButtonTabFlat.clip_y = false
+mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let held = clamp(max(self.active, self.down), 0.0, 1.0)
+    return cb_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, held, self.focus, self.disabled, 0.0, 0.0, vec4(4.0, 4.0, 4.0, 4.0), step(0.5, self.active), 5.0, vec4(0.0, 0.0, 0.0, 0.0), 0.0)
+}
+mod.widgets.RadioButtonTabFlat.draw_text.color = #x18140e
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #xf1e6cf
+mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #x6e5a44
+
+// ---------------------------------------------------------------------------
+// SLIDERS. The track is drawn in marker: a thick line the length of the
+// travel, and over the part the value covers a broader stroke. The thumb is
+// a disc of board 20 points across riding on it, glued up thick enough that
+// its cut edge shows under it. Every slider's quad grows
+// for the disc's shadow, its cut edge and the focus line.
+mod.widgets.SliderMinimal.height = 32.0
+mod.widgets.SliderMinimal.clip_x = false
+mod.widgets.SliderMinimal.clip_y = false
+mod.widgets.SliderMinimal.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+
+let cb_track = fn(p: vec2, x0: float, x1: float, cy: float, f0: float, f1: float, px: float, hw: float, thin: float, dis: float) -> vec4 {
+    let ink = mix(cb_ink_c(), cb_dry_c(), dis)
+    let wy = cy + (Finish.noise(vec2(p.x * 0.045, 3.0)) - 0.5) * 0.5
+    let dl = cb_seg(p, vec2(x0 + thin, wy), vec2(x1 - thin, wy))
+    var out = cb_stroke(dl, thin, p, px, ink, mix(0.85, 0.5, dis))
+    if f1 - f0 > 0.01 {
+        let a = min(f0 + hw, f1)
+        let b = max(f1 - hw, a)
+        let dt = cb_seg(p, vec2(a, wy), vec2(b, wy))
+        out = Finish.over(out, cb_stroke(dt, hw, p, px, ink, mix(1.0, 0.55, dis)))
+    }
+    return out
+}
+
+mod.widgets.SliderFlat.height = 40.0
+mod.widgets.SliderFlat.clip_x = false
+mod.widgets.SliderFlat.clip_y = false
+mod.widgets.SliderFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let cy = Finish.snap(o.y + size.y - 12.0, px) - o.y
+    let x0 = Finish.snap(o.x + 1.0, px) - o.x
+    let x1 = Finish.snap(o.x + size.x - 1.0, px) - o.x
+    let w = x1 - x0
+    let kr = 10.0
+    let span = w - 2.0 * kr
+    let kx = x0 + kr + self.slide_pos * span
+    let ox = x0 + kr + self.origin_pos * span
+    let f0 = mix(x0, min(ox, kx), self.arc_origin)
+    let f1 = mix(kx, max(ox, kx), self.arc_origin)
+    var out = cb_track(p, x0, x1, cy, f0, f1, px, 2.7, 1.45, self.disabled)
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, cy + 1.2)
+    out = Finish.over(out, cb_disc(p, kc, kr, px, 3.0, max(self.hover, self.focus * 0.5), self.drag * live, self.disabled))
+    return Finish.over(out, cb_focus(length(p - kc) - kr, p, px, self.focus * live))
+}
+mod.widgets.SliderFlat.text_input.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+
+// The range slider: the track's broad stroke between the two ends, and a
+// disc on each end, sitting down while it is the one held.
+mod.widgets.RangeSliderFlat.handle_size = 18.0
+mod.widgets.RangeSliderFlat.track_inset = 1.0
+mod.widgets.RangeSliderFlat.clip_x = false
+mod.widgets.RangeSliderFlat.clip_y = false
+mod.widgets.RangeSliderFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RangeSliderFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let top = self.label_px
+    let cy = Finish.snap(o.y + top + (size.y - top) * 0.5, px) - o.y
+    let x0 = Finish.snap(o.x + 1.0, px) - o.x
+    let x1 = Finish.snap(o.x + size.x - 1.0, px) - o.x
+    let span = max(size.x - self.inset_px * 2.0 - self.handle_px, 1.0)
+    let sx = self.inset_px + self.handle_px * 0.5 + self.start_pos * span
+    let ex = self.inset_px + self.handle_px * 0.5 + self.end_pos * span
+    var out = cb_track(p, x0, x1, cy, sx, ex, px, 2.7, 1.45, self.disabled)
+    let kr = self.handle_px * 0.5
+    let k0 = vec2(Finish.snap(o.x + sx, px) - o.x, cy + 1.0)
+    let k1 = vec2(Finish.snap(o.x + ex, px) - o.x, cy + 1.0)
+    out = Finish.over(out, cb_disc(p, k0, kr, px, 2.6, max(self.hot_start, self.focus * 0.5) * live, self.drag * self.hot_start * live, self.disabled))
+    out = Finish.over(out, cb_disc(p, k1, kr, px, 2.6, max(self.hot_end, self.focus * 0.5) * live, self.drag * self.hot_end * live, self.disabled))
+    return out
+}
+
+// The minimal slider: one thin marker line, a heavier one over the value,
+// and a small disc of board.
+mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let cy = Finish.snap(o.y + size.y - 8.0, px) - o.y
+    let kr = 6.5
+    let kx = kr + self.slide_pos * (size.x - 2.0 * kr)
+    var out = cb_track(p, 0.0, size.x, cy, 0.0, kx, px, 1.8, 1.0, self.disabled)
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, cy + 0.8)
+    out = Finish.over(out, cb_disc(p, kc, kr, px, 1.8, self.hover, self.drag * live, self.disabled))
+    return Finish.over(out, cb_focus(length(p - kc) - kr, p, px, self.focus * live))
+}
+mod.widgets.SliderMinimal.text_input.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+
+// The round slider: a slot cut through the board beside its label, its
+// floor filled in black marker up to a small disc riding in it; the value
+// reads beside the slot.
+mod.widgets.SliderRoundFlat.height = 22.0
+mod.widgets.SliderRoundFlat.clip_x = false
+mod.widgets.SliderRoundFlat.clip_y = false
+mod.widgets.SliderRoundFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderRoundFlat.text_input.margin = mod.turtle.Inset{left: 0.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRoundFlat.text_input.width = 34.0
+mod.widgets.SliderRoundFlat.text_input.min_height = 0.0
+mod.widgets.SliderRoundFlat.text_input.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRoundFlat.text_input.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let dis = self.disabled
+    let x0 = Finish.snap(o.x + self.label_size, px) - o.x
+    let y0 = Finish.snap(o.y + 1.0, px) - o.y
+    let x1 = Finish.snap(o.x + size.x - 48.0, px) - o.x
+    let y1 = Finish.snap(o.y + size.y - 1.0, px) - o.y
+    let h = vec2((x1 - x0) * 0.5, (y1 - y0) * 0.5)
+    let c = vec2(x0, y0) + h
+    let d = cb_rbox(p, c, h, h.y) + cb_wob(p, 0.14, vec2(5.0, 5.0))
+    let g = 1.2
+    var out = cb_gap(p, d + g, p.y - c.y, h.y, g, px, mix(1.0, 0.5, dis))
+    let fd = d + g
+    let fa = Finish.cover(fd, px)
+    var flr = cb_kraft(p + vec2(3.0, 19.0), px, cb_kraft_c() * 0.84, 1.0)
+    let ish = clamp(Finish.inset(p, c, h - vec2(g, g), h.y - g, vec2(0.0, 1.2), 1.0), 0.0, 1.0)
+    flr = mix(flr, cb_shade_c(), ish * 0.45)
+    flr = Finish.lift(flr, 0.06 * self.hover * live)
+    flr = mix(flr, vec3(0.62, 0.56, 0.49), dis * 0.6)
+    out = Finish.over(out, vec4(flr * fa, fa))
+    let kr = h.y - g - 0.8
+    let kx = x0 + g + 0.8 + kr + self.slide_pos * (2.0 * h.x - 2.0 * (g + 0.8) - 2.0 * kr)
+    let fill = cb_rbox(p, vec2((x0 + g + kx) * 0.5, c.y), vec2((kx - x0 - g) * 0.5, h.y - g), h.y - g)
+    out = Finish.over(out, vec4(cb_blackcard(p, px, 1.0) * Finish.cover(max(fill, fd), px) * mix(1.0, 0.4, dis), Finish.cover(max(fill, fd), px) * mix(1.0, 0.4, dis)))
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, c.y)
+    out = Finish.over(out, cb_disc(p, kc, kr, px, 1.6, self.hover, self.drag * live, dis))
+    return Finish.over(out, cb_focus(d, p, px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// FADERS. A slot cut through the board three points wide, its walls dark
+// with the flutes in them, ticks drawn either side in marker, and a block
+// of board glued up from three layers riding in it, 22 points across and
+// 12 along the travel, yellow paper glued on its top and a marker line
+// drawn across its middle.
+mod.widgets.SliderFader.cap_size = 12.0
+mod.widgets.SliderFader.clip_x = false
+mod.widgets.SliderFader.clip_y = false
+mod.widgets.SliderFader.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderFader.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let dis = self.disabled
+    let vert = self.is_vertical
+    let a = mix(p.x, size.y - p.y, vert)
+    let b = mix(p.y, p.x, vert)
+    let along = mix(size.x, size.y, vert)
+    let across = mix(size.y, size.x, vert)
+    let travel = max(along - self.inset_px * 2.0 - self.cap_px, 1.0)
+    let foot = self.inset_px + self.cap_px * 0.5
+    let mid = floor(across * 0.5 / px) * px
+    // the slot, in screen space
+    let sw = 3.4
+    let sc = mix(vec2(along * 0.5, mid), vec2(mid, size.y - along * 0.5), vert)
+    let sh = mix(vec2(along * 0.5 - self.inset_px, sw * 0.5), vec2(sw * 0.5, along * 0.5 - self.inset_px), vert)
+    let sd = cb_rbox(p, sc, sh, sw * 0.5)
+    var out = cb_gap(p, sd + sw * 0.5, p.y - sc.y, sh.y, sw * 0.5, px, mix(1.0, 0.5, dis))
+    let sa = Finish.cover(sd + sw * 0.5, px)
+    out = Finish.over(out, vec4(vec3(0.10, 0.065, 0.035) * sa, sa))
+    // ticks drawn by hand either side: a long one every quarter of the
+    // travel, three short ones between
+    let nt = 16.0
+    let f = (a - foot) / travel * nt
+    let fi = floor(f + 0.5)
+    let ta = foot + fi / nt * travel
+    let major = 1.0 - step(0.1, abs(fi * 0.25 - floor(fi * 0.25 + 0.5)))
+    let tl = mix(2.5, 4.5, major)
+    let in_rng = step(-0.5, fi) * step(fi, nt + 0.5)
+    let off = abs(b - mid) - sw * 0.5 - 3.0
+    let tq = vec2(a, off)
+    let dt = cb_seg(tq, vec2(ta, 0.0), vec2(ta, tl))
+    let tk = in_rng * mix(1.0, 0.5, dis)
+    out = Finish.over(out, cb_stroke(dt, mix(0.42, 0.55, major), p, px, mix(cb_ink_c(), cb_dry_c(), dis), tk))
+    // the block, in screen space so its light stays on top
+    let at = foot + self.slide_pos * travel
+    let cw = min(22.0, across)
+    let cs = mix(vec2(at, mid), vec2(mid, size.y - at), vert)
+    let ch = mix(vec2(self.cap_px * 0.5, cw * 0.5), vec2(cw * 0.5, self.cap_px * 0.5), vert)
+    let press = self.drag * live
+    let tk2 = 2.4 * (1.0 - 0.4 * press)
+    let cc = vec2(Finish.snap(o.x + cs.x, px) - o.x, Finish.snap(o.y + cs.y - tk2 * 0.5, px) - o.y)
+    out = Finish.over(out, cb_under(p, cc, ch, 1.5, px, tk2, cb_kraft_c(), clamp(0.4 + 0.5 * self.hover * live - 0.4 * press, 0.0, 1.0)) * mix(1.0, 0.55, dis))
+    let cd = cb_rbox(p, cc, ch, 1.5)
+    var face = cb_paper(p - cc + vec2(5.0, 61.0), px, cb_yellow_c(), 1.0)
+    face = face * (1.05 - 0.10 * smoothstep(0.0 - ch.y, ch.y, p.y - cc.y))
+    face = Finish.lift(face, 0.08 * max(self.hover, self.focus * 0.5) * live)
+    face = face * (1.0 - 0.07 * press)
+    face = mix(face, vec3(0.70, 0.64, 0.57), dis * 0.55)
+    face = cb_cut_edge(face, cd, p.y - cc.y, ch.y, px, 1.0)
+    let ca = Finish.cover(cd, px)
+    out = Finish.over(out, vec4(face * ca, ca))
+    let ld = mix(abs(p.y - cc.y), abs(p.x - cc.x), 1.0 - vert)
+    let lspan = mix(abs(p.x - cc.x) - (ch.x - 2.5), abs(p.y - cc.y) - (ch.y - 2.5), 1.0 - vert)
+    out = Finish.over(out, cb_stroke(max(ld, max(lspan, 0.0)), 0.6, p, px, mix(cb_ink_c(), cb_dry_c(), dis), ca))
+    return Finish.over(out, cb_focus(cd, p, px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// KNOBS. A disc of board glued up from a few layers, so its cut edge shows
+// thick along its foot, a ring of marker drawn round its face, and a marker
+// pointer from near its middle toward its rim, turned with the value. Round
+// it, ticks drawn on the board in marker: the ones the value has passed in
+// full ink, the rest in dry pencil.
+let cb_knob = fn(p: vec2, c: vec2, rad: float, px: float, ang: float, hover: float, press: float, dis: float) -> vec4 {
+    let live = 1.0 - dis
+    let th = clamp(rad * 0.16, 1.6, 3.0) * (1.0 - 0.35 * press)
+    let fc = c - vec2(0.0, th * 0.5)
+    var out = cb_under(p, fc, vec2(rad, rad), rad, px, th, cb_kraft_c(), clamp(0.5 + 0.4 * hover * live - 0.4 * press, 0.0, 1.0))
+    out = out * mix(1.0, 0.55, dis)
+    let q = p - fc
+    let d = length(q) - rad
+    let t = q / max(rad, 0.5)
+    var face = cb_kraft(q + vec2(rad * 3.1, 17.0), px, Finish.lift(cb_kraft_c(), 0.07), 1.0)
+    face = face * (1.06 - 0.12 * smoothstep(-1.0, 1.0, t.y))
+    face = Finish.lift(face, 0.07 * hover * live)
+    face = face * (1.0 - 0.06 * press)
+    face = mix(face, vec3(0.70, 0.64, 0.57), dis * 0.55)
+    face = cb_cut_edge(face, d, q.y, rad, px, 1.0)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    let ink = mix(cb_ink_c(), cb_dry_c(), dis)
+    let fade = mix(1.0, 0.6, dis)
+    let ring = abs(d + max(rad * 0.09, 1.1)) + cb_wob(p, 0.1, vec2(1.0, 3.0))
+    out = Finish.over(out, cb_stroke(max(ring, 0.0), max(rad * 0.055, 0.7), p, px, ink, fade * a))
+    let dir = vec2(0.0 - sin(ang), cos(ang))
+    let dp = cb_seg(p, fc + dir * rad * 0.22, fc + dir * rad * 0.74)
+    out = Finish.over(out, cb_stroke(dp, max(rad * 0.075, 0.9), p, px, ink, fade))
+    return out
+}
+
+// Ticks round a knob: `n` of them over the sweep from `r0` to `r1`, the
+// ends and the middle longer; those between `v0` and `v1` in full ink.
+let cb_ticks = fn(p: vec2, c: vec2, r0: float, r1: float, gap: float, v0: float, v1: float, n: float, px: float, dis: float) -> vec4 {
+    let start = gap * 0.5
+    let sweep = 2.0 * PI - gap
+    let q = p - c
+    var ang = atan2(0.0 - q.x, q.y)
+    if ang < 0.0 {
+        ang = ang + 2.0 * PI
+    }
+    let k = clamp(floor((ang - start) / sweep * (n - 1.0) + 0.5), 0.0, n - 1.0)
+    let f = k / (n - 1.0)
+    let ak = start + sweep * f
+    let dir = vec2(0.0 - sin(ak), cos(ak))
+    let major = max(1.0 - step(0.5, k), max(step(n - 1.5, k), 1.0 - step(0.5, abs(k - (n - 1.0) * 0.5))))
+    let ri = mix(r0 + (r1 - r0) * 0.35, r0, major)
+    let dl = cb_seg(p, c + dir * ri, c + dir * r1)
+    let on = step(v0 - 0.001, f) * step(f, v1 + 0.001)
+    let ink = mix(mix(vec3(0.33, 0.26, 0.18), cb_ink_c(), on), cb_dry_c(), dis)
+    let amt = mix(0.55, 1.0, on) * mix(1.0, 0.55, dis)
+    return cb_stroke(dl, 0.55, p, px, ink, amt)
+}
+
+// An arc drawn round a knob in marker over the value, in dry pencil over
+// the rest; `ar` its middle radius. The gap is centred at the bottom and the
+// value runs clockwise from its left end, or from the origin when bipolar.
+let cb_arc = fn(p: vec2, c: vec2, ar: float, aw: float, px: float, v0: float, v1: float, gap: float, dis: float) -> vec4 {
+    let start = gap * 0.5
+    let sweep = 2.0 * PI - gap
+    let q = p - c
+    var ang = atan2(0.0 - q.x, q.y)
+    if ang < 0.0 {
+        ang = ang + 2.0 * PI
+    }
+    let rd = abs(length(q) + cb_wob(p, 0.2, vec2(8.0, 8.0)) - ar)
+    let in_arc = step(start, ang) * step(ang, start + sweep)
+    let e0 = c + vec2(0.0 - sin(start), cos(start)) * ar
+    let e1 = c + vec2(0.0 - sin(start + sweep), cos(start + sweep)) * ar
+    let track_d = min(mix(1000.0, rd, in_arc), min(length(p - e0), length(p - e1)))
+    let a0 = start + sweep * v0
+    let a1 = start + sweep * v1
+    let l0 = c + vec2(0.0 - sin(a0), cos(a0)) * ar
+    let l1 = c + vec2(0.0 - sin(a1), cos(a1)) * ar
+    let lit_in = step(a0, ang) * step(ang, a1)
+    let lit_d = min(mix(1000.0, rd, lit_in), min(length(p - l0), length(p - l1)))
+    var out = cb_stroke(track_d, 0.45, p, px, vec3(0.33, 0.26, 0.18), mix(0.6, 0.35, dis))
+    return Finish.over(out, cb_stroke(lit_d, aw * 0.5, p, px, mix(cb_ink_c(), cb_dry_c(), dis), mix(1.0, 0.55, dis)))
+}
+
+mod.widgets.RotaryKnob.clip_x = false
+mod.widgets.RotaryKnob.clip_y = false
+mod.widgets.RotaryKnob.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let dia = min(size.x, size.y)
+    let rr = dia * 0.5 - 0.5
+    let c = vec2(Finish.snap(o.x + size.x * 0.5, px) - o.x, Finish.snap(o.y + size.y - dia * 0.5, px) - o.y)
+    let gap = self.gap * PI / 180.0
+    let rad = floor(rr * 0.71 / px) * px
+    let lo = min(self.origin_pos, self.slide_pos)
+    let hi = max(self.origin_pos, self.slide_pos)
+    let v0 = mix(0.0, lo, self.arc_origin)
+    let v1 = mix(self.slide_pos, hi, self.arc_origin)
+    var out = cb_ticks(p, c, rad + 2.6, rr, gap, v0, v1, 11.0, px, self.disabled)
+    let ang = gap * 0.5 + (2.0 * PI - gap) * self.slide_pos
+    out = Finish.over(out, cb_knob(p, c, rad, px, ang, max(self.hover, self.focus * 0.5), self.drag * live, self.disabled))
+    return Finish.over(out, cb_focus(length(p - c) - rr, p, px, self.focus * live))
+}
+// Knob captions are marker capitals.
+mod.widgets.RotaryKnob.draw_text.color = #x18140e
+mod.widgets.RotaryKnob.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+
+mod.widgets.RotaryFlat.clip_x = false
+mod.widgets.RotaryFlat.clip_y = false
+mod.widgets.RotaryFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let room = vec2(size.x, size.y - 24.0)
+    let dia = min(room.x, room.y)
+    let rr = dia * 0.5 - 3.5
+    let c = vec2(Finish.snap(o.x + size.x * 0.5, px) - o.x, Finish.snap(o.y + 24.0 + room.y * 0.5, px) - o.y)
+    let gap = self.gap * PI / 180.0
+    let aw = 2.2
+    let ar = floor((rr - aw * 0.5) / px) * px
+    let rad = floor(ar / 1.22 / px) * px
+    let lo = min(self.origin_pos, self.slide_pos)
+    let hi = max(self.origin_pos, self.slide_pos)
+    let v0 = mix(0.0, lo, self.arc_origin)
+    let v1 = mix(self.slide_pos, hi, self.arc_origin)
+    var out = cb_arc(p, c, ar, aw, px, v0, v1, gap, self.disabled)
+    let ang = gap * 0.5 + (2.0 * PI - gap) * self.slide_pos
+    out = Finish.over(out, cb_knob(p, c, rad, px, ang, max(self.hover, self.focus * 0.5), self.drag * live, self.disabled))
+    return Finish.over(out, cb_focus(length(p - c) - ar - aw * 0.5, p, px, self.focus * live))
+}
+
+// THE INSTRUMENT WINDOW, one for the readouts, the screen, the meter and the
+// dial's value: a frame of cream paper `b` points wide glued on the board
+// (its thin shadow under it, its edges a little uneven where it was cut),
+// and a face of black card set in it, a shade of the frame's shadow falling
+// on its top edge. `face` is what the face shows. Premultiplied.
+let cb_window = fn(p: vec2, lo: vec2, hi: vec2, r: float, b: float, px: float, face: vec3, recess: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let ho = (hi - lo) * 0.5
+    let r_out = min(r, min(ho.x, ho.y))
+    let outer = cb_rbox(p, c, ho, r_out) + cb_wob(p, 0.22, vec2(3.0, 13.0))
+    let hf = max(ho - vec2(b, b), vec2(0.5, 0.5))
+    let face_d = cb_rbox(p, c, hf, max(r_out - b * 0.5, 0.5)) + cb_wob(p, 0.12, vec2(23.0, 1.0))
+    var out = cb_under(p, c, ho, r_out, px, 0.0, cb_kraft_c(), 0.3)
+    var frame = cb_paper(p + vec2(7.0, 3.0), px, cb_cream_c(), 1.0)
+    frame = frame * (1.03 - 0.06 * smoothstep(0.0 - ho.y, ho.y, p.y - c.y))
+    frame = mix(frame, frame * 0.80, Finish.band(outer, 0.0, px, px) * 0.6)
+    var f = face
+    if recess > 0.0 {
+        let insh = Finish.inset(p, c, hf, max(r_out - b * 0.5, 0.5), vec2(0.0, recess * 0.4), max(recess * 0.4, 0.3))
+        f = f * (1.0 - 0.45 * insh)
+    }
+    f = mix(f, Finish.lift(f, 0.25), Finish.band(face_d, 0.0, px, px) * 0.5)
+    var col = mix(frame, f, Finish.cover(face_d, px))
+    let a = Finish.cover(outer, px)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+// The black card the instruments show on, with its own grain kept faint so
+// the figures read.
+let cb_screen_face = fn(p: vec2, px: float, base: vec3) -> vec3 {
+    let cloud = Finish.fbm(p * 0.07 + vec2(9.0, 2.0)) - 0.5
+    var col = base * (1.0 + cloud * 0.22) + g3(Finish.grain(p / px, 0.008))
+    let fa = cb_fibres(p, px, 3.0, vec2(5.0, 77.0), 0.45, 0.16, 0.3, 1.0)
+    col = mix(col, Finish.lift(base, 0.14), fa.y * 0.35)
+    return col
+}
+
+// The dial's value: the instrument window in small, yellow figures on it.
+mod.widgets.RotaryFlat.text_input.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 2.0 bottom: 2.0}
+mod.widgets.RotaryFlat.text_input.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.RotaryFlat.text_input.min_height = 22.0
+mod.widgets.RotaryFlat.text_input.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o + vec2(0.5, 0.5)
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o - vec2(0.5, 1.0)
+    return cb_window(p, lo, hi, 2.0, 2.2, px, cb_screen_face(p, px, cb_black_c()), 2.0)
+}
+mod.widgets.RotaryFlat.text_input.draw_text.color = #xf2c94e
+mod.widgets.RotaryFlat.text_input.draw_text.color_hover = #xf2c94e
+mod.widgets.RotaryFlat.text_input.draw_text.color_focus = #xf6d470
+mod.widgets.RotaryFlat.text_input.draw_text.color_empty = #a08a5a
+mod.widgets.RotaryFlat.text_input.draw_text.text_style = mod.theme.font_bold{font_size: 9.5}
+
+// ---------------------------------------------------------------------------
+// TEXT FIELDS. A slip of paler card glued on the board as a piece
+// (`cb_piece`): its cut edge under its foot, its shadow, and the marker
+// frame round its face. The quad grows for the edge and the shadow; the text
+// is clipped to the face as before. Focused, a blue ballpoint line runs
+// inside the marker; disabled, the marker has gone dry and the slip is the
+// board under tracing paper. `p` is the point in the grown quad.
+let cb_field = fn(p: vec2, size: vec2, o: vec2, px: float, hover: float, focus: float, dis: float, r: float) -> vec4 {
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let seed = size * vec2(0.61, 1.7)
+    let tint = Finish.lift(cb_kraft_c(), 0.15 + 0.05 * hover)
+    var out = cb_piece(p, c, h, vec4(r, r, r, r), px, 3.0, 0.0, 0.0, dis, 10.0, tint, 1.0 + 0.15 * focus, seed)
+    let fd = cb_rbox(p, c, h, r) + 3.9 + cb_wob(p, 0.2, vec2(1.0, 21.0))
+    return Finish.over(out, cb_stroke(abs(fd), 0.4, p, px, cb_pen_c(), 0.85 * focus))
+}
+
+mod.widgets.TextInputFlat.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 4.0 bottom: 4.0}
+mod.widgets.TextInputFlat.clip_x = false
+mod.widgets.TextInputFlat.clip_y = false
+mod.widgets.TextInputFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
+    // The value field inside a slider or a well draws no box of its own.
+    if self.color.a < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return cb_field(p, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, 3.0)
+}
+mod.widgets.FieldWell.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.FieldWell.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return cb_field(p, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, 3.0)
+}
+mod.widgets.TextInputFlat.draw_text.color_empty = #4a3a2a
+mod.widgets.TextInputFlat.draw_text.color_disabled = #x6e5a44
+mod.widgets.TextInputFlat.draw_cursor.color = #x18140e
+
+// NUMBER FIELDS. The field, and on its right a stepper column set off by a
+// marker line, its two halves each with a chevron drawn in marker; the half
+// under the pointer takes a breath of pencil, the held half a darker one.
+mod.widgets.NumberField.clip_x = false
+mod.widgets.NumberField.clip_y = false
+mod.widgets.NumberField.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.NumberField.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return cb_field(p, self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, 3.0)
+}
+mod.widgets.NumberField.pad_left = 10.0
+mod.widgets.NumberSpin.width = 18.0
+mod.widgets.NumberSpin.draw_text.color = #00000000
+mod.widgets.NumberSpin.draw_text.color_disabled = #00000000
+mod.widgets.NumberSpin.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y + 3.2, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x - 3.2, px), Finish.snap(o.y + self.rect_size.y - 3.2, px)) - o
+    let mid = (lo.y + hi.y) * 0.5
+    let upper = step(p.y, mid)
+    let hot = mix(max(0.0, 0.0 - self.hot), max(0.0, self.hot), upper) * live
+    let dn = mix(max(0.0, 0.0 - self.down), max(0.0, self.down), upper) * live
+    let inside = step(lo.x, p.x) * step(p.x, hi.x) * step(lo.y, p.y) * step(p.y, hi.y)
+    let wash = inside * (0.07 * hot + 0.14 * dn)
+    var out = vec4(cb_shade_c() * wash, wash)
+    let ink = mix(cb_ink_c(), cb_dry_c(), self.disabled)
+    let fade = mix(1.0, 0.6, self.disabled)
+    let dv = abs(p.x - lo.x - 0.6) + cb_wob(p, 0.15, vec2(3.0, 3.0))
+    let lv = max(dv, max(lo.y + 0.5 - p.y, p.y - hi.y + 0.5))
+    out = Finish.over(out, cb_stroke(max(lv, 0.0), 0.75, p, px, ink, fade))
+    let cx = (lo.x + hi.x) * 0.5 + 0.6
+    let yu = (lo.y + mid) * 0.5 + 0.5
+    let yd = (mid + hi.y) * 0.5 - 0.5
+    let cu = min(cb_seg(p, vec2(cx - 3.4, yu + 1.8), vec2(cx, yu - 1.6)), cb_seg(p, vec2(cx, yu - 1.6), vec2(cx + 3.4, yu + 1.8)))
+    let cdn = min(cb_seg(p, vec2(cx - 3.4, yd - 1.8), vec2(cx, yd + 1.6)), cb_seg(p, vec2(cx, yd + 1.6), vec2(cx + 3.4, yd - 1.8)))
+    return Finish.over(out, cb_stroke(min(cu, cdn), 0.75, p, px, ink, fade))
+}
+
+// The drag-number: the field, its track a wash of pencil behind the digits.
+mod.widgets.ValueInput.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ValueInput.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    var out = cb_field(p, self.rect_size, self.rect_pos, px, max(self.hover, self.drag), self.focus, 0.0, 3.0)
+    let d = cb_rbox(p, self.rect_size * 0.5, self.rect_size * 0.5 - vec2(3.5, 3.5), 2.0)
+    let wx = 3.5 + (self.rect_size.x - 7.0) * max(self.fill, 0.0)
+    let wash = step(0.0, self.fill) * step(p.x, wx) * Finish.cover(d, px) * 0.12
+    return Finish.over(out, vec4(cb_shade_c() * wash, wash))
+}
+mod.widgets.ValueInput.draw_text.color = #x18140e
+mod.widgets.ValueInput.draw_text.text_style = mod.theme.font_label{font_size: 12.5 line_spacing: 1.0}
+mod.widgets.ValueInput.arrow_color = #x18140e
+mod.widgets.ValueInput.text_input.draw_bg.color = #00000000
+
+// ---------------------------------------------------------------------------
+// DROP-DOWNS. The button's piece of card, with a triangle filled in marker
+// on its right. Open, the piece is held pressed down. A drop-down in a row
+// of fields stands as tall as they do: both are the row's height, the cut
+// edge under them.
+let cb_dropdown = fn(pos: vec2, size: vec2, o: vec2, px: float, hover: float, held: float, focus: float, dis: float, ins: float) -> vec4 {
+    let m = 5.0
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    var out = cb_button(pos, size, o, px, hover, held, focus, dis, 0.0, 0.0, vec4(4.0, 4.0, 4.0, 4.0), 0.0, m, vec4(0.0, 0.0, 0.0, 0.0), 0.0)
+    let th = clamp(size.y * 0.105, 2.0, 3.4)
+    let dn = held * (1.0 - dis) * th * 0.7
+    let cc = vec2(size.x - 13.0, size.y * 0.5 + dn + 0.5)
+    let tri = cb_tri(p, cc, 4.6, 2.8, 1.0) + cb_wob(p, 0.12, vec2(2.0, 2.0))
+    return Finish.over(out, cb_fill(tri, p, px, mix(cb_ink_c(), cb_dry_c(), dis), mix(1.0, 0.6, dis)))
+}
+
+mod.widgets.DropDownFlat.padding = mod.turtle.Inset{left: 12.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.DropDown.padding = mod.turtle.Inset{left: 12.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.DropDownFlat.clip_x = false
+mod.widgets.DropDownFlat.clip_y = false
+mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, max(self.down, self.active), self.focus, self.disabled, 0.0)
+}
+
+// The select wears a button of its own, built before this sheet: it is given
+// the drop-down's face, its grown quad, and no clip, here by name.
+mod.widgets.Select.clip_x = false
+mod.widgets.Select.clip_y = false
+mod.widgets.MultiSelect.clip_x = false
+mod.widgets.MultiSelect.clip_y = false
+mod.widgets.Select.face.clip_x = false
+mod.widgets.Select.face.clip_y = false
+mod.widgets.MultiSelect.face.clip_x = false
+mod.widgets.MultiSelect.face.clip_y = false
+mod.widgets.Select.face.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.MultiSelect.face.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Select.face.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, 0.0)
+}
+mod.widgets.MultiSelect.face.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, 0.0)
+}
+mod.widgets.Select.face.padding.right = 30.0
+mod.widgets.MultiSelect.face.padding.right = 30.0
+
+// The combo box: the field one types into, its triangle filled in marker at
+// the right end; the triangle sits down a device pixel while held.
+mod.widgets.ComboBox.padding = mod.turtle.Inset{left: 10.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.ComboBox.input.min_height = 0.0
+mod.widgets.ComboBox.clip_x = false
+mod.widgets.ComboBox.clip_y = false
+mod.widgets.ComboBox.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ComboBox.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - self.disabled
+    var out = cb_field(p, size, self.rect_pos, px, self.hover, self.focus, self.disabled, 3.0)
+    let held = self.down * self.hover * live
+    let cc = vec2(size.x - 14.0, size.y * 0.5 + held * px + 0.5)
+    let tri = cb_tri(p, cc, 4.6, 2.8, 1.0) + cb_wob(p, 0.12, vec2(2.0, 2.0))
+    return Finish.over(out, cb_fill(tri, p, px, mix(cb_ink_c(), cb_dry_c(), self.disabled), mix(1.0, 0.6, self.disabled)))
+}
+
+// ---------------------------------------------------------------------------
+// SEGMENTS AND TABS. The strip is one piece of card glued on the board,
+// framed in marker; the chosen segment is a piece of black card set into it
+// with a gap of its own, pressed in, its word in cream.
+let cb_strip = fn(p: vec2, size: vec2, o: vec2, px: float) -> vec4 {
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    return cb_piece(p, c, h, vec4(4.0, 4.0, 4.0, 4.0), px, clamp(h.y * 0.19, 1.8, 3.0), 0.0, 0.0, 0.0, 0.0, vec3(0.0, 0.0, 0.0), 1.0, size * vec2(1.1, 0.7))
+}
+// The chosen cell: black card, its gap round it, pressed in. `lo` and `hi`
+// are the cell's corners in the quad's own points.
+let cb_cell = fn(p: vec2, lo: vec2, hi: vec2, px: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = cb_rbox(p, c, h, 3.0) + cb_wob(p, 0.14, vec2(6.0, 6.0))
+    var out = cb_gap(p, d, p.y - c.y, h.y, 1.1, px, 1.0)
+    var face = cb_blackcard(p + hi * 1.7, px, 1.0)
+    let insh = clamp(Finish.inset(p, c, h, 3.0, vec2(0.0, 1.2), 1.0), 0.0, 1.0)
+    face = mix(face, vec3(0.03, 0.025, 0.02), insh * 0.5)
+    face = cb_cut_edge(face, d, p.y - c.y, h.y, px, 0.6)
+    let a = Finish.cover(d, px)
+    return Finish.over(out, vec4(face * a, a))
+}
+
+mod.widgets.SegmentedControlFlat.segment_height = 26.0
+mod.widgets.SegmentedControlFlat.segment_padding = 10.0
+mod.widgets.SegmentedControlFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return cb_strip(p, self.rect_size, self.rect_pos, px)
+}
+// The pill is the segment's own box, two points in from the strip; the card
+// stands a point further in, inside the strip's marker frame. Its quad grows
+// two points round it for the gap and its lip.
+mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(2.0, 2.0), self.rect_size + vec2(4.0, 4.0))
+}
+mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let o = self.rect_pos
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(4.0, 4.0)) - vec2(2.0, 2.0)
+    let lo = vec2(Finish.snap(o.x + 1.5, px), Finish.snap(o.y + 1.5, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x - 1.5, px), Finish.snap(o.y + size.y - 1.5, px)) - o
+    return cb_cell(p, lo, hi, px)
+}
+mod.widgets.SegmentedControlFlat.draw_text.color = #x18140e
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #xf1e6cf
+mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #xf1e6cf
+mod.widgets.SegmentedControlFlat.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.SegmentedControlFlat.draw_text_selected.text_style = mod.theme.font_label{}
+
+// The tab strip: every tab a piece of card glued on the board side by side,
+// framed in marker; the tab in use is yellow paper, a hovered one a shade
+// lighter. The close mark is a marker cross; the add mark a small piece of
+// card of its own with a marker plus.
+let cb_tab = fn(pos: vec2, size: vec2, o: vec2, px: float, kind: float, hover: float) -> vec4 {
+    let m = 5.0
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(Finish.snap(o.x + 2.0, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x - 2.0, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    return cb_piece(p, c, h, vec4(4.0, 4.0, 4.0, 4.0), px, clamp(h.y * 0.19, 1.8, 3.0), hover, 0.0, 0.0, kind, vec3(0.0, 0.0, 0.0), 1.0, size * vec2(0.9, 1.3))
+}
+mod.widgets.Tabs.height = 30.0
+mod.widgets.Tabs.clip_x = false
+mod.widgets.Tabs.clip_y = false
+mod.widgets.Tabs.draw_bg.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Tabs.draw_tab.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_tab(self.pos, self.rect_size, self.rect_pos, px, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_hover.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Tabs.draw_tab_hover.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_tab(self.pos, self.rect_size, self.rect_pos, px, 0.0, 1.0)
+}
+mod.widgets.Tabs.draw_tab_active.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Tabs.draw_tab_active.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_tab(self.pos, self.rect_size, self.rect_pos, px, 9.0, 0.0)
+}
+mod.widgets.Tabs.draw_sep.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_mark.color = #x18140e
+mod.widgets.Tabs.draw_mark.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Tabs.draw_mark.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let c = self.rect_size * 0.5
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    if self.plus > 0.5 {
+        let bh = self.rect_size * 0.5 + vec2(2.0, 2.0)
+        out = cb_piece(p, c, bh, vec4(3.0, 3.0, 3.0, 3.0), px, 2.0, 0.0, 0.0, 0.0, 0.0, vec3(0.0, 0.0, 0.0), 1.0, vec2(23.0, 7.0))
+    }
+    let a = mix(0.7853981634, 0.0, self.plus)
+    let r = mix(3.2, 4.4, self.plus)
+    let u = vec2(cos(a), sin(a)) * r
+    let v = vec2(0.0 - sin(a), cos(a)) * r
+    let dd = min(cb_seg(p, c - u, c + u), cb_seg(p, c - v, c + v))
+    return Finish.over(out, cb_stroke(dd, mix(0.65, 0.85, self.plus), p, px, self.color.rgb, self.color.a))
+}
+mod.widgets.Tabs.draw_text.color = #x18140e
+mod.widgets.Tabs.draw_text_active.color = #100c08
+mod.widgets.Tabs.draw_text.text_style = mod.theme.font_label{font_size: 11.5}
+mod.widgets.Tabs.draw_text_active.text_style = mod.theme.font_label{font_size: 11.5}
+
+// ---------------------------------------------------------------------------
+// PROGRESS. A thin marker line the length of the bar, and over the value a
+// broad stroke of marker (a coloured marker for an intent). The unknown
+// value is a row of short slanted strokes along the whole line: a face may
+// not run a clock.
+mod.widgets.ProgressBarFlat.height = 8.0
+mod.widgets.ProgressBarFlat.draw_bg.thickness = uniform(7.0)
+mod.widgets.ProgressBarFlat.clip_x = false
+mod.widgets.ProgressBarFlat.clip_y = false
+mod.widgets.ProgressBarFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 3.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 3.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let th = min(self.thickness, size.y)
+    let cy = size.y * 0.5
+    let x0 = size.x * self.start
+    let x1 = size.x * self.end
+    let dis = step(4.5, self.intent)
+    var ink = cb_ink_c()
+    if self.intent > 0.5 {
+        ink = mix(self.fill_color().rgb * 0.85, cb_ink_c(), 0.25)
+    }
+    ink = mix(ink, cb_dry_c(), dis)
+    let wy = cy + (Finish.noise(vec2(p.x * 0.05, 7.0)) - 0.5) * 0.5
+    let hw = th * 0.5 - 0.3
+    var out = cb_stroke(cb_seg(p, vec2(x0 + 0.7, wy), vec2(x1 - 0.7, wy)), 0.7, p, px, cb_ink_c(), 0.75 * self.track)
+    if self.value < 0.0 {
+        let u = (p.x - x0) / 6.0
+        let k = floor(u)
+        let sx = x0 + (k + 0.5) * 6.0
+        let ds = cb_seg(p, vec2(sx - 1.6, wy + hw), vec2(sx + 1.6, wy - hw))
+        let inr = step(x0 + 1.0, sx) * step(sx, x1 - 1.0)
+        out = Finish.over(out, cb_stroke(ds, 0.8, p, px, ink, inr))
+    } else {
+        let v1 = x0 + (x1 - x0) * clamp(self.value, 0.0, 1.0)
+        if v1 - x0 > 0.5 {
+            let a = x0 + hw
+            let b = max(v1 - hw, a)
+            out = Finish.over(out, cb_stroke(cb_seg(p, vec2(a, wy), vec2(b, wy)), hw, p, px, ink, 1.0))
+        }
+    }
+    return out * self.opacity
+}
+
+// ---------------------------------------------------------------------------
+// LAMPS: an LED pushed through a hole punched in the card. The emitter is
+// the light: at full current its middle burns toward white and its rim is
+// its most saturated colour; at lower current the middle is no longer
+// white, the colour deeper, the glow smaller; out, it is dark tinted glass,
+// its colour barely there. Round it the punched hole: a dark socket, its
+// upper wall in shade and a catch light on its lower rim, and round that a
+// ring of torn card fibres the punch pushed down. Over the lens one crisp
+// highlight of a dome. Its light is added, never painted: a tight hot halo
+// and a short bloom in its own hue, screened over the card and gone in about
+// two radii.
+let cb_led_add = fn(res: vec4, light: vec3, ground: vec3) -> vec4 {
+    let est = res.rgb + ground * (1.0 - res.a)
+    let add = (vec3(1.0, 1.0, 1.0) - exp(0.0 - light)) * max(vec3(1.0, 1.0, 1.0) - est, vec3(0.0, 0.0, 0.0))
+    return vec4(res.rgb + add, res.a)
+}
+let cb_led = fn(p: vec2, c: vec2, hb: vec2, lit: float, ink: vec3, vivid: float, px: float, room: float) -> vec4 {
+    let rt = max(min(hb.x, hb.y), 0.4)
+    let d = Material.sd_box(p, c, hb, rt)
+    let bw = clamp(0.42 * rt, 1.0, 2.4)
+    let ds = d - bw
+    let L = clamp(lit, 0.0, 1.0)
+    let b = ink / max(max(ink.x, max(ink.y, ink.z)), 0.01)
+    let mn = min(b.x, min(b.y, b.z))
+    let pure = (b - vec3(mn, mn, mn)) / max(1.0 - mn, 0.001)
+    let hue = mix(b, pure, clamp(vivid, 0.0, 1.0) * 0.72 * smoothstep(0.03, 0.12, 1.0 - mn))
+    let pw = L * sqrt(L)
+    let white = vec3(1.0, 1.0, 1.0)
+    let ground = cb_kraft_c()
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    let ex = max(hb.x - hb.y, 0.0)
+    let ey = max(hb.y - hb.x, 0.0)
+    let qx = p.x - c.x
+    let qy = p.y - c.y
+    let q = vec2(qx - clamp(qx, 0.0 - ex, ex), qy - clamp(qy, 0.0 - ey, ey)) / rt
+    let t = clamp(length(q), 0.0, 1.0)
+    let nrm = q / max(length(q), 0.001)
+    // the punched edge: torn fibres pushed down round the hole
+    let ang = atan2(q.y, q.x)
+    let tear = (Finish.noise(vec2(ang * 3.0, rt)) - 0.5) * 0.9 + (Finish.hash(vec2(floor(ang * 9.0), rt)) - 0.5) * 0.5
+    let dr = ds - 1.2 - tear * 0.7
+    let rag = Finish.cover(dr, px) * (1.0 - Finish.cover(ds, px))
+    let ragc = mix(cb_liner_c() * 0.95, cb_kraft_c() * 0.58, smoothstep(-0.7, 0.7, 0.0 - nrm.y))
+    res = Finish.over(res, vec4(ragc * rag * 0.9, rag * 0.9))
+    // the socket: the hole's wall, shade above and a catch light below
+    let a_s = Finish.cover(ds, px)
+    let gy = clamp(nrm.y * t, -1.0, 1.0)
+    var sc = vec3(0.14, 0.09, 0.05) * mix(0.55, 1.2, smoothstep(-0.9, 0.9, gy))
+    sc = mix(sc, cb_liner_c() * 0.8, Finish.band(ds, 0.0, max(px, 0.45), px) * smoothstep(0.2, 0.95, nrm.y) * 0.7)
+    res = Finish.over(res, vec4(sc * a_s, a_s))
+    // the light: a tight hot halo and a short bloom in its hue
+    if L > 0.001 {
+        let xl = max(d, 0.0)
+        let halo = exp(0.0 - xl / max(0.30 * rt, 0.4)) * 1.5 + exp(0.0 - xl / max(0.65 * rt, 0.7)) * 0.32
+        let hwin = 1.0 - smoothstep(0.55 * room, room, xl)
+        res = cb_led_add(res, mix(hue, white, 0.15 * pw) * halo * pw * hwin, ground)
+    }
+    // the bead: a glossy dome of coloured glass
+    let top = smoothstep(-1.0, 0.6, q.y)
+    let pool = exp(0.0 - (q.y - 0.55) * (q.y - 0.55) / 0.09 - q.x * q.x / 0.30)
+    var on = mix(hue * mix(0.55, 0.8, L), mix(b, hue, 0.5), top)
+    on = mix(on, min(mix(b, hue, 0.4) + vec3(0.35, 0.35, 0.35), white), pool * 0.5)
+    on = mix(on, vec3(1.0, 0.99, 0.975), exp(0.0 - t * t / 0.20) * smoothstep(0.5, 1.0, L) * 0.85)
+    on = mix(on, hue * (0.82 + 0.18 * L), smoothstep(0.62, 1.0, t))
+    on = on * (0.42 + 0.58 * L)
+    let offc = mix(vec3(0.085, 0.075, 0.07), b * 0.45, 0.24)
+    var off = mix(offc * 0.62, offc * 1.08, top)
+    off = mix(off, min(offc + vec3(0.18, 0.18, 0.18), white), pool * 0.35)
+    off = off * mix(1.0, 0.75, smoothstep(0.75, 1.0, t))
+    let catchl = smoothstep(0.62, 0.9, t) * (1.0 - smoothstep(0.9, 1.0, t)) * smoothstep(0.2, 0.9, nrm.y)
+    off = off + vec3(0.30, 0.30, 0.32) * catchl
+    var col = mix(off, min(on, white), smoothstep(0.0, 0.35, L))
+    let e = length(vec2(q.x / 0.62, (q.y + 0.46) / 0.30))
+    let spec = (1.0 - smoothstep(0.55, 1.0, e)) * mix(1.0, 0.3, clamp((q.y + 0.76) / 0.6, 0.0, 1.0))
+    col = mix(col, white, spec * mix(0.8, 0.55, L) * smoothstep(0.9, 2.2, rt))
+    col = mix(col, col * 0.7, Finish.band(d, 0.0, px * 0.6, px) * 0.6 * (1.0 - smoothstep(0.0, 0.25, L)))
+    col = min(col, white)
+    let a_l = Finish.cover(d, px)
+    return Finish.over(res, vec4(col * a_l, a_l))
+}
+
+// ---------------------------------------------------------------------------
+// LEVEL METERS. A row of short marker dashes, the lit ones full ink and the
+// last tenth in red marker, the unlit ones only outlined in dry pencil; the
+// hold is a dash drawn across; the over lamp an LED in a punched hole. On a
+// display (a meter with no lamp lying along a screen) the dashes are the
+// display's yellow paint, the unlit ones a ghost of it.
+mod.widgets.LevelMeter.height = 9.0
+mod.widgets.LevelMeterColumn.width = 9.0
+mod.widgets.LevelMeter.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 3.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.LevelMeter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(6.0, 6.0)) - vec2(3.0, 3.0)
+    let vert = self.vertical
+    let along = mix(self.rect_size.x, self.rect_size.y, vert)
+    let across = mix(self.rect_size.y, self.rect_size.x, vert)
+    let a = mix(p.x, self.rect_size.y - p.y, vert)
+    let b = mix(p.y, p.x, vert)
+    let screen = (1.0 - step(0.5, self.lamp)) * (1.0 - step(0.5, vert))
+    let th = min(7.0, across - 1.0)
+    let lamp_room = self.lamp * (th + 6.0)
+    let bar = max(4.0, along - lamp_room)
+    let pitch = mix(5.0, 3.5, screen)
+    let cw = mix(2.6, 2.0, screen)
+    let n = max(floor((bar - 1.0) / pitch), 1.0)
+    let pad = (bar - n * pitch) * 0.5
+    let k = clamp(floor((a - pad) / pitch), 0.0, n - 1.0)
+    let ca = pad + (k + 0.5) * pitch
+    let share = (k + 0.5) / n
+    let lit = step(share, self.level + 0.5 / n) * step(0.001, self.level)
+    let q = vec2(a, b)
+    let hh = th * 0.5 - mix(0.5, 1.0, screen)
+    let dd = cb_rbox(q, vec2(ca, across * 0.5), vec2(cw * 0.5, hh), cw * 0.5) + cb_wob(p, 0.12, vec2(7.0, 2.0))
+    let hot = step(0.9, share)
+    var ink = mix(cb_ink_c(), cb_redink_c(), hot)
+    ink = mix(ink, vec3(0.949, 0.788, 0.306), screen)
+    var out = cb_fill(dd, p, px, ink, lit * mix(1.0, 0.95, screen))
+    let pencil = mix(vec3(0.30, 0.24, 0.17), vec3(0.949, 0.788, 0.306), screen)
+    out = Finish.over(out, cb_stroke(abs(dd), 0.38, p, px, pencil, (1.0 - lit) * mix(0.45, 0.0, screen)))
+    out = Finish.over(out, cb_fill(dd, p, px, pencil, (1.0 - lit) * screen * 0.16))
+    if self.hold > 0.002 {
+        let at = pad + n * pitch * self.hold
+        let hd = cb_seg(q, vec2(at, across * 0.5 - hh - 1.0), vec2(at, across * 0.5 + hh + 1.0))
+        out = Finish.over(out, cb_stroke(hd, 0.7, p, px, ink, 1.0))
+    }
+    if self.lamp > 0.5 {
+        let la = bar + 3.0 + th * 0.5
+        let lc = vec2(mix(la, across * 0.5, vert), mix(across * 0.5, self.rect_size.y - la, vert))
+        out = Finish.over(out, cb_led(p, lc, vec2(2.4, 2.4), step(0.5, self.over), vec3(0.95, 0.20, 0.12), 1.0, px, 2.2))
+    }
+    return out * self.opacity
+}
+
+// ---------------------------------------------------------------------------
+// SCROLL BARS. A narrow slot cut in the board, and riding in it a strip of
+// board glued on, its thin shadow under it.
+mod.widgets.ScrollBar.bar_size = 10.0
+mod.widgets.ScrollBar.bar_side_margin = 0.0
+mod.widgets.ScrollBar.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let vert = self.is_vertical
+    let along = mix(self.rect_size.x, self.rect_size.y, vert)
+    let across = mix(self.rect_size.y, self.rect_size.x, vert)
+    let sc = self.rect_size * 0.5
+    let sh = mix(vec2(along * 0.5 - 1.0, 1.4), vec2(1.4, along * 0.5 - 1.0), vert)
+    let sd = cb_rbox(p, sc, sh, 1.4)
+    let sa = Finish.cover(sd, px) * 0.55
+    var out = vec4(vec3(0.10, 0.065, 0.035) * sa, sa)
+    let t0 = along * self.norm_scroll
+    let tl = along * self.norm_handle
+    let tc1 = t0 + tl * 0.5
+    let tc = mix(vec2(tc1, sc.y - 0.6), vec2(sc.x, tc1 - 0.6), vert)
+    let th = mix(vec2(max(tl * 0.5 - 1.0, 4.0), 3.2), vec2(3.2, max(tl * 0.5 - 1.0, 4.0)), vert)
+    out = Finish.over(out, cb_under(p, tc, th, 3.2, px, 1.1, cb_kraft_c(), 0.2))
+    let td = cb_rbox(p, tc, th, 3.2)
+    var face = cb_kraft(p + vec2(13.0, 3.0), px, Finish.lift(cb_kraft_c(), 0.08), 1.0)
+    face = Finish.lift(face, 0.10 * self.hover - 0.06 * self.drag)
+    face = cb_cut_edge(face, td, p.y - tc.y, th.y, px, 1.0)
+    let ta = Finish.cover(td, px)
+    out = Finish.over(out, vec4(face * ta, ta))
+    return out * self.opacity
+}
+
+// ---------------------------------------------------------------------------
+// VIEWS AND PANELS. A raised panel is a piece of board glued on the board:
+// its shadow, its cut edge along its foot with the flutes in it, the pale
+// cut line round its face. The sunken panel is a window cut through the
+// board: the cut wall along its top seen side on, the floor the deeper
+// board beyond it in the wall's shade, a pale lip where the window's liner
+// was cut along its foot.
+let cb_plate = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, sunken: float) -> vec4 {
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let seed = size * vec2(0.73, 1.19)
+    let d = cb_rbox(p, c, h, r) + cb_wob(p, 0.22, seed * 0.01)
+    if sunken > 0.5 {
+        let th = 3.0
+        let g = cb_gap(p, d + 0.01, p.y - c.y, h.y, 0.01, px, 1.0)
+        let yin = p.y - lo.y
+        let wall = cb_flute(p.x + seed.x, clamp(yin / th, 0.0, 1.0), th, px, cb_kraft_c())
+        var flr = cb_kraft(p + seed, px, cb_kraft_c() * 0.86, 1.0)
+        let ish = clamp(Finish.inset(p, c + vec2(0.0, th), h, r, vec2(0.0, 1.6), 2.0), 0.0, 1.0)
+        flr = mix(flr, cb_shade_c(), ish * 0.40)
+        let side = clamp(Finish.inset(p, c, h, r, vec2(0.0, 0.0), 0.6), 0.0, 1.0)
+        flr = mix(flr, cb_shade_c(), side * 0.35)
+        var col = mix(flr, wall, (1.0 - step(th, yin)) * step(0.0, yin))
+        let a = Finish.cover(d, px)
+        let lip = Finish.ring_out(d, 0.0, 1.2 * px, px) * smoothstep(0.0, h.y, p.y - c.y) * 0.8
+        var out = vec4(cb_liner_c() * lip, lip)
+        out = Finish.over(out, vec4(col * a, a))
+        return Finish.over(g, out)
+    }
+    var out = cb_under(p, c, h, r, px, 2.6, cb_kraft_c(), 0.6)
+    var face = cb_kraft(p + seed, px, Finish.lift(cb_kraft_c(), 0.05), 1.0)
+    // the flutes under the liner show through it as the faintest ribs
+    face = face * (1.0 + 0.016 * sin((p.y + seed.y) / 4.4 * 6.2831853) * (0.6 + 0.4 * Finish.noise(p * 0.05)))
+    face = cb_cut_edge(face, d, p.y - c.y, h.y, px, 1.0)
+    let a = Finish.cover(d, px)
+    return Finish.over(out, vec4(face * a, a))
+}
+
+mod.widgets.PanelView.clip_x = false
+mod.widgets.PanelView.clip_y = false
+mod.widgets.PanelView.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 8.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.PanelView.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 8.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return cb_plate(p, self.rect_size, self.rect_pos, px, 5.0, self.sunken)
+}
+
+// A STRIP OF MASKING TAPE: crepe paper, cream and a little translucent, its
+// fine crinkles running across it, its two ends torn ragged. `c` its
+// middle, `ang` its turn, `hl` and `hw` half its length and width.
+let cb_tape = fn(p: vec2, c: vec2, ang: float, hl: float, hw: float, px: float, seed: float) -> vec4 {
+    let cs = cos(ang)
+    let sn = sin(ang)
+    let q = vec2((p.x - c.x) * cs + (p.y - c.y) * sn, (p.y - c.y) * cs - (p.x - c.x) * sn)
+    let tear = (Finish.noise(vec2(q.y * 1.7, seed + step(0.0, q.x) * 9.0)) - 0.5) * 1.8 + (Finish.hash(vec2(floor(q.y * 2.5), seed)) - 0.5) * 0.6
+    let de = abs(q.x) - hl - tear
+    let ds = abs(q.y) - hw - (Finish.noise(vec2(q.x * 0.6, seed + 3.0)) - 0.5) * 0.3
+    let d = max(de, ds)
+    let crepe = 1.0 + (Finish.noise(vec2(q.x * 2.4, q.y * 0.25 + seed)) - 0.5) * 0.08 + Finish.grain(p / px, 0.012)
+    let col = vec3(0.925, 0.870, 0.725) * crepe
+    let a = Finish.cover(d, px) * 0.84
+    let edge = Finish.ring_out(d, 0.0, 0.8, px) * 0.12
+    var out = vec4(cb_shade_c() * edge, edge)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+// The card is a sheet of cream paper glued on, held down at its top right
+// corner by a strip of masking tape laid across it; it lifts a little under
+// the pointer.
+mod.widgets.Card.radius = 3.0
+mod.widgets.Card.clip_x = false
+mod.widgets.Card.clip_y = false
+mod.widgets.Card.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 8.0)
+    return self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Card.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 8.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = cb_rbox(p, c, h, 2.0) + cb_wob(p, 0.2, vec2(5.0, 1.0))
+    let lift = 0.4 + 0.4 * self.hover - 0.3 * self.down
+    var out = cb_under(p, c, h, 2.0, px, 0.0, cb_kraft_c(), lift)
+    var face = cb_paper(p + size * 0.37, px, cb_cream_c(), 1.0)
+    face = face * (1.02 - 0.05 * smoothstep(0.0 - h.y, h.y, p.y - c.y))
+    face = Finish.lift(face, 0.04 * self.hover)
+    face = mix(face, face * 0.86, Finish.band(d, 0.0, px, px) * 0.6)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    return Finish.over(out, cb_tape(p, vec2(hi.x - 12.0, lo.y + 6.0), 0.62, 13.0, 5.0, px, 3.0))
+}
+
+// The plain rounded view keeps the colour its caller gives it, laid as a
+// sheet of paper of that colour; the edge a snapped line at the radius.
+mod.widgets.RoundedView.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    var fill = self.color
+    if self.color_2.x > -0.5 {
+        fill = mix(self.color, self.color_2, mix(self.pos.y, self.pos.x, self.gradient_fill_horizontal))
+    }
+    let lo = vec2(self.border_inset.x, self.border_inset.y)
+    let hi = self.rect_size - vec2(self.border_inset.z, self.border_inset.w)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = cb_rbox(p, c, h, max(self.border_radius, 1.0))
+    var col = cb_paper(p + self.rect_size * 0.29, px, fill.rgb, step(0.9, fill.a))
+    if self.border_size > 0.0 {
+        col = mix(col, self.border_color.rgb, Finish.band(d, 0.0, max(self.border_size, px), px) * self.border_color.a)
+    }
+    let a = Finish.cover(d, px) * fill.a
+    return vec4(col * a, a)
+}
+
+// ---------------------------------------------------------------------------
+// LISTS. Rows of 22 points of words on the board; a hovered row is
+// underlined in faint pencil; the chosen row is a strip of yellow paper
+// glued on, its thin shadow under it.
+mod.widgets.ListItemOne.height = 22.0
+mod.widgets.ListItem.padding = mod.turtle.Inset{left: 10.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    if self.selected > 0.5 {
+        let h = vec2((hi.x - lo.x) * 0.5 - 6.0, (hi.y - lo.y) * 0.5 - 2.0)
+        let c = vec2(lo.x + h.x + 2.0, (lo.y + hi.y) * 0.5 - 0.6)
+        let d = cb_rbox(p, c, h, 1.0) + cb_wob(p, 0.2, vec2(8.0, 3.0))
+        out = cb_under(p, c, h, 1.0, px, 0.0, cb_kraft_c(), 0.1)
+        var face = cb_paper(p + vec2(3.0, 41.0), px, cb_yellow_c(), 1.0)
+        face = mix(face, face * 0.84, Finish.band(d, 0.0, px, px) * 0.6)
+        let a = Finish.cover(d, px)
+        out = Finish.over(out, vec4(face * a, a))
+    }
+    let uy = hi.y - 2.5 + (Finish.noise(vec2(p.x * 0.07, 5.0)) - 0.5) * 0.6
+    let du = cb_seg(p, vec2(lo.x + 8.0, uy), vec2(hi.x - 14.0, uy))
+    out = Finish.over(out, cb_stroke(du, 0.4, p, px, vec3(0.30, 0.24, 0.17), (0.45 * self.hover + 0.25 * self.down) * live * (1.0 - self.selected)))
+    return out
+}
+mod.widgets.ListItem.draw_text.color = #x18140e
+
+// The open list of a drop-down: a sheet of cream paper with its shadow;
+// the row under the pointer is swept with yellow highlighter, the chosen
+// row carries a marker tick.
+mod.widgets.PopupMenuFlat.clip_x = false
+mod.widgets.PopupMenuFlat.clip_y = false
+mod.widgets.PopupMenuFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.PopupMenuFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = cb_rbox(p, c, h, 2.0) + cb_wob(p, 0.2, vec2(1.0, 1.0))
+    var out = cb_under(p, c, h, 2.0, px, 0.0, cb_kraft_c(), 1.0)
+    var face = cb_paper(p + vec2(17.0, 9.0), px, cb_cream_c(), 1.0)
+    face = mix(face, face * 0.82, Finish.band(d, 0.0, px, px) * 0.7)
+    let a = Finish.cover(d, px)
+    return Finish.over(out, vec4(face * a, a))
+}
+mod.widgets.PopupMenuItem.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let live = 1.0 - self.disabled
+    let hy = c.y + (Finish.noise(vec2(p.x * 0.06, 2.0)) - 0.5) * 0.8
+    let h = vec2(c.x - 3.0, c.y - 2.0)
+    let d = cb_rbox(p, vec2(c.x, hy), h, h.y)
+    let wa = Finish.cover(d, px) * self.hover * live * 0.55
+    var out = vec4(cb_yellow_c() * wa, wa)
+    let m0 = vec2(6.0, c.y)
+    let m1 = vec2(8.6, c.y + 2.8)
+    let m2 = vec2(13.0, c.y - 3.6)
+    let mk = min(cb_seg(p, m0, m1), cb_seg(p, m1, m2))
+    return Finish.over(out, cb_stroke(mk, 0.8, p, px, cb_ink_c(), self.active))
+}
+
+// The dock's tabs: the tab in use is a piece of board glued on, rounded at
+// the top and open at the foot where it joins the panel below; the others
+// take a breath of pencil under the pointer.
+mod.widgets.Tab.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 3.0 bottom: 3.0}
+mod.widgets.Tab.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y + 2.0, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o + vec2(0.0, 6.0)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = cb_rbox(p, c, h, 4.0)
+    var face = cb_kraft(p + vec2(7.0, 7.0), px, Finish.lift(cb_kraft_c(), 0.05), 1.0)
+    face = cb_cut_edge(face, d, p.y - c.y, h.y, px, 1.0)
+    let a = Finish.cover(d, px) * self.active
+    let wash = Finish.cover(d, px) * 0.08 * self.hover * (1.0 - self.active)
+    return Finish.over(vec4(cb_shade_c() * wash, wash), vec4(face * a, a))
+}
+mod.widgets.TabBar.draw_fill.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let yb = self.rect_size.y - 1.0 + (Finish.noise(vec2(p.x * 0.05, 1.0)) - 0.5) * 0.4
+    return cb_stroke(abs(p.y - yb), 0.5, p, px, cb_ink_c(), 0.7)
+}
+
+// ---------------------------------------------------------------------------
+// CHIPS AND BADGES. A chip is a small piece in its window (paper of its
+// colour when it has one, framed in marker when outlined, bare when a
+// ghost); a badge is a slip of paper framed in marker with its count.
+mod.widgets.ChipFlat.size = mod.widgets.ChipSize.Small
+mod.widgets.Chip.size = mod.widgets.ChipSize.Small
+mod.widgets.ChipFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ChipFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let ch = min(24.0, self.rect_size.y)
+    let dy = (self.rect_size.y - ch) * 0.5
+    let sz = vec2(self.rect_size.x, ch)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let pp = (p - vec2(0.0, dy) + vec2(m, m)) / (sz + vec2(2.0 * m, 2.0 * m))
+    let has_fill = step(0.05, self.color.a)
+    let mx = max(self.color.r, max(self.color.g, self.color.b))
+    let mn = min(self.color.r, min(self.color.g, self.color.b))
+    let neutral = 1.0 - step(0.25, (mx - mn) / max(mx, 0.01))
+    let light_ink = step(0.6, Finish.lum(self.ink.rgb))
+    let kind = mix(mix(mix(6.0, 5.0, step(0.01, self.border_size)), mix(7.0, 0.0, neutral), has_fill), 1.0, light_ink)
+    let tint = vec4(self.color.rgb, has_fill)
+    // light words ask for a dark ground: they are written on black card
+    return cb_button(pp, sz, self.rect_pos + vec2(0.0, dy), px, self.hover, self.down, self.keyed, 0.0, 0.0, 0.0, vec4(4.0, 4.0, 4.0, 4.0), kind, m, tint, 0.0)
+}
+mod.widgets.BadgePalette.neutral = #xe6d8bc
+mod.widgets.BadgePalette.on_neutral = #x18140e
+mod.widgets.BadgeFlat.draw_text.text_style = mod.theme.font_label{font_size: 10.0}
+mod.widgets.Badge.draw_text.text_style = mod.theme.font_label{font_size: 10.0}
+mod.widgets.BadgeFlat.clip_x = false
+mod.widgets.BadgeFlat.clip_y = false
+mod.widgets.BadgeFlat.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.BadgeFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let bh = min(18.0, self.rect_size.y - 1.0)
+    let y0 = (self.rect_size.y - bh) * 0.5
+    let lo = vec2(1.0, y0)
+    let hi = vec2(self.rect_size.x - 1.0, y0 + bh)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let r = mix(2.5, h.y, step(self.rect_size.x, self.rect_size.y + 0.5) * step(self.rect_size.y, 12.5))
+    let d = cb_rbox(p, c, h, r) + cb_wob(p, 0.18, vec2(2.0, 8.0))
+    var out = cb_under(p, c, h, r, px, 0.0, cb_kraft_c(), 0.0)
+    let face = cb_paper(p + vec2(9.0, 4.0), px, self.color.rgb, 1.0)
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    out = Finish.over(out, cb_stroke(abs(d + 0.7), 0.65, p, px, cb_ink_c(), 1.0))
+    return out * self.color.a
+}
+
+// The spinner keeps its stock turning face (it runs on the pass clock, which
+// a face may not read), in marker with a dry pencil track ring.
+mod.widgets.SpinnerFlat.draw_bg.color = #x18140e
+mod.widgets.SpinnerFlat.draw_bg.stroke_width = 3.0
+mod.widgets.SpinnerFlat.draw_bg.track_alpha = 0.22
+
+// Rules between groups: a line of pencil drawn by hand.
+mod.widgets.Hr.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let y = self.rect_size.y * 0.5 + (Finish.noise(vec2(p.x * 0.04, 3.0)) - 0.5) * 0.8
+    return cb_stroke(abs(p.y - y), 0.45, p, px, vec3(0.30, 0.24, 0.17), 0.6)
+}
+mod.widgets.Vr.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let x = self.rect_size.x * 0.5 + (Finish.noise(vec2(3.0, p.y * 0.04)) - 0.5) * 0.8
+    return cb_stroke(abs(p.x - x), 0.45, p, px, vec3(0.30, 0.24, 0.17), 0.6)
+}
+
+// ---------------------------------------------------------------------------
+// WORDS IN MARKER. Every word is drawn in felt marker, and the felt bleeds a
+// little into the board's fibres: the glyph's edge carries a soft ink that
+// is the glyph read again a device pixel away on each diagonal. Pale ink
+// (the cream paint pen on black card, the figures on a display) keeps its
+// edge, so nothing pale grows a halo. Written once, handed to every label.
+let cb_words = fn() {
+    if self.texture_index > 0.5 && self.texture_index < 1.5 {
+        return self.sample_text_pixel()
+    }
+    if self.texture_index > 2.5 {
+        return self.sample_text_pixel()
+    }
+    let c = self.get_color()
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    let e1 = dFdx(self.t.xy) + dFdy(self.t.xy)
+    let e2 = dFdx(self.t.xy) - dFdy(self.t.xy)
+    var a0 = 0.0
+    var a1 = 0.0
+    var a2 = 0.0
+    var a3 = 0.0
+    var a4 = 0.0
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let ht = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        a0 = self.sdf(scale, clamp(self.t.xy, self.t_min + ht, self.t_max - ht), c)
+        a1 = self.sdf(scale, clamp(self.t.xy + e1, self.t_min + ht, self.t_max - ht), c)
+        a2 = self.sdf(scale, clamp(self.t.xy - e1, self.t_min + ht, self.t_max - ht), c)
+        a3 = self.sdf(scale, clamp(self.t.xy + e2, self.t_min + ht, self.t_max - ht), c)
+        a4 = self.sdf(scale, clamp(self.t.xy - e2, self.t_min + ht, self.t_max - ht), c)
+    } else {
+        let tex_size = self.msdf_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let ht = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        a0 = self.msdf(scale, clamp(self.t.xy, self.t_min + ht, self.t_max - ht), c)
+        a1 = self.msdf(scale, clamp(self.t.xy + e1, self.t_min + ht, self.t_max - ht), c)
+        a2 = self.msdf(scale, clamp(self.t.xy - e1, self.t_min + ht, self.t_max - ht), c)
+        a3 = self.msdf(scale, clamp(self.t.xy + e2, self.t_min + ht, self.t_max - ht), c)
+        a4 = self.msdf(scale, clamp(self.t.xy - e2, self.t_min + ht, self.t_max - ht), c)
+    }
+    let pale = step(0.45, dot(c.rgb, vec3(0.299, 0.587, 0.114)))
+    let bleed = (a1 + a2 + a3 + a4) * 0.25 * 0.30 * (1.0 - pale)
+    let a = clamp(a0 + bleed * (1.0 - a0), 0.0, 1.0) * c.a
+    return vec4(c.rgb * a, a)
+}
+mod.widgets.Label.draw_text.pixel = cb_words
+mod.widgets.H1.draw_text.pixel = cb_words
+mod.widgets.H2.draw_text.pixel = cb_words
+mod.widgets.H3.draw_text.pixel = cb_words
+mod.widgets.H4.draw_text.pixel = cb_words
+mod.widgets.H5.draw_text.pixel = cb_words
+mod.widgets.H6.draw_text.pixel = cb_words
+mod.widgets.ButtonFlat.draw_text.pixel = cb_words
+mod.widgets.Button.draw_text.pixel = cb_words
+mod.widgets.ButtonFlatter.draw_text.pixel = cb_words
+mod.widgets.ButtonPrimary.draw_text.pixel = cb_words
+mod.widgets.ButtonSecondary.draw_text.pixel = cb_words
+mod.widgets.ButtonTertiary.draw_text.pixel = cb_words
+mod.widgets.ButtonDanger.draw_text.pixel = cb_words
+mod.widgets.ButtonOutline.draw_text.pixel = cb_words
+mod.widgets.ButtonXs.draw_text.pixel = cb_words
+mod.widgets.ButtonSm.draw_text.pixel = cb_words
+mod.widgets.ButtonLg.draw_text.pixel = cb_words
+mod.widgets.CheckBoxFlat.draw_text.pixel = cb_words
+mod.widgets.CheckBox.draw_text.pixel = cb_words
+mod.widgets.ToggleFlat.draw_text.pixel = cb_words
+mod.widgets.Toggle.draw_text.pixel = cb_words
+mod.widgets.RadioButtonFlat.draw_text.pixel = cb_words
+mod.widgets.RadioButton.draw_text.pixel = cb_words
+mod.widgets.RadioButtonTabFlat.draw_text.pixel = cb_words
+mod.widgets.RadioButtonTab.draw_text.pixel = cb_words
+mod.widgets.SliderFlat.draw_text.pixel = cb_words
+mod.widgets.Slider.draw_text.pixel = cb_words
+mod.widgets.SliderMinimal.draw_text.pixel = cb_words
+mod.widgets.SliderRoundFlat.draw_text.pixel = cb_words
+mod.widgets.SliderRound.draw_text.pixel = cb_words
+mod.widgets.RotaryFlat.draw_text.pixel = cb_words
+mod.widgets.Rotary.draw_text.pixel = cb_words
+mod.widgets.RotaryKnob.draw_text.pixel = cb_words
+mod.widgets.DropDownFlat.draw_text.pixel = cb_words
+mod.widgets.DropDown.draw_text.pixel = cb_words
+mod.widgets.SegmentedControlFlat.draw_text.pixel = cb_words
+mod.widgets.SegmentedControl.draw_text.pixel = cb_words
+mod.widgets.Tabs.draw_text.pixel = cb_words
+mod.widgets.ListItem.draw_text.pixel = cb_words
+mod.widgets.ListItemOne.draw_text.pixel = cb_words
+mod.widgets.ChipFlat.draw_text.pixel = cb_words
+mod.widgets.Chip.draw_text.pixel = cb_words
+
+// ---------------------------------------------------------------------------
+// STATES. Every held state is written as a plain value that cuts in at once:
+// the library writes some as snap() values, which a state held as a default
+// (the states page) never applies. Live, the cut is the same as the snap.
+mod.widgets.ButtonFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.ButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.CheckBoxFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.CheckBoxFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.CheckBoxFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.CheckBoxFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.ToggleFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.ToggleFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.ToggleFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.ToggleFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.RadioButtonFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.RadioButtonFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.RadioButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.RadioButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.SliderFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.SliderFlat.animator.hover.on.apply = {draw_bg: {hover: 1.0} draw_text: {hover: 1.0}}
+mod.widgets.SliderFlat.animator.drag.on.from = {all: Snap}
+mod.widgets.SliderFlat.animator.drag.on.apply = {draw_bg: {drag: 1.0} draw_text: {drag: 1.0}}
+
+// ---------------------------------------------------------------------------
+// THE BOARD under everything: the window's own ground, kraft over its whole
+// face and calm under the content. The heavy detail is at the frame: the
+// board's edges a little rubbed and darker, its cut edge showing along the
+// window's foot with the flutes in it, and a strip of brown packing tape
+// run along the top where the caption is, glossy, with the fine streaks of
+// its stretched film and its long edges a little uneven.
+let cb_packing_tape = fn(p: vec2, sz: vec2, px: float) -> vec4 {
+    let top = 1.5 + (Finish.noise(vec2(p.x * 0.03, 1.0)) - 0.5) * 0.8
+    let bot = 27.0 + (Finish.noise(vec2(p.x * 0.025, 7.0)) - 0.5) * 1.2
+    let d = max(top - p.y, p.y - bot)
+    let a = Finish.cover(d, px)
+    let v = clamp((p.y - top) / max(bot - top, 1.0), 0.0, 1.0)
+    let streak = (Finish.noise(vec2(p.x * 0.012, p.y * 2.2)) - 0.5) * 0.10 + (Finish.noise(vec2(p.x * 0.004, p.y * 0.7 + 4.0)) - 0.5) * 0.08
+    var col = vec3(0.560, 0.365, 0.170) * (1.0 + streak)
+    let sheen = smoothstep(0.08, 0.3, v) * (1.0 - smoothstep(0.32, 0.55, v)) * (0.6 + 0.4 * Finish.noise(vec2(p.x * 0.01, 3.0)))
+    col = mix(col, vec3(0.98, 0.90, 0.76), sheen * 0.22)
+    col = mix(col, col * 0.75, Finish.band(d, 0.0, 1.5 * px, px))
+    let ta = a * 0.62
+    var out = vec4(col * ta, ta)
+    let sh = Finish.ring_out(d, 0.0, 1.0, px) * step(bot - 2.0, p.y) * 0.18
+    return Finish.over(vec4(cb_shade_c() * sh, sh), out)
+}
+mod.widgets.Window.show_bg = true
+mod.widgets.Window.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    var col = cb_kraft(p, px, cb_kraft_c(), 1.0)
+    let e = min(min(p.x, sz.x - p.x), sz.y - p.y)
+    let rub = (1.0 - smoothstep(0.0, 22.0, e)) * (0.6 + 0.4 * Finish.noise(p * 0.05))
+    col = col * (1.0 - 0.13 * rub)
+    let th = 4.0
+    let fb = sz.y - p.y
+    col = mix(col, cb_flute(p.x, clamp(1.0 - fb / th, 0.0, 1.0), th, px, cb_kraft_c()), 1.0 - step(th, fb))
+    let fs = min(p.x, sz.x - p.x)
+    col = mix(col, col * 0.62, (1.0 - smoothstep(0.0, 1.6, fs)) * 0.5)
+    let tape = cb_packing_tape(p, sz, px)
+    col = col * (1.0 - tape.a) + tape.rgb
+    let mt = cb_tape(p, vec2(sz.x - 20.0, sz.y - 22.0), -0.80, 30.0, 8.5, px, 7.0)
+    col = col * (1.0 - mt.a) + mt.rgb
+    return vec4(col, 1.0)
+}
+
+// A splitter is a seam between two panes: the board shows through its
+// strip, and down its middle a faint line of pencil; under the hand, held or
+// focused, the line is gone over in marker along the grip's length.
+mod.widgets.Splitter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let v = self.is_vertical
+    let across = mix(p.y, p.x, v)
+    let along = mix(p.x, p.y, v)
+    let thick = mix(self.rect_size.y, self.rect_size.x, v)
+    let span = mix(self.rect_size.x, self.rect_size.y, v)
+    let m = thick * 0.5 + (Finish.noise(vec2(along * 0.03, 2.0)) - 0.5) * 0.6
+    var out = cb_stroke(abs(across - m), 0.35, p, px, vec3(0.30, 0.24, 0.17), 0.35)
+    let act = max(max(self.hover, self.drag), self.focus)
+    let inbar = 1.0 - smoothstep(self.bar_size * 0.5 - 2.0, self.bar_size * 0.5, abs(along - span * 0.5))
+    return Finish.over(out, cb_stroke(abs(across - m), 0.7, p, px, cb_ink_c(), act * inbar))
+}
+
+// ---------------------------------------------------------------- switches and meter
+
+// THE SWITCHES are the sheet's own toggle, in proportion with the labels
+// and the controls beside them: the rocker and the slide switch take the
+// toggle's face (the disc in its slot, black card under it when on), its
+// size and shape, its quad and its label gap; the rocker's disc is faced
+// with yellow paper and the slide's with blue, so the two kinds tell apart.
+mod.widgets.ToggleRocker.label_walk.margin = mod.turtle.Inset{left: 47.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.ToggleSlide.label_walk.margin = mod.turtle.Inset{left: 47.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.ToggleRocker.draw_bg.size = 18.0
+mod.widgets.ToggleSlide.draw_bg.size = 18.0
+mod.widgets.ToggleRocker.min_height = 26.0
+mod.widgets.ToggleSlide.min_height = 26.0
+mod.widgets.ToggleRocker.draw_bg.pill_aspect = 2.111
+mod.widgets.ToggleSlide.draw_bg.pill_aspect = 2.111
+mod.widgets.ToggleRocker.draw_bg.knob_inset = 9.0
+mod.widgets.ToggleSlide.draw_bg.knob_inset = 9.0
+mod.widgets.ToggleRocker.clip_x = false
+mod.widgets.ToggleRocker.clip_y = false
+mod.widgets.ToggleSlide.clip_x = false
+mod.widgets.ToggleSlide.clip_y = false
+mod.widgets.ToggleRocker.draw_bg.vertex = mod.widgets.ToggleFlat.draw_bg.vertex
+mod.widgets.ToggleSlide.draw_bg.vertex = mod.widgets.ToggleFlat.draw_bg.vertex
+mod.widgets.ToggleRocker.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_toggle(self.pos, self.rect_size, self.rect_pos, px, self.active, self.drag_pos, self.drag, self.hover, self.down, self.focus, self.disabled, self.error, self.mark_at_end, 9.0)
+}
+mod.widgets.ToggleSlide.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return cb_toggle(self.pos, self.rect_size, self.rect_pos, px, self.active, self.drag_pos, self.drag, self.hover, self.down, self.focus, self.disabled, self.error, self.mark_at_end, 2.0)
+}
+
+// The readouts and the screen: the instrument window round black card.
+mod.widgets.ScreenView.clip_x = false
+mod.widgets.ScreenView.clip_y = false
+mod.widgets.ScreenView.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ScreenView.draw_bg.pixel = fn() {
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let lo = vec2(Finish.snap(self.rect_pos.x, px), Finish.snap(self.rect_pos.y, px)) - self.rect_pos
+    let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px) - px) - self.rect_pos
+    let b = 3.0
+    var face = cb_screen_face(p, px, self.color.rgb)
+    if self.scan > 0.0 {
+        face = face * Finish.scan(p.y - lo.y, px, 3.0 * px, self.scan)
+    }
+    return cb_window(p, lo, hi, 2.0, b, px, face, max(self.recess, 2.5))
+}
+mod.widgets.ScreenView.bezel = 3.0
+mod.widgets.ScreenView.sheen = 0.0
+
+// THE METER sits in the same window as the readouts and the screen, on the
+// same black card: the scale painted in the display's yellow, the red zone
+// in red paint, the needle a cream paint line and its pivot a yellow dot.
+mod.widgets.NeedleMeter.clip_x = false
+mod.widgets.NeedleMeter.clip_y = false
+mod.widgets.NeedleMeter.draw_bg.border_radius = uniform(2.0)
+mod.widgets.NeedleMeter.draw_bg.color_needle = uniform(#xf1e6cf)
+mod.widgets.NeedleMeter.draw_bg.color_zone = uniform(#xe0533e)
+mod.widgets.NeedleMeter.draw_bg.color_scale = uniform(#xf2c94e)
+mod.widgets.NeedleMeter.draw_bg.vertex = fn() {
+    let g = cb_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.NeedleMeter.draw_bg.pixel = fn() {
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let lo = vec2(Finish.snap(self.rect_pos.x, px), Finish.snap(self.rect_pos.y, px)) - self.rect_pos
+    let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px) - px) - self.rect_pos
+    let b = 3.0
+    let pv = self.pivot()
+    let rr = self.scale_radius()
+    let q = p - pv
+    let r = length(q)
+    let ang = atan2(q.x, 0.0 - q.y)
+    let sweep = self.sweep * 0.017453293
+    let t = ang / sweep + 0.5
+    let on_scale = step(-0.0001, t) * step(t, 1.0001)
+    var face = cb_screen_face(p, px, cb_black_c())
+    // The scale: a painted arc and a tick at every division.
+    let arc = Finish.cover(abs(r - rr) - px * 0.75, px) * on_scale
+    let n = max(floor(self.majors + 0.5), 1.0) * max(floor(self.minors + 0.5), 1.0)
+    let k = floor(clamp(t, 0.0, 1.0) * n + 0.5)
+    let ak = (k / n - 0.5) * sweep
+    let perp = abs(q.x * cos(ak) + q.y * sin(ak))
+    let mn = max(floor(self.minors + 0.5), 1.0)
+    let major = 1.0 - step(0.5, k - mn * floor(k / mn + 0.0001))
+    let len = mix(self.tick_minor, self.tick_major, major)
+    let radial = max(rr - len - r, r - rr)
+    let tick = Finish.cover(perp - px * mix(0.6, 1.1, major), px) * Finish.cover(radial, px) * step(0.0, 0.0 - q.y * cos(ak) + q.x * sin(ak))
+    face = mix(face, self.color_scale.rgb, max(arc, tick) * 0.92)
+    if self.zone < 0.999 {
+        let zone_t = Finish.cover((self.zone - t) * sweep * r, px) * Finish.cover((t - 1.0) * sweep * r, px)
+        let zone_r = Finish.cover(max(rr + px - r, r - rr - 2.5), px)
+        face = mix(face, self.color_zone.rgb, zone_t * zone_r)
+    }
+    // The needle, from under the pivot to just past the scale.
+    let na = self.needle_angle(self.value)
+    let nd = vec2(sin(na), 0.0 - cos(na))
+    let along = dot(q, nd)
+    let across = abs(q.x * nd.y - q.y * nd.x)
+    let needle = Finish.cover(across - px * 0.9, px) * Finish.cover(along - (rr + 3.0), px) * Finish.cover(0.0 - along - max(self.pivot_size - px, 0.0), px)
+    face = mix(face, self.color_needle.rgb, needle)
+    let pd = r - self.pivot_size
+    face = mix(face, self.color_scale.rgb, Finish.cover(pd, px))
+    face = mix(face, face * 0.5, Finish.band(pd, 0.0, px, px))
+    return cb_window(p, lo, hi, self.border_radius, b, px, face, 2.5) * self.color.a * self.opacity
+}
+mod.widgets.NeedleMeter.draw_label.color = #xf2c94e
+
+// ---------------------------------------------------------------- lamps
+// The Lamp widget and the bar lamp. A round lamp's halo has its room in the
+// lamp's own box (the library reserves a lens thickness either side once a
+// halo is asked for), so the light is never cut at its edge and stays in
+// its cell. A bar is a short light pipe: six points thick and a little over
+// twice that long, set at the left of its cell three points in, its glow
+// held to two and a half points round its hole -- so the whole lamp takes
+// the first twenty points of its cell and leaves the rest free.
+mod.widgets.Lamp.halo = 0.3
+mod.widgets.Lamp.halo_reach = 1.0
+mod.widgets.Lamp.draw_bg.color_accent = uniform(#xff9a2a)
+mod.widgets.Lamp.draw_bg.vertex = fn() {
+    let m = 2.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Lamp.draw_bg.pixel = fn() {
+    let m = 2.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let reach = clamp(self.reach, 0.0, 1.0)
+    let t = self.rect_size.y / (1.0 + 2.0 * reach)
+    let room = t * reach
+    let tb = min(t, 6.0)
+    let lb = tb * 2.1
+    let c = mix(self.rect_size * 0.5, vec2(3.5 + lb * 0.5, self.rect_size.y * 0.5), self.bar)
+    let hb = mix(vec2(t * 0.5, t * 0.5), vec2(lb * 0.5, tb * 0.5), self.bar)
+    let glow = mix(max(room - 0.5, 2.0), 2.5, self.bar)
+    let res = cb_led(p, c, hb, self.lit, self.intent_color().rgb, 1.0 - step(3.5, self.intent), px, glow)
+    return res * self.opacity
+}
+
+// ---------------------------------------------------------------- tree rows
+// The rows of a tree are strips of cream paper glued on the board one under
+// another, every other one a shade warmer; the chosen row a strip of yellow
+// paper.
+mod.widgets.FileTreeNode.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let h = vec2(self.rect_size.x * 0.5 - 1.0, self.rect_size.y * 0.5)
+    let c = self.rect_size * 0.5
+    let d = cb_rbox(p, c, h, 0.5) + cb_wob(p, 0.2, vec2(self.is_even * 7.0, 3.0))
+    let base = mix(mix(self.color_1.rgb, self.color_2.rgb, self.is_even), cb_yellow_c(), self.active)
+    var face = cb_paper(p + vec2(self.is_even * 37.0, 11.0), px, base, 1.0)
+    let ry = self.rect_size.y - 0.8 + (Finish.noise(vec2(p.x * 0.05, self.is_even * 3.0)) - 0.5) * 0.5
+    face = mix(face, face * 0.78, Finish.cover(abs(p.y - ry) - 0.3, px) * 0.7)
+    let a = Finish.cover(d, px)
+    return vec4(face * a, a)
+}
+true

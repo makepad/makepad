@@ -1,10 +1,12 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
+    gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
     makepad_derive_widget::*,
     makepad_draw::*,
     text_input::{TextInput, TextInputAction},
     widget::*,
-    widget_async::ScriptAsyncResult,
+    widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
+    makepad_draw::makepad_platform::makepad_script::ScriptFnRef,
 };
 
 script_mod! {
@@ -431,6 +433,84 @@ script_mod! {
             /** handle width in pixels 4..60 step 1 */
             handle_size: uniform(20.)
 
+            // THE MATERIAL, from the theme, packed as `ReliefView` and
+            // `RoundedView` pack theirs. Zero in every stock theme: at
+            // `material` 0 this shader draws what it always drew.
+            /** surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: direction (x right, y down, z out) and intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** bevel width, profile curve, raise, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** occlusion, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** face gradient, hairline, occlusion reach, sink */
+            material_tune: uniform(vec4(theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach, theme.material_sink))
+            /** cast shadow strength, blur, falloff (0 linear 1 expo), contact occlusion */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_shadow_falloff, theme.material_contact_ao))
+            /** inner shadow, inner blur, ground lip, glow */
+            material_inner: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_ground_lip, theme.material_glow))
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+
+            /** the outward gradient of a rounded box centred on c with half size h and corner k, by central differences */
+            material_grad: fn(p: vec2, c: vec2, h: vec2, k: float) -> vec2 {
+                let e = 0.5
+                let g = vec2(
+                    Material.sd_box(p + vec2(e, 0.0), c, h, k) - Material.sd_box(p - vec2(e, 0.0), c, h, k),
+                    Material.sd_box(p + vec2(0.0, e), c, h, k) - Material.sd_box(p - vec2(0.0, e), c, h, k)
+                )
+                if length(g) > 0.00001 {
+                    return normalize(g)
+                }
+                return vec2(0.0, 1.0)
+            }
+
+            /** the box centred on c (half size h, corner k, distance d at p)
+             * lit as one face at elevation `elev`: a groove below zero, with
+             * the surround's inner shadow over it, a cap above. Tier 1 is
+             * the relief alone. */
+            material_box: fn(fill: vec4, p: vec2, d: float, c: vec2, h: vec2, k: float, elev: float) -> vec4 {
+                let g = self.material_grad(p, c, h, k)
+                var insh = 0.0
+                if self.material_inner.x > 0.001 && elev < 0.0 {
+                    let ioff = Material.shadow_dir(self.material_light) * abs(elev) * 1.6
+                    insh = 1.0 - Material.box_cov(c - h + ioff, c + h + ioff, p, max(self.material_inner.y * 0.5, 0.35), k)
+                }
+                let t2 = step(1.5, self.material)
+                let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                let rel = vec4(min(self.material_relief.x, min(h.x, h.y)), self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                let uv = (p - c) / (2.0 * h) + vec2(0.5, 0.5)
+                let o = Material.face(
+                    fill.rgb, d, g, uv, elev, elev, 0.0, insh, 0.0,
+                    self.material_light, rel, fin, self.material_tune, self.material_inner.x,
+                    self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                )
+                return vec4(o, fill.a)
+            }
+
+            /** what the raised handle box (centred on c, half size h, corner
+             * k) throws on the groove at p, premultiplied: its cast shadow,
+             * contact and lip. Laid into the groove's fill, since the
+             * handle travels inside it. */
+            material_handle_under: fn(p: vec2, c: vec2, h: vec2, k: float) -> vec4 {
+                let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                let d = Material.sd_box(p, c, h, k)
+                let g = self.material_grad(p, c, h, k)
+                let raise = self.material_relief.z * (1.0 - self.disabled)
+                let off = Material.cast_offset(raise, self.material_light)
+                // The shadow falls inside the groove: its blur stays in scale
+                // with the handle.
+                let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, min(h.x, h.y)), self.material_shadow.z, self.material_shadow.w)
+                return Material.cast(
+                    d, Material.sd_box(p - off, c, h, k), Material.sd_box(p + off, c, h, k), g, px, raise, self.material_relief.z,
+                    self.material_light, sh, self.material_inner.z,
+                    self.material_shadow_ink.rgb, self.material_light_ink.rgb
+                ) * (1.0 - self.disabled)
+            }
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let handle_sz = self.handle_size
@@ -563,6 +643,19 @@ script_mod! {
                     handle_stroke_disabled = mix(self.border_color_2_disabled, self.border_color_disabled, dir)
                 }
 
+                // The handle's geometry, before the groove is filled, because
+                // under a material its shadow is laid INTO the groove's fill.
+                let ctrl_height = self.rect_size.y - offset_px.y
+                let offset_sides = self.border_size + /** track side inset 0..20 step 0.5 */ 6.
+                let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides) - 3
+                let handle_padding = /** handle vertical inset 0..6 step 0.5 */ 1.5
+                let handle_box = vec4(
+                    handle_x + offset_sides + self.border_size
+                    offset_px.y + self.border_size + handle_padding
+                    self.handle_size - self.border_size * 2.
+                    ctrl_height - self.border_size * 2. - handle_padding * 2.
+                )
+
                 // Draw main box
                 sdf.box(
                     self.border_size
@@ -572,10 +665,27 @@ script_mod! {
                     self.border_radius
                 )
 
-                let fill = color_fill
+                var fill = color_fill
                     .mix(color_fill_focus, self.focus)
                     .mix(color_fill_hover.mix(color_fill_drag, self.drag), self.hover)
                     .mix(color_fill_disabled, self.disabled)
+
+                // THE MATERIAL: the track is a groove cut into the housing,
+                // the handle a cap standing in it and throwing its shadow on
+                // it. Nothing changes at 0.
+                let p = self.pos * self.rect_size
+                // `sdf.box` draws a corner of TWICE its argument, clamped.
+                let hc = handle_box.xy + handle_box.zw * 0.5
+                let hh = max(handle_box.zw * 0.5, vec2(0.5, 0.5))
+                let hk = min(2.0 * self.border_radius, min(hh.x, hh.y))
+                if self.material > 0.5 {
+                    let c = vec2(self.border_size + slider_width * 0.5, slider_top + slider_bottom * 0.5)
+                    let h = max(vec2(slider_width * 0.5, slider_bottom * 0.5), vec2(0.5, 0.5))
+                    let k = min(2.0 * self.border_radius, min(h.x, h.y))
+                    fill = self.material_box(fill, p, sdf.shape, c, h, k, -self.material_tune.w * (1.0 - self.disabled))
+                    let under = self.material_handle_under(p, hc, hh, hk)
+                    fill = vec4(mix(fill.rgb, under.rgb / max(under.a, 0.0001), under.a), fill.a)
+                }
 
                 sdf.fill_keep(fill)
 
@@ -586,7 +696,6 @@ script_mod! {
                 sdf.stroke(stroke, self.border_size)
 
                 // Ridge
-                let offset_sides = self.border_size + /** track side inset 0..20 step 0.5 */ 6.
                 sdf.rect(
                     self.border_size + offset_sides
                     offset_px.y + (self.rect_size.y - offset_px.y) * 0.5 - self.border_size - 0.5
@@ -636,21 +745,24 @@ script_mod! {
                 )
 
                 // Handle
-                let ctrl_height = self.rect_size.y - offset_px.y
-                let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides) - 3
-                let handle_padding = /** handle vertical inset 0..6 step 0.5 */ 1.5
                 sdf.box(
-                    handle_x + offset_sides + self.border_size
-                    offset_px.y + self.border_size + handle_padding
-                    self.handle_size - self.border_size * 2.
-                    ctrl_height - self.border_size * 2. - handle_padding * 2.
+                    handle_box.x
+                    handle_box.y
+                    handle_box.z
+                    handle_box.w
                     self.border_radius
                 )
 
-                let hfill = handle_fill
+                var hfill = handle_fill
                     .mix(handle_fill_hover, self.hover)
                     .mix(handle_fill_focus.mix(handle_fill_hover.mix(handle_fill_drag, self.drag), self.hover), self.focus)
                     .mix(handle_fill_disabled, self.disabled)
+
+                if self.material > 0.5 {
+                    // The cap: raised, lifted a quarter more under the hand.
+                    let raise = self.material_relief.z * (1.0 + 0.25 * max(self.hover, self.drag)) * (1.0 - self.disabled)
+                    hfill = self.material_box(hfill, p, sdf.shape, hc, hh, hk, raise)
+                }
 
                 sdf.fill_keep(hfill)
 
@@ -703,6 +815,186 @@ script_mod! {
             gradient_border_horizontal: 1.0
             gradient_fill_horizontal: 1.0
         }
+    }
+
+    /** The fader: a desk cap running a slotted track, along whichever axis the slider is dragged. */
+    mod.widgets.SliderFader = mod.widgets.SliderMinimal{
+        width: Fill
+        height: 40.
+
+        // The cap's length and the track's end inset belong to the WIDGET
+        // rather than to the material, because the DRAG divides by the
+        // distance the cap actually travels: a finger that has crossed the
+        // whole track must leave the cap on the stop, not short of it or
+        // hard against it half way down. The shader is handed the same two
+        // numbers every draw, so what is drawn is what is dragged.
+        /** the cap's length along the track, in pixels 8..60 step 1 */
+        cap_size: 18.
+        /** how far the track's two ends are held off the edges, in pixels 0..40 step 1 */
+        track_inset: 8.
+
+        // NO INLINE LABEL, and that is the design rather than an omission.
+        // A fader stood on end is forty points across -- a desk strip is
+        // narrower still -- and this material fills the whole quad, so a
+        // word or a readout drawn here lands ON the track. The legend is a
+        // sibling's job: a Label over the column and another under it, the
+        // way a desk prints them. The readout is sized away as RotaryKnob
+        // sizes it away, the field still taking key focus so a value can be
+        // typed; the label turtle draws nothing while `text` is empty, and
+        // the tap-the-label reset goes with it, so a DOUBLE TAP is what
+        // puts a fader back to its default.
+        text_input +: {
+            width: 0.
+            height: 0.
+        }
+
+        /** The fader material: a slot, a bar out of the origin, and the cap. */
+        draw_bg +: {
+            /** corner rounding of the slot and the cap 0..12 step 0.5 */
+            border_radius: uniform(theme.corner_radius)
+            /** the slot's width across the track, in pixels 2..24 step 0.5 */
+            track_size: uniform(7.)
+            /** the cap's width across the track, as a share of it 0.2..1 step 0.05 */
+            cap_cross: uniform(0.72)
+            /** the grip line cut across the cap, in pixels 0..4 step 0.5 */
+            cap_line: uniform(2.)
+
+            color: uniform(theme.color_inset)
+            color_hover: uniform(theme.color_inset_hover)
+            color_focus: uniform(theme.color_inset_focus)
+            color_drag: uniform(theme.color_inset_drag)
+            color_disabled: uniform(theme.color_inset_disabled)
+
+            border_color: uniform(theme.color_bevel_inset_1)
+            border_color_hover: uniform(theme.color_bevel_inset_1_hover)
+            border_color_focus: uniform(theme.color_bevel_inset_1_focus)
+            border_color_drag: uniform(theme.color_bevel_inset_1_drag)
+            border_color_disabled: uniform(theme.color_bevel_inset_1_disabled)
+
+            handle_color: uniform(theme.color_handle_1)
+            handle_color_hover: uniform(theme.color_handle_1_hover)
+            handle_color_focus: uniform(theme.color_handle_1_focus)
+            handle_color_drag: uniform(theme.color_handle_1_drag)
+            handle_color_disabled: uniform(theme.color_handle_1_disabled)
+
+            // Inherited and not read by this material: offset_y and
+            // handle_size, which reserve a label strip and grow a hover
+            // handle on the flat faces, and the whole _2 colour family.
+            // They still take uniform slots and still show in the tweaker
+            // doing nothing. The cap's size is the WIDGET's `cap_size`, not
+            // draw_bg's `handle_size`, which is the one trap this material
+            // inherits: the drag has to divide by the same number, and only
+            // Rust can hold both ends of that.
+
+            // TRACK SPACE: `p` runs along the track from the value's own
+            // zero -- the left end lying down, the BOTTOM standing up,
+            // which is where a desk fader's zero is -- and `q` across it.
+            // This is the one place a track rect becomes a screen rect, and
+            // it is what lets the two orientations be one material:
+            // vertical only means the track runs up. Lifted from
+            // LevelMeter, which reads its scale the same way.
+            rect_of: fn(p: float, q: float, plen: float, qlen: float) -> vec4 {
+                let up = self.rect_size.y - p - plen
+                return vec4(
+                    mix(p, q, self.is_vertical),
+                    mix(q, up, self.is_vertical),
+                    mix(plen, qlen, self.is_vertical),
+                    mix(qlen, plen, self.is_vertical)
+                )
+            }
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                let along = mix(self.rect_size.x, self.rect_size.y, self.is_vertical)
+                let across = mix(self.rect_size.y, self.rect_size.x, self.is_vertical)
+
+                // THE TRAVEL LAW, and it is RangeSlider's: the cap's CENTRE
+                // is what the value means, so it stops half a cap in from
+                // either inset end and never hangs off its own track. Rust
+                // divides the drag by this same distance.
+                let travel = max(along - self.inset_px * 2. - self.cap_px, 1.)
+                let foot = self.inset_px + self.cap_px * 0.5
+
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover.mix(self.color_drag, self.drag), self.hover)
+                    .mix(self.color_disabled, self.disabled)
+                let stroke = self.border_color
+                    .mix(self.border_color_focus, self.focus)
+                    .mix(self.border_color_hover.mix(self.border_color_drag, self.drag), self.hover)
+                    .mix(self.border_color_disabled, self.disabled)
+                let val = self.val_color
+                    .mix(self.val_color_focus, self.focus)
+                    .mix(self.val_color_hover.mix(self.val_color_drag, self.drag), self.hover)
+                    .mix(self.val_color_disabled, self.disabled)
+                let grip = self.handle_color
+                    .mix(self.handle_color_focus, self.focus)
+                    .mix(self.handle_color_hover.mix(self.handle_color_drag, self.drag), self.hover)
+                    .mix(self.handle_color_disabled, self.disabled)
+
+                // The slot, the whole length of the track.
+                let slot_w = min(self.track_size, across)
+                let slot_q = (across - slot_w) * 0.5
+                let slot = self.rect_of(
+                    self.inset_px,
+                    slot_q,
+                    max(along - self.inset_px * 2., 1.),
+                    slot_w
+                )
+                sdf.box(slot.x, slot.y, slot.z, slot.w, self.border_radius)
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
+
+                // The bar, inside the slot. Both of its ends come from the
+                // widget -- from the stop, or out of the default's own
+                // place when the slider asks for it -- so a gain fader
+                // grows its bar out of unity the way it was moved, and a
+                // cut cannot look like a boost.
+                let lo = foot + self.fill_lo * travel
+                let hi = foot + self.fill_hi * travel
+                let bar = self.rect_of(
+                    lo,
+                    slot_q + self.border_size,
+                    max(hi - lo, 1.),
+                    max(slot_w - self.border_size * 2., 1.)
+                )
+                sdf.box(bar.x, bar.y, bar.z, bar.w, self.border_radius)
+                sdf.fill(val)
+
+                // The cap, and the grip line across its middle -- the line
+                // the value is read off, and what makes a cap a cap rather
+                // than a block.
+                let cap_w = min(max(across * self.cap_cross, 4.), across)
+                let cap_q = (across - cap_w) * 0.5
+                let cap_at = foot + self.slide_pos * travel
+                let body = self.rect_of(cap_at - self.cap_px * 0.5, cap_q, self.cap_px, cap_w)
+                sdf.box(body.x, body.y, body.z, body.w, self.border_radius)
+                sdf.fill_keep(grip)
+                sdf.stroke(stroke, self.border_size)
+
+                let line = self.rect_of(
+                    cap_at - self.cap_line * 0.5,
+                    cap_q + self.border_size,
+                    self.cap_line,
+                    max(cap_w - self.border_size * 2., 1.)
+                )
+                sdf.rect(line.x, line.y, line.z, line.w)
+                sdf.fill(stroke)
+
+                return sdf.result
+            }
+        }
+    }
+
+    /** The fader stood on end: the same material and the same law read up the y axis, for a channel strip. */
+    mod.widgets.SliderFaderY = mod.widgets.SliderFader{
+        // One property moves both halves. `axis` is what the drag already
+        // read; the material reads it too now, so a fader cannot end up
+        // drawn one way and dragged the other.
+        axis: Vertical
+        width: 40.
+        height: 160.
     }
 
     /** The round slider: a label column beside a pill track with a capsule value fill. */
@@ -1424,12 +1716,12 @@ script_mod! {
         // drawn at. Left at the family default of 0 a drag divides by the
         // control's own height, which is 95 on a stock Rotary and would be
         // 24 here -- four percent of the range per pixel, on the size this
-        // is built for -- and there is no modifier to slow it: the
-        // Shift/Ctrl ladder lives on the wheel only. The wheel is not the
-        // answer either. Nothing marks a scroll consumed, so a knob that
-        // took the wheel inside a scrolling panel would move its value AND
-        // scroll the panel with the same gesture; `scroll_step` stays off,
-        // here as everywhere else in the library.
+        // is built for. Shift does slow a drag down, but a rate a hand has
+        // to hold a key to get is not the rate a knob should sit at. The
+        // wheel is not the answer either: nothing marks a scroll consumed,
+        // so a knob that took the wheel inside a scrolling panel would move
+        // its value AND scroll the panel with the same gesture. `scroll_step`
+        // stays off, here as everywhere else in the library.
         drag_travel: 160.
 
         // SliderMinimal's `label_walk` is INHERITED, not replaced, and both
@@ -1551,6 +1843,34 @@ script_mod! {
             // doing nothing. A RotaryKnobGradientY rung is where the _2
             // family would earn its place.
 
+            // THE MATERIAL, from the theme, packed as `ReliefView` and
+            // `RoundedView` pack theirs. Zero in every stock theme: at
+            // `material` 0 this shader draws what it always drew.
+            /** surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: direction (x right, y down, z out) and intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** bevel width, profile curve, raise, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** occlusion, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** face gradient, hairline, occlusion reach, sink */
+            material_tune: uniform(vec4(theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach, theme.material_sink))
+            /** cast shadow strength, blur, falloff (0 linear 1 expo), contact occlusion */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_shadow_falloff, theme.material_contact_ao))
+            /** inner shadow, inner blur, ground lip, glow */
+            material_inner: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_ground_lip, theme.material_glow))
+            /** the margin the disc keeps back from its box under a material, where its cast shadow falls, in points; held to a third of the radius 0..32 step 0.5 */
+            material_margin: uniform(theme.material_margin)
+            /** how far the dome rises: the slope of the cap at its rim, 0 a flat top 0..1.5 step 0.05 */
+            material_dome: uniform(0.55)
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+            /** the emissive ink the lit arc's halo takes */
+            material_glow_ink: uniform(theme.color_material_glow)
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
@@ -1588,7 +1908,11 @@ script_mod! {
                 let clearance = /** clearance between the bezel and the box, as a fraction of the radius 0..0.15 step 0.01 */ 0.05
                 let bed = /** material either side of the groove, as a fraction of the radius 0..0.3 step 0.01 */ 0.09
                 let ring_gap = max(radius * bed, 1.)
-                let disc_r = radius - max(radius * clearance, 0.5) - self.border_size
+                // Under a material the disc keeps back from its box by the
+                // margin its cast shadow falls into, held to a third of the
+                // radius so a 24-square knob keeps a face. Zero without one.
+                let margin = min(self.material_margin, radius / 3.0) * step(0.5, self.material)
+                let disc_r = radius - max(radius * clearance, 0.5) - self.border_size - margin
                 let ring_w = max(radius * self.ring_size, /** thinnest the groove may draw, in pixels 0.5..3 step 0.25 */ 1.25)
                 let ring_r = disc_r - self.border_size - ring_gap - ring_w * 0.5
                 let field_r = ring_r - ring_w * 0.5 - ring_gap
@@ -1671,12 +1995,55 @@ script_mod! {
                 // when RotaryFlat does it alone.
                 let lifted = max(self.hover, max(self.focus, self.drag)) * (1. - self.disabled)
 
+                // THE MATERIAL: the disc is a domed cap standing off the
+                // page, throwing its shadow into the margin round it, the
+                // shoulder rolling into a shallow dome so the whole cap
+                // catches the light. Nothing changes at 0.
+                var cap = material
+                if self.material > 0.5 {
+                    let p = self.pos * self.rect_size
+                    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                    let q = p - center
+                    let rr = length(q)
+                    let d = rr - disc_r
+                    var g = vec2(0.0, 1.0)
+                    if rr > 0.00001 {
+                        g = q / rr
+                    }
+                    let raise = self.material_relief.z * (1.0 + 0.25 * lifted) * (1.0 - self.disabled)
+                    let off = Material.cast_offset(raise, self.material_light)
+                    let sh = vec4(self.material_shadow.x, Material.blur_fit(self.material_shadow.y, margin, length(off)), self.material_shadow.z, self.material_shadow.w)
+                    var under = Material.cast(
+                        d, length(q - off) - disc_r, length(q + off) - disc_r, g, px, raise, self.material_relief.z,
+                        self.material_light, sh, self.material_inner.z,
+                        self.material_shadow_ink.rgb, self.material_light_ink.rgb
+                    ) * (1.0 - self.disabled)
+                    // Faded out before the box edge, so it ends round.
+                    under = under * Material.window(radius - rr, margin)
+                    // `clear` premultiplies what it is given.
+                    sdf.clear(vec4(under.rgb / max(under.a, 0.0001), under.a))
+                    let t2 = step(1.5, self.material)
+                    let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                    let rel = vec4(min(self.material_relief.x, disc_r * 0.5), self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                    // No face gradient: a dome's normal carries its own.
+                    let tune = vec4(0.0, self.material_tune.y, self.material_tune.z, self.material_tune.w)
+                    // The dome: a paraboloid, its slope growing with the
+                    // radius, over a raise that the normal multiplies back in.
+                    let dome = self.material_dome * clamp(rr / max(disc_r, 0.001), 0.0, 1.0) / max(raise, 0.001)
+                    let uv = q / (2.0 * disc_r) + vec2(0.5, 0.5)
+                    cap = vec4(Material.face(
+                        material.rgb, d, g, uv, raise, raise, dome, 0.0, 0.0,
+                        self.material_light, rel, fin, tune, self.material_inner.x,
+                        self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                    ), material.a)
+                }
+
                 // The disc, and the bezel on the same shape: fill_keep
                 // hands the circle straight to the stroke, which lays the
                 // width EITHER SIDE of it -- half on the material, half on
                 // the page.
                 sdf.circle(center.x, center.y, disc_r)
-                sdf.fill_keep(material)
+                sdf.fill_keep(cap)
                 sdf.stroke(bezel, self.border_size)
 
                 // The unlit groove, whole.
@@ -1760,10 +2127,24 @@ script_mod! {
 
 }
 
+/// The rate the modifiers held ask for: Shift fine (x0.2), plain (x1),
+/// Ctrl fast (x4), Ctrl and Shift together faster still (x10).
+///
+/// The wheel and the drag read the SAME ladder, so a knob answers a held
+/// Shift the same whichever gesture is moving it, and a hand that learns
+/// the rates on one has them on the other.
+pub(crate) fn modifier_ladder(modifiers: &KeyModifiers) -> f64 {
+    match (modifiers.control, modifiers.shift) {
+        (true, true) => 10.0,
+        (true, false) => 4.0,
+        (false, true) => 0.2,
+        (false, false) => 1.0,
+    }
+}
+
 /// Value delta for one scroll event: notch count (Windows wheels send 120
 /// units per notch; trackpads send smaller deltas that accumulate over the
-/// gesture) times the step fraction, scaled by the modifier ladder —
-/// Shift fine (x0.2), plain (x1), Ctrl coarse (x4), Ctrl+Shift (x10).
+/// gesture) times the step fraction, scaled by `modifier_ladder`.
 /// Scroll up (negative y) raises the value; a zero step disables wheel input.
 pub(crate) fn wheel_value_delta(
     scroll: Vec2d,
@@ -1774,13 +2155,7 @@ pub(crate) fn wheel_value_delta(
         return 0.0;
     }
     let axis = if scroll.y != 0.0 { -scroll.y } else { -scroll.x };
-    let ladder = match (modifiers.control, modifiers.shift) {
-        (true, true) => 10.0,
-        (true, false) => 4.0,
-        (false, true) => 0.2,
-        (false, false) => 1.0,
-    };
-    (axis / 120.0) * scroll_step * ladder
+    (axis / 120.0) * scroll_step * modifier_ladder(modifiers)
 }
 
 /// The pointer distance that covers a slider's whole range: the travel the
@@ -1799,6 +2174,87 @@ pub(crate) fn drag_span(drag_travel: f64, own: f64) -> f64 {
         drag_travel
     } else {
         own
+    }
+}
+
+/// How far ONE move of a drag takes the value: the pointer's movement since
+/// the move before it, read along an axis, at the rate the modifiers held
+/// ask for, over the span that covers the whole range.
+///
+/// Measured from the last move and not from the press, so the modifiers are
+/// read afresh every move: press Shift halfway through and the pointer moves
+/// the value five times finer FROM THERE ON, with the value staying exactly
+/// where it was rather than jumping to where a whole drag at the finer rate
+/// would have left it. Hold nothing and the moves add back up to the
+/// press-to-now distance over the span, which is the number the drag was
+/// before it was incremental.
+///
+/// `alt` swaps which way the pointer is read: a vertical knob or fader takes
+/// the pointer's horizontal movement, a horizontal slider its vertical, and
+/// right and up raise the value either way. The span does not swap with it --
+/// the same pointer distance still crosses the whole range, only measured
+/// across.
+///
+/// A span of nothing is not a span. Dividing by it gave an infinity, which
+/// pinned the value to a stop; a running total cannot hold an infinity, so
+/// the move takes the whole range instead, which leaves the value in the
+/// same place.
+pub(crate) fn drag_value_delta(
+    delta_px: Vec2d,
+    axis: DragAxis,
+    alt: bool,
+    modifiers: &KeyModifiers,
+    span: f64,
+) -> f64 {
+    let along = match (axis, alt) {
+        (DragAxis::Horizontal, false) => delta_px.x,
+        (DragAxis::Horizontal, true) => -delta_px.y,
+        (DragAxis::Vertical, false) => -delta_px.y,
+        (DragAxis::Vertical, true) => delta_px.x,
+    };
+    if along == 0.0 {
+        return 0.0;
+    }
+    let moved = along * modifier_ladder(modifiers) / span;
+    if moved.is_nan() {
+        0.0
+    } else if moved.is_infinite() {
+        moved.signum()
+    } else {
+        moved
+    }
+}
+
+/// Where a fader's cap sits along its track, in points from the track's own
+/// zero end, for a cap `cap` long on a control `length` long whose track is
+/// held `inset` off both ends.
+///
+/// This is `RangeSlider`'s law, and it is here for its reason: the cap's
+/// CENTRE is what the value means, so the centre stops half a cap in from
+/// either end and never hangs off the track. A control that names neither a
+/// cap nor an inset -- every slider in the tree but the faders -- is the
+/// whole of its own length, to the point, which is what the drag divided by
+/// before there were faders. The floor under the travel is RangeSlider's as
+/// well: a cap with nowhere to go still has a distance to divide by rather
+/// than a zero.
+pub(crate) fn fader_cap_center(pos: f64, length: f64, cap: f64, inset: f64) -> f64 {
+    inset + cap * 0.5 + pos * (length - inset * 2.0 - cap).max(1.0)
+}
+
+/// The value bar's two ends along the track, 0..1: from the low stop, or
+/// out of the ORIGIN -- where the default sits on the track -- when the
+/// slider asks for it.
+///
+/// Decided here rather than in a shader so that one law answers for the
+/// drawing and for a test alike. A bipolar control grows its bar out of
+/// unity the way it was moved, so a cut and a boost point opposite ways and
+/// rest shows as nothing at all rather than as a half-filled track that
+/// looks like a setting.
+pub(crate) fn fill_span(origin: f64, pos: f64, from_origin: bool) -> (f64, f64) {
+    if from_origin {
+        (origin.min(pos), origin.max(pos))
+    } else {
+        (0.0, pos)
     }
 }
 
@@ -1976,6 +2432,339 @@ pub struct DrawSlider {
     /// 1.0 when the slider asks for that arc, else 0.0.
     #[live]
     arc_origin: f32,
+    /// The value bar's two ends along the track, 0..1, worked out once in
+    /// Rust by [`fill_span`]. The faces that predate it read `origin_pos`
+    /// and `arc_origin` and work the same span out for themselves.
+    #[live]
+    fill_lo: f32,
+    #[live]
+    fill_hi: f32,
+    /// 1.0 when the control lies along y, read off the widget's own `axis`,
+    /// so a material drawn both ways cannot disagree with the drag about
+    /// which way it lies.
+    #[live]
+    is_vertical: f32,
+    /// The cap and the track inset the drag divides by, in points, handed
+    /// to the shader so the two cannot drift apart.
+    #[live]
+    cap_px: f32,
+    #[live]
+    inset_px: f32,
+    /// The cap's motion, for a material whose cap is a liquid: how far
+    /// the cap's tail trails its head (0 at rest, 1 fully stretched),
+    /// which way along the track it trails (-1 or 1), the press as a
+    /// spring (0 at rest, overshooting past 1 on a press), and the squash
+    /// along and across (1 and 1 but as the tail lands). All at rest unless
+    /// the widget's `cap_viscosity` is above zero.
+    #[live]
+    cap_stretch: f32,
+    #[live(1.0)]
+    cap_dir: f32,
+    #[live]
+    cap_press: f32,
+    #[live(1.0)]
+    cap_squash_along: f32,
+    #[live(1.0)]
+    cap_squash_across: f32,
+    /// The pointer's field over the cap, for a material whose cap answers
+    /// the pointer (a magnetic liquid): its strength 0..1 (a spring toward
+    /// 1 while the pointer is within `cap_field_reach` of the cap, plus the
+    /// press), the pointer's position in the cap's frame in points (along,
+    /// across, from the cap's centre) and a clock in seconds that runs while
+    /// the field is up. All zero unless the widget's `cap_field_reach` is
+    /// above zero.
+    #[live]
+    cap_field: f32,
+    #[live]
+    cap_pointer_along: f32,
+    #[live]
+    cap_pointer_across: f32,
+    #[live]
+    cap_time: f32,
+}
+
+/// One step of a field's place after the pointer `to`: critically damped at
+/// nine radians a second, so it settles in about a third of a second with
+/// no overshoot; `snap` takes it straight there (a held control, or a field
+/// that is down and has nothing to glide from). Answers the new velocity.
+pub(crate) fn field_follow(shown: &mut Option<(f64, f64)>, v: (f64, f64), to: (f64, f64), snap: bool, dt: f64) -> (f64, f64) {
+    let Some(s) = shown.as_mut() else {
+        *shown = Some(to);
+        return (0.0, 0.0);
+    };
+    if snap {
+        *s = to;
+        return (0.0, 0.0);
+    }
+    let (k, c) = (81.0, 18.0);
+    let ax = k * (to.0 - s.0) - c * v.0;
+    let ay = k * (to.1 - s.1) - c * v.1;
+    let v = (v.0 + ax * dt, v.1 + ay * dt);
+    s.0 += v.0 * dt;
+    s.1 += v.1 * dt;
+    v
+}
+
+/// The cap's motion: a head that is the value (or travels to it on a spring
+/// after a jump), a tail that follows the head on a viscous spring, and a
+/// press spring, each stepped on the frames after a kick until all are at
+/// rest. Positions along the track in points, so the springs read the same
+/// at every size.
+#[derive(Default)]
+pub struct CapMotion {
+    head: f64,
+    head_v: f64,
+    tail: Option<f64>,
+    tail_v: f64,
+    press: f64,
+    press_v: f64,
+    last_dir: f64,
+    travel: bool,
+    /// The track's travel in points at the last draw, which the value is
+    /// scaled by.
+    travel_px: f64,
+    next_frame: Option<NextFrame>,
+    last_time: Option<f64>,
+    /// The pointer's field: a hover spring toward 1 while the pointer is
+    /// near, the pointer in the TRACK's frame (along from the track's
+    /// start, across from its middle, in points; the cap moves under it,
+    /// so it is taken into the cap's frame only when the cap is drawn, at
+    /// the value the cap is drawn at), the track's extent it was read
+    /// against, and the clock the field runs.
+    hover: f64,
+    hover_v: f64,
+    hover_target: f64,
+    pointer: Option<(f64, f64)>,
+    extent: f64,
+    /// The release wave, when the widget asks for one (`wave_len` its
+    /// length in seconds, 0 for none): where the cap was let go (the
+    /// track's frame) and how long ago.
+    wave_len: f64,
+    up_at: Option<(f64, f64)>,
+    since_up: f64,
+    /// Where the field is drawn: the pointer followed on a critically
+    /// damped spring, so the field glides after the pointer instead of
+    /// jumping with each pointer event; held at the pointer while the cap
+    /// is held, and taken straight to it while the field is down.
+    shown: Option<(f64, f64)>,
+    shown_v: (f64, f64),
+    time: f64,
+}
+
+impl CapMotion {
+    /// The spring constants for a viscosity 0..1: stiff and quick at 0,
+    /// slow and loose at 1, the tail's (k, c) and the press's (kp, cp).
+    fn constants(viscosity: f64) -> (f64, f64, f64, f64) {
+        let v = viscosity.clamp(0.0, 1.0);
+        let (w0, z) = if v < 0.5 {
+            let t = v * 2.0;
+            (22.0 * (6.0f64 / 22.0).powf(t), 0.57 + (0.7 - 0.57) * t)
+        } else {
+            let t = (v - 0.5) * 2.0;
+            (6.0 * (7.0f64 / 6.0).powf(t), 0.7 + 0.5 * t)
+        };
+        (w0 * w0, 2.0 * z * w0, 4.0 * w0 * w0, 2.0 * 0.6 * 2.0 * w0)
+    }
+
+    fn spring(x: &mut f64, v: &mut f64, target: f64, k: f64, c: f64, dt: f64) {
+        let a = k * (target - *x) - c * *v;
+        *v += a * dt;
+        *x += *v * dt;
+    }
+
+    /// One step: true while anything still moves.
+    pub(crate) fn step(&mut self, dt: f64, value: f64, dragging: bool, viscosity: f64) -> bool {
+        let (k, c, kp, cp) = Self::constants(viscosity);
+        let target = value * self.travel_px;
+        if self.travel {
+            Self::spring(&mut self.head, &mut self.head_v, target, kp, cp, dt);
+            if (self.head - target).abs() < 0.15 && self.head_v.abs() < 3.0 {
+                self.travel = false;
+                self.head = target;
+                self.head_v = 0.0;
+            }
+        } else {
+            self.head = target;
+            self.head_v = 0.0;
+        }
+        let head = self.head;
+        let mut tail = self.tail.unwrap_or(head);
+        Self::spring(&mut tail, &mut self.tail_v, head, k, c, dt);
+        self.tail = Some(tail);
+        let press_target = if dragging { 1.0 } else { 0.0 };
+        Self::spring(&mut self.press, &mut self.press_v, press_target, kp, cp, dt);
+        let gap = head - tail;
+        if gap.abs() > 0.05 {
+            self.last_dir = if gap > 0.0 { 1.0 } else { -1.0 };
+        }
+        // The field: critically damped so it settles without crossing
+        // zero, and its clock runs while it is up.
+        Self::spring(&mut self.hover, &mut self.hover_v, self.hover_target, 40.0, 12.7, dt);
+        self.hover = self.hover.max(0.0);
+        if self.field() > 0.001 {
+            self.time += dt;
+        }
+        if let Some(p) = self.pointer {
+            let snap = dragging || self.field() < 0.001;
+            self.shown_v = field_follow(&mut self.shown, self.shown_v, p, snap, dt);
+        }
+        let wave = self.wave_running();
+        if wave {
+            self.since_up += dt;
+            if self.reported_field() <= 0.001 {
+                self.time += dt;
+            }
+        }
+        wave
+            || self.travel
+            || dragging
+            || self.tail_v.abs() > 0.5
+            || gap.abs() > 0.05
+            || self.press_v.abs() > 1e-3
+            || (self.press - press_target).abs() > 1e-3
+            || self.hover_v.abs() > 1e-3
+            || (self.hover - self.hover_target).abs() > 1e-3
+            || self.field() > 0.001
+    }
+
+    /// The field's strength: most of the hover plus the press, never below
+    /// zero nor above one.
+    pub(crate) fn field(&self) -> f64 {
+        (0.7 * self.hover + self.press).clamp(0.0, 1.0)
+    }
+
+    /// What the material reads: stretch, direction, press, squash along,
+    /// squash across; and the value the cap is drawn at.
+    pub(crate) fn read(&self, value: f64, radius: f64, dragging: bool) -> (f32, f32, f32, f32, f32, f64) {
+        let tail = self.tail.unwrap_or(self.head);
+        let gap = self.head - tail;
+        let dir = if self.last_dir == 0.0 { 1.0 } else { self.last_dir };
+        let r = radius.max(1.0);
+        let stretch = (gap.abs() / (1.69 * r)).min(1.0);
+        let sq = -gap * dir;
+        let (sqa, sqx) = if sq > 0.0 && !dragging {
+            let sr = (sq / r).min(0.6);
+            (1.0 - sr, 1.0 + 0.36 * sr)
+        } else {
+            (1.0, 1.0)
+        };
+        let drawn = if self.travel && self.travel_px > 0.0 {
+            (self.head / self.travel_px).clamp(0.0, 1.0)
+        } else {
+            value
+        };
+        (stretch as f32, dir as f32, self.press as f32, sqa as f32, sqx as f32, drawn)
+    }
+
+    /// The track's travel in points at this draw: a new length scales the
+    /// positions with it rather than snapping them.
+    pub(crate) fn resize(&mut self, travel: f64) {
+        if (travel - self.travel_px).abs() > 0.5 {
+            if self.travel_px > 0.0 {
+                let k = travel / self.travel_px;
+                self.head *= k;
+                if let Some(t) = self.tail.as_mut() {
+                    *t *= k;
+                }
+            }
+            self.travel_px = travel;
+        }
+    }
+
+    /// Starts the motion on the next frame: after a press, a release, a
+    /// drag move, or (`jump`) a value that arrived without a drag, which
+    /// the cap then travels to.
+    pub(crate) fn kick(&mut self, cx: &mut Cx, jump: bool, value: f64) {
+        if jump && self.travel_px > 0.0 {
+            let target = value * self.travel_px;
+            if (self.head - target).abs() > 0.2 {
+                self.travel = true;
+            }
+        }
+        if self.next_frame.is_none() {
+            self.last_time = None;
+            self.next_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// One step on the motion's frame, and the next frame asked for while
+    /// anything still moves. True when it stepped, so the caller redraws.
+    pub(crate) fn tick(&mut self, cx: &mut Cx, event: &Event, value: f64, dragging: bool, viscosity: f64) -> bool {
+        let Some(nf) = self.next_frame else {
+            return false;
+        };
+        let Some(ne) = nf.is_event(event) else {
+            return false;
+        };
+        self.next_frame = None;
+        let dt = match self.last_time {
+            Some(t) => (ne.time - t).clamp(0.001, 0.05),
+            None => 1.0 / 60.0,
+        };
+        self.last_time = Some(ne.time);
+        if self.step(dt, value, dragging, viscosity) {
+            self.next_frame = Some(cx.new_next_frame());
+        }
+        true
+    }
+
+    /// The cap is let go: with a release wave asked for, the wave starts at
+    /// the pointer's place now (the track's frame).
+    pub(crate) fn release(&mut self, cx: &mut Cx, wave_len: f64) {
+        self.wave_len = wave_len.max(0.0);
+        if self.wave_len <= 0.0 {
+            self.up_at = None;
+            return;
+        }
+        self.up_at = self.shown.or(self.pointer);
+        self.since_up = 0.0;
+        if self.next_frame.is_none() {
+            self.last_time = None;
+            self.next_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// A pressed cap has no wave from its last release any more.
+    pub(crate) fn press(&mut self) {
+        self.up_at = None;
+    }
+
+    fn wave_running(&self) -> bool {
+        self.wave_len > 0.0 && self.up_at.is_some() && self.since_up < self.wave_len
+    }
+
+    /// The field the material is handed. Usually the hover and the press
+    /// (`field`); for a widget with a release wave, the press while held
+    /// and then the wave, 1 when the cap is let go and falling away to 0
+    /// over the wave's length, eased so it lingers, with no field from the
+    /// hover alone.
+    pub(crate) fn reported_field(&self) -> f64 {
+        if self.wave_len <= 0.0 {
+            return self.field();
+        }
+        let held = self.press.clamp(0.0, 1.0);
+        let wave = if self.wave_running() {
+            let k = 1.0 - (self.since_up / self.wave_len).clamp(0.0, 1.0);
+            k * k
+        } else {
+            0.0
+        };
+        held.max(wave)
+    }
+
+    /// Where the field is, the track's frame: the release's place while a
+    /// release wave runs, else the pointer followed.
+    pub(crate) fn place(&self) -> Option<(f64, f64)> {
+        if self.wave_running() {
+            return self.up_at;
+        }
+        self.shown.or(self.pointer)
+    }
+
+    /// Whether the motion drives the cap right now: a frame is pending.
+    pub(crate) fn moving(&self) -> bool {
+        self.next_frame.is_some()
+    }
 }
 
 #[derive(Script, Widget, Animator)]
@@ -1991,8 +2780,19 @@ pub struct Slider {
     #[walk]
     walk: Walk,
 
+    #[live(true)]
+    #[visible]
+    visible: bool,
+
     #[live(DragAxis::Horizontal)]
     pub axis: DragAxis,
+
+    /// Called (from script) with the value on each step of a slide, and
+    /// at its end.
+    #[live]
+    on_change: ScriptFnRef,
+    #[live]
+    on_commit: ScriptFnRef,
 
     #[layout]
     layout: Layout,
@@ -2035,11 +2835,12 @@ pub struct Slider {
     /// drag axis, which is what every slider did before there was a number
     /// here: the taller the box, the finer the drag.
     ///
-    /// That is fine for a control drawn 95 points tall and useless for one
-    /// drawn 24 square, where it puts four percent of the range in a pixel
-    /// and there is no modifier to slow it down -- the Shift/Ctrl ladder in
-    /// `wheel_value_delta` is on the wheel only. A control that names a
-    /// travel keeps that resolution at any size.
+    /// That is fine for a control drawn 95 points tall and coarse on one
+    /// drawn 24 square, where it puts four percent of the range in a pixel.
+    /// A held Shift divides that rate by five and a held Ctrl multiplies it
+    /// by four -- `drag_value_delta` reads the same ladder on the drag as
+    /// `wheel_value_delta` does on the wheel -- but a control that names a
+    /// travel keeps its resolution at any size with no key held at all.
     #[live]
     drag_travel: f64,
 
@@ -2065,6 +2866,68 @@ pub struct Slider {
     #[live(false)]
     pub arc_from_origin: bool,
 
+    /// The cap's length along the track, and how far the track is held off
+    /// the control's two ends, in points.
+    ///
+    /// Rust owns them because the DRAG divides by the distance between the
+    /// cap's stops, and the material is handed the same two numbers every
+    /// draw; see [`fader_cap_center`]. Zero and zero -- every slider here
+    /// but the faders -- leaves the drag dividing by the control's own
+    /// extent exactly as it always did.
+    #[live]
+    cap_size: f64,
+    #[live]
+    track_inset: f64,
+
+    /// Above zero, the cap moves like a liquid: its tail follows the head
+    /// on a spring this viscous (0 stiff, 1 slow), a press spreads it on a
+    /// spring, and a value that jumps (a reset, a wheel step, a host's
+    /// write) sends the cap travelling to it. The material reads the
+    /// motion from `cap_stretch`, `cap_dir`, `cap_press` and the two
+    /// `cap_squash_*` instances. Zero, the default, draws every frame at
+    /// rest and never asks for another.
+    #[live]
+    cap_viscosity: f64,
+    /// Above zero, the pointer's field reaches this far (in points) from
+    /// the cap: the material gets `cap_field`, `cap_pointer_along`,
+    /// `cap_pointer_across` and `cap_time`, and the widget follows the
+    /// pointer over the whole window while it is near. Zero, the default,
+    /// tracks nothing.
+    #[live]
+    cap_field_reach: f64,
+    /// Above zero (seconds), with a pointer field: the field is the press
+    /// while the cap is held and, when it is let go, a wave from where it
+    /// was let go that dies away over this long, its place held there; the
+    /// hover alone raises no field. For a material that answers a touch
+    /// like water. Zero, the default, keeps the field of the hover.
+    #[live]
+    cap_release_wave: f64,
+    #[rust]
+    cap_motion: CapMotion,
+
+    /// True, the face is drawn twice, for a material with glass in it that
+    /// shows the window blurred behind it. First in the body, as always,
+    /// with the uniform `backdrop_layer` at 0 and nothing of the window
+    /// bound: what lies under the glass, which the window then captures.
+    /// Then again on an overlay over the body, at the same rect, with
+    /// `backdrop_layer` at 1 and the window's blurred scene bound as
+    /// [`bind_gauss_snapshot`] binds it (`has_gauss` 0 until a capture
+    /// exists): the glass. Drawn inside something that is already on an
+    /// overlay (a pane of glass), the face's first layer is on that overlay
+    /// too and so not in the capture, which holds what lies behind that
+    /// pane: the second layer then has `backdrop_layer` at 2. A material
+    /// that turns this on declares `backdrop_layer` and the scene's slots
+    /// and draws its glass in the second layer only. False, the default,
+    /// draws once and binds nothing.
+    #[live]
+    backdrop: bool,
+    #[rust]
+    backdrop_list: Option<DrawList2d>,
+    /// The face's second instance, on the overlay. The face's own area,
+    /// which the pointer is tested against, stays the first.
+    #[rust]
+    backdrop_area: Area,
+
     #[live]
     bind: String,
 
@@ -2078,6 +2941,19 @@ pub struct Slider {
     pub relative_value: f64,
     #[rust]
     pub dragging: Option<f64>,
+
+    /// Where the pointer stood at the previous move of the drag in hand, so
+    /// that every move is measured from the one before it and the modifiers
+    /// held can be read afresh each time. Unset until the first move of a
+    /// drag, which measures from the press itself.
+    #[rust]
+    drag_from: Option<Vec2d>,
+    /// What the drag has added up to BEFORE the 0..1 clamp. A drag that runs
+    /// past a stop has to come back the same distance before the value
+    /// leaves that stop, which is what a drag measured from the press always
+    /// did.
+    #[rust]
+    drag_travelled: f64,
 }
 
 impl ScriptHook for Slider {
@@ -2085,6 +2961,30 @@ impl ScriptHook for Slider {
         self.set_internal(self.default);
         vm.with_cx_mut(|cx| {
             self.update_text_input(cx);
+        });
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if !self.backdrop {
+            return;
+        }
+        vm.with_cx_mut(|cx| {
+            if apply.is_animate() {
+                // An animation frame writes the animated inputs into the
+                // face's own instance in place; the second one, over the
+                // backdrop, would keep the old ones until the next draw.
+                self.draw_bg.redraw(cx);
+            } else {
+                // Built or restyled and not drawn yet: the window captures
+                // on the frame this first paints in, as a glass surface's.
+                arm_gauss_capture(cx);
+            }
         });
     }
 }
@@ -2106,6 +3006,18 @@ pub enum SliderAction {
 }
 
 impl Slider {
+    fn emit_slide(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        let value = self.to_external();
+        cx.widget_action(uid, SliderAction::Slide(value));
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_change.clone(), &[ScriptValue::from_f64(value)]);
+    }
+
+    fn emit_end_slide(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        let value = self.to_external();
+        cx.widget_action(uid, SliderAction::EndSlide(value));
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_commit.clone(), &[ScriptValue::from_f64(value)]);
+    }
+
     fn to_external(&self) -> f64 {
         taper_to_value(self.taper, self.relative_value, self.min, self.max, self.default, self.step)
     }
@@ -2136,12 +3048,81 @@ impl Slider {
         self.text_input.select_all(cx);
     }
 
+    /// The pointer distance that covers the whole range on a control whose
+    /// cap is drawn on its track: the journey the CAP makes between its two
+    /// stops, so the finger and the cap arrive together. Without a cap and
+    /// an inset it is the extent itself, which is what every slider here
+    /// divided by before there were faders.
+    fn cap_travel(&self, extent: f64) -> f64 {
+        fader_cap_center(1.0, extent, self.cap_size, self.track_inset)
+            - fader_cap_center(0.0, extent, self.cap_size, self.track_inset)
+    }
+
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_bg.slide_pos = self.relative_value as f32;
-        self.draw_bg.origin_pos =
-            taper_to_travel(self.taper, self.default, self.min, self.max, self.default, self.step)
-                as f32;
+        // The cap's motion: at rest (and off) it reads 0, 1, 0, 1, 1 and
+        // the cap is drawn at the value; travelling, the cap is drawn at
+        // its head and the value bar follows it.
+        let drawn = if self.cap_viscosity > 0.0 || self.cap_field_reach > 0.0 {
+            let (stretch, dir, press, sqa, sqx, drawn) =
+                self.cap_motion.read(self.relative_value, self.cap_size * 0.5, self.dragging.is_some());
+            self.draw_bg.cap_stretch = stretch;
+            self.draw_bg.cap_dir = dir;
+            self.draw_bg.cap_press = press;
+            self.draw_bg.cap_squash_along = sqa;
+            self.draw_bg.cap_squash_across = sqx;
+            if self.cap_field_reach > 0.0 {
+                // The pointer and the release are kept in the track's frame;
+                // the cap is where it is drawn now.
+                let cap_at = fader_cap_center(drawn, self.cap_motion.extent, self.cap_size, self.track_inset);
+                let (pa, pc) = match self.cap_motion.place() {
+                    Some((a, c)) => (a - cap_at, c),
+                    None => (0.0, 0.0),
+                };
+                self.draw_bg.cap_field = self.cap_motion.reported_field() as f32;
+                self.draw_bg.cap_pointer_along = pa as f32;
+                self.draw_bg.cap_pointer_across = pc as f32;
+                self.draw_bg.cap_time = self.cap_motion.time as f32;
+            } else {
+                self.draw_bg.cap_field = 0.0;
+                self.draw_bg.cap_pointer_along = 0.0;
+                self.draw_bg.cap_pointer_across = 0.0;
+                self.draw_bg.cap_time = 0.0;
+            }
+            drawn
+        } else {
+            self.draw_bg.cap_stretch = 0.0;
+            self.draw_bg.cap_dir = 1.0;
+            self.draw_bg.cap_press = 0.0;
+            self.draw_bg.cap_squash_along = 1.0;
+            self.draw_bg.cap_squash_across = 1.0;
+            self.draw_bg.cap_field = 0.0;
+            self.draw_bg.cap_pointer_along = 0.0;
+            self.draw_bg.cap_pointer_across = 0.0;
+            self.draw_bg.cap_time = 0.0;
+            self.relative_value
+        };
+        self.draw_bg.slide_pos = drawn as f32;
+        let origin =
+            taper_to_travel(self.taper, self.default, self.min, self.max, self.default, self.step);
+        self.draw_bg.origin_pos = origin as f32;
         self.draw_bg.arc_origin = if self.arc_from_origin { 1.0 } else { 0.0 };
+        let (lo, hi) = fill_span(origin, drawn, self.arc_from_origin);
+        self.draw_bg.fill_lo = lo as f32;
+        self.draw_bg.fill_hi = hi as f32;
+        // The face and the drag read the same `axis`, so a fader cannot be
+        // drawn one way and dragged the other.
+        self.draw_bg.is_vertical = match self.axis {
+            DragAxis::Vertical => 1.0,
+            DragAxis::Horizontal => 0.0,
+        };
+        self.draw_bg.cap_px = self.cap_size as f32;
+        self.draw_bg.inset_px = self.track_inset as f32;
+        if self.backdrop {
+            // The body's layer never reads the window: it is part of the
+            // scene the window captures, and the second layer reads that.
+            bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, None);
+            self.draw_bg.draw_vars.set_uniform(cx, live_id!(backdrop_layer), &[0.0]);
+        }
         self.draw_bg.begin(cx, walk, self.layout);
 
         if let Flow::Right { wrap: false, .. } = self.layout.flow {
@@ -2164,6 +3145,52 @@ impl Slider {
         }
 
         self.draw_bg.end(cx);
+        if self.backdrop {
+            self.draw_backdrop_layer(cx);
+        }
+        // The track's travel in points, for the motion's springs, which
+        // work in points so a long fader and a short one feel the same.
+        if self.cap_viscosity > 0.0 || self.cap_field_reach > 0.0 {
+            let size = self.draw_bg.area().rect(cx).size;
+            let extent = match self.axis {
+                DragAxis::Horizontal => size.x - self.draw_bg.label_size as f64,
+                DragAxis::Vertical => size.y,
+            };
+            let travel = self.cap_travel(extent).max(1.0);
+            self.cap_motion.resize(travel);
+        }
+    }
+
+    /// The face's second layer (see `backdrop`): the same instance again at
+    /// the face's rect, on an overlay of its own begun under the plain ones
+    /// (so popups paint over it) unless one is being drawn already (then `backdrop_layer` is 2, not 1: the first layer is not in
+    /// the capture), with the window's blurred scene bound. Added as an
+    /// aligned instance, so a parent that aligns the face afterwards moves
+    /// both.
+    fn draw_backdrop_layer(&mut self, cx: &mut Cx2d) {
+        let rect = self.draw_bg.area().rect(cx);
+        let own_list = !cx.is_drawing_overlay();
+        if own_list {
+            self.backdrop_list
+                .get_or_insert_with(|| DrawList2d::new(cx))
+                .begin_overlay_under(cx);
+        }
+        let snapshot = request_window_gauss(cx);
+        bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, snapshot);
+        let layer = if own_list { 1.0 } else { 2.0 };
+        self.draw_bg.draw_vars.set_uniform(cx, live_id!(backdrop_layer), &[layer]);
+        self.draw_bg.rect_pos = rect.pos.into();
+        self.draw_bg.rect_size = rect.size.into();
+        self.draw_bg.draw_vars.append_group_id = cx.draw_call_group_background().0;
+        if self.draw_bg.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_bg.draw_vars);
+            self.backdrop_area = cx.update_area_refs(self.backdrop_area, new_area);
+        }
+        if own_list {
+            if let Some(list) = self.backdrop_list.as_mut() {
+                list.end(cx);
+            }
+        }
     }
 
     pub fn value(&self) -> f64 {
@@ -2176,6 +3203,7 @@ impl Slider {
         // the old one instead said yes for a value that quantises or clamps
         // onto the travel already in effect, and then repainted for nothing.
         if self.set_internal(v) {
+            self.cap_motion_kick(cx, true);
             self.update_text_input(cx);
             // And draw the material again. `update_text_input` only dirties
             // the readout's own area, which was the whole repaint a caller
@@ -2190,12 +3218,143 @@ impl Slider {
     /// Snap back to the DSL `default:` value, as a title-click reset does.
     pub fn reset_to_default(&mut self, cx: &mut Cx) {
         self.set_internal(self.default);
+        self.cap_motion_kick(cx, true);
         self.update_text_input(cx);
         self.draw_bg.redraw(cx);
+    }
+
+    /// Starts the cap's motion on the next frame, if the widget has a
+    /// viscosity: after a press, a release, a drag move, or (`jump`) a
+    /// value that arrived without a drag, which the cap then travels to.
+    fn cap_motion_kick(&mut self, cx: &mut Cx, jump: bool) {
+        if self.cap_viscosity <= 0.0 && self.cap_field_reach <= 0.0 {
+            return;
+        }
+        self.cap_motion.kick(cx, jump, self.relative_value);
+    }
+
+    /// The pointer, wherever it is on the window, read against the cap:
+    /// within the field's reach of the cap's centre the field's target is
+    /// one, beyond it zero; its position in the cap's frame is handed to
+    /// the material. Points; `a` runs up the screen on a vertical control.
+    fn cap_field_pointer(&mut self, cx: &mut Cx, abs: Vec2d) {
+        if self.cap_field_reach <= 0.0 {
+            return;
+        }
+        let rect = self.draw_bg.area().rect(cx);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return;
+        }
+        // Along runs from the track's start, which on a horizontal control
+        // is past the label.
+        let (extent, along, across) = match self.axis {
+            DragAxis::Horizontal => (
+                rect.size.x - self.draw_bg.label_size as f64,
+                abs.x - rect.pos.x - self.draw_bg.label_size as f64,
+                abs.y - (rect.pos.y + rect.size.y * 0.5),
+            ),
+            DragAxis::Vertical => (
+                rect.size.y,
+                (rect.pos.y + rect.size.y) - abs.y,
+                abs.x - (rect.pos.x + rect.size.x * 0.5),
+            ),
+        };
+        let cap_at = fader_cap_center(self.relative_value, extent, self.cap_size, self.track_inset);
+        let rel = (along - cap_at, across);
+        let at = (along, across);
+        // The distance to the cap's edge goes to the arbiter: only the
+        // nearest two controls on the window carry a field at once.
+        let dist = ((rel.0 * rel.0 + rel.1 * rel.1).sqrt() - self.cap_size * 0.5).max(0.0);
+        let granted = crate::pointer_field::FieldArbiter::report(abs, self.widget_uid().0, dist);
+        let near = dist < self.cap_field_reach + self.cap_size * 0.5 && granted;
+        let target = if near { 1.0 } else { 0.0 };
+        let moved = match self.cap_motion.pointer {
+            Some(p) => (p.0 - at.0).abs() > 0.01 || (p.1 - at.1).abs() > 0.01,
+            None => true,
+        };
+        self.cap_motion.pointer = Some(at);
+        self.cap_motion.extent = extent;
+        if target != self.cap_motion.hover_target || (moved && self.cap_motion.field() > 0.001) {
+            self.cap_motion.hover_target = target;
+            self.cap_motion_kick(cx, false);
+        }
+    }
+
+    /// One step of the cap's motion on its frame, and the next frame asked
+    /// for while anything still moves.
+    fn cap_motion_tick(&mut self, cx: &mut Cx, event: &Event) {
+        let dragging = self.dragging.is_some();
+        if self.cap_motion.tick(cx, event, self.relative_value, dragging, self.cap_viscosity) {
+            self.draw_bg.redraw(cx);
+        }
     }
 }
 
 impl Widget for Slider {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        let step = if self.step > 0.0 {
+            self.step
+        } else {
+            (self.max - self.min) / 100.0
+        };
+        let value = if action.action == A::SET_VALUE {
+            match &action.arg {
+                ActionArg::Number(v) if v.is_finite() => *v,
+                _ => return ActionResult::Unsupported,
+            }
+        } else if action.action == A::INCREMENT {
+            self.to_external() + step
+        } else if action.action == A::DECREMENT {
+            self.to_external() - step
+        } else {
+            return ActionResult::Unhandled;
+        };
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        let uid = self.widget_uid();
+        self.set_value(cx, value);
+        self.emit_slide(cx, uid);
+        self.emit_end_slide(cx, uid);
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text);
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+        node.value = (|| -> Option<String> {
+            // The number the readout shows, unit and all, so a test waits on
+            // what a person reads rather than on a raw f64.
+            Some(format_readout(
+                self.to_external() * self.display_scale,
+                self.precision,
+                &self.unit,
+            ))
+        })()
+        .unwrap_or_default();
+        node.range = Some(a11y_tree::RangeValue {
+            min: self.min,
+            max: self.max,
+            now: self.to_external(),
+            step: self.step,
+        });
+        node.actions = a11y_tree::Actions::FOCUS
+            | a11y_tree::Actions::SET_VALUE
+            | a11y_tree::Actions::INCREMENT
+            | a11y_tree::Actions::DECREMENT;
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,
@@ -2221,8 +3380,7 @@ impl Widget for Slider {
         }
         if method == live_id!(set_value) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if let Some(v) = value.as_f64() {
                     vm.with_cx_mut(|cx| {
                         self.set_value(cx, v);
@@ -2237,6 +3395,21 @@ impl Widget for Slider {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        // Hidden: no hits, and the value field inside takes no keys.
+        if !self.visible {
+            return;
+        }
+        self.cap_motion_tick(cx, event);
+        match event {
+            Event::MouseMove(e) => self.cap_field_pointer(cx, e.abs),
+            Event::MouseLeave(_) if self.cap_field_reach > 0.0 => {
+                if self.cap_motion.hover_target != 0.0 {
+                    self.cap_motion.hover_target = 0.0;
+                    self.cap_motion_kick(cx, false);
+                }
+            }
+            _ => (),
+        }
 
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
@@ -2331,11 +3504,22 @@ impl Widget for Slider {
                     if delta != 0.0 && self.dragging.is_none() {
                         self.relative_value = (self.relative_value + delta).max(0.0).min(1.0);
                         self.set_internal(self.to_external());
+                        self.cap_motion_kick(cx, true);
                         self.draw_bg.redraw(cx);
                         self.update_text_input(cx);
-                        cx.widget_action(uid, SliderAction::Slide(self.to_external()));
-                        cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
+                        self.emit_slide(cx, uid);
+                        self.emit_end_slide(cx, uid);
                     }
+                    // The wheel a slider took is spent: a list or a
+                    // panel scrolling by the same wheel behind it -- an
+                    // effect rack's rows -- reads the mark and stays
+                    // where it is, so one notch moves the value and
+                    // never also slides the slider out from under the
+                    // pointer. Marked whenever the slider is the one
+                    // wearing a step, not only when the notch moved it,
+                    // so a slider at its end still holds the panel.
+                    event.set_scroll_handled(Vec2Index::X);
+                    event.set_scroll_handled(Vec2Index::Y);
                 }
             }
             Hit::FingerDown(FingerDownEvent {
@@ -2351,7 +3535,7 @@ impl Widget for Slider {
                 }
                 if tap_count == 2 {
                     self.reset_to_default(cx);
-                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
+                    self.emit_slide(cx, uid);
                     return ();
                 }
                 // cx.set_key_focus(self.slider.area());
@@ -2365,6 +3549,10 @@ impl Widget for Slider {
 
                 self.animator_play(cx, ids!(drag.on));
                 self.dragging = Some(self.relative_value);
+                self.drag_from = None;
+                self.drag_travelled = self.relative_value;
+                self.cap_motion.press();
+                self.cap_motion_kick(cx, false);
                 cx.claim_finger_drag(digit_id);
                 cx.widget_action(uid, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
@@ -2384,6 +3572,11 @@ impl Widget for Slider {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 self.dragging = None;
+                self.drag_from = None;
+                self.cap_motion_kick(cx, false);
+                if self.cap_field_reach > 0.0 {
+                    self.cap_motion.release(cx, self.cap_release_wave);
+                }
                 // A TAP on the label puts the control back to its DSL
                 // default.
                 //
@@ -2414,7 +3607,7 @@ impl Widget for Slider {
                     self.reset_to_default(cx);
                     cx.widget_action(uid, SliderAction::Reset(self.to_external()));
                 }
-                cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
+                self.emit_end_slide(cx, uid);
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerMove(fe) => {
@@ -2422,22 +3615,43 @@ impl Widget for Slider {
                     return ();
                 }
 
-                let rel = fe.abs - fe.abs_start;
-                if let Some(start_pos) = self.dragging {
-                    if let DragAxis::Horizontal = self.axis {
-                        let span = drag_span(
+                if self.dragging.is_some() {
+                    // The span is the one the control's OWN axis names, held
+                    // even when Alt is turning the drag across it: what Alt
+                    // changes is which way the pointer is read, not how far
+                    // it has to go. Naming none, it is the journey the CAP
+                    // makes between its stops, which on a control with no cap
+                    // to hold it off the ends is the control's own extent --
+                    // so a fader's cap and the finger arrive together.
+                    let span = if let DragAxis::Horizontal = self.axis {
+                        drag_span(
                             self.drag_travel,
-                            fe.rect.size.x - self.draw_bg.label_size as f64,
-                        );
-                        self.relative_value = (start_pos + rel.x / span).max(0.0).min(1.0);
+                            self.cap_travel(
+                                fe.rect.size.x - self.draw_bg.label_size as f64,
+                            ),
+                        )
                     } else {
-                        let span = drag_span(self.drag_travel, fe.rect.size.y);
-                        self.relative_value = (start_pos - rel.y / span).max(0.0).min(1.0);
-                    }
+                        drag_span(self.drag_travel, self.cap_travel(fe.rect.size.y))
+                    };
+                    // From the move before, or from the press on the first
+                    // move, so the modifiers that count are the ones down
+                    // NOW and a key taken or let go mid-drag changes the
+                    // rate from here without moving the value.
+                    let from = self.drag_from.unwrap_or(fe.abs_start);
+                    self.drag_from = Some(fe.abs);
+                    self.drag_travelled += drag_value_delta(
+                        fe.abs - from,
+                        self.axis,
+                        fe.modifiers.alt,
+                        &fe.modifiers,
+                        span,
+                    );
+                    self.relative_value = self.drag_travelled.max(0.0).min(1.0);
                     self.set_internal(self.to_external());
+                    self.cap_motion_kick(cx, false);
                     self.draw_bg.redraw(cx);
                     self.update_text_input(cx);
-                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
+                    self.emit_slide(cx, uid);
                 }
             }
             _ => (),
@@ -2445,7 +3659,11 @@ impl Widget for Slider {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_walk_slider(cx, walk);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
     }
 
@@ -2453,15 +3671,7 @@ impl Widget for Slider {
         format!("{}", self.to_external())
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        // The number the readout shows, unit and all, so a test waits on
-        // what a person reads rather than on a raw f64.
-        Some(format_readout(
-            self.to_external() * self.display_scale,
-            self.precision,
-            &self.unit,
-        ))
-    }
+
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         if let Ok(v) = v.parse::<f64>() {
@@ -2479,6 +3689,16 @@ impl Widget for Slider {
 }
 
 impl SliderRef {
+    /// Whether the value field holds the key focus: after any press on the
+    /// slider it does, and a value may be being typed into it. A host that
+    /// writes the value back every frame checks this before it does.
+    pub fn has_text_focus(&self, cx: &Cx) -> bool {
+        match self.borrow() {
+            Some(inner) => cx.has_key_focus(inner.text_input.area()),
+            None => false,
+        }
+    }
+
     pub fn value(&self) -> Option<f64> {
         if let Some(inner) = self.borrow() {
             return Some(inner.value());
@@ -2653,7 +3873,7 @@ mod style_reapply_tests {
             vm.with_cx_mut(|cx| slider.set_value(cx, 70.0));
             assert_eq!(slider.text_input.text(), "70.00");
             for (style, dark) in [(DesktopStyle::Macos, true), (DesktopStyle::Windows2000, false), (DesktopStyle::Omarchy, false)] {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+                install(vm, StyleSheet::load(style.sheet(dark)));
                 vm.with_reload(crate::script_mod);
                 slider.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
                 assert!(
@@ -2725,6 +3945,108 @@ mod drag_tests {
         // Neither zero nor a negative is a travel.
         assert_eq!(drag_span(-10.0, 24.0), 24.0);
     }
+
+    fn mods(control: bool, shift: bool, alt: bool) -> KeyModifiers {
+        KeyModifiers { control, shift, alt, logo: false }
+    }
+
+    #[test]
+    fn a_drag_moves_as_far_as_before_with_no_modifier_held() {
+        // The drag used to be one sum, (pointer - press) over the span. It is
+        // a running total of moves now, and over the same pointer path with
+        // no key held the total is the same number: every slider in the
+        // library that nobody holds a key on drags exactly as it did.
+        let span = 160.0;
+        let path = [
+            Vec2d { x: 0.0, y: 0.0 },
+            Vec2d { x: 7.0, y: -13.0 },
+            Vec2d { x: 3.0, y: -40.0 },
+            Vec2d { x: -11.0, y: -12.5 },
+        ];
+        let whole = path[path.len() - 1] - path[0];
+        let plain = mods(false, false, false);
+
+        let mut summed = 0.0;
+        for step in path.windows(2) {
+            summed += drag_value_delta(step[1] - step[0], DragAxis::Vertical, false, &plain, span);
+        }
+        assert!((summed - (-whole.y / span)).abs() < 1e-12, "{}", summed);
+
+        let mut summed = 0.0;
+        for step in path.windows(2) {
+            summed += drag_value_delta(step[1] - step[0], DragAxis::Horizontal, false, &plain, span);
+        }
+        assert!((summed - (whole.x / span)).abs() < 1e-12, "{}", summed);
+    }
+
+    #[test]
+    fn shift_makes_a_drag_five_times_finer_and_ctrl_four_times_faster() {
+        let span = 160.0;
+        let up = Vec2d { x: 0.0, y: -16.0 };
+        let plain = drag_value_delta(up, DragAxis::Vertical, false, &mods(false, false, false), span);
+        assert!((plain - 0.1).abs() < 1e-12, "{}", plain);
+
+        let shift = drag_value_delta(up, DragAxis::Vertical, false, &mods(false, true, false), span);
+        assert!((shift - plain * 0.2).abs() < 1e-12, "{}", shift);
+        let ctrl = drag_value_delta(up, DragAxis::Vertical, false, &mods(true, false, false), span);
+        assert!((ctrl - plain * 4.0).abs() < 1e-12, "{}", ctrl);
+        let both = drag_value_delta(up, DragAxis::Vertical, false, &mods(true, true, false), span);
+        assert!((both - plain * 10.0).abs() < 1e-12, "{}", both);
+
+        // The wheel's ladder and the drag's are one ladder.
+        let notch = Vec2d { x: 0.0, y: -120.0 };
+        let wheel_plain = wheel_value_delta(notch, &mods(false, false, false), 0.025);
+        for held in [mods(false, true, false), mods(true, false, false), mods(true, true, false)] {
+            let by_wheel = wheel_value_delta(notch, &held, 0.025) / wheel_plain;
+            let by_drag = drag_value_delta(up, DragAxis::Vertical, false, &held, span) / plain;
+            assert!((by_wheel - by_drag).abs() < 1e-12, "{} vs {}", by_wheel, by_drag);
+        }
+    }
+
+    #[test]
+    fn alt_reads_a_vertical_sliders_drag_from_the_horizontal() {
+        let span = 100.0;
+        let right = Vec2d { x: 25.0, y: 0.0 };
+        let up = Vec2d { x: 0.0, y: -25.0 };
+        let plain = mods(false, false, false);
+
+        // Held on a knob or a fader: the pointer's across movement moves the
+        // value, right raising it as up does, and up does nothing.
+        assert!((drag_value_delta(right, DragAxis::Vertical, true, &plain, span) - 0.25).abs() < 1e-12);
+        assert_eq!(drag_value_delta(up, DragAxis::Vertical, true, &plain, span), 0.0);
+        // and on a horizontal slider the other way about.
+        assert!((drag_value_delta(up, DragAxis::Horizontal, true, &plain, span) - 0.25).abs() < 1e-12);
+        assert_eq!(drag_value_delta(right, DragAxis::Horizontal, true, &plain, span), 0.0);
+        // Not held, each reads its own way, up and right raising the value.
+        assert!((drag_value_delta(up, DragAxis::Vertical, false, &plain, span) - 0.25).abs() < 1e-12);
+        assert!((drag_value_delta(right, DragAxis::Horizontal, false, &plain, span) - 0.25).abs() < 1e-12);
+        // The rates go with it: Alt says which way, the ladder says how fast.
+        let fine = drag_value_delta(right, DragAxis::Vertical, true, &mods(false, true, false), span);
+        assert!((fine - 0.05).abs() < 1e-12, "{}", fine);
+    }
+
+    #[test]
+    fn changing_a_modifier_mid_drag_changes_the_rate_without_a_jump() {
+        let span = 100.0;
+        let step = Vec2d { x: 0.0, y: -10.0 };
+        let mut value = 0.0;
+        for _ in 0..3 {
+            value += drag_value_delta(step, DragAxis::Vertical, false, &mods(false, false, false), span);
+        }
+        assert!((value - 0.3).abs() < 1e-12, "{}", value);
+
+        // Shift goes down with the drag still in hand: the value stays where
+        // it stands and only the rate from here on is finer. It does not
+        // jump to the 0.06 a whole drag at the fine rate would have reached.
+        for _ in 0..3 {
+            value += drag_value_delta(step, DragAxis::Vertical, false, &mods(false, true, false), span);
+        }
+        assert!((value - 0.36).abs() < 1e-12, "{}", value);
+
+        // And let go again: the plain rate from that point, no jump back.
+        value += drag_value_delta(step, DragAxis::Vertical, false, &mods(false, false, false), span);
+        assert!((value - 0.46).abs() < 1e-12, "{}", value);
+    }
 }
 
 /// THE POINTER-CAPTURE RULE, as it applies to a slider.
@@ -2740,20 +4062,20 @@ mod pointer_capture_tests {
     use crate::makepad_draw::cx_draw::CxDraw;
     use std::cell::Cell;
 
-    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
-    const WINDOW: WindowId = WindowId(1, 1);
+    pub(super) const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    pub(super) const WINDOW: WindowId = WindowId(1, 1);
 
-    struct Target {
+    pub(super) struct Target {
         pass: DrawPass,
         draw_list: DrawList2d,
     }
 
     impl Target {
-        fn new(cx: &mut Cx) -> Self {
+        pub(super) fn new(cx: &mut Cx) -> Self {
             Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
         }
 
-        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+        pub(super) fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
             self.pass.set_size(cx, SIZE);
             let event = DrawEvent::default();
             let mut draw = CxDraw::new(cx, &event);
@@ -2768,7 +4090,7 @@ mod pointer_capture_tests {
         }
     }
 
-    fn press(abs: Vec2d) -> Event {
+    pub(super) fn press(abs: Vec2d) -> Event {
         Event::MouseDown(MouseDownEvent {
             abs,
             button: MouseButton::PRIMARY,
@@ -2779,11 +4101,11 @@ mod pointer_capture_tests {
         })
     }
 
-    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+    pub(super) fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
         cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
     }
 
-    fn middle(cx: &Cx, widget: &WidgetRef) -> Vec2d {
+    pub(super) fn middle(cx: &Cx, widget: &WidgetRef) -> Vec2d {
         let rect = widget.area().rect(cx);
         assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "not drawn");
         rect.pos + rect.size * 0.5
@@ -2877,5 +4199,360 @@ mod pointer_capture_tests {
             "and nothing else on the slider took a second hold of it"
         );
         cx.fingers.first_mouse_button = None;
+    }
+}
+
+/// THE FADER, and the three things it has to get right: where the cap sits
+/// on its track, which side of the origin the bar grows, and that standing
+/// the control on end moves the HIT TEST with the drawing.
+#[cfg(test)]
+mod fader_tests {
+    use super::pointer_capture_tests::{middle, press, send, Target, WINDOW};
+    use super::*;
+    use std::cell::Cell;
+
+    /// The cap's two stops are half a cap in from the track's ends, and the
+    /// middle of its travel is the middle of the control: an 18 point cap on
+    /// a 200 point control held 6 off either end travels 170, from 15 to 185.
+    #[test]
+    fn the_cap_stops_half_a_cap_in_from_either_end() {
+        let at = |pos| fader_cap_center(pos, 200.0, 18.0, 6.0);
+        assert_eq!(at(0.0), 15.0);
+        assert_eq!(at(1.0), 185.0);
+        assert_eq!(at(0.5), 100.0, "the middle of the travel is the middle of the track");
+        // Stood on end the same law is read back from the far edge, since a
+        // desk fader's zero is at the BOTTOM: full value sits fifteen points
+        // down from the top, and rest fifteen up from the bottom.
+        assert_eq!(200.0 - at(1.0), 15.0);
+        assert_eq!(200.0 - at(0.0), 185.0);
+        // A control that names neither a cap nor an inset is the whole of
+        // its own length, which is what the drag divided by before there
+        // were faders.
+        let span = |length, cap, inset| {
+            fader_cap_center(1.0, length, cap, inset) - fader_cap_center(0.0, length, cap, inset)
+        };
+        assert_eq!(span(300.0, 0.0, 0.0), 300.0);
+        assert_eq!(span(200.0, 18.0, 6.0), 170.0);
+        // And a cap with nowhere left to go still leaves a distance to
+        // divide by rather than a zero.
+        assert_eq!(span(10.0, 18.0, 6.0), 1.0);
+    }
+
+    /// The bar grows out of the origin, on the side the value fell.
+    #[test]
+    fn the_centre_origin_bar_draws_on_the_side_the_value_fell() {
+        assert_eq!(fill_span(0.5, 0.8, true), (0.5, 0.8), "a boost fills above unity");
+        assert_eq!(fill_span(0.5, 0.2, true), (0.2, 0.5), "and a cut below it");
+        assert_eq!(fill_span(0.5, 0.5, true), (0.5, 0.5), "at rest it is a line on the origin");
+        // An origin that is not the middle is still the origin: a fader
+        // whose unity sits at a quarter of its travel grows from the
+        // quarter.
+        assert_eq!(fill_span(0.25, 0.9, true), (0.25, 0.9));
+        // Off, which is the family's default: from the stop, wherever the
+        // default happens to sit.
+        assert_eq!(fill_span(0.5, 0.2, false), (0.0, 0.2));
+        assert_eq!(fill_span(0.5, 0.8, false), (0.0, 0.8));
+    }
+
+    /// The two presets and every property they are made of raise nothing.
+    /// A theme token that does not exist, or a property the base has not
+    /// got, is only a line in the running app's log; evaluated with that
+    /// log held, both faces come up clean.
+    #[test]
+    fn the_presets_and_their_properties_raise_no_script_error() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let _ = vm.take_errors();
+            vm.capture_errors();
+            let _ = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    level := SliderFader{cap_size: 24. track_inset: 4.}
+                    gain := SliderFaderY{min: -1. max: 1. default: 0. arc_from_origin: true}
+                }
+            });
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:#?}");
+        });
+    }
+
+    fn motion(abs: Vec2d) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: Vec2d::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    fn release(abs: Vec2d) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    /// One fader lying down and one standing up, the same length and the
+    /// same cap, so the same gesture can be asked of both.
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    flat := SliderFader{width: 300. height: 40. default: 0.5}
+                    upright := SliderFaderY{width: 40. height: 300. default: 0.5}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let flat = root.widget(cx, ids!(flat));
+        let upright = root.widget(cx, ids!(upright));
+        (root, flat, upright)
+    }
+
+    fn value_of(fader: &WidgetRef) -> f64 {
+        fader.borrow::<Slider>().unwrap().value()
+    }
+
+    /// A press, a move and a release, the button recorded as held in
+    /// between the way the platform records it.
+    fn drag(cx: &mut Cx, root: &WidgetRef, from: Vec2d, by: Vec2d) {
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(cx, root, &press(from));
+        send(cx, root, &motion(from + by));
+        send(cx, root, &release(from + by));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// One gesture on one fader, and the value it left behind.
+    ///
+    /// A scene of its own for each, because a capture outlives its gesture
+    /// here: releasing the mouse digit is the event loop's job -- the
+    /// platform calls `Fingers::mouse_up` after dispatching the up -- and a
+    /// unit test has no event loop. A second gesture on the same Cx would
+    /// be handed to whatever held the first one, which is the very
+    /// confusion this test exists to rule out.
+    fn dragged(upright: bool, by: Vec2d) -> f64 {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, flat, standing) = start(&mut cx);
+        let fader = if upright { standing } else { flat };
+        let at = middle(&cx, &fader);
+        drag(&mut cx, &root, at, by);
+        value_of(&fader)
+    }
+
+    /// The axis flips the HIT TEST and not merely the drawing. The same
+    /// gesture -- sixty points right and sixty points up -- is read off x by
+    /// the fader lying down and off y by the one standing up, and since the
+    /// two are the same length with the same cap they land on the same
+    /// value. Each ignores the other's axis entirely.
+    #[test]
+    fn the_axis_flip_moves_the_hit_test_with_the_face() {
+        let by = Vec2d { x: 60.0, y: -60.0 };
+        let (a, b) = (dragged(false, by), dragged(true, by));
+        assert!(a > 0.5, "the gesture moved the flat fader up its own axis: {a}");
+        assert!((a - b).abs() < 1e-12, "the same gesture, read on each axis: {a} and {b}");
+        // Sixty points of a 266 point travel: three hundred long, less an
+        // eighteen point cap and eight off either end.
+        assert!((a - (0.5 + 60.0 / 266.0)).abs() < 1e-12, "{a}");
+
+        // And the cross axis does nothing at all to either.
+        assert_eq!(
+            dragged(false, Vec2d { x: 0.0, y: -60.0 }),
+            0.5,
+            "an upright gesture moved the flat fader"
+        );
+        assert_eq!(
+            dragged(true, Vec2d { x: 60.0, y: 0.0 }),
+            0.5,
+            "a flat gesture moved the upright fader"
+        );
+    }
+
+    /// The cap keeps the pointer for the whole drag, and nothing else takes
+    /// a second hold of it. A strip of these lives inside a drag-scrolling
+    /// column, and the column stands down for exactly as long as this
+    /// capture lasts -- so a fader that let go of the pointer mid-drag would
+    /// scroll the rack it sits in.
+    #[test]
+    fn the_cap_holds_the_pointer_for_the_whole_drag() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _flat, upright) = start(&mut cx);
+        let face = upright.borrow::<Slider>().unwrap().draw_bg.area();
+        let at = middle(&cx, &upright);
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at));
+        assert!(cx.fingers.is_area_captured(face), "the press took the pointer");
+        send(&mut cx, &root, &motion(at + Vec2d { x: 0.0, y: -40.0 }));
+        assert!(cx.fingers.is_area_captured(face), "and still held it mid-drag");
+        assert!(
+            !cx.fingers.is_mouse_held_outside(&[face]),
+            "something else took a second hold of the same press"
+        );
+        send(&mut cx, &root, &release(at + Vec2d { x: 0.0, y: -40.0 }));
+        cx.fingers.first_mouse_button = None;
+        assert!(value_of(&upright) > 0.5, "the drag moved the value");
+    }
+}
+
+/// THE BACKDROP LAYER. A face whose material has glass in it is drawn twice:
+/// in the body, which the window captures, and again over it on an overlay,
+/// where the glass reads that capture. The pointer is tested against the
+/// first alone.
+#[cfg(test)]
+mod backdrop_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: Vec2d = Vec2d { x: 400.0, y: 300.0 };
+
+    /// A window-less pass with the overlay a window keeps.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    glass := SliderFader{
+                        width: 300.
+                        backdrop: true
+                        draw_bg +: {backdrop_layer: uniform(-1.0)}
+                    }
+                    plain := SliderFader{
+                        width: 300.
+                        draw_bg +: {backdrop_layer: uniform(-1.0)}
+                    }
+                    pane := View{
+                        width: 320.
+                        height: Fit
+                        show_bg: true
+                        backdrop: true
+                        on_glass := SliderFader{
+                            width: 300.
+                            backdrop: true
+                            draw_bg +: {backdrop_layer: uniform(-1.0)}
+                        }
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// The list an instance was drawn into and the `backdrop_layer` its
+    /// draw call carries.
+    fn layer_of(cx: &Cx, slider: &Slider, area: Area) -> (DrawListId, f32) {
+        let inst = area.valid_instance(cx).expect("drawn").clone();
+        let call = cx.draw_lists[inst.draw_list_id].draw_items[inst.draw_item_id]
+            .kind
+            .draw_call()
+            .expect("a draw call");
+        let (offset, _) = slider
+            .draw_bg
+            .draw_vars
+            .uniform_range(cx, live_id!(backdrop_layer))
+            .expect("the material declares backdrop_layer");
+        (inst.draw_list_id, call.dyn_uniforms[offset])
+    }
+
+    #[test]
+    fn a_backdrop_face_draws_under_the_glass_then_the_glass_over_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let root = scene(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        target.draw(&mut cx, &root);
+
+        let glass = root.widget(&cx, ids!(glass));
+        let glass = glass.borrow::<Slider>().unwrap();
+        let face = glass.draw_bg.area();
+        let (body_list, body_layer) = layer_of(&cx, &glass, face);
+        let (over_list, over_layer) = layer_of(&cx, &glass, glass.backdrop_area);
+        assert_eq!(body_layer, 0.0, "the body's layer is what lies under the glass");
+        assert_eq!(over_layer, 1.0, "the second is the glass");
+        assert_ne!(body_list, over_list, "and it is drawn on a list of its own");
+        assert_eq!(
+            Some(over_list),
+            glass.backdrop_list.as_ref().map(|list| list.id()),
+            "the slider's overlay list"
+        );
+        assert_eq!(
+            face.rect(&cx),
+            glass.backdrop_area.rect(&cx),
+            "both layers cover the same rect"
+        );
+
+        // A face that does not ask is drawn once, as before, and its
+        // material keeps whatever it declared.
+        let plain = root.widget(&cx, ids!(plain));
+        let plain = plain.borrow::<Slider>().unwrap();
+        assert_eq!(plain.backdrop_area, Area::Empty);
+        assert!(plain.backdrop_list.is_none());
+        let (_, plain_layer) = layer_of(&cx, &plain, plain.draw_bg.area());
+        assert_eq!(plain_layer, -1.0);
+
+        // On a pane of glass both layers are on the pane's overlay, so the
+        // body under the glass is not in the capture: the glass says so.
+        let on_glass = root.widget(&cx, ids!(on_glass));
+        let on_glass = on_glass.borrow::<Slider>().unwrap();
+        let (body_list, body_layer) = layer_of(&cx, &on_glass, on_glass.draw_bg.area());
+        let (over_list, over_layer) = layer_of(&cx, &on_glass, on_glass.backdrop_area);
+        assert_eq!(body_layer, 0.0);
+        assert_eq!(over_layer, 2.0, "the glass over a body that is not in the capture");
+        assert_eq!(body_list, over_list, "both on the pane's overlay");
+        assert!(on_glass.backdrop_list.is_none(), "no overlay of its own");
     }
 }

@@ -1,6 +1,7 @@
 //! Application identities with artwork supplied by the active desktop style.
 //! App code names an identity; renderers cache parsed SVGs and share source data.
 use crate::{desktop_style::DesktopStyle, *};
+use makepad_app_icons::ICONS;
 use makepad_micro_serde::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,67 +11,6 @@ pub struct IconAsset {
     pub name: String,
     pub svg: String,
 }
-struct BundledIcon {
-    name: &'static str,
-    variants: [&'static str; 7],
-}
-macro_rules! icon {
-    ($name:literal) => {
-        BundledIcon {
-            name: $name,
-            variants: [
-                include_str!(concat!("../../themes/omarchy/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/macos/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/windows/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/windows-2000/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/nextstep/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/ios/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/android/icons/", $name, ".svg")),
-            ],
-        }
-    };
-}
-const ICONS: &[BundledIcon] = &[
-    icon!("applications"),
-    icon!("browser"),
-    icon!("files"),
-    icon!("terminal"),
-    icon!("mixer"),
-    icon!("task"),
-    icon!("sheets"),
-    icon!("photos"),
-    icon!("clock"),
-    icon!("weather"),
-    icon!("finance"),
-    icon!("mail"),
-    icon!("notes"),
-    icon!("calendar"),
-    icon!("reminders"),
-    icon!("calculator"),
-    icon!("fabric"),
-    icon!("score"),
-    icon!("video"),
-    icon!("route"),
-    icon!("vj"),
-    icon!("fab"),
-    icon!("studio"),
-    icon!("scope"),
-    icon!("image"),
-    icon!("pdf"),
-    icon!("aichat"),
-    icon!("counter"),
-    icon!("app"),
-    icon!("file-folder"),
-    icon!("file-generic"),
-    icon!("file-image"),
-    icon!("file-text"),
-    icon!("file-code"),
-    icon!("file-audio"),
-    icon!("file-video"),
-    icon!("file-archive"),
-    icon!("file-pdf"),
-
-];
 
 pub fn canonical_name(name: &str) -> &str {
     let name = name.strip_prefix("makepad-").unwrap_or(name);
@@ -278,27 +218,25 @@ impl ScriptHook for AppIcon {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
-        let selected = desktop_style::current_name(vm);
-        let name = if self.style.as_ref() == "auto" {
-            selected.as_deref().unwrap_or(if cfg!(target_os = "ios") {
-                "ios"
+        // `auto` draws the installed sheet's family, or this platform's
+        // with none; a name draws the family of that sheet.
+        self.resolved = if self.style.as_ref() == "auto" {
+            if desktop_style::current_name(vm).is_some() {
+                desktop_style::current_style(vm)
+            } else if cfg!(target_os = "ios") {
+                DesktopStyle::Ios
             } else if cfg!(target_os = "android") {
-                "android"
+                DesktopStyle::Android
             } else if cfg!(target_os = "macos") {
-                "macos"
+                DesktopStyle::Macos
             } else if cfg!(target_os = "windows") {
-                "windows"
+                DesktopStyle::Windows
             } else {
-                "omarchy"
-            })
+                DesktopStyle::Omarchy
+            }
         } else {
-            self.style.as_ref()
+            desktop_style::find(self.style.as_ref()).map(|entry| entry.family).unwrap_or_default()
         };
-        self.resolved = DesktopStyle::parse(name).unwrap_or(if name == "macos-dark" {
-            DesktopStyle::Macos
-        } else {
-            DesktopStyle::Omarchy
-        });
     }
 }
 impl AppIcon {
@@ -316,6 +254,12 @@ impl AppIcon {
     }
 }
 impl Widget for AppIcon {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {

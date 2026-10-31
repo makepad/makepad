@@ -340,7 +340,8 @@ pub struct InitialState;
 impl InitialState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
-            ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
+            // `r"…"` and `r#"…"#` (any number of `#`): raw strings, no escapes.
+            ('r', '"', _) | ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
             ('b', 'r', '"') | ('b', 'r', '#') => self.raw_byte_string(cursor),
             ('/', '/', _) => self.line_comment(cursor),
             ('/', '*', _) => self.block_comment(cursor),

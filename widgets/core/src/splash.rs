@@ -86,6 +86,10 @@ pub struct Splash {
     /// first; timers a handler started later are left alone.
     #[rust]
     startup_timers: Vec<LiveId>,
+    /// What the last evaluation of the body reported (also logged): a host shows them instead
+    /// of evaluating the body a second time in a throwaway isolate to find out.
+    #[rust]
+    last_errors: Vec<String>,
     /// `mod.*` entries the body introduced (its persistent models, e.g.
     /// `mod.state`). A style reapply restores them after the body's re-run, as
     /// `!vm.is_reload()`-guarded application state survives a style reload.
@@ -130,10 +134,17 @@ pub const SPLASH_PREFIX_LINES: u32 = 3;
 /// Line offset for net-enabled apps (their prefix adds `use mod.net`).
 pub const SPLASH_NET_PREFIX_LINES: u32 = 4;
 
-const SPLASH_PREFIX: &str =
-    "use mod.prelude.widgets.*\nlet fs = mod.fs\nlet host = mod.host\nView{height:Fit, ";
-const SPLASH_NET_PREFIX: &str =
-    "use mod.prelude.widgets.*\nuse mod.net\nlet fs = mod.fs\nlet host = mod.host\nView{height:Fit, ";
+/// The prefix a body is evaluated under: the UI domain's default `use`s
+/// (`makepad_script::domain::UI`), `use mod.net` for a net-enabled app, the
+/// jailed storage and host bridge as bare names, and the root view it opens.
+fn splash_prefix(allow_net: bool) -> String {
+    let mut prefix = crate::makepad_script::domain::UI.use_prefix();
+    if allow_net {
+        prefix.push_str("use mod.net\n");
+    }
+    prefix.push_str("let fs = mod.fs\nlet host = mod.host\nView{height:Fit, ");
+    prefix
+}
 const SPLASH_EVAL_INSTRUCTION_LIMIT: usize = 200_000;
 
 impl Splash {
@@ -201,17 +212,17 @@ impl Splash {
     /// are dropped first rather than left to write over the new one.
     fn restyle_theme(&mut self, cx: &mut Cx) {
         self.styled = self.current_style();
-        let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+        let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key());
         stop_script_timers(cx, &isolate_timer_ids(cx, heap_key));
         self.startup_timers.clear();
         crate::splash_host::forget_callbacks(heap_key);
 
         let (theme, script) = (self.styled.theme, self.styled.script.clone());
-        let host_io_only = self.host_io_only;
         let vm_id = self.vm_id;
+        let loader = crate::widget_async::isolate_loader(cx, vm_id);
         crate::widget_async::contain_isolate_panic("theme restyle", || {
-            cx.with_script_vm_id_trusted(vm_id, |vm| {
-                crate::widget_async::restyle_isolate(vm, theme, script.as_deref(), host_io_only);
+            cx.with_script_vm_id(vm_id, |vm| {
+                crate::widget_async::restyle_isolate(vm, theme, script, loader.as_ref());
             });
         });
         self.eval_styled_body(cx, true);
@@ -257,7 +268,7 @@ impl Splash {
         }
         // (Re)bind this isolate's storage jail and host-bridge identity.
         // Keyed by heap so the script can neither read nor retarget them.
-        let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+        let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key());
         crate::splash_storage::set_root_for_heap(heap_key, self.sandbox_dir.clone());
         crate::splash_host::set_tag_for_heap(heap_key, self.host_tag.clone());
         crate::splash_host::set_caps_for_heap(heap_key, self.host_caps.clone());
@@ -266,28 +277,17 @@ impl Splash {
 
         let body_key = self.body_key();
         // Full code string: prefix + body (no closing - parser auto-closes)
-        let prefix = if self.allow_net {
-            SPLASH_NET_PREFIX
-        } else {
-            SPLASH_PREFIX
-        };
+        let prefix = splash_prefix(self.allow_net);
         let code = format!("{}{}", prefix, body);
 
         // Identity is stable (same module_path each call) AND the location
         // fields are left alone, so `ip_to_loc` reports the script's own line
         // instead of one offset by a pointer address.
-        let script_mod = ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: self.body_key(),
-            file: self.source_label(),
-            line: 0,
-            column: 0,
-            code: String::new(),
-            values: vec![],
-        };
+        let script_mod = ScriptMod::new("", &self.body_key(), &self.source_label(), 0, 0, "", &[]);
 
         let vm_id = self.vm_id;
         let sheet=if self.host_io_only {None} else {self.stylesheet.clone()};
+        let loader=if sheet.is_some() {crate::widget_async::isolate_loader(cx,vm_id)} else {None};
         let (theme, script) = (self.styled.theme, self.styled.script.clone());
         self.style_pending=false;
         // A style reapply runs the body's top-level statements again: only the
@@ -308,20 +308,29 @@ impl Splash {
         let body_modules = std::mem::take(&mut self.body_modules);
         let mut new_view = None;
         let mut body_modules_out = Vec::new();
+        let mut errors_out = vec!["the script crashed its isolate".to_string()];
         crate::widget_async::contain_isolate_panic("app source eval", || {
-            let (view, body_modules) = cx.with_script_vm_id(vm_id, |vm| {
-                if let Some(sheet)=sheet {
+            // An isolate whose library is not registered yet takes the sheet into the
+            // registration itself: once, styled, instead of the stock library and then this.
+            let sheet = sheet.filter(|sheet| !crate::widget_async::restyle_lazy_isolate(cx, vm_id, sheet));
+            if let Some(sheet)=sheet {
+                cx.with_script_vm_id(vm_id, |vm| {
                     if crate::desktop_style::current(vm).as_ref()!=Some(&sheet) {
                         crate::desktop_style::install(vm,sheet);
                         // Keep the isolate's existing prelude/resource handles and jail.
-                        crate::widget_async::restyle_isolate(vm, theme, script.as_deref(), false);
+                        // The sheet's fonts load through the resource loader the
+                        // isolate was stripped of, so the restyle has it while it runs.
+                        crate::widget_async::restyle_isolate(vm, theme, script, loader.as_ref());
                     }
-                }
+                });
+            }
+            let (view, body_modules, errors) = cx.with_script_vm_id(vm_id, |vm| {
                 // Everything on `mod` that is not the body's own; whatever the run
                 // adds beyond this is the body's.
                 let mut known = module_keys(vm);
                 known.retain(|key| !body_modules.contains(key));
                 let saved = if preserve { snapshot_modules(vm, &body_modules) } else { Vec::new() };
+                vm.capture_errors();
                 let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
                     if preserve {
                         vm.with_reload(|vm| vm.eval_with_append_source(script_mod, &code, NIL.into()))
@@ -336,6 +345,13 @@ impl Splash {
                     .into_iter()
                     .filter(|key| !known.contains(key))
                     .collect();
+                let mut errors = vm.take_errors();
+                for e in &errors {
+                    log!("splash: {}", e);
+                }
+                if errors.is_empty() && !value.is_err() && value.as_object().is_none() {
+                    errors.push("script has no root widget (e.g. View{...}) as its final expression".to_string());
+                }
                 let view = if !value.is_err() && !value.is_nil() {
                     if preserve {
                         let walk=self.view.walk;
@@ -348,19 +364,21 @@ impl Splash {
                     // its previous view — or nothing at all. Say so: a silent
                     // blank widget is the hardest bug in this file to find.
                     if value.is_err() {
-                        for e in vm.take_errors() {
-                            log!("splash: {}", e);
+                        if errors.is_empty() {
+                            errors.push("script evaluated to an error".to_string());
                         }
                     } else {
                         log!("splash: script body evaluated to nothing (no root view)");
                     }
                     None
                 };
-                (view, body_modules)
+                (view, body_modules, errors)
             });
             new_view = view;
             body_modules_out = body_modules;
+            errors_out = errors;
         });
+        self.last_errors = errors_out;
         self.body_modules = body_modules_out;
         self.startup_timers = isolate_timer_ids(cx, heap_key)
             .into_iter()
@@ -376,14 +394,13 @@ impl Splash {
             // full-height Splash gets a zero-height one that draws nothing.
             view.walk = self.view.walk;
             // Cache the body index for host->script calls (call_script_fn etc).
-            self.body_id = cx.with_script_vm_id(vm_id, |vm| {
-                let bodies = vm.bx.code.bodies.borrow();
-                bodies.iter().position(|body| match &body.source {
-                    ScriptSource::Mod(m) => m.module_path == body_key,
-                    _ => false,
-                })
-            })
-            .map(|i| i as u16);
+            self.body_id = cx.with_script_vm_id(vm_id, |vm| vm.body_by_module_path(&body_key));
+            // Redraw where the OLD view was drawn: the new view has no area yet,
+            // so a redraw after the swap reaches nothing, and a body re-evaluated
+            // with no other redraw pending (a settled edit, a timer) kept
+            // showing the old draw calls -- a time-reading shader animated on
+            // with its old code.
+            self.view.redraw(cx);
             self.view = view;
             // Make `ui` a global in this splash's VM so helper `fn`s inside the block can use
             // `ui.<id>.set_text(...)`, not just inline handlers. It points at the Splash widget
@@ -404,7 +421,12 @@ impl Splash {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return; // nothing running
         }
+        // The host's walk stays (`Splash{height: Fit}` in a scroll view): the
+        // next body's view takes it from here, and a blank default would make
+        // it Fill, the scroll view's height, so nothing past it could scroll.
+        let walk = self.view.walk;
         self.view = cx.with_vm(|vm| View::script_from_value(vm, NIL.into()));
+        self.view.walk = walk;
         self.body_id = None;
         self.startup_timers.clear();
         self.body_modules.clear();
@@ -449,10 +471,8 @@ fn stop_script_timers(cx: &mut Cx, ids: &[LiveId]) {
 
 /// The entries of the isolate's `mod` namespace.
 fn module_keys(vm: &mut ScriptVm) -> Vec<LiveId> {
-    let modules = vm.bx.heap.modules;
-    vm.map_mut_with(modules, |_vm, map| {
-        map.iter().filter_map(|(key, _)| key.as_id()).collect()
-    })
+    let modules = vm.modules();
+    vm.heap().map_entries(modules).into_iter().filter_map(|e| e.key.as_id()).collect()
 }
 
 /// The current values of these `mod` entries. Objects are rooted so a
@@ -462,20 +482,20 @@ fn snapshot_modules(
     vm: &mut ScriptVm,
     keys: &[LiveId],
 ) -> Vec<(LiveId, ScriptValue, Option<ScriptObjectRef>)> {
-    let modules = vm.bx.heap.modules;
+    let modules = vm.modules();
     keys.iter()
         .map(|key| {
-            let value = vm.bx.heap.value(modules, (*key).into(), NoTrap);
-            let root = value.as_object().map(|obj| vm.bx.heap.new_object_ref(obj));
+            let value = vm.value(modules, *key);
+            let root = value.as_object().map(|obj| vm.new_object_ref(obj));
             (*key, value, root)
         })
         .collect()
 }
 
 fn restore_modules(vm: &mut ScriptVm, saved: Vec<(LiveId, ScriptValue, Option<ScriptObjectRef>)>) {
-    let modules = vm.bx.heap.modules;
+    let modules = vm.modules();
     for (key, value, _root) in saved {
-        vm.bx.heap.set_value_def(modules, key.into(), value);
+        vm.set_value_def(modules, key, value);
     }
 }
 
@@ -493,7 +513,7 @@ fn restore_modules(vm: &mut ScriptVm, saved: Vec<(LiveId, ScriptValue, Option<Sc
 /// Caveats (identical to installing the same source in a real `Splash`, so
 /// validation adds no NEW exposure): the instruction limit bounds compute but
 /// not heap growth, so a hostile script can still allocate aggressively within
-/// its budget; and top-level side effects (e.g. `start_interval`) run and live
+/// its instruction limit; and top-level side effects (e.g. `start_interval`) run and live
 /// until the marked-dead isolate is reclaimed by `gc_dead_splash_isolates`.
 pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
     validate_splash_body_with_io(cx, body, allow_net, false)
@@ -514,34 +534,19 @@ fn validate_splash_body_with_io(cx: &mut Cx, body: &str, allow_net: bool, host_i
     let scratch = ValidationScratch::new(vm_id);
     #[cfg(test)]
     LAST_VALIDATION_JAIL.with_borrow_mut(|jail| *jail = scratch.as_ref().map(|scratch| scratch.0.clone()));
-    let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key());
+    let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.heap_key());
     if let Some(scratch) = &scratch {
         crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.0.clone()));
     }
-    let prefix = if allow_net {
-        SPLASH_NET_PREFIX
-    } else {
-        SPLASH_PREFIX
-    };
+    let prefix = splash_prefix(allow_net);
     let code = format!("{}{}", prefix, body);
-    let script_mod = ScriptMod {
-        cargo_manifest_path: String::new(),
-        module_path: format!("splash-validate#{}", vm_id.0),
-        // Named, and NOT via `line` — the validator's errors are shown to the
-        // user (and fed back to the agent as repair input), so a location
-        // offset by a vm id would be actively misleading there.
-        file: "splash:validating".to_string(),
-        line: 0,
-        column: 0,
-        code: String::new(),
-        values: vec![],
-    };
+    let script_mod = ScriptMod::new("", &format!("splash-validate#{}", vm_id.0), "splash:validating", 0, 0, "", &[]);
     let mut errors_out = vec!["the script crashed its isolate during validation".to_string()];
     crate::widget_async::contain_isolate_panic("validation eval", || {
     errors_out = cx.with_script_vm_id(vm_id, |vm| {
         // Capture instead of logging: mid-eval errors otherwise go straight to
         // the error log (see `ScriptVm::take_errors`) and can't be returned.
-        vm.bx.captured_errors = Some(Vec::new());
+        vm.capture_errors();
         let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
             vm.eval_with_append_source(script_mod, &code, NIL.into())
         });
@@ -654,6 +659,11 @@ impl Drop for Splash {
 }
 
 impl Widget for Splash {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.allow_net {
             if let Event::NetworkResponses(responses) = event {
@@ -713,8 +723,8 @@ impl Widget for Splash {
 
 impl Splash {
     /// Calls a top-level `fn` defined in this Splash's script body, if the script
-    /// defines one by that name. Runs inside the isolate under the standard entry
-    /// budget and instruction limit. Returns whether the fn was found: hosts
+    /// defines one by that name. Runs inside the isolate under the standard
+    /// instruction limit. Returns whether the fn was found: hosts
     /// broadcasting optional hooks (e.g. size changes) can ignore it, while
     /// callers expecting the fn to exist can log a missing-hook diagnostic
     /// (distinguishing "script has no hook" from a typo'd name).
@@ -730,7 +740,7 @@ impl Splash {
             // the miss is handled right here — every host broadcast (e.g.
             // on_app_resize) then spams "variable <raw id> not found" for
             // every script that simply doesn't define the hook.
-            let fnval = vm.bx.heap.scope_value(scope, name, NoTrap);
+            let fnval = vm.heap().scope_value(scope, name, NoTrap);
             if fnval.is_nil() || fnval.is_err() {
                 return false;
             }
@@ -754,7 +764,7 @@ impl Splash {
         let mut called = false;
         crate::widget_async::contain_isolate_panic("script hook call", || {
         called = cx.with_script_vm_id(self.vm_id, |vm| {
-            let fnval = vm.bx.heap.scope_value(scope, name, NoTrap);
+            let fnval = vm.heap().scope_value(scope, name, NoTrap);
             if fnval.is_nil() || fnval.is_err() {
                 return false;
             }
@@ -797,7 +807,7 @@ impl Splash {
     pub fn set_sandbox_dir(&mut self, cx: &mut Cx, dir: Option<std::path::PathBuf>) {
         self.sandbox_dir = dir.clone();
         if self.vm_id != MAIN_SPLASH_VM_ID {
-            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key());
             crate::splash_storage::set_root_for_heap(heap_key, dir);
         }
     }
@@ -808,7 +818,7 @@ impl Splash {
     pub fn set_host_tag(&mut self, cx: &mut Cx, tag: Option<String>) {
         self.host_tag = tag.clone();
         if self.vm_id != MAIN_SPLASH_VM_ID {
-            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key());
             crate::splash_host::set_tag_for_heap(heap_key, tag);
         }
     }
@@ -819,7 +829,7 @@ impl Splash {
     pub fn set_host_caps(&mut self, cx: &mut Cx, caps: Vec<String>) {
         self.host_caps = caps.clone();
         if self.vm_id != MAIN_SPLASH_VM_ID {
-            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key());
             crate::splash_host::set_caps_for_heap(heap_key, caps);
         }
     }
@@ -830,7 +840,7 @@ impl Splash {
     pub fn set_storage_quota(&mut self, cx: &mut Cx, total_bytes: Option<u64>) {
         self.storage_quota = total_bytes;
         if self.vm_id != MAIN_SPLASH_VM_ID {
-            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key());
             crate::splash_storage::set_quota_for_heap(heap_key, total_bytes);
         }
     }
@@ -840,7 +850,7 @@ impl Splash {
     pub fn set_host_prompts(&mut self, cx: &mut Cx, may_prompt: bool) {
         self.host_prompts = may_prompt;
         if self.vm_id != MAIN_SPLASH_VM_ID {
-            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key());
             crate::splash_host::set_prompts_for_heap(heap_key, may_prompt);
         }
     }
@@ -853,7 +863,7 @@ impl Splash {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return None;
         }
-        Some(cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key()))
+        Some(cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key()))
     }
 
     /// Sets (or replaces) a global visible to this Splash's script, like the
@@ -881,17 +891,10 @@ impl Splash {
         let body_key = self.body_key();
         let body_id = self.body_id;
         cx.with_script_vm_id(self.vm_id, |vm| {
-            let bodies = vm.bx.code.bodies.borrow();
-            let ended_in = |body: &ScriptBody| {
-                body.end_scope.as_ref().unwrap_or(&body.scope).as_object()
-            };
-            if let Some(body) = body_id.and_then(|i| bodies.get(i as usize)) {
-                return Some(ended_in(body));
+            if let Some(scope) = body_id.and_then(|i| vm.body_end_scope(i)) {
+                return Some(scope);
             }
-            bodies.iter().find_map(|body| match &body.source {
-                ScriptSource::Mod(m) if m.module_path == body_key => Some(ended_in(body)),
-                _ => None,
-            })
+            vm.body_by_module_path(&body_key).and_then(|i| vm.body_end_scope(i))
         })
     }
 }
@@ -901,6 +904,11 @@ impl SplashRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, v);
         }
+    }
+
+    /// What the last evaluation of the body reported (empty: it evaluated to a view).
+    pub fn last_errors(&self) -> Vec<String> {
+        self.borrow().map(|inner| inner.last_errors.clone()).unwrap_or_default()
     }
 
     /// See [`Splash::set_theme`].
@@ -997,7 +1005,7 @@ mod style_tests {
         let uid=field.widget_uid();
         field.clone().set_text(&mut cx,"edited document");
         cx.with_vm(|vm| {
-            desktop_style::install(vm,StyleSheet::load_with_appearance(DesktopStyle::Macos,true));
+            desktop_style::install(vm,StyleSheet::load(DesktopStyle::Macos.sheet(true)));
             let source=splash.script_source();
             splash.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),source.into());
         });
@@ -1007,7 +1015,7 @@ mod style_tests {
         assert_eq!(field.text(),"edited document");
         cx.with_script_vm_id(splash.vm_id,|vm| {
             let theme=vm.module(id!(theme));
-            assert_eq!(vm.bx.heap.value(theme,id!(color_bg_app).into(),NoTrap).as_color(),Some(0x28282aff));
+            assert_eq!(vm.value(theme,id!(color_bg_app)).as_color(),Some(0x28282aff));
         });
         splash.stop(&mut cx);
     }
@@ -1024,11 +1032,34 @@ mod style_tests {
     /// Splash (which notices the new sheet), then let it restyle its isolate.
     fn restyle(cx: &mut Cx, splash: &mut Splash, style: DesktopStyle, dark: bool) {
         cx.with_vm(|vm| {
-            desktop_style::install(vm, StyleSheet::load_with_appearance(style, dark));
+            desktop_style::install(vm, StyleSheet::load(style.sheet(dark)));
             let source = splash.script_source();
             splash.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), source.into());
         });
         splash.eval_styled_body(cx, true);
+    }
+
+    /// A sheet's theme half loads its fonts through `crate_resource`, and an
+    /// isolate is stripped of the resource loader before its body first runs.
+    /// Without the loader the font member is left without a file and the
+    /// isolate's text falls through to the next member of the family.
+    #[test]
+    fn a_restyle_loads_the_fonts_its_sheet_names_and_leaves_the_body_no_loader() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_text(&mut cx, "label := Label{text: \"under a sheet\"}");
+        restyle(&mut cx, &mut splash, DesktopStyle::Ios, false);
+        cx.with_script_vm_id(splash.vm_id, |vm| {
+            let theme = vm.module(id!(theme));
+            let font = vm.value(theme, id!(font_regular)).as_object().unwrap();
+            let family = vm.value(font, id!(font_family)).as_object().unwrap();
+            let member = vm.value(family, id!(latin)).as_object().unwrap();
+            let res = vm.value(member, id!(res));
+            assert!(res.as_handle().is_some(), "the sheet's font member has no file: {:?}", res);
+            let modules = vm.modules();
+            assert!(vm.value(modules, id!(res)).is_nil(), "the body can reach the resource loader");
+        });
+        splash.stop(&mut cx);
     }
 
     #[test]
@@ -1074,7 +1105,7 @@ mod style_tests {
         let count = |cx: &mut Cx, splash: &mut Splash| {
             cx.with_script_vm_id(splash.vm_id, |vm| {
                 let state = vm.module(id!(state));
-                vm.bx.heap.value(state, id!(count).into(), NoTrap).as_f64()
+                vm.value(state, id!(count)).as_f64()
             })
         };
         assert!(splash.call_script_fn(&mut cx, id!(bump), &[]));
@@ -1143,6 +1174,16 @@ mod host_io_validation_tests {
 }
 
 #[cfg(test)]
+mod prefix_tests {
+    /// The reported-line offsets match the prefix the UI domain makes.
+    #[test]
+    fn the_prefix_line_counts_match_the_domain_prefix() {
+        assert_eq!(super::splash_prefix(false).matches('\n').count() as u32, super::SPLASH_PREFIX_LINES);
+        assert_eq!(super::splash_prefix(true).matches('\n').count() as u32, super::SPLASH_NET_PREFIX_LINES);
+    }
+}
+
+#[cfg(test)]
 mod theme_tests {
     use super::*;
     use crate::splash_host::{splash_host_respond, take_splash_host_requests, SplashRespondOutcome};
@@ -1166,7 +1207,7 @@ mod theme_tests {
     fn module_value(cx: &mut Cx, splash: &Splash, module: LiveId, key: LiveId) -> ScriptValue {
         cx.with_script_vm_id(splash.vm_id, |vm| {
             let module = vm.module(module);
-            vm.bx.heap.value(module, key.into(), NoTrap)
+            vm.value(module, key)
         })
     }
 
@@ -1185,7 +1226,7 @@ mod theme_tests {
     fn is_on_theme(cx: &mut Cx, splash: &Splash, theme: LiveId) -> bool {
         cx.with_script_vm_id(splash.vm_id, |vm| {
             let themes = vm.module(id!(themes));
-            vm.bx.heap.value(themes, theme.into(), NoTrap).as_object() == Some(vm.module(id!(theme)))
+            vm.value(themes, theme).as_object() == Some(vm.module(id!(theme)))
         })
     }
 
@@ -1196,11 +1237,10 @@ mod theme_tests {
     /// Restyles an isolate the host's change left stale, returning the script errors that raised.
     fn restyle(cx: &mut Cx, splash: &mut Splash) -> Vec<String> {
         assert!(splash.needs_restyle(), "the host's change must restyle the isolate");
-        cx.with_script_vm_id_trusted(splash.vm_id, |vm| vm.bx.captured_errors = Some(Vec::new()));
+        cx.with_script_vm_id(splash.vm_id, |vm| vm.capture_errors());
         splash.restyle_theme(cx);
-        cx.with_script_vm_id_trusted(splash.vm_id, |vm| {
-            let mut errors = vm.bx.captured_errors.take().unwrap_or_default();
-            errors.extend(vm.take_errors().iter().map(|error| format!("{error:?}")));
+        cx.with_script_vm_id(splash.vm_id, |vm| {
+            let mut errors = vm.take_errors();
             // Every eval of a body raises this as the parser auto-closes the prefix's
             // open `View{`; outside a capture, Splash silences it.
             errors.retain(|error| !error.contains("pop_stack_value on empty stack"));

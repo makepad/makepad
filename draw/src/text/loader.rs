@@ -25,6 +25,10 @@ pub struct Loader {
     font_definitions: FxHashMap<FontId, FontDefinition>,
     font_family_cache: FxHashMap<FontFamilyId, Rc<FontFamily>>,
     font_cache: FxHashMap<FontId, Rc<Font>>,
+    /// The OS faces found for characters no family member covers (see
+    /// [`Loader::add_system_fallback`]), in the order they were found, with
+    /// whether each is a heavy face. Every family ends with them.
+    system_fallbacks: Vec<(FontId, bool)>,
 }
 
 impl Loader {
@@ -37,6 +41,7 @@ impl Loader {
             font_definitions: FxHashMap::default(),
             font_family_cache: FxHashMap::default(),
             font_cache: FxHashMap::default(),
+            system_fallbacks: Vec::new(),
         };
         //builtins::define(&mut loader);
         loader
@@ -68,7 +73,8 @@ impl Loader {
         self.insert_font_family_definition(id, definition);
     }
 
-    /// Returns whether the family changed, so text laid out with it may come out different.
+    /// Whether the family's faces changed (a lazy face arrived, a member
+    /// became available).
     pub fn set_font_family_definition(
         &mut self,
         id: FontFamilyId,
@@ -115,6 +121,23 @@ impl Loader {
         self.font_definitions.insert(id, definition);
     }
 
+    /// Appends an OS face (already defined with [`Self::define_font`]) to
+    /// every family's chain: the loaded families are dropped and load again
+    /// with it at their end. A family whose first face is heavy (`bold`)
+    /// tries the heavy OS faces before the regular ones, and the other way
+    /// round.
+    pub fn add_system_fallback(&mut self, id: FontId, bold: bool) {
+        if self.system_fallbacks.iter().any(|(known, _)| *known == id) {
+            return;
+        }
+        self.system_fallbacks.push((id, bold));
+        self.font_family_cache.clear();
+    }
+
+    pub fn system_fallbacks(&self) -> &[(FontId, bool)] {
+        &self.system_fallbacks
+    }
+
     pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> &Rc<FontFamily> {
         if !self.font_family_cache.contains_key(&id) {
             let font_family = self.load_font_family(id);
@@ -133,12 +156,27 @@ impl Loader {
             .get(&id)
             .cloned()
             .unwrap_or_else(|| panic!("font family {:?} is not defined", id));
-        let fonts = definition
+        let mut fonts: Vec<Rc<Font>> = definition
             .font_ids
             .into_iter()
             .map(|font_id| self.get_or_load_font(font_id).clone())
             .collect();
-        FontFamily::new(id, self.shaper.clone(), fonts, definition.diagnostics)
+        if !self.system_fallbacks.is_empty() && !fonts.is_empty() {
+            let bold = font_is_bold(&fonts[0]);
+            let system: Vec<FontId> = self
+                .system_fallbacks
+                .iter()
+                .filter(|(_, heavy)| *heavy == bold)
+                .chain(self.system_fallbacks.iter().filter(|(_, heavy)| *heavy != bold))
+                .map(|(font_id, _)| *font_id)
+                .filter(|font_id| !fonts.iter().any(|font| font.id() == *font_id))
+                .collect();
+            for font_id in system {
+                let font = self.get_or_load_font(font_id).clone();
+                fonts.push(font);
+            }
+        }
+        FontFamily::new(id, self.shaper.clone(), fonts.into(), definition.diagnostics)
     }
 
     pub fn get_or_load_font(&mut self, id: FontId) -> &Rc<Font> {
@@ -179,6 +217,19 @@ impl Loader {
             definition.descender_fudge_in_ems,
         )
     }
+}
+
+/// Whether a face draws heavy: its `wght` axis value where it has one,
+/// else its OS/2 weight class, at semibold (600) or above.
+pub fn font_is_bold(font: &Font) -> bool {
+    const WGHT: u32 = u32::from_be_bytes(*b"wght");
+    let weight = font
+        .variation_coords()
+        .iter()
+        .find(|(tag, _)| *tag == WGHT)
+        .map(|(_, value)| *value)
+        .unwrap_or_else(|| font.with_ttf_parser_face(|face| face.weight().to_number() as f32));
+    weight >= 600.0
 }
 
 #[derive(Clone, Copy, Debug)]

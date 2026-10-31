@@ -22,12 +22,12 @@ impl MockHandle {
         Self::new_with_skip(uid, false)
     }
 
-    fn new_with_skip(uid: u64, skip_widget_tree_search: bool) -> Self {
+    fn new_with_skip(uid: u64, scope: bool) -> Self {
         let children = Rc::new(RefCell::new(Vec::new()));
         let widget = WidgetRef::new_with_inner(Box::new(MockWidget {
             uid: WidgetUid(uid),
             children: children.clone(),
-            skip_widget_tree_search,
+            scope,
         }));
         Self {
             uid: WidgetUid(uid),
@@ -50,7 +50,7 @@ impl MockHandle {
 struct MockWidget {
     uid: WidgetUid,
     children: Rc<RefCell<Vec<(LiveId, WidgetRef)>>>,
-    skip_widget_tree_search: bool,
+    scope: bool,
 }
 
 impl ScriptApply for MockWidget {}
@@ -66,8 +66,8 @@ impl WidgetNode for MockWidget {
         }
     }
 
-    fn skip_widget_tree_search(&self) -> bool {
-        self.skip_widget_tree_search
+    fn search_scope(&self) -> bool {
+        self.scope
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {

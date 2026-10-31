@@ -210,6 +210,8 @@ script_mod! {
 
 #[derive(Script, Widget)]
 pub struct TabBar {
+    #[rust]
+    semantic_token: Option<u32>,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -308,7 +310,7 @@ impl ScriptHook for TabBar {
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }
@@ -332,6 +334,31 @@ impl ScriptHook for TabBar {
 }
 
 impl Widget for TabBar {
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        for (index, id) in self.tab_order.iter().enumerate() {
+            if let Some((_, tab)) = self.tab_ref(*id) {
+                out.push((
+                    id.0,
+                    None,
+                    a11y_tree::Node {
+                        id: a11y_tree::NodeId::widget(tab.widget_uid().0),
+                        role: a11y_tree::Role::Tab,
+                        pos_in_set: index as u32 + 1,
+                        set_size: self.tab_order.len() as u32,
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TabList;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.set_size = self.tab_order.len() as u32;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
@@ -343,6 +370,32 @@ impl Widget for TabBar {
 
         if let Some(tab_id) = self.next_active_tab_id.take() {
             cx.widget_action(uid, TabBarAction::TabWasPressed(tab_id));
+        }
+        if let Event::KeyDown(key) = event {
+            if let Some(index) = self.tab_order.iter().position(|id| self.tabs.get(id).is_some_and(|(tab, _)| cx.has_key_focus(tab.area()))) {
+                let next = match key.key_code {
+                    KeyCode::ArrowLeft => Some(index.saturating_sub(1)),
+                    KeyCode::ArrowRight => Some((index + 1).min(self.tab_order.len().saturating_sub(1))),
+                    KeyCode::Home => Some(0),
+                    KeyCode::End => Some(self.tab_order.len().saturating_sub(1)),
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    let id = self.tab_order[next];
+                    self.set_active_tab_id(cx, Some(id), Animate::Yes);
+                    if let Some((tab, _)) = self.tabs.get(&id) { cx.set_key_focus(tab.area()); }
+                    cx.widget_action(uid, TabBarAction::TabWasPressed(id));
+                }
+            }
+        }
+        if let Event::A11yAction(request) = event {
+            if request.action == a11y_tree::Actions::SELECT || request.action == a11y_tree::Actions::PRESS {
+                if let Some(id) = self.tabs.iter().find_map(|(id, (tab, _))| (tab.widget_uid().0 == request.node.uid()).then_some(*id)) {
+                    self.set_active_tab_id(cx, Some(id), Animate::Yes);
+                    cx.widget_action(uid, TabBarAction::TabWasPressed(id));
+                    cx.a11y.record_action(request.req, a11y_tree::ActionResult::Handled);
+                }
+            }
         }
         for (tab_id, (tab, _)) in self.tabs.iter_mut() {
             let Some(mut tab) = tab.borrow_mut::<Tab>() else {
@@ -530,6 +583,10 @@ impl TabBar {
         is_current_bar: bool,
         walk: Walk,
     ) {
+        if cx.a11y.on && !cx.a11y.is_current_node(self.widget_uid().0) {
+            let list = cx.draw_list_stack.last().copied();
+            self.semantic_token = Some(cx.a11y.begin_node(self.widget_uid().0, list));
+        }
         self.active_tab = active_tab;
         self.is_current_bar = is_current_bar;
         self.scroll_bars.begin(cx, walk, Layout::flow_right());
@@ -553,6 +610,15 @@ impl TabBar {
             .draw_walk(cx, Walk::new(Size::fill(), Size::fill()));
 
         self.scroll_bars.end(cx);
+        if let Some(token) = self.semantic_token.take() {
+            let mut node = cx.a11y.take_node(token);
+            self.semantics(cx, &mut node);
+            let mut parts = Vec::new();
+            self.semantics_parts(cx, &mut parts);
+            for (key, parent, part) in parts { cx.a11y.set_part(token, key, parent, part, || WidgetUid::new().0); }
+            cx.a11y.end_node(token, node, self.area());
+        }
+
 
         // After scroll_bars.end() so that view_visible/view_total are up to date.
         if self.active_tab_id != self.prev_active_tab_id {

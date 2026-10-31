@@ -2,6 +2,73 @@ mod.widgets.Button.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 6.0 bo
 mod.widgets.Button.draw_bg.border_radius = 4.0
 mod.widgets.Button.draw_bg.border_size = 1.0
 mod.widgets.Button.draw_bg.color_2 = #ffffff
-mod.widgets.TextInput.draw_bg.border_radius = 4.0
+// A ROW OF FIELDS IS ONE HEIGHT. Left to themselves the library's fields each
+// come out at a size of their own -- in the widget catalogue's toolbar the
+// search box, the number beside it and the drop down after it stood at three
+// different heights -- and a sheet that reshapes the text box alone widens
+// that gap instead of closing it. So the box metrics are stated ONCE here and
+// handed to each field below, and a field added to the library later joins
+// the row by being named here rather than by having these numbers copied
+// into it.
+let field_height = 24.0
+let field_pad_v = mod.theme.mspace_1.top
+let field_radius = 4.0
+let field_border = mod.theme.beveling
+
+// The room a Fit field takes. A minimum height rather than a height,
+// because a line of text is shorter than a row, and the padding with it:
+// where a field is Fit, the padding IS its height, and two fields padded
+// differently part company again the moment the type grows.
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+// The box a field draws. Given the draw object and not the widget, because
+// not every field draws its own box, and because writing a corner onto a
+// draw struct that has no corner would add a slot its shader never reads.
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+// A field that states a frame and lays its own parts out inside it: a number
+// with a stepper, a date, a time. The height is all these take. A padding
+// here would NOT hold the line off the box -- each of them measures its
+// parts against the turtle's whole rect and draws them from the content
+// origin, so the padding displaces the line instead of insetting it, and the
+// number came out sitting on the bottom edge with its arrows split around it.
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+// The number's box strokes its own hairline and declares no border size.
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+// The drag-number's corner is written into its own shader, so it takes the
+// room and keeps the box it draws.
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+// A picker is a date field in an anchor: the field inside fills the frame.
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+// The chrome-less input a well holds must impose no height of its own. It is
+// a TextInput, so it inherits the minimum above, and a minimum as tall as the
+// whole field, applied inside a well already that tall, pushed the line out
+// through the bottom of the box.
+mod.widgets.WellInput.min_height = 0.0
+
 mod.widgets.Window.pass.clear_color = #f3f3f3
 true

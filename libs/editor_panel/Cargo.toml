@@ -1,0 +1,22 @@
+# A document's editor panel: the small Splash program an AI (or a person)
+# writes into the document (`let editor_panel = fn() { View{ … } }`), run in
+# a sandboxed isolate, editing the document's code through named paths.
+# Host-independent: the graphic desk and the SCORE page mount it, each
+# applying the splices it hands back on its own text.
+[package]
+name = "makepad-editor-panel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Editor panels: a document's own AI-written Splash UI, editing its code through scene.read/set/swap/replace on named paths, over a document trait"
+
+[lib]
+name = "makepad_editor_panel"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-strict-json = { path = "../strict_json" }
+# The panel widgets' library and the host they read and write through.
+makepad-value-pickers = { path = "../value_pickers" }
+# Value sites (the auto panel is made from them).
+makepad-edit-values = { path = "../edit_values" }

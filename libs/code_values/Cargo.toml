@@ -1,0 +1,24 @@
+# Inline value controls over Splash in Makepad's code editor: a swatch before
+# a colour, a curve before an ease, a menu after a name, a words box on a
+# string, and every number scrubbed in place. Shared by Stage's code views
+# (Motion's Source view, the Score editor); the host says what each value
+# is, the controls write its bytes back.
+[package]
+name = "makepad-code-values"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Inline value controls (scrub, swatch, ease curve, choices, words) over Splash source in the code editor"
+
+[lib]
+name = "makepad_code_values"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["fab"] }
+makepad-code-editor = { path = "../../code_editor" }
+# Lines and discs for the 3D value views (a point, a direction, a path).
+makepad-render-lines = { path = "../render_lines" }
+# Value sites and edits: the one editable-values layer.
+makepad-edit-values = { path = "../edit_values" }
+# Named eases and their curves.
+makepad-tween = { path = "../tween" }

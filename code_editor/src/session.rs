@@ -243,8 +243,33 @@ impl CodeSession {
         }
     }
 
+    /// Re-measure every line, after the document's inline inlays changed
+    /// ([`CodeDocument::set_inline_inlays`]): widths, wraps and positions.
+    pub fn relayout_inline(&self) {
+        let line_count = self.document.as_text().as_lines().len();
+        {
+            let mut layout = self.layout.borrow_mut();
+            for i in 0..line_count {
+                layout.column_count[i] = None;
+                layout.wrap_data[i] = None;
+            }
+            layout.y.clear();
+        }
+        for line in 0..line_count {
+            self.update_wrap_data(line);
+        }
+        self.update_y();
+    }
+
     pub fn document(&self) -> &CodeDocument {
         &self.document
+    }
+
+    /// Recompute every line's position, after the document's block inlays
+    /// changed ([`CodeDocument::set_block_inlays`]).
+    pub fn relayout(&self) {
+        self.layout.borrow_mut().y.clear();
+        self.update_y();
     }
 
     pub fn layout(&self) -> Layout<'_> {
@@ -306,6 +331,92 @@ impl CodeSession {
                 fold_state.folding_lines.insert(line_index);
             }
         }
+    }
+
+    /// Fold exactly `lines` (animated, like `fold`): each keeps its first
+    /// `column` columns at full size and shrinks the rest (0: the whole
+    /// line shrinks). Lines already folded stay folded.
+    pub fn fold_lines(&self, lines: &[usize], column: usize) {
+        let mut fold_state = self.fold_state.borrow_mut();
+        let line_count = self.document().as_text().as_lines().len();
+        for &line_index in lines.iter().filter(|line| **line < line_count) {
+            if fold_state.folded_lines.contains(&line_index) || fold_state.folding_lines.contains(&line_index) {
+                continue;
+            }
+            self.layout.borrow_mut().fold_column[line_index] = column;
+            fold_state.unfolding_lines.remove(&line_index);
+            fold_state.folding_lines.insert(line_index);
+        }
+    }
+
+    /// Unfold exactly `lines` (animated).
+    pub fn unfold_lines(&self, lines: &[usize]) {
+        let fold_state = &mut *self.fold_state.borrow_mut();
+        for line in lines {
+            if fold_state.folding_lines.remove(line) | fold_state.folded_lines.remove(line) {
+                fold_state.unfolding_lines.insert(*line);
+            }
+        }
+    }
+
+    /// Fold `fold` and unfold `unfold` at once, without animating (a host
+    /// jumping to a line it opened: the line is where it will stay).
+    pub fn set_folds_now(&self, fold: &[usize], unfold: &[usize]) {
+        let line_count = self.document().as_text().as_lines().len();
+        {
+            let fold_state = &mut *self.fold_state.borrow_mut();
+            let mut layout = self.layout.borrow_mut();
+            let mut first = usize::MAX;
+            // Folds still moving land now too.
+            for line in fold_state.folding_lines.drain().collect::<Vec<_>>() {
+                if let Some(scale) = layout.scale.get_mut(line) {
+                    *scale = 0.1;
+                }
+                fold_state.folded_lines.insert(line);
+                first = first.min(line);
+            }
+            for line in fold_state.unfolding_lines.drain().collect::<Vec<_>>() {
+                if let Some(scale) = layout.scale.get_mut(line) {
+                    *scale = 1.0;
+                }
+                first = first.min(line);
+            }
+            for &line in fold.iter().filter(|l| **l < line_count) {
+                fold_state.unfolding_lines.remove(&line);
+                fold_state.folding_lines.remove(&line);
+                fold_state.folded_lines.insert(line);
+                layout.fold_column[line] = 0;
+                if let Some(scale) = layout.scale.get_mut(line) {
+                    *scale = 0.1;
+                }
+                first = first.min(line);
+            }
+            for &line in unfold.iter().filter(|l| **l < line_count) {
+                fold_state.unfolding_lines.remove(&line);
+                fold_state.folding_lines.remove(&line);
+                fold_state.folded_lines.remove(&line);
+                if let Some(scale) = layout.scale.get_mut(line) {
+                    *scale = 1.0;
+                }
+                first = first.min(line);
+            }
+            if first != usize::MAX {
+                layout.y.truncate(first + 1);
+            }
+        }
+        self.update_y();
+    }
+
+    /// Whether a fold or unfold is still animating.
+    pub fn folds_animating(&self) -> bool {
+        let fold_state = self.fold_state.borrow();
+        !fold_state.folding_lines.is_empty() || !fold_state.unfolding_lines.is_empty()
+    }
+
+    /// Whether `line` is folded or folding.
+    pub fn is_folded(&self, line: usize) -> bool {
+        let fold_state = self.fold_state.borrow();
+        fold_state.folded_lines.contains(&line) || fold_state.folding_lines.contains(&line)
     }
 
     pub fn unfold(&self) {

@@ -27,10 +27,10 @@ That keeps the normal Rust workflow intact: add a dev-dependency, write `tests/*
 1. runs `cargo build --release -p <package>` from the package directory
 2. selects the standalone executable from Cargo's compiler-artifact messages
 3. launches that executable with `--remote`, hidden unless visible mode is requested
-4. reads the owned PID and endpoint and waits for the app's first window
+4. reads the owned PID and socket path from the startup line and waits for the app's first window
 5. passes a `TestApp` into your test body
 6. captures failure artifacts on returned errors or panics
-7. requests `/gq`, falls back to `/quit` if needed, and confirms the owned child exits
+7. requests `gq`, falls back to `quit` if needed, and confirms the owned child exits
 
 Cargo's owning-workspace target is reused, including explicit `CARGO_TARGET_DIR`
 overrides. No build target is forced beneath each package. Tests keep their
@@ -102,21 +102,21 @@ is no hub or mount to configure.
 
 ## Selectors
 
-Selectors are snapshot-based. They match structured widget state instead of only relying on geometry query strings.
+Selectors build the shared semantic query grammar used by `ui find` and `ui wait`.
 
 Constructors:
 
 - `Selector::all()`
 - `Selector::id("widget_id")`
 - `Selector::widget_type("TextInput")`
-- `Selector::raw("text:hello")`
+- `Selector::raw("text~=hello")`
 
 Builder filters:
 
 - `.text_exact("...")`
 - `.text_contains("...")`
 - `.nth(index)`
-- `.window("panel_window")`
+- `.window("1")`
 - `.window_index(1)`
 - `.any_window()`
 
@@ -178,7 +178,7 @@ Lower-level escape hatch:
 app.forward(vec![/* pointer, scroll, key, or text StudioToApp events */]);
 ```
 
-`forward` translates supported input events to HTTP input routes. Other legacy
+`forward` translates supported input events to remote input commands. Other legacy
 protocol variants return an explicit error. Native timestamps are assigned at
 injection; key repeat and IME metadata are not forwarded. It does not provide live reload,
 window resizing, swapchains, clipboard forwarding, or hub control. Prefer the
@@ -186,27 +186,14 @@ regular `TestApp` methods for snapshots, grabs, and logs.
 
 ## Structured Widget State
 
-Each snapshot record exposes:
+`widget_snapshot()` returns a typed `UiSnapshot` of semantic window trees. Each
+`NodeMatch` exposes its node ID, role, name, value, text metadata, states, actions,
+path, class and bounds, plus its session/window key. `visible()`, `enabled()` and
+`checked()` read that state. `ui json=1` carries readable fields and a canonical
+wire payload for lossless decoding; malformed payloads fail the read.
 
-- widget id
-- widget type
-- bounds
-- window id and window index
-- visible/enabled state
-- widget-specific state when available:
-  - `text`
-  - `value`
-  - `checked`
-  - `selected`
-
-Window names, enabled flags, and selections come from the actual widget
-snapshot. Missing required fields fail decoding instead of fabricating state.
-Optional state is absent when the widget does not expose it; empty labels may
-omit `text`, while an empty input `value` remains an empty string.
-
-Interactions require visible geometry. State reads prefer visible matches and
-can fall back to a uniquely matched clipped widget, such as a label below a
-scrolling page.
+Actions resolve exactly one enabled, non-hidden node. Raw pointer and key events
+remain available through `TestApp::forward` for input and hit-testing tests.
 
 ## Failure Artifacts
 
@@ -237,18 +224,20 @@ cargo test --release -p makepad-example-text-input --test ui -- --test-threads=1
 
 ## Standalone Transport and Ownership
 
-The runtime uses the app's documented [HTTP remote surface](../../docs/agents/app-remote.md):
-`/s`, `/snap`, `/d`, `/g`, `/log`, and input routes. Input requests wait for a
+The runtime uses the app's documented [remote commands](../../docs/agents/app-remote.md)
+over its makepad-remote Unix socket: `status`, `ui`, `ui find`, `ui act`, `ui type`, `ui wait`, `grab`, `log`, and the
+input commands (`click`, `mouse`, `key`, `text`). Images are written by the test client,
+never by the app. Input requests wait for a
 resulting frame. Rectangles are window-local layout points; do not apply DPI
 conversion to clicks.
 
 Screenshots are captured from the app's own drawable. Setting
-`TestConfig::env["MAKEPAD_GPUSIM_DPI"]` to a positive number scales screenshots
+`TestConfig::env["MAKEPAD_TEST_DPI"]` to a positive number scales screenshots
 to that pixel density for existing suites; it does not select a software
 renderer or change the native window's DPI.
 
-Cleanup first uses `/gq` to save a final frame and quit. If capture is unavailable
-or the app remains alive, it sends `/quit`. A dropped response is not treated as
+Cleanup first uses `gq` to save a final frame and quit. If capture is unavailable
+or the app remains alive, it sends `quit`. A dropped response is not treated as
 proof that the process failed to exit. The runner waits for its owned `Child`
 and kills only that child after graceful shutdown times out. This cleanup also
 runs after test panics. It never stops, replaces, or drives user-owned instances.

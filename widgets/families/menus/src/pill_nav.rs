@@ -31,6 +31,7 @@ use crate::{
     family_api::{for_each_element, obj_bool, obj_field, obj_string, orphan_sweep_locks, release_orphaned_sweep_locks},
     overlay_place::{claim_escape, place_overlay, PlaceRequest, Placed, Side},
     popover::{PopoverPlacement, PopoverTrigger},
+    tween::{tween_ticker_ref, ClockPolicy, Lerp, QuickTo, Retime, TweenClock},
     widget::*,
 };
 
@@ -1191,15 +1192,15 @@ fn elide(dt: &DrawText, cx: &mut Cx, text: &str, max_w: f64) -> String {
 /// clock runs straight and the ease shapes what is read off it, so a spring
 /// or a bounce can carry the value past its end and back while the clock
 /// still says how much of the run is left.
+///
+/// A [`QuickTo`] (GSAP `quickTo`) retimed by distance, plus the furthest the
+/// value has come this run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UnitTween {
-    from: f64,
-    to: f64,
-    /// 0 when the run starts, 1 once it is over.
-    t: f64,
-    secs: f64,
-    ease: Ease,
-    /// The furthest the value has come toward `to` this run, held to 0..1.
+    /// The run: where it started, where it ends, its clock (0 when the run
+    /// starts, 1 once it is over), its length and its ease.
+    q: QuickTo<f64>,
+    /// The furthest the value has come toward the target this run, held to 0..1.
     peak: f64,
 }
 
@@ -1209,10 +1210,13 @@ impl Default for UnitTween {
     }
 }
 
+/// A run from one end of 0..1 to the other takes the full time.
+const UNIT_RETIME: Retime = Retime::ByDistance { per_unit: 1.0 };
+
 impl UnitTween {
     /// At rest on `value`.
     pub fn at(value: f64) -> Self {
-        Self { from: value, to: value, t: 1.0, secs: 0.0, ease: Ease::Linear, peak: value.clamp(0.0, 1.0) }
+        Self { q: QuickTo::at(value), peak: value.clamp(0.0, 1.0) }
     }
 
     /// Head for `to` along `ease`. A run from one end to the other takes
@@ -1221,53 +1225,46 @@ impl UnitTween {
     /// way back is. Aiming where it already heads changes nothing, so a
     /// caller can aim on every frame.
     pub fn aim(&mut self, to: f64, secs: f64, ease: Ease) {
-        if to == self.to {
+        // Checked before the ease is converted, so aiming on every frame
+        // costs one comparison.
+        if to == self.q.target() {
             return;
         }
-        let now = self.value();
-        self.secs = secs.max(0.0) * (to - now).abs().min(1.0);
-        self.from = now;
-        self.to = to;
-        self.ease = ease;
+        let now = self.q.value();
+        if !self.q.aim(to, secs, (&ease).into(), UNIT_RETIME) {
+            return;
+        }
         self.peak = now.clamp(0.0, 1.0);
-        self.t = 0.0;
-        if self.secs <= 0.0 {
+        if self.q.duration() <= 0.0 {
             self.settle();
         }
     }
 
     /// Advance the clock by `dt` seconds. Answers whether the run goes on.
     pub fn step(&mut self, dt: f64) -> bool {
-        if self.t >= 1.0 {
+        if self.q.is_settled() {
             return false;
         }
-        if self.secs <= 0.0 {
+        if !self.q.step(dt) {
+            // The landing step answers false.
             self.settle();
             return false;
         }
-        self.t = (self.t + dt / self.secs).min(1.0);
-        if self.t >= 1.0 {
-            self.settle();
-            return false;
-        }
-        let now = self.value().clamp(0.0, 1.0);
-        self.peak = if self.to >= self.from { self.peak.max(now) } else { self.peak.min(now) };
+        let now = self.q.value().clamp(0.0, 1.0);
+        self.peak = if self.q.target() >= self.q.from_value() { self.peak.max(now) } else { self.peak.min(now) };
         true
     }
 
     /// End the run on its target now. For motion that has been switched off.
     pub fn settle(&mut self) {
-        *self = Self::at(self.to);
+        *self = Self::at(self.q.target());
     }
 
     /// Where the value is now, past either end while an overshooting ease
     /// carries it. Exactly the target once the run is over: a curve read at
     /// its last sample can land a hair off.
     pub fn value(&self) -> f64 {
-        if self.t >= 1.0 {
-            return self.to;
-        }
-        self.from + (self.to - self.from) * self.ease.map(self.t)
+        self.q.value()
     }
 
     /// The furthest the value has come this run, held to 0..1 and never going
@@ -1277,12 +1274,12 @@ impl UnitTween {
     }
 
     pub fn target(&self) -> f64 {
-        self.to
+        self.q.target()
     }
 
     /// Resting on `value`, with nothing of the run left.
     pub fn is_at(&self, value: f64) -> bool {
-        self.t >= 1.0 && self.to == value
+        self.q.is_settled() && self.q.target() == value
     }
 }
 
@@ -1291,20 +1288,25 @@ impl UnitTween {
 /// button group's sliding indicator does the same on a fixed curve; this one
 /// takes the curve as a property and lets an overshooting one carry the rect
 /// past where it is going.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// A [`QuickTo`] (GSAP `quickTo`) over `[x, y, w, h]` with the full time for
+/// every run.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EasedGlide {
-    from: Rect,
-    to: Rect,
-    /// 0 at the start of the glide, 1 once it has arrived.
-    t: f64,
-    secs: f64,
-    ease: Ease,
+    /// The glide over `[x, y, w, h]`: its clock is 0 at the start and 1 once
+    /// it has arrived.
+    q: QuickTo<[f64; 4]>,
+    /// Aimed with no time and not stepped since: it is drawn where the run
+    /// starts, with its clock at 0, until the next step lands it.
+    unstepped: bool,
 }
 
-impl Default for EasedGlide {
-    fn default() -> Self {
-        Self { from: Rect::default(), to: Rect::default(), t: 1.0, secs: 0.0, ease: Ease::Linear }
-    }
+fn rect_lanes(r: Rect) -> [f64; 4] {
+    [r.pos.x, r.pos.y, r.size.x, r.size.y]
+}
+
+fn lanes_rect(l: [f64; 4]) -> Rect {
+    Rect { pos: dvec2(l[0], l[1]), size: dvec2(l[2], l[3]) }
 }
 
 impl EasedGlide {
@@ -1312,66 +1314,70 @@ impl EasedGlide {
     /// to slide from; a new one starts from wherever the rect is drawn now,
     /// so a second aim mid-flight bends the path instead of jumping back.
     pub fn aim(&mut self, target: Rect, secs: f64, ease: Ease) {
-        if self.to == target {
+        let to = rect_lanes(target);
+        if self.q.target() == to {
             return;
         }
         if self.is_empty() {
-            self.from = target;
-            self.to = target;
-            self.t = 1.0;
+            self.q.retarget_from(to, to, secs, (&ease).into());
+            self.q.settle();
+            self.unstepped = false;
         } else {
-            self.from = self.current();
-            self.to = target;
-            self.t = 0.0;
+            self.q.retarget_from(rect_lanes(self.current()), to, secs, (&ease).into());
+            self.unstepped = self.q.is_settled();
         }
-        self.secs = secs.max(0.0);
-        self.ease = ease;
     }
 
     /// Advance the glide by `dt` seconds. Answers whether it is still
     /// moving, so a caller knows whether to ask for another frame.
     pub fn step(&mut self, dt: f64) -> bool {
-        if self.t >= 1.0 {
+        if self.unstepped {
+            self.unstepped = false;
             return false;
         }
-        if self.secs <= 0.0 {
-            self.t = 1.0;
-            return false;
-        }
-        self.t = (self.t + dt / self.secs).min(1.0);
-        self.t < 1.0
+        self.q.step(dt)
     }
 
     /// Where the rect is drawn now, past its target while an overshooting
     /// ease carries it, and never a negative size.
     pub fn current(&self) -> Rect {
-        if self.t >= 1.0 {
-            return self.to;
-        }
-        let rect = lerp_rect(self.from, self.to, self.ease.map(self.t));
+        let lanes = if self.unstepped {
+            <[f64; 4]>::lerp(self.q.from_value(), self.q.target(), self.q.ease().map(0.0))
+        } else if self.q.is_settled() {
+            return self.resting();
+        } else {
+            self.q.value()
+        };
+        let rect = lanes_rect(lanes);
         Rect { pos: rect.pos, size: dvec2(rect.size.x.max(0.0), rect.size.y.max(0.0)) }
     }
 
     /// Where the rect comes to rest.
     pub fn resting(&self) -> Rect {
-        self.to
+        lanes_rect(self.q.target())
     }
 
     /// True while it has never been aimed at anything.
     pub fn is_empty(&self) -> bool {
-        self.to.size.x == 0.0 && self.to.size.y == 0.0
+        let to = self.q.target();
+        to[2] == 0.0 && to[3] == 0.0
     }
 
     /// How far along the glide's clock is, 0 at its start and 1 once it has
     /// arrived. A fade timed against the glide reads this rather than a
     /// second clock that could drift from the first.
     pub fn progress(&self) -> f64 {
-        self.t
+        if self.unstepped {
+            0.0
+        } else {
+            self.q.progress()
+        }
     }
 
     /// Land on the target now. For motion that has been switched off.
     pub fn settle(&mut self) {
-        self.t = 1.0;
+        self.unstepped = false;
+        self.q.settle();
     }
 }
 
@@ -1661,10 +1667,17 @@ pub struct PillNav {
     panel_scroll_max: f64,
     #[rust]
     locked: bool,
+    /// The frame clock every motion steps by: the first frame after a stop
+    /// steps by 0, later ones by the time since the last, capped by the
+    /// tween ticker's lag smoothing (0.1 s unless the app changes it), so a
+    /// stall never makes a motion jump. The ticker's pause and time scale
+    /// apply too.
+    #[rust(TweenClock::new(ClockPolicy::default()))]
+    clock: TweenClock,
+    /// The app-wide reduced-motion switch (the tween ticker's), read on
+    /// every event and draw.
     #[rust]
-    frame: NextFrame,
-    #[rust]
-    last_time: f64,
+    ticker_reduced: bool,
     #[rust]
     timer: Timer,
     #[rust]
@@ -1705,7 +1718,7 @@ impl PillNav {
     // -- reading ----------------------------------------------------------
 
     fn instant(&self) -> bool {
-        self.reduced_motion
+        self.reduced_motion || self.ticker_reduced
     }
 
     fn bar_metrics(&self) -> BarMetrics {
@@ -1851,8 +1864,23 @@ impl PillNav {
 
     /// Something started to move: ask for a frame and a redraw.
     fn kick(&mut self, cx: &mut Cx) {
-        self.frame = cx.new_next_frame();
+        self.clock.arm(cx);
         self.repaint(cx);
+    }
+
+    /// Called while drawing something that still moves: asks for a frame
+    /// again when none is pending (a container that stopped forwarding
+    /// events swallowed it). The last frame time is kept, so the next step
+    /// catches up by the real gap, capped like every step. While the tween
+    /// ticker is paused nothing is asked for: `draw_walk` resumes a clock
+    /// the pause held once it is lifted.
+    fn keep_frames(&mut self, cx: &mut Cx) {
+        if tween_ticker_ref(cx).paused {
+            return;
+        }
+        if !self.clock.is_armed(cx) {
+            self.clock.arm(cx);
+        }
     }
 
     /// Advance every animation by `dt`. Answers whether anything still moves.
@@ -2385,7 +2413,7 @@ impl PillNav {
         }
         panel.aimed_item = Some(panel.item);
         if panel.glide.progress() < 1.0 {
-            self.frame = cx.new_next_frame();
+            self.keep_frames(cx);
         }
 
         // It grows out of its own item's pill, and shrinks back into wherever
@@ -2954,7 +2982,40 @@ fn menu_id() -> LiveId {
 }
 
 impl Widget for PillNav {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TabList;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.name = (|| -> Option<String> {
+            self.current_index
+                .and_then(|i| self.defs.get(i))
+                .map(|item| item.label.clone())
+        })()
+        .unwrap_or_default();
+        node.value = (|| -> Option<String> {
+            let Some(panel) = self.panel_showing() else {
+                return Some(String::new());
+            };
+            if self.drawn_compact {
+                return Some(self.compact_word());
+            }
+            Some(
+                self.defs
+                    .get(panel.item)
+                    .map(|item| item.label.clone())
+                    .unwrap_or_default(),
+            )
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.ticker_reduced = tween_ticker_ref(cx).reduced_motion;
+        if self.clock.is_held() {
+            // Stopped by a pause of the tween ticker mid-motion: go on once
+            // it is lifted.
+            self.clock.draw_check(cx, true);
+        }
         if !self.visible {
             self.draw_overlay(cx, Rect::default());
             return DrawStep::done();
@@ -3031,10 +3092,10 @@ impl Widget for PillNav {
         if let Some(target) = target {
             self.highlight.aim(target, self.glide_secs, self.glide_ease);
             if self.highlight.progress() < 1.0 || !self.highlight_fade.is_at(1.0) {
-                self.frame = cx.new_next_frame();
+                self.keep_frames(cx);
             }
         } else if !self.highlight_fade.is_at(0.0) {
-            self.frame = cx.new_next_frame();
+            self.keep_frames(cx);
         }
         // An opacity past 1 brightens what the pill is drawn over, so the
         // fade's swing is cut at both ends.
@@ -3140,16 +3201,12 @@ impl Widget for PillNav {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if let Some(ne) = self.frame.is_event(event) {
-            let dt = if self.last_time > 0.0 { (ne.time - self.last_time).clamp(0.0, 0.1) } else { 0.0 };
+        self.ticker_reduced = tween_ticker_ref(cx).reduced_motion;
+        if let Some(dt) = self.clock.tick(cx, event) {
             let moving = self.advance(dt);
+            // Repainted on every frame, the last one included.
             self.repaint(cx);
-            if moving {
-                self.last_time = ne.time;
-                self.frame = cx.new_next_frame();
-            } else {
-                self.last_time = 0.0;
-            }
+            self.clock.finish_frame(cx, moving);
         }
         if self.timer.is_event(event).is_some() {
             self.timer = Timer::empty();
@@ -3203,91 +3260,168 @@ impl Widget for PillNav {
         self.disabled
     }
 
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        self.current_index.and_then(|i| self.defs.get(i)).map(|item| item.label.clone())
-    }
+
 
     /// The open item's label while a panel is open or opening, so a test
     /// can wait for it before pressing a row that is still growing.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        let Some(panel) = self.panel_showing() else {
-            return Some(String::new());
-        };
-        if self.drawn_compact {
-            return Some(self.compact_word());
-        }
-        Some(self.defs.get(panel.item).map(|item| item.label.clone()).unwrap_or_default())
-    }
 
-    fn snapshot_parts(&self, cx: &Cx) -> Vec<SnapshotPart> {
-        let area = self.draw_bar.area();
-        // Not drawn this frame (another tab, a page scrolled away): a stale
-        // area reads as a zero rect, and the cached item rects moved by it
-        // would send a test to press empty space by the window's corner.
-        if !area.is_valid(cx) {
-            return Vec::new();
-        }
-        let bar = area.rect(cx);
-        // The bar's items as they are on screen: an ancestor that clips the
-        // bar clips them. The panel is on an overlay, which nothing clips.
-        let shown = area.clipped_rect(cx);
-        let on_screen = |rect: Rect| rect.clip((shown.pos, shown.pos + shown.size));
-        let mut parts = Vec::new();
-        if self.drawn_compact {
-            parts.push(SnapshotPart {
-                id: menu_id(),
-                widget_type: "PillNavMenu",
-                rect: on_screen(self.pill_rect.translate(bar.pos)),
-                text: self.compact_word(),
-                selected: false,
-                enabled: !self.disabled,
-            });
-        } else {
-            for (i, item) in self.defs.iter().enumerate() {
-                let Some(rect) = self.item_rects.get(i) else {
-                    continue;
-                };
-                parts.push(SnapshotPart {
-                    id: item.id,
-                    widget_type: "PillNavItem",
-                    rect: on_screen(rect.translate(bar.pos)),
-                    text: item.label.clone(),
-                    selected: self.current_index == Some(i),
-                    enabled: item.enabled && !self.disabled,
-                });
+
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        out.extend((|| {
+            let area = self.draw_bar.area();
+            // Not drawn this frame (another tab, a page scrolled away): a stale
+            // area reads as a zero rect, and the cached item rects moved by it
+            // would send a test to press empty space by the window's corner.
+            if !area.is_valid(cx) {
+                return Vec::new();
             }
-        }
-        // Rows only once the panel has settled: a test must not press a row
-        // that is still arriving.
-        let Some(panel) = self.panel_showing() else {
-            return parts;
-        };
-        if !panel.grow.is_at(1.0) || panel.fading.is_some() || panel.glide.progress() < 1.0 {
-            return parts;
-        }
-        if !self.drawn_compact {
-            if let Some(item) = self.defs.get(panel.item) {
-                parts.push(SnapshotPart {
-                    id: item.id,
-                    widget_type: "PillNavPanel",
-                    rect: self.panel_rect,
-                    text: item.label.clone(),
-                    selected: false,
-                    enabled: true,
-                });
+            let bar = area.rect(cx);
+            // The bar's items as they are on screen: an ancestor that clips the
+            // bar clips them. The panel is on an overlay, which nothing clips.
+            let shown = area.clipped_rect(cx);
+            let on_screen = |rect: Rect| rect.clip((shown.pos, shown.pos + shown.size));
+            let mut parts = Vec::new();
+            if self.drawn_compact {
+                parts.push((
+                    ((menu_id()).0 ^ LiveId::from_str("PillNavMenu").0.rotate_left(1)),
+                    None,
+                    a11y_tree::Node {
+                        role: a11y_tree::Role::MenuItem,
+                        class: ("PillNavMenu").to_string(),
+                        path: makepad_widgets_core::widget_tree::live_id_token(menu_id()),
+                        bounds: makepad_platform::a11y::semantic_rect(on_screen(
+                            self.pill_rect.translate(bar.pos),
+                        )),
+                        name: self.compact_word(),
+                        states: {
+                            let mut states = a11y_tree::States::FOCUSABLE;
+                            states.set(a11y_tree::States::SELECTED, false);
+                            states.set(a11y_tree::States::DISABLED, !(!self.disabled));
+                            states
+                        },
+                        toggle: if false {
+                            a11y_tree::Toggle::On
+                        } else {
+                            a11y_tree::Toggle::Off
+                        },
+                        actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                        ..Default::default()
+                    },
+                ));
+            } else {
+                for (i, item) in self.defs.iter().enumerate() {
+                    let Some(rect) = self.item_rects.get(i) else {
+                        continue;
+                    };
+                    parts.push((
+                        ((item.id).0 ^ LiveId::from_str("PillNavItem").0.rotate_left(1)),
+                        None,
+                        a11y_tree::Node {
+                            role: a11y_tree::Role::MenuItem,
+                            class: ("PillNavItem").to_string(),
+                            path: makepad_widgets_core::widget_tree::live_id_token(item.id),
+                            bounds: makepad_platform::a11y::semantic_rect(on_screen(
+                                rect.translate(bar.pos),
+                            )),
+                            name: item.label.clone(),
+                            states: {
+                                let mut states = a11y_tree::States::FOCUSABLE;
+                                states.set(
+                                    a11y_tree::States::SELECTED,
+                                    self.current_index == Some(i),
+                                );
+                                states.set(
+                                    a11y_tree::States::DISABLED,
+                                    !(item.enabled && !self.disabled),
+                                );
+                                states
+                            },
+                            toggle: if self.current_index == Some(i) {
+                                a11y_tree::Toggle::On
+                            } else {
+                                a11y_tree::Toggle::Off
+                            },
+                            actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                            ..Default::default()
+                        },
+                    ));
+                }
             }
-        }
-        for hit in &self.panel_hits {
-            if hit.rect.size.x <= 0.0 || hit.rect.size.y <= 0.0 {
-                continue;
-            }
-            let (id, widget_type, selected) = match hit.row {
-                CompactRow::Item(i) => (self.defs[i].id, "PillNavItem", self.current_index == Some(i)),
-                CompactRow::Link(i, j) => (self.defs[i].links[j].id, "PillNavLink", false),
+            // Rows only once the panel has settled: a test must not press a row
+            // that is still arriving.
+            let Some(panel) = self.panel_showing() else {
+                return parts;
             };
-            parts.push(SnapshotPart { id, widget_type, rect: hit.rect, text: hit.label.clone(), selected, enabled: hit.enabled });
-        }
-        parts
+            if !panel.grow.is_at(1.0) || panel.fading.is_some() || panel.glide.progress() < 1.0 {
+                return parts;
+            }
+            if !self.drawn_compact {
+                if let Some(item) = self.defs.get(panel.item) {
+                    parts.push((
+                        ((item.id).0 ^ LiveId::from_str("PillNavPanel").0.rotate_left(1)),
+                        None,
+                        a11y_tree::Node {
+                            role: a11y_tree::Role::TabPanel,
+                            class: ("PillNavPanel").to_string(),
+                            path: makepad_widgets_core::widget_tree::live_id_token(item.id),
+                            bounds: makepad_platform::a11y::semantic_rect(self.panel_rect),
+                            name: item.label.clone(),
+                            states: {
+                                let mut states = a11y_tree::States::FOCUSABLE;
+                                states.set(a11y_tree::States::SELECTED, false);
+                                states.set(a11y_tree::States::DISABLED, !(true));
+                                states
+                            },
+                            toggle: if false {
+                                a11y_tree::Toggle::On
+                            } else {
+                                a11y_tree::Toggle::Off
+                            },
+                            actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+            for hit in &self.panel_hits {
+                if hit.rect.size.x <= 0.0 || hit.rect.size.y <= 0.0 {
+                    continue;
+                }
+                let (id, widget_type, selected) = match hit.row {
+                    CompactRow::Item(i) => (
+                        self.defs[i].id,
+                        "PillNavItem",
+                        self.current_index == Some(i),
+                    ),
+                    CompactRow::Link(i, j) => (self.defs[i].links[j].id, "PillNavLink", false),
+                };
+                parts.push((
+                    ((id).0 ^ LiveId::from_str(widget_type).0.rotate_left(1)),
+                    None,
+                    a11y_tree::Node {
+                        role: a11y_tree::Role::MenuItem,
+                        class: (widget_type).to_string(),
+                        path: makepad_widgets_core::widget_tree::live_id_token(id),
+                        bounds: makepad_platform::a11y::semantic_rect(hit.rect),
+                        name: hit.label.clone(),
+                        states: {
+                            let mut states = a11y_tree::States::FOCUSABLE;
+                            states.set(a11y_tree::States::SELECTED, selected);
+                            states.set(a11y_tree::States::DISABLED, !(hit.enabled));
+                            states
+                        },
+                        toggle: if selected {
+                            a11y_tree::Toggle::On
+                        } else {
+                            a11y_tree::Toggle::Off
+                        },
+                        actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                        ..Default::default()
+                    },
+                ));
+            }
+            parts
+        })());
     }
 }
 
@@ -3406,7 +3540,6 @@ mod tests {
     }
     use super::*;
     use crate::makepad_script::script;
-    use crate::makepad_script::trap::NoTrap;
 
     fn id(name: &str) -> LiveId {
         LiveId::from_str(name)
@@ -3429,15 +3562,13 @@ mod tests {
     /// restate it.
     fn theme_ease(vm: &mut ScriptVm, token: &str) -> Ease {
         let theme = vm.module(id!(theme));
-        let value = vm.bx.heap.value(theme, LiveId::from_str(token).into(), NoTrap);
+        let value = vm.value(theme, LiveId::from_str(token));
         Ease::script_from_value(vm, value)
     }
 
     fn theme_number(vm: &mut ScriptVm, token: &str) -> f64 {
         let theme = vm.module(id!(theme));
-        vm.bx
-            .heap
-            .value(theme, LiveId::from_str(token).into(), NoTrap)
+        vm.value(theme, LiveId::from_str(token))
             .as_f64()
             .unwrap_or_else(|| panic!("the theme has no number {token}"))
     }
@@ -3579,9 +3710,7 @@ mod tests {
                     mod.shader.test_compile_draw_source(mod.widgets.PillNav.draw_mark, "glsl", false)
                 })),
             ] {
-                let text = vm
-                    .bx
-                    .heap
+                let text = vm.heap()
                     .string_with(value, |_heap, text| text.to_string())
                     .expect("the compiler answers with source");
                 assert!(!text.starts_with("ERRORS:"), "{name} did not compile: {text}");
@@ -4390,8 +4519,9 @@ mod tests {
         let nav = root.widget(&cx, ids!(nav));
         let (pill, bar) = {
             let inner = nav.borrow::<PillNav>().expect("nav is a pill nav");
-            let parts = inner.snapshot_parts(&cx);
-            let pill = parts.iter().find(|part| part.widget_type == "PillNavMenu").expect("the folded pill").rect.center();
+            let parts = semantic_parts(&*inner, &cx);
+            let pill = parts.iter().find(|part| part.class == "PillNavMenu").expect("the folded pill");
+            let pill = node_rect(pill).center();
             (pill, inner.draw_bar.area())
         };
         cx.set_key_focus(bar);
@@ -4532,10 +4662,10 @@ mod tests {
         screen.draw(&mut cx, &root);
         let nav = root.widget(&cx, ids!(nav));
         let inner = nav.borrow::<PillNav>().expect("nav is a pill nav");
-        let parts = inner.snapshot_parts(&cx);
-        let pill = parts.iter().find(|part| part.widget_type == "PillNavMenu").expect("the folded pill");
-        assert_eq!(pill.id, live_id!(menu));
-        assert_eq!(crate::widget_tree::live_id_token(pill.id), "menu");
+        let parts = semantic_parts(&*inner, &cx);
+        let pill = parts.iter().find(|part| part.class == "PillNavMenu").expect("the folded pill");
+        assert_eq!(pill.path, "menu");
+        assert_eq!(pill.class, "PillNavMenu");
         });
     }
 
@@ -4605,7 +4735,7 @@ mod tests {
             assert_eq!(bar.panel_rect, placed, "the placed rect does not swing");
             assert_eq!(bar.panel_hits.iter().map(|hit| hit.rect).collect::<Vec<_>>(), rows, "the rows are hit where they rest");
             assert!(
-                bar.snapshot_parts(&cx).iter().all(|part| part.widget_type != "PillNavLink"),
+                semantic_parts(&*bar, &cx).iter().all(|part| part.class != "PillNavLink"),
                 "rows still arriving are not reported"
             );
         }
@@ -4615,8 +4745,9 @@ mod tests {
         {
             let bar = nav.borrow::<PillNav>().unwrap();
             assert!(bar.panel.as_ref().unwrap().grow.is_at(1.0));
-            let links: Vec<Rect> = bar.snapshot_parts(&cx).iter().filter(|part| part.widget_type == "PillNavLink").map(|part| part.rect).collect();
-            assert_eq!(links, rows, "settled, the rows are reported where they were hit all along");
+            let links: Vec<_> = semantic_parts(&*bar, &cx).iter().filter(|part| part.class == "PillNavLink").map(|part| part.bounds).collect();
+            let expected: Vec<_> = rows.iter().map(|rect| makepad_platform::a11y::semantic_rect(*rect)).collect();
+            assert_eq!(links, expected, "settled, the rows are reported where they were hit all along (wire coordinates)");
         }
 
         let mut bar = nav.borrow_mut::<PillNav>().unwrap();
@@ -4731,4 +4862,15 @@ mod lock_tests {
         assert_eq!(cx.sweep_lock_area(), None, "the next page has the pointer");
         });
     }
+}
+
+#[cfg(test)]
+fn semantic_parts(widget: &dyn Widget, cx: &Cx) -> Vec<a11y_tree::Node> {
+    let mut parts = Vec::new();
+    widget.semantics_parts(cx, &mut parts);
+    parts.into_iter().map(|(_, _, node)| node).collect()
+}
+#[cfg(test)]
+fn node_rect(node: &a11y_tree::Node) -> Rect {
+    rect(node.bounds.x as f64, node.bounds.y as f64, node.bounds.w as f64, node.bounds.h as f64)
 }

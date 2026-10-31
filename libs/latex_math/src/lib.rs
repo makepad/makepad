@@ -2,6 +2,7 @@ mod layout;
 mod parser;
 
 pub use layout::{
-    layout, LayoutGlyph, LayoutItem, LayoutOutput, LayoutRect, LayoutRule, MathStyle,
+    glyph_outline, layout, LayoutGlyph, LayoutItem, LayoutOutput, LayoutRect, LayoutRule, MathStyle,
+    OutlineSeg, PartInfo, PartSeg, NO_PART,
 };
-pub use parser::{parse, AccentKind, Delimiter, MathNode};
+pub use parser::{parse, parse_checked, AccentKind, Delimiter, MathNode};
