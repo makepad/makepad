@@ -1,7 +1,7 @@
 //! Score product tokens: quiet warm paper in pianist mode and compact,
 //! restrained professional chrome when the editor is disclosed.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.widgets.*

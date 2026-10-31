@@ -38,3 +38,7 @@ required-features = ["convert"]
 [[bin]]
 name = "flowref"
 required-features = ["convert"]
+
+[[bin]]
+name = "clipcover"
+required-features = ["convert"]

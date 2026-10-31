@@ -1,0 +1,11 @@
+[package]
+name = "makepad-score-tools"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The Score tools' text and shape (score_guide, score_check, score_listen): one definition in every app's AI registry; running them is makepad-score-live's"
+
+[dependencies]
+
+[dev-dependencies]
+makepad-strict-json = { path = "../../strict_json" }

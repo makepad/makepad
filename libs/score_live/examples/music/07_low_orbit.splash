@@ -1,0 +1,214 @@
+// Low Orbit: ambient at 64 in D (lydian colours), no drums.
+//
+// Form (44 bars, a chord every 4): dawn 8 (the drone, a low texture that
+// re-voices itself, filtered wind, the piano's first droplets: Dmaj9,
+// Bm11) · drift 8 (a glassy FM texture, the strings swell, the bell motif:
+// Gmaj7#11, Em9) · bloom 12 (a soprano sings a wordless melody on "ah",
+// the piano answers in slow arpeggios, the choir hums: A6sus, Dmaj9/F#,
+// then the borrowed Bbmaj7#11 lifts the light) · settle 8 (Cadd9 and Gmaj9,
+// the textures thin, the bell remembers the melody) · home 8 (Asus4-A to
+// Dmaj9: the piano plays the melody once, alone over the drone, and the
+// hall rings out).
+// The melody: F# A E, falling to D, then B, a rising sixth answered by a
+// step down; three phrases, the last reaching the high B.
+use mod.score.*
+
+let clock = Clock{bpm: 64 sig: [4 4] seed: 808 params: {swell: 0}}
+
+let drone_syn = Synth{recipe: "sine freq=440 a=4 d=2 s=1 r=6 gain=0.6; sine freq=660 a=5 d=2 s=0.8 r=6 gain=0.1; tri freq=880 a=6 d=2 s=0.5 r=6 gain=0.05 lp=900"}
+let tex_a = Synth{recipe: "saw freq=440 detune=7 a=3.5 d=3 s=0.8 r=6 gain=0.1 lp=900 q=1.4 vib=0.2 vib_depth=0.04; saw freq=440 detune=-9 a=4 d=3 s=0.8 r=6 gain=0.1 lp=700 q=1.2; tri freq=880 detune=3 a=5 d=3 s=0.6 r=6 gain=0.06"}
+let tex_b = Synth{recipe: "fm=2 osc=sine freq=440 index=2.4>0.3 glide=9 a=4 d=4 s=0.7 r=7 gain=0.16; fm=3 osc=sine freq=880 index=1>0 glide=6 a=5 d=4 s=0.5 r=7 gain=0.05; sine freq=1320 detune=5 a=6 d=3 s=0.4 r=7 gain=0.03"}
+let strings = Instrument{kind: @soundfont program: @strings}
+let bell_syn = Shader{lib: "modal_bell" t60: 5 stiffness: 0.2 hardness: 4}
+let piano = Instrument{kind: @piano}
+let singer = Voice{profile: @soprano vibrato: 0.3 vibrato_delay: 0.4 breath: 0.25 portamento: 0.12}
+let hummers = Voice{profile: @alto choir: 6 parts: 3 vibrato: 0.15 breath: 0.35}
+let wind_syn = Synth{recipe: "noise=pink bp=400>2400 glide=28 q=3 a=8 d=2 s=1 r=8 gain=0.25; noise=brown bp=180>600 glide=20 q=2 a=6 d=2 s=1 r=8 gain=0.3"}
+
+// ---- the harmonic arc, a chord every 4 bars -----------------------------------------
+
+let roots = [@d2 @b1 @g1 @e2 @a1 @fs2 @bb1 @c2 @g1 @a1 @d2]
+let chords = [
+    [@a3 @cs4 @e4 @fs4], [@a3 @d4 @e4 @fs4], [@b3 @cs4 @d4 @fs4], [@g3 @b3 @d4 @fs4],
+    [@b3 @d4 @e4 @fs4], [@a3 @cs4 @e4 @fs4], [@a3 @d4 @e4 @f4], [@g3 @c4 @d4 @e4],
+    [@a3 @b3 @d4 @fs4], [@a3 @d4 @e4 @a4], [@a3 @cs4 @e4 @fs4]
+]
+let chord_at = fn(b) { min(10, floor(b / 4)) }
+
+let phrase = fn(ns, ds, tr, amp, leg) {
+    let k = 0
+    for d in ds {
+        let r = rand(0, 0.04)
+        sleep(r)
+        let n = ns[k]
+        if n != @r { play(note(n) + tr, {dur: d * leg amp: amp * rand(0.85, 1.0)}) }
+        sleep(d - r)
+        k = k + 1
+    }
+}
+
+let drone = Loop{play: drone_syn beats: 16 amp: 0.3
+    code: fn(i) {
+        play(roots[min(i, 10)], {dur: if i == 10 { 22 } else { 15.8 }})
+        sleep(16)
+    }
+}
+
+/// The low texture: each note its own cutoff and entry, the cutoffs
+/// following the arc (dark, opening to the bloom, closing).
+let low_tex = Loop{play: tex_a beats: 16 amp: 0.38 sends: {hall: 0.45}
+    code: fn(i) {
+        let c = chords[min(i, 10)]
+        let arc = [0.3 0.4 0.55 0.65 0.8 0.9 1.0 0.8 0.6 0.45 0.35]
+        let a = arc[min(i, 10)]
+        for n in c {
+            play(n, {dur: 15 cutoff: 350 + a * 1500 * rand(0.6, 1.3) amp: rand(0.75, 1.0)})
+            sleep(rand(0.3, 0.9))
+        }
+        sleep(16 - beat())
+    }
+}
+
+/// The glass texture: the chord's colour tones, high.
+let high_tex = Loop{play: tex_b beats: 16 amp: 0.28 pan: 0.2 sends: {hall: 0.5}
+    code: fn(i) {
+        let c = chords[min(i, 10)]
+        sleep(rand(1, 3))
+        play(note(c[3]) + 12, {dur: 12 amp: rand(0.7, 0.9)})
+        sleep(rand(2, 4))
+        play(note(c[1]) + 12, {dur: 9 amp: rand(0.6, 0.8)})
+        sleep(16 - beat())
+    }
+}
+
+let swell = Loop{play: strings beats: 16 amp: 0.12 pan: -0.2 sends: {hall: 0.45}
+    code: fn(i) {
+        let c = chords[min(i, 10)]
+        play([note(c[0]) note(c[2]) note(c[3]) + 12], {dur: 14 amp: 0.8})
+        sleep(16)
+    }
+}
+
+/// Piano droplets: four chord tones high up, drawn once per chord and kept.
+let droplets = Loop{play: piano beats: 16 amp: 1.8 pan: -0.25 sends: {hall: 0.4 echo: 0.35}
+    code: fn(i) {
+        let c = chords[min(i, 10)]
+        let gaps = [2.5 3 1.5 4 5]
+        for k in 0..4 {
+            sleep(gaps[k] * rand(0.9, 1.1))
+            play(note(c[irand(0, 3)]) + 24, {dur: 3 amp: rand(0.28, 0.4)})
+        }
+        sleep(16 - beat())
+    }
+}
+
+/// The bell motif, drawn once and varied a note at a time.
+let bells = Loop{play: bell_syn beats: 16 amp: 0.32 pan: 0.35 sends: {hall: 0.4 echo: 0.4}
+    code: fn(i) {
+        let motif = [@fs5 @a5 @e5 @d5 @b4 @d5 @e5 @a4]
+        let gaps = [1.5 1 2.5 1.5 3 1.5 2 3]
+        let moved = irand(0, 7)
+        for n in 0..8 {
+            let x = if n == moved && chance(0.5) { note(motif[n]) + 12 } else { note(motif[n]) }
+            play(x, {dur: 3 amp: if n == 0 { 0.8 } else { rand(0.45, 0.7) }})
+            sleep(gaps[n])
+        }
+    }
+}
+
+// ---- the melody ---------------------------------------------------------------------
+
+let mel = [
+    [[@fs5 @a5 @e5 @d5 @r], [2 2 3 5 4]],
+    [[@e5 @fs5 @d5 @cs5 @a4 @r], [2 1 3 2 4 4]],
+    [[@d5 @e5 @f5 @a5 @b5 @a5 @e5], [2 1 1 3 3 2 4]]
+]
+
+/// The soprano's vocalise across the bloom: one "ah" held through each
+/// phrase (a melisma), breathing between.
+let vocalise = Loop{play: singer beats: 16 amp: 1.5 sends: {hall: 0.45 echo: 0.12}
+    code: fn(i) {
+        let line = mel[(i - 4) % 3]
+        let notes = []
+        for n in line[0] { notes.push(if n == @r { nil } else { note(n) }) }
+        sleep(sing(notes, "ah _ _ _ _ _ _", {durs: line[1] vel: 0.55}))
+        sleep(16 - beat())
+    }
+}
+
+/// The piano answers in slow arpeggios during the bloom, and in the
+/// last bars plays the melody alone.
+let answer = Loop{play: piano beats: 4 amp: 0.6 pan: 0.15 sends: {hall: 0.35}
+    code: fn(i) {
+        let c = chords[chord_at(i)]
+        for k in [0 1 2 3 2 1] {
+            play(note(c[k]) + 12, {dur: 1.2 amp: rand(0.3, 0.38)})
+            sleep(0.66)
+        }
+        sleep(4 - beat())
+    }
+}
+let piano_home = Loop{play: piano beats: 16 amp: 1.8 sends: {hall: 0.45}
+    code: fn(i) {
+        if i == 9 { phrase([@fs5 @a5 @e5 @d5 @r], [2 2 3 5 4], 0, 0.45, 1.0) }
+        if i == 10 {
+            phrase([@e5 @fs5 @d5 @cs5], [2 1 3 2], 0, 0.42, 1.0)
+            play([@d3 @a3 @fs4 @e5 @a5], {dur: 12 amp: 0.32})
+        }
+        sleep(16 - beat())
+    }
+}
+
+let hum = Loop{play: hummers beats: 16 amp: 2.6 sends: {hall: 0.5}
+    code: fn(i) {
+        let c = chords[min(i, 10)]
+        sing([[note(c[1]) note(c[2]) note(c[3])]], "mm", {dur: 14 vel: 0.4})
+        sleep(16)
+    }
+}
+
+let wind = Loop{play: wind_syn beats: 64 amp: 0.22 sends: {hall: 0.4}
+    code: fn(i) {
+        if i < 2 { play(@a4, {dur: 58}) }
+        sleep(64)
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: one very large hall (swelling in the bloom), a long slow echo.
+let hall = Reverb{room: 0.95 mix: 1 damp: 5500}
+let echo = Delay{time: 1.5 feedback: 0.55 mix: 1 spread: 1}
+let hall_level = Bus{in: [hall] gain: {param: @swell from: 0.9 to: 1.4 ramp: 32}}
+let returns = Highpass{in: [hall_level echo] cutoff: 150}
+
+// The drone and wind: the low end, gently held.
+let low_comp = Comp{in: [drone wind] threshold: -20 ratio: 2 makeup: 1}
+// Textures, strings and the choir: high-passed, a softer top, wide.
+let lift = Highpass{in: [low_tex high_tex swell hum] cutoff: 120}
+let tex_lp = Lowpass{in: [lift] cutoff: 10000}
+let tex_wide = Chorus{in: [tex_lp] rate: 0.15 depth: 7 mix: 0.4}
+// The voice and the piano: compressed lightly.
+let vox_hp = Highpass{in: [vocalise] cutoff: 150}
+let vox_comp = Comp{in: [vox_hp] threshold: -22 ratio: 2.5 makeup: 2}
+let keys_comp = Comp{in: [droplets answer piano_home bells] threshold: -22 ratio: 2 makeup: 2}
+let keys_hp = Highpass{in: [keys_comp] cutoff: 80}
+
+/// The master: gentle glue (the master limiter follows).
+let glue = Comp{in: [returns low_comp tex_wide vox_comp keys_hp] threshold: -16 ratio: 1.5 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.70}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let dawn = Section{bars: 8 loops: [drone low_tex wind droplets]}
+let drift = Section{bars: 8 loops: [drone low_tex high_tex swell bells wind droplets]}
+let bloom = Section{bars: 12 set: {swell: 1} loops: [drone low_tex high_tex swell vocalise answer hum]}
+let settle = Section{bars: 8 set: {swell: 0.3} loops: [drone low_tex high_tex bells hum]}
+let home = Section{bars: 8 set: {swell: 1} loops: [drone low_tex piano_home] next: @stop}
+
+Score{label: "Low Orbit" clock drone_syn tex_a tex_b strings bell_syn piano singer hummers wind_syn drone low_tex high_tex swell droplets bells vocalise answer piano_home hum wind hall echo hall_level returns low_comp lift tex_lp tex_wide vox_hp vox_comp keys_comp keys_hp glue master_eq master_width master_peak master_limit master_lp dawn drift bloom settle home ceiling: -1 master: 1.0 arrange: [dawn drift bloom settle home]}

@@ -1,0 +1,333 @@
+// Ember Hollow: an adaptive game score at 96, D dorian.
+//
+// Three states a game switches between with `goto` (switches land on the
+// bar), two params and three stingers:
+// - explore (16 bars, loops): Dm9 G/D Fmaj7 C/E | Dm9 Bbmaj7 C Asus4-A7.
+//   Harp ostinato, strings, a walking pizzicato bass, the flute tune (a
+//   rising D E F A answered by a fall through the dorian B natural), a
+//   clarinet-like counter-line the second time, frame-drum toms and shaker.
+//   `tension` (0..1) adds a heartbeat pulse (above 0.2), ticking rims and
+//   tremolo strings (above 0.5).
+// - danger (8 bars, loops): D phrygian, Dm Eb/D Dm C#dim7/D. A sixteenth
+//   string ostinato, taiko and toms, brass stabs, the low brass playing the
+//   explore motif inverted and minor. `danger` (0..1) adds the second drum
+//   layer and high string trills (above 0.6).
+// - victory (4 bars): a D major fanfare over timpani, then explore.
+// Stingers: `found` (a bell arpeggio, on the beat), `alarm` (a brass
+// cluster and taiko hit, on the bar), `fanfare` (on the bar).
+// The arrangement is a linear demo: explore, danger, victory, a calm
+// explore, and a close on D.
+use mod.score.*
+
+let clock = Clock{bpm: 96 sig: [4 4] seed: 4242 params: {tension: 0.55 danger: 0.8 swell: 0}}
+
+let harp = Instrument{kind: @soundfont program: @harp}
+let strings = Instrument{kind: @soundfont program: @strings}
+let trem = Instrument{kind: @soundfont program: @tremolo}
+let pizz = Instrument{kind: @soundfont program: @pizzicato}
+let flute = Instrument{kind: @soundfont program: @flute}
+let reed = Instrument{kind: @soundfont program: @clarinet}
+let low = Synth{recipe: "saw freq=440 detune=6 a=0.004 d=0.22 s=0.2 r=0.1 gain=0.22 lp=1300; saw freq=440 detune=-6 a=0.005 d=0.22 s=0.2 r=0.1 gain=0.2 lp=1100; sine freq=440 a=0.003 d=0.25 s=0.3 r=0.08 gain=0.18"}
+let brass = Instrument{kind: @soundfont program: @brass}
+let timp = Instrument{kind: @soundfont program: @timpani}
+let bell = Shader{lib: "modal_bell" t60: 2.5}
+let heart = Synth{recipe: "sine freq=440>220 glide=0.08 a=0.002 d=0.3 s=0 r=0.1 gain=0.8"}
+let kit = Instrument{kind: @drums}
+let subsyn = Synth{recipe: "sine freq=440 a=0.08 d=0.5 s=0.8 r=0.6 gain=0.7; tri freq=880 a=0.05 d=0.3 s=0.2 r=0.4 gain=0.05"}
+
+let phrase = fn(ns, ds, tr, amp, leg) {
+    let k = 0
+    for d in ds {
+        let r = rand(0, 0.02)
+        sleep(r)
+        let n = ns[k]
+        if n != @r { play(note(n) + tr, {dur: d * leg amp: amp * if d >= 1 { 1.0 } else { rand(0.8, 0.9) }}) }
+        sleep(d - r)
+        k = k + 1
+    }
+}
+
+// ---- explore --------------------------------------------------------------------------------
+
+let ex_bass = [@d2 @d2 @f2 @e2 @d2 @bb1 @c2 @a1]
+let ex_chords = [[@c4 @e4 @f4 @a4], [@b3 @d4 @g4], [@a3 @c4 @e4 @f4], [@g3 @c4 @e4], [@c4 @e4 @f4 @a4], [@a3 @d4 @f4], [@g3 @c4 @e4], [@a3 @cs4 @e4 @g4]]
+
+/// The harp: the chord in a rising and falling eighth figure, the bass
+/// string on the downbeat.
+let harp_ost = Loop{play: harp beats: 8 amp: 0.304 pan: -0.2 sends: {echo: 0.2 hall: 0.25}
+    code: fn(i) {
+        let k = i % 8
+        let c = ex_chords[k]
+        let order = [0 1 2 1 0 2 1 2]
+        for s in 0..16 {
+            if s % 8 == 0 { play(note(ex_bass[k]) + 12, {dur: 2 amp: 0.8}) }
+            let r = rand(0, 0.015)
+            sleep(r)
+            play(note(at(c, order[s % 8])) + if s >= 8 { 12 } else { 0 }, {dur: 0.9 amp: rand(0.5, 0.65)})
+            sleep(0.5 - r)
+        }
+    }
+}
+
+let ex_pad = Loop{play: strings beats: 8 amp: 0.088 sends: {hall: 0.3}
+    code: fn(i) {
+        play(ex_chords[i % 8], {dur: 7.8})
+        sleep(8)
+    }
+}
+
+/// Pizzicato bass: root, fifth, and a walk into the next chord.
+let ex_walk = Loop{play: pizz beats: 8 amp: 0.6 sends: {room: 0.2}
+    code: fn(i) {
+        let r = note(ex_bass[i % 8])
+        let n = note(ex_bass[(i + 1) % 8])
+        let ap = if n > r { n - 1 } else { n + 1 }
+        phrase([r r + 7 r + 12 r + 7 r r + 3 r + 5 ap], [1 1 1 1 1 1 1 1], 0, 0.8, 0.5)
+    }
+}
+
+/// A soft sub under the harp: the chord's root, held.
+let ex_sub = Loop{play: subsyn beats: 8 amp: 0.3
+    code: fn(i) {
+        play(note(ex_bass[i % 8]), {dur: 7.6})
+        sleep(8)
+    }
+}
+
+/// The flute's tune, 16 bars: the motif, its answer through the dorian
+/// B natural, the motif a step higher, a cadence onto A.
+let ex_tune = [
+    [[@d5 @e5 @f5 @a5 @g5 @e5], [1 0.5 0.5 2 2 2]],
+    [[@c5 @d5 @e5 @g5 @f5 @d5], [1 0.5 0.5 2 2 2]],
+    [[@a5 @b5 @c6 @a5 @g5 @e5 @d5], [1 0.5 0.5 2 1.5 0.5 2]],
+    [[@c5 @d5 @e5 @c5 @cs5 @e5 @a4], [1 0.5 0.5 2 1.5 0.5 2]]
+]
+let tune = Loop{play: flute beats: 8 amp: 0.4 pan: 0.1 sends: {echo: 0.2 hall: 0.25}
+    code: fn(i) {
+        let line = ex_tune[i % 4]
+        phrase(line[0], line[1], if floor(i / 4) % 2 == 1 { 12 } else { 0 }, 0.85, 0.95)
+        sleep(8 - beat())
+    }
+}
+/// The reed counter-line: long notes a third or sixth under the tune.
+let counter = Loop{play: reed beats: 8 amp: 0.224 pan: -0.3 sends: {hall: 0.25}
+    code: fn(i) {
+        let lines = [[@f4 @e4 @d4 @c4], [@e4 @d4 @c4 @b3], [@f4 @g4 @e4 @d4], [@e4 @g4 @e4 @cs4]]
+        phrase(lines[i % 4], [2 2 2 2], 0, 0.7, 1.0)
+    }
+}
+
+let ex_perc = Loop{play: kit beats: 4 amp: 2.6 sends: {room: 0.3}
+    code: fn(i) {
+        for s in 0..16 {
+            if s == 0 || s == 10 { hit(@floortom, {amp: rand(0.35, 0.45)}) }
+            if s == 6 || s == 14 { hit(@tom3, {amp: rand(0.2, 0.3)}) }
+            if s % 2 == 1 { hit(@pedalhat, {amp: rand(0.12, 0.2) pan: 0.4}) }
+            if i % 4 == 3 && s >= 12 { hit(@tom2, {amp: 0.2 + (s - 12) * 0.06}) }
+            sleep(0.25)
+        }
+    }
+}
+
+/// Tension: a heartbeat (above 0.2), ticking rims and tremolo strings
+/// (above 0.5), each scaled by the param.
+let pulse = Loop{play: heart beats: 4 amp: 0.55 sends: {room: 0.2}
+    code: fn(i) {
+        let t = param(@tension)
+        if t > 0.2 {
+            play(@d2, {amp: t})
+            sleep(0.4)
+            play(@d2, {amp: t * 0.6})
+            sleep(3.6)
+        } else { sleep(4) }
+    }
+}
+let ticks = Loop{play: kit beats: 4 amp: 1.2 sends: {room: 0.2}
+    code: fn(i) {
+        let t = param(@tension)
+        let e = euclid(5, 16, 3)
+        for s in 0..16 {
+            if t > 0.5 && e[s] { hit(@rim, {amp: t * rand(0.4, 0.6) pan: 0.4}) }
+            sleep(0.25)
+        }
+    }
+}
+let tremolo = Loop{play: trem beats: 8 amp: 0.11 pan: 0.3 sends: {hall: 0.3}
+    code: fn(i) {
+        let c = ex_chords[i % 8]
+        if param(@tension) > 0.5 {
+            for s in 0..32 {
+                play(note(c[c.len() - 1]) + 12, {dur: 0.12 amp: rand(0.5, 0.7)})
+                sleep(0.25)
+            }
+        } else { sleep(8) }
+    }
+}
+
+// ---- danger ---------------------------------------------------------------------------------
+
+let dg_bass = [@d2 @d2 @d2 @d2]
+let dg_chords = [[@d3 @a3 @f4], [@eb3 @bb3 @g4], [@d3 @a3 @f4], [@cs3 @bb3 @e4]]
+
+let dg_ost = Loop{play: low beats: 4 amp: 1.0 sends: {room: 0.2}
+    code: fn(i) {
+        let cell = if i % 4 == 1 { [0 0 1 0 0 13 0 1 0 0 3 0 1 0 13 1] } else { [0 0 1 0 0 12 0 1 0 0 3 0 1 0 12 1] }
+        for s in 0..16 {
+            play(note(@d2) + cell[s], {dur: 0.2 amp: if s % 3 == 0 { 1.0 } else { rand(0.55, 0.7) }})
+            sleep(0.25)
+        }
+    }
+}
+let dg_drums = Loop{play: kit beats: 4 amp: 3.2 sends: {room: 0.3 smash: 0.35}
+    code: fn(i) {
+        let x = param(@danger)
+        let a = steps("X..x..x.x.......")
+        let b = steps("....o.....o.oo.o")
+        for s in 0..16 {
+            if a[s] != nil { hit(@floortom, {amp: a[s] * rand(0.88, 1.0)}) }
+            if s % 8 == 0 { hit(@kick, {amp: 0.9}) }
+            if x > 0.6 && b[s] != nil { hit(@tom2, {amp: rand(0.45, 0.6) pan: 0.2}) }
+            if i % 4 == 3 && s >= 12 { hit(@snare, {amp: 0.4 + (s - 12) * 0.12}) }
+            sleep(0.25)
+        }
+    }
+}
+let dg_stabs = Loop{play: brass beats: 8 amp: 0.293 sends: {hall: 0.3}
+    code: fn(i) {
+        let c = dg_chords[(i * 2) % 4]
+        let c2 = dg_chords[(i * 2 + 1) % 4]
+        play(c, {dur: 0.5 amp: 0.9})
+        sleep(3)
+        play(c, {dur: 0.4 amp: 0.7})
+        sleep(1)
+        play(c2, {dur: 1.8 amp: 0.8})
+        sleep(4)
+    }
+}
+/// The low brass: the explore motif turned upside down, in D phrygian.
+let dg_motif = Loop{play: brass beats: 16 amp: 0.383 sends: {hall: 0.3}
+    code: fn(i) {
+        phrase([@d3 @c3 @bb2 @g2 @a2 @c3 @eb3 @d3], [1 0.5 0.5 2 2 1 1 8], 0, 0.85, 0.95)
+    }
+}
+let dg_trills = Loop{play: trem beats: 8 amp: 0.1 pan: 0.3 sends: {hall: 0.3}
+    code: fn(i) {
+        if param(@danger) > 0.6 {
+            for s in 0..32 {
+                play(if s % 2 == 0 { @a5 } else { @bb5 }, {dur: 0.12 amp: rand(0.5, 0.7)})
+                sleep(0.25)
+            }
+        } else { sleep(8) }
+    }
+}
+
+// ---- victory and the stingers ------------------------------------------------------------------
+
+let fanfare_line = fn() {
+    let notes = [[@d4 @fs4 @a4], [@d4 @fs4 @a4], [@e4 @a4 @cs5], [@fs4 @a4 @d5], [@g4 @b4 @d5], [@a4 @d5 @fs5]]
+    let lens = [0.75 0.25 1 2 2 8]
+    for n in 0..6 {
+        play(notes[n], {dur: lens[n] * 0.95 amp: if n == 5 { 1.0 } else { 0.85 }})
+        sleep(lens[n])
+    }
+}
+let victory_brass = Loop{play: brass beats: 16 amp: 0.15 sends: {hall: 0.35} code: fn(i) { fanfare_line() }}
+let victory_timp = Loop{play: timp beats: 16 amp: 1.4 sends: {room: 0.3 hall: 0.2}
+    code: fn(i) {
+        for s in 0..4 { play(@d2, {amp: 0.25 + s * 0.12 dur: 0.3}) sleep(0.25) }
+        sleep(3)
+        play(@a1, {amp: 0.8})
+        sleep(2)
+        play(@d2, {amp: 1.0 dur: 4})
+        sleep(10)
+    }
+}
+let victory_strings = Loop{play: strings beats: 16 amp: 0.2 sends: {hall: 0.35}
+    code: fn(i) {
+        sleep(4)
+        play([@d4 @fs4 @a4 @d5], {dur: 11.5})
+        sleep(12)
+    }
+}
+
+let found_line = fn() {
+    for n in [@a5 @d6 @fs6 @a6] { play(n, {dur: 1.5 amp: 0.8}) sleep(0.125) }
+}
+let alarm_line = fn() {
+    play([@d2 @d3 @eb3], {dur: 1.5 amp: 1.0})
+    sleep(0.5)
+    play([@d2 @d3 @eb3], {dur: 2 amp: 0.9})
+    sleep(2)
+}
+let found = Stinger{play: bell quant: 1 code: fn(i) { found_line() }}
+let alarm = Stinger{play: brass quant: @bar code: fn(i) { alarm_line() }}
+let fanfare = Stinger{play: brass quant: @bar code: fn(i) { fanfare_line() }}
+
+/// The demo's stingers, written in where a game would fire them.
+let demo_found = Loop{play: bell beats: 4 amp: 0.4 pan: 0.3 sends: {echo: 0.3 hall: 0.3}
+    code: fn(i) {
+        if i == 6 || i == 13 { sleep(2) found_line() }
+        sleep(4 - beat())
+    }
+}
+let demo_alarm = Loop{play: brass beats: 4 amp: 0.248 sends: {hall: 0.35}
+    code: fn(i) {
+        if i == 16 { alarm_line() }
+        sleep(4 - beat())
+    }
+}
+/// The demo's close: a last D minor 9 in the harp and strings.
+let close = Loop{play: strings beats: 4 amp: 0.14 sends: {hall: 0.4}
+    code: fn(i) {
+        if i == 44 { play([@d3 @a3 @c4 @e4 @f4], {dur: 7}) }
+        sleep(4)
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: a stage room for percussion and the low strings, a hall for the
+// orchestra (it swells for the danger and the victory), a quarter-note echo
+// for the harp and flute.
+let room = Reverb{room: 0.45 mix: 1 damp: 6000}
+let hall = Reverb{room: 0.78 mix: 1 damp: 6000}
+let echo = Delay{time: 0.75 feedback: 0.35 mix: 1 spread: 1}
+let hall_level = Bus{in: [hall] gain: {param: @swell from: 0.8 to: 1.5 ramp: 8}}
+let returns = Highpass{in: [room hall_level echo] cutoff: 200}
+
+// Percussion: glued, with a parallel smash for the danger drums.
+let perc_bus = Comp{in: [ex_perc ticks dg_drums victory_timp pulse] threshold: -18 ratio: 3 makeup: 2}
+let perc_tape = Drive{in: [perc_bus] amount: 0.12 mix: 0.3 tone: 10000}
+let smash = Comp{threshold: -34 ratio: 10 makeup: 10}
+// Low strings and basses.
+let low_bus = Comp{in: [ex_walk ex_sub dg_ost] threshold: -18 ratio: 2.5 makeup: 1}
+// Strings, harp, woodwinds: carved and wide.
+let lift = Highpass{in: [ex_pad tremolo dg_trills counter victory_strings close harp_ost tune demo_found] cutoff: 180}
+let upper_wide = Chorus{in: [lift] rate: 0.25 depth: 4 mix: 0.2}
+// Brass: glued.
+let brass_bus = Comp{in: [dg_stabs dg_motif victory_brass demo_alarm] threshold: -18 ratio: 2.5 makeup: 2}
+let brass_hp = Highpass{in: [brass_bus] cutoff: 80}
+
+/// The master: gentle glue (the master limiter follows).
+let glue = Comp{in: [found alarm fanfare returns perc_tape smash low_bus upper_wide brass_hp] threshold: -14 ratio: 1.8 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.55}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let explore = Section{bars: 16 loops: [harp_ost ex_pad ex_walk ex_sub tune counter ex_perc pulse ticks tremolo] next: @explore}
+let danger = Section{bars: 8 loops: [dg_ost dg_drums dg_stabs dg_motif dg_trills pulse] next: @danger}
+let victory = Section{bars: 4 loops: [victory_brass victory_timp victory_strings] next: @explore}
+
+// The demo.
+let demo_explore = Section{bars: 16 loops: [harp_ost ex_pad ex_walk ex_sub tune counter ex_perc pulse ticks tremolo demo_found]}
+let demo_danger = Section{bars: 16 set: {swell: 1} loops: [dg_ost dg_drums dg_stabs dg_motif dg_trills pulse demo_alarm]}
+let demo_victory = Section{bars: 4 loops: [victory_brass victory_timp victory_strings]}
+let demo_calm = Section{bars: 8 set: {swell: 0} loops: [harp_ost ex_pad ex_walk ex_sub tune]}
+let demo_close = Section{bars: 2 loops: [close] next: @stop}
+
+Score{label: "Ember Hollow" clock harp strings trem pizz flute reed low brass timp bell heart kit subsyn harp_ost ex_pad ex_walk ex_sub tune counter ex_perc pulse ticks tremolo dg_ost dg_drums dg_stabs dg_motif dg_trills victory_brass victory_timp victory_strings found alarm fanfare demo_found demo_alarm close room hall echo hall_level returns perc_bus perc_tape smash low_bus lift upper_wide brass_bus brass_hp glue master_eq master_width master_peak master_limit master_lp explore danger victory demo_explore demo_danger demo_victory demo_calm demo_close ceiling: -1 master: 1.0 arrange: [demo_explore demo_danger demo_victory demo_calm demo_close]}

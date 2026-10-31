@@ -34,6 +34,7 @@ fn main() {
             video_bitrate_bps: 12_000_000,
             audio: None,
             keyframe_only: false,
+            ..Default::default()
         },
     )
     .expect("encoder");

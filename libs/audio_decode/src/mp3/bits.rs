@@ -8,6 +8,8 @@
 //! a few bits past `part2_3_length`, and a decoder that treats that as fatal
 //! rejects legal files.
 
+use makepad_relax::relax;
+
 /// Bit cursor over a byte slice. Never panics; never allocates.
 pub struct BitReader<'a> {
     data: &'a [u8],
@@ -16,6 +18,7 @@ pub struct BitReader<'a> {
     overran: bool,
 }
 
+#[relax(O3, always)]
 impl<'a> BitReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0, overran: false }

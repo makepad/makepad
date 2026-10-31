@@ -1,0 +1,52 @@
+// Night Drive: minimal techno at 126. A mid-80s analog-box kit, an acid line that never
+// repeats exactly, a stab, and the bass ducking under the kick.
+use mod.score.*
+
+let clock = Clock{bpm: 126 sig: [4 4] seed: 7 swing: 0}
+
+let kit = Drums{kit: @analog_hybrid tune: {kick: -1} gain: {hat: 0.7}}
+let acid = Synth{preset: @acid cutoff: 700 res: 7 drive: 2}
+let stab = Synth{preset: @stab}
+
+let kick = Loop{play: kit hits: "x...x...x...x..." amp: 0.95}
+let hats = Loop{play: kit beats: 4 amp: 0.45 pan: 0.2
+    code: fn(i) {
+        for s in 0..16 {
+            if s % 4 == 2 { hit(@ohat, {amp: 0.7}) }
+            else { hit(@hat, {amp: rand(0.25, 0.6)}) }
+            sleep(0.25)
+        }
+    }
+}
+let clap = Loop{play: kit hits: "....x.......x..." note: @clap amp: 0.7}
+
+/// Sixteen steps from a ring; the cutoff wanders every step.
+let line = Loop{play: acid beats: 4 amp: 0.55
+    code: fn(i) {
+        let notes = [@a1 @a1 @a2 @a1 @c2 @a1 @g1 @e2]
+        for s in 0..16 {
+            if one_in(4) == false { play(tick(notes), {cutoff: rand(350, 1600) dur: 0.2}) }
+            sleep(0.25)
+        }
+    }
+}
+
+let stabs = Loop{play: stab beats: 8 amp: 0.3
+    code: fn(i) {
+        sleep(1.5)
+        play(chord(@a3, @m7), {dur: 0.2})
+        sleep(3)
+        play(chord(@a3, @m9), {dur: 0.2})
+        sleep(3.5)
+    }
+}
+
+let pump = Duck{in: [line] key: kick depth: 7 release: 0.18}
+let echo = Delay{in: [stabs] time: 0.75 feedback: 0.45 mix: 0.35 spread: 1}
+let room = Reverb{in: [clap echo] room: 0.4 mix: 0.2}
+
+let intro = Section{bars: 8 loops: [kick hats]}
+let groove = Section{bars: 16 loops: [kick hats clap line]}
+let peak = Section{bars: 16 loops: [kick hats clap line stabs]}
+
+Score{label: "Night Drive" clock kit acid stab kick hats clap line stabs pump echo room intro groove peak arrange: [intro groove peak]}

@@ -426,7 +426,9 @@ def velocity_weights(velocities):
         if velocity <= KNOTS[0]:
             result[i, 0] = 1.0
         elif velocity >= KNOTS[-1]:
-            result[i, -1] = 1.0
+            # the runtime continues the mf->ff slope up to 127
+            over = (min(velocity, 127) - KNOTS[-1]) / (KNOTS[-1] - KNOTS[1])
+            result[i, 1:] = (-over, 1 + over)
         else:
             lo = 0 if velocity < KNOTS[1] else 1
             fraction = (velocity - KNOTS[lo]) / (KNOTS[lo + 1] - KNOTS[lo])

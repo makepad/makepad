@@ -1,0 +1,25 @@
+# The synthesiser's widgets for a score's editor panel: an instrument's
+# envelope, filter and wave dragged, its live sound, a keyboard to hear it
+# and the instrument switch, bound to score nodes by name. Widget code and
+# the display maths; no audio thread, no Score VM.
+[package]
+name = "makepad-synth-panel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Synth widgets for score editor panels: envelope, filter, wave, scope, keys and the instrument switch, bound to score nodes"
+
+[lib]
+name = "makepad_synth_panel"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-math = { path = "../math" }
+makepad-audio-synth = { path = "../audio_synth" }
+makepad-score-live = { path = "../score_live" }
+makepad-edit-values = { path = "../edit_values" }
+makepad-editor-panel = { path = "../editor_panel" }
+makepad-score-player = { path = "../score_player" }
+makepad-look = { path = "../look" }
+# The panel widgets' host the synth widgets read and write through.
+makepad-value-pickers = { path = "../value_pickers" }

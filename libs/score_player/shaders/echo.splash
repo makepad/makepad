@@ -1,0 +1,50 @@
+// Stereo echo with cross-feedback: the left input first passes an ~11 ms
+// side delay (Haas), each side's repeat feeds the other with its own
+// feedback (asymmetric, so the repeats wander), the loop is band-limited
+// (low-cut and high-cut, darker with every repeat), the returns get
+// mid/side width. The time is `division` beats at `bpm` (the song tempo).
+let bpm = param(120, 20, 300)
+let division = param(0.75, 0.0625, 4)
+let feedback_l = param(0.45, 0, 0.95)
+let feedback_r = param(0.6, 0, 0.95)
+let side_ms = param(11, 0, 40)
+let low_cut = param(250, 20, 2000)
+let high_cut = param(5000, 1000, 16000)
+let spread = param(1.6, 0, 2)
+let wet = param(0.3, 0, 1)
+
+let MAX = 131072
+var dl = [0.0; MAX]
+var dr = [0.0; MAX]
+var side = [0.0; 4096]
+var w = int(0)
+var hp_l = OnePole{}
+var hp_r = OnePole{}
+var lp_l = OnePole{}
+var lp_r = OnePole{}
+var d = 0.0
+
+fn block() {
+    onepole_set(hp_l, low_cut)
+    onepole_set(hp_r, low_cut)
+    onepole_set(lp_l, high_cut)
+    onepole_set(lp_r, high_cut)
+    let target = min(60.0 / bpm * division * sample_rate, MAX - 4.0)
+    // Glide to a new time instead of jumping (no clicks on tempo changes).
+    d = if d == 0.0 { target } else { d + (target - d) * 0.2 }
+}
+
+fn effect(l, r) {
+    side[w] = l
+    let side_l = tap(side, w, max(side_ms * 0.001 * sample_rate, 0.0))
+    let el = tap(dl, w, d)
+    let er = tap(dr, w, d)
+    // Cross-feedback through the band-limited loop.
+    let fl = onepole_lp(lp_l, onepole_hp(hp_l, er)) * feedback_l
+    let fr = onepole_lp(lp_r, onepole_hp(hp_r, el)) * feedback_r
+    dl[w] = side_l + soft_clip(fl)
+    dr[w] = r + soft_clip(fr)
+    w = w + 1
+    let wide = width(vec2(el, er), spread)
+    vec2(l, r) + wide * wet
+}

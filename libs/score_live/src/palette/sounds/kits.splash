@@ -1,0 +1,208 @@
+// The synthesized drum kits: each a point of the drum model (drums.splash).
+// `Drums{kit: @name}` plays one; `about` and `tags` are what
+// instrument_search reads.
+
+let kits = {
+    analog_80s: kit(Kit{
+        about: "early-80s analog box: a long booming sine kick, a snappy tuned snare, ticking hats, a clap and a cowbell"
+        tags: "electronic analog drum_machine 80s electro hip_hop trap miami_bass synthpop boom_bap booming"
+        kick: Kick{tune: 47 sweep: 3.2 bend: 0.07 decay: 1.1 click: 0.25 noise: 0.05 tone: 0.3 drive: 0.15}
+        snare: Snare{tune: 225 sweep: 1.45 decay: 0.1 body: 0.6 noise: 0.6 color: 3200 noise_decay: 0.19 snap: 0.3}
+        clap: Clap{color: 1150 spread: 0.0105 tail: 0.17}
+        hat: Hat{tune: 4180 metal: 0.25 color: 7200 decay: 0.042 tone: 0.3}
+        ohat: Hat{tune: 4180 metal: 0.25 color: 6600 decay: 0.36 tone: 0.3}
+        rim: Rim{tune: 1720 decay: 0.018}
+        tom: Tom{tune: 96 sweep: 1.33 bend: 0.2 decay: 0.42 noise: 0.1 tone: 0.2 drive: 0}
+        crash: Cymbal{tune: 3150 decay: 1.7 color: 4600 metal: 0.2}
+        cowbell: Cowbell{tune: 562 decay: 0.26}
+        conga: Conga{tune: 340 decay: 0.22}
+    })
+    analog_hybrid: kit(Kit{
+        about: "mid-80s analog and sampled hybrid box: a punchy driven kick with a click, a noisy bright snare, metallic sampled-sounding hats and cymbals, a wide clap"
+        tags: "electronic analog drum_machine 80s 90s house techno acid rave punchy"
+        kick: Kick{tune: 52 sweep: 4.4 bend: 0.032 decay: 0.5 click: 0.6 noise: 0.35 tone: 0.7 drive: 0.5}
+        snare: Snare{tune: 182 sweep: 1.35 decay: 0.11 body: 0.45 noise: 0.7 color: 5200 noise_decay: 0.23 snap: 0.5 tone: 0.6}
+        clap: Clap{color: 1300 spread: 0.009 tail: 0.2}
+        hat: Hat{tune: 3900 metal: 0.35 color: 8200 decay: 0.038 tone: 0.6}
+        ohat: Hat{tune: 3900 metal: 0.35 color: 7200 decay: 0.42 tone: 0.6}
+        rim: Rim{tune: 1860 decay: 0.016 noise: 0.4 color: 3200}
+        tom: Tom{tune: 84 sweep: 1.43 bend: 0.12 decay: 0.34 noise: 0.25 tone: 0.6 drive: 0.3}
+        crash: Cymbal{tune: 4400 decay: 1.9 color: 5200 metal: 0.35}
+        ride: Cymbal{tune: 5600 decay: 1.6 noise: 0.3 metal: 0.5 bell: 0.3 color: 7600}
+    })
+    studio: kit(Kit{
+        about: "a synthesized studio kit: round tuned kick with beater, a crisp mid snare with wires, natural toms and long washy cymbals"
+        tags: "acoustic_like studio rock pop funk soul natural"
+        kick: Kick{tune: 52 sweep: 2.15 bend: 0.05 decay: 0.38 click: 0.45 noise: 0.6 tone: 0.35 drive: 0.1}
+        snare: Snare{tune: 178 sweep: 1.15 decay: 0.09 body: 0.5 noise: 0.75 color: 2800 noise_decay: 0.26 snap: 0.45 tone: 0.6}
+        hat: Hat{tune: 5300 metal: 0.4 color: 9000 decay: 0.05 tone: 0.4}
+        ohat: Hat{tune: 5300 metal: 0.4 color: 8000 decay: 0.55 tone: 0.4}
+        tom: Tom{tune: 86 sweep: 1.14 bend: 0.3 decay: 0.55 noise: 0.4 tone: 0.3 drive: 0}
+        crash: Cymbal{tune: 3700 decay: 2.2 color: 5000 metal: 0.35 tone: 0.6}
+        ride: Cymbal{tune: 4100 decay: 1.4 noise: 0.15 metal: 0.6 bell: 0.5 color: 8000}
+        shaker: Shaker{color: 7500 attack: 0.02 decay: 0.07}
+    })
+    lofi: kit(Kit{
+        about: "lo-fi hip hop kit: a dull saturated kick, a soft dusty snare, dark short hats, everything rolled off"
+        tags: "lofi hip_hop boom_bap chill dusty soft dark vinyl"
+        kick: Kick{tune: 50 sweep: 2.4 bend: 0.06 decay: 0.5 click: 0.05 noise: 0.3 tone: 0.05 drive: 0.7}
+        snare: Snare{tune: 200 sweep: 1.15 decay: 0.1 body: 0.4 noise: 0.6 color: 2200 noise_decay: 0.2 snap: 0.05 tone: 0 drive: 0.4}
+        clap: Clap{color: 1100 tail: 0.2 tone: 0}
+        hat: Hat{tune: 3000 metal: 0.1 noise: 0.8 color: 6000 decay: 0.04 tone: 0}
+        ohat: Hat{tune: 3000 metal: 0.1 noise: 0.8 color: 5600 decay: 0.3 tone: 0}
+        tom: Tom{tune: 95 decay: 0.4 tone: 0.1}
+        crash: Cymbal{decay: 1.3 color: 4200 metal: 0.1 tone: 0}
+        shaker: Shaker{color: 5000 decay: 0.06}
+    })
+    chip: kit(Kit{
+        about: "8-bit console kit: square-wave kick and toms, white-noise snare and hats, tiny and dry"
+        tags: "chiptune 8bit retro game square noise tiny dry"
+        kick: Kick{tune: 50 sweep: 3.2 bend: 0.08 decay: 0.16 click: 0 noise: 0 tone: 0 drive: 1}
+        snare: Snare{tune: 140 sweep: 1.6 decay: 0.06 body: 0.4 noise: 0.7 color: 3000 noise_decay: 0.12 snap: 0 tone: 0 drive: 0.6}
+        hat: Hat{metal: 0 noise: 1 color: 6000 decay: 0.03 tone: 0 level: 0.75}
+        ohat: Hat{metal: 0 noise: 1 color: 5000 decay: 0.2 tone: 0 level: 0.75}
+        tom: Tom{tune: 110 sweep: 1.6 bend: 0.1 decay: 0.2 noise: 0 drive: 1}
+        crash: Cymbal{decay: 0.6 metal: 0 noise: 0.8 color: 3000 tone: 0}
+    })
+    house: kit(Kit{
+        about: "classic house kit: a short punchy four-on-the-floor kick, a bright clap, crisp offbeat open hats and shakers"
+        tags: "electronic house deep_house disco_house 90s club dance punchy bright"
+        kick: Kick{tune: 55 sweep: 4 bend: 0.03 decay: 0.32 click: 0.5 noise: 0.25 tone: 0.6 drive: 0.4}
+        snare: Snare{tune: 200 decay: 0.09 body: 0.4 noise: 0.6 color: 4500 noise_decay: 0.18 snap: 0.5}
+        clap: Clap{color: 1400 spread: 0.009 tail: 0.22 tone: 0.7}
+        hat: Hat{tune: 4300 metal: 0.3 color: 8500 decay: 0.035 tone: 0.7}
+        ohat: Hat{tune: 4300 metal: 0.3 color: 7500 decay: 0.25 tone: 0.7}
+        shaker: Shaker{color: 7500 attack: 0.008 decay: 0.05 level: 1.05}
+        conga: Conga{tune: 300 decay: 0.2 slap: 0.25}
+        crash: Cymbal{tune: 4400 decay: 1.8 color: 5600 metal: 0.3}
+    })
+    techno: kit(Kit{
+        about: "techno kit: a deep driven rumbling kick, a dry clap, tight metallic hats and a long ride"
+        tags: "electronic techno industrial_techno berlin warehouse dark driving punchy"
+        kick: Kick{tune: 48 sweep: 5 bend: 0.028 decay: 0.6 click: 0.6 noise: 0.4 tone: 0.5 drive: 0.85}
+        snare: Snare{tune: 180 decay: 0.08 body: 0.3 noise: 0.8 color: 4000 noise_decay: 0.15 snap: 0.4 drive: 0.3}
+        clap: Clap{color: 1000 spread: 0.008 tail: 0.14 tone: 0.3}
+        hat: Hat{tune: 5100 metal: 0.6 noise: 0.5 color: 8800 decay: 0.025 tone: 0.5}
+        ohat: Hat{tune: 5100 metal: 0.6 noise: 0.5 color: 7800 decay: 0.2 tone: 0.5}
+        ride: Cymbal{tune: 5800 decay: 1.4 noise: 0.25 metal: 0.7 bell: 0.4 color: 8000}
+        rim: Rim{tune: 1600 decay: 0.025}
+        tom: Tom{tune: 70 sweep: 2 bend: 0.08 decay: 0.3 drive: 0.6}
+    })
+    minimal: kit(Kit{
+        about: "minimal kit: a tight short kick, clicky rims, tiny hats and dry percussion"
+        tags: "electronic minimal microhouse tech_house dry tight clicky"
+        kick: Kick{tune: 58 sweep: 3 bend: 0.025 decay: 0.22 click: 0.7 noise: 0.15 tone: 0.6 drive: 0.2}
+        clap: Clap{color: 1600 taps: 2 spread: 0.008 tail: 0.09}
+        hat: Hat{tune: 6000 metal: 0.4 noise: 0.6 color: 9500 decay: 0.02 tone: 0.6}
+        ohat: Hat{tune: 6000 metal: 0.4 noise: 0.6 color: 9000 decay: 0.12 tone: 0.6}
+        rim: Rim{tune: 2100 decay: 0.012 noise: 0.5 color: 4000}
+        conga: Conga{tune: 420 decay: 0.12 slap: 0.3}
+        snap: Snap{color: 2800 decay: 0.03}
+    })
+    trap: kit(Kit{
+        about: "trap kit: a long pitched sub kick, a crisp snappy snare and clap, fast bright hats for rolls"
+        tags: "electronic trap hip_hop modern 2010s drill booming bright crisp"
+        kick: Kick{tune: 43 sweep: 3.5 bend: 0.06 decay: 1.6 click: 0.5 noise: 0.1 tone: 0.5 drive: 0.6}
+        snare: Snare{tune: 230 sweep: 1.4 decay: 0.08 body: 0.45 noise: 0.8 color: 5500 noise_decay: 0.16 snap: 0.8 tone: 0.8 level: 0.8}
+        clap: Clap{color: 1500 spread: 0.008 tail: 0.16 tone: 0.8}
+        hat: Hat{tune: 5800 metal: 0.35 noise: 0.7 color: 9500 decay: 0.03 tone: 0.8}
+        ohat: Hat{tune: 5800 metal: 0.35 noise: 0.7 color: 8500 decay: 0.3 tone: 0.8}
+        rim: Rim{tune: 1900 decay: 0.02}
+        snap: Snap{color: 2600 decay: 0.05}
+        crash: Cymbal{tune: 4600 decay: 2 color: 6000 metal: 0.3 tone: 0.7}
+    })
+    jungle: kit(Kit{
+        about: "jungle and drum & bass kit: a tight kick, a cracking high snare with a ringing body, crisp breakbeat hats and ride"
+        tags: "electronic jungle drum_and_bass breakbeat 90s rave crisp fast"
+        kick: Kick{tune: 56 sweep: 2.6 bend: 0.035 decay: 0.28 click: 0.6 noise: 0.5 tone: 0.6 drive: 0.3}
+        snare: Snare{tune: 250 sweep: 1.2 decay: 0.14 body: 0.6 noise: 0.7 color: 3800 noise_decay: 0.18 snap: 0.7 tone: 0.7 drive: 0.2}
+        hat: Hat{tune: 5300 metal: 0.4 color: 8800 decay: 0.035 tone: 0.6}
+        ohat: Hat{tune: 5300 metal: 0.4 color: 8000 decay: 0.3 tone: 0.6}
+        ride: Cymbal{tune: 4400 decay: 1.2 noise: 0.2 metal: 0.6 bell: 0.5 color: 7600}
+        tom: Tom{tune: 105 sweep: 1.2 bend: 0.2 decay: 0.3 noise: 0.4 tone: 0.5}
+    })
+    garage: kit(Kit{
+        about: "UK garage and 2-step kit: a round short kick, a rimshot-snare, shuffled shakers and bright closed hats"
+        tags: "electronic garage 2_step uk_garage 90s 2000s shuffle bright"
+        kick: Kick{tune: 54 sweep: 3 bend: 0.04 decay: 0.3 click: 0.4 noise: 0.2 tone: 0.5 drive: 0.25}
+        snare: Snare{tune: 210 decay: 0.07 body: 0.5 noise: 0.5 color: 4200 noise_decay: 0.12 snap: 0.6 tone: 0.6}
+        rim: Rim{tune: 1800 decay: 0.025 noise: 0.5 level: 1.1}
+        hat: Hat{tune: 5000 metal: 0.3 color: 8800 decay: 0.03 tone: 0.7}
+        ohat: Hat{tune: 5000 metal: 0.3 color: 8000 decay: 0.18 tone: 0.7}
+        shaker: Shaker{color: 8000 attack: 0.006 decay: 0.045 level: 1.15}
+        clap: Clap{color: 1500 spread: 0.008 tail: 0.15}
+    })
+    electro: kit(Kit{
+        about: "electro and Miami bass kit: a huge long sub kick, zapping toms, a tight clap and cowbell"
+        tags: "electronic electro miami_bass breakdance 80s booming zap"
+        kick: Kick{tune: 42 sweep: 3 bend: 0.08 decay: 1.4 click: 0.3 noise: 0 tone: 0.3 drive: 0.3}
+        snare: Snare{tune: 240 sweep: 1.5 decay: 0.08 body: 0.6 noise: 0.6 color: 3500 noise_decay: 0.15 snap: 0.4}
+        clap: Clap{color: 1250 spread: 0.01 tail: 0.14}
+        tom: Tom{tune: 80 sweep: 3 bend: 0.1 decay: 0.35 noise: 0 tone: 0.2}
+        cowbell: Cowbell{tune: 600 decay: 0.2}
+        zap: Zap{from: 3000 to: 150 bend: 0.1 decay: 0.15}
+    })
+    synthwave: kit(Kit{
+        about: "synthwave kit: a tight kick, a huge bright snare with a long gated-room tail, shimmering hats and electronic toms"
+        tags: "electronic synthwave retrowave outrun 80s gated big bright"
+        kick: Kick{tune: 54 sweep: 3.8 bend: 0.035 decay: 0.35 click: 0.5 noise: 0.3 tone: 0.6 drive: 0.3}
+        snare: Snare{tune: 190 sweep: 1.3 decay: 0.16 body: 0.55 noise: 0.85 color: 4000 noise_decay: 0.38 snap: 0.6 tone: 0.7 drive: 0.2}
+        clap: Clap{color: 1300 tail: 0.3 tone: 0.6}
+        hat: Hat{tune: 4600 metal: 0.3 color: 8400 decay: 0.04 tone: 0.6}
+        ohat: Hat{tune: 4600 metal: 0.3 color: 7600 decay: 0.4 tone: 0.6}
+        tom: Tom{tune: 90 sweep: 1.9 bend: 0.12 decay: 0.45 noise: 0.3 tone: 0.5 drive: 0.2}
+        crash: Cymbal{tune: 4000 decay: 2.4 color: 5000 metal: 0.3 tone: 0.7}
+    })
+    industrial: kit(Kit{
+        about: "industrial kit: a distorted pounding kick, a clanging metallic snare, harsh noise hats"
+        tags: "electronic industrial ebm noise harsh distorted metallic aggressive"
+        kick: Kick{tune: 46 sweep: 4.5 bend: 0.03 decay: 0.45 click: 0.8 noise: 0.6 tone: 0.7 drive: 1}
+        snare: Snare{tune: 160 sweep: 1.8 decay: 0.15 body: 0.6 noise: 0.9 color: 2500 noise_decay: 0.22 snap: 0.6 tone: 0.5 drive: 1}
+        clap: Clap{color: 900 spread: 0.013 tail: 0.25 tone: 0.2}
+        hat: Hat{tune: 3300 metal: 0.8 noise: 0.6 color: 6500 decay: 0.05 tone: 0.4}
+        ohat: Hat{tune: 3300 metal: 0.8 noise: 0.6 color: 6000 decay: 0.3 tone: 0.4}
+        cowbell: Cowbell{tune: 700 decay: 0.3 tone: 0.8}
+        crash: Cymbal{tune: 2700 decay: 1.5 metal: 0.7 color: 3800}
+    })
+    dub: kit(Kit{
+        about: "dub and dub-techno kit: a soft round kick, a rim-and-snare with space for echoes, dark hats"
+        tags: "electronic dub dub_techno reggae roots deep soft dark spacious"
+        kick: Kick{tune: 50 sweep: 2 bend: 0.06 decay: 0.5 click: 0.1 noise: 0.15 tone: 0.2 drive: 0.1}
+        snare: Snare{tune: 240 sweep: 1.1 decay: 0.12 body: 0.7 noise: 0.4 color: 2800 noise_decay: 0.14 snap: 0.2 tone: 0.3}
+        rim: Rim{tune: 1500 decay: 0.03 noise: 0.2 level: 1.2}
+        hat: Hat{tune: 3600 metal: 0.2 color: 6500 decay: 0.04 tone: 0.2}
+        ohat: Hat{tune: 3600 metal: 0.2 color: 6000 decay: 0.3 tone: 0.2}
+        shaker: Shaker{color: 5500 decay: 0.07}
+    })
+    sampled_80s: kit(Kit{
+        about: "early sampled-sounding 80s box: a short thuddy kick, a tight snare with a bright crack, bright tambourine-like shaker, handclaps"
+        tags: "electronic drum_machine sampled 80s pop funk new_wave disco synthpop tight bright"
+        kick: Kick{tune: 60 sweep: 1.9 bend: 0.03 decay: 0.22 click: 0.6 noise: 0.4 tone: 0.5 drive: 0.1}
+        snare: Snare{tune: 205 sweep: 1.2 decay: 0.07 body: 0.45 noise: 0.75 color: 3600 noise_decay: 0.15 snap: 0.6 tone: 0.7}
+        clap: Clap{color: 1450 spread: 0.011 tail: 0.15 tone: 0.6}
+        hat: Hat{tune: 6100 metal: 0.5 color: 9200 decay: 0.035 tone: 0.7}
+        ohat: Hat{tune: 6100 metal: 0.5 color: 8500 decay: 0.28 tone: 0.7}
+        shaker: Shaker{color: 9000 attack: 0.004 decay: 0.09 level: 1.15}
+        cowbell: Cowbell{tune: 580 decay: 0.15}
+        tom: Tom{tune: 92 sweep: 1.25 bend: 0.1 decay: 0.3 noise: 0.3 tone: 0.5}
+    })
+    boom_bap: kit(Kit{
+        about: "boom-bap hip hop kit: a thick punchy kick, a cracking fat snare, crunchy dusty hats"
+        tags: "hip_hop boom_bap 90s golden_age breakbeat punchy crunchy fat"
+        kick: Kick{tune: 52 sweep: 2.6 bend: 0.045 decay: 0.4 click: 0.5 noise: 0.4 tone: 0.4 drive: 0.6}
+        snare: Snare{tune: 195 sweep: 1.25 decay: 0.13 body: 0.6 noise: 0.75 color: 3000 noise_decay: 0.22 snap: 0.5 tone: 0.4 drive: 0.5}
+        hat: Hat{tune: 4200 metal: 0.3 noise: 0.8 color: 7000 decay: 0.04 tone: 0.3}
+        ohat: Hat{tune: 4200 metal: 0.3 noise: 0.8 color: 6500 decay: 0.25 tone: 0.3}
+        rim: Rim{tune: 1650 decay: 0.022}
+    })
+    ambient: kit(Kit{
+        about: "soft ambient kit: a gentle felt kick, a brushed snare, airy shakers and soft long cymbals"
+        tags: "electronic ambient downtempo chill soft gentle airy"
+        kick: Kick{tune: 52 sweep: 1.8 bend: 0.06 decay: 0.4 click: 0 noise: 0.2 tone: 0.1 drive: 0 level: 0.85}
+        snare: Snare{tune: 200 decay: 0.08 body: 0.2 noise: 0.6 color: 3000 noise_decay: 0.28 snap: 0 tone: 0.2 level: 0.7}
+        hat: Hat{metal: 0.1 noise: 0.8 color: 7000 decay: 0.05 tone: 0.2 level: 0.8}
+        ohat: Hat{metal: 0.1 noise: 0.8 color: 6500 decay: 0.5 tone: 0.2 level: 0.7}
+        shaker: Shaker{color: 6000 attack: 0.03 decay: 0.1 level: 0.8}
+        crash: Cymbal{tune: 3000 decay: 3 metal: 0.15 noise: 0.5 color: 4000 tone: 0.3 level: 0.8}
+    })
+}

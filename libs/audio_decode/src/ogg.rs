@@ -1,7 +1,7 @@
 //! Ogg container framing: pages in, one packet at a time out.
 //!
 //! Adapted from the same author's decoder in the sandbox repo
-//! (`apps/sandbox/libs/audio/src/ogg.rs`), re-homed here so the non-sandbox
+//! (`apps/commercial/sandbox/libs/audio/src/ogg.rs`), re-homed here so the non-sandbox
 //! apps can use it, and rewritten from "collect every packet into a
 //! `Vec<Vec<u8>>`" into a streaming reader: a DJ deck starts a 100 MB track
 //! without first materialising a hundred thousand packet allocations.

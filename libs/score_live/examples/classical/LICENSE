@@ -1,0 +1,19 @@
+The scores in this folder are adaptations of other people's work.
+
+    Each *.score.splash file here is a transcription (notes, dynamics,
+    pedalling and tempo) of a MIDI performance by Bernd Krueger,
+    piano-midi.de (http://www.piano-midi.de), licensed under the
+    Creative Commons Attribution-ShareAlike 3.0 Germany licence
+    (CC BY-SA 3.0 DE): https://creativecommons.org/licenses/by-sa/3.0/de/
+
+    The original performances are distributed unmodified in
+    apps/score/resources/performances (with their own licence notice).
+
+These adaptations are licensed under CC BY-SA 3.0 DE as well. Anyone who
+redistributes them keeps this notice and the credit in each file, and any
+adaptation of them must also be licensed under CC BY-SA 3.0 DE.
+
+The compositions themselves are in the public domain. The ShareAlike term binds
+these data files and adaptations of them only; the code of this crate and of
+the applications that read these files stays under the repository's licence
+(MIT OR Apache-2.0).

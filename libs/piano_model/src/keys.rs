@@ -14,20 +14,23 @@
 // params::DesignParams (defaults = the shipped instrument):
 //
 // - partial frequencies: f_n = n * f0 * sqrt(1 + B n^2), the stiff-string
-//   dispersion law, with B rising from ~4.5e-5 (A0, long wound strings) to
-//   ~2e-2 (C8, short stiff wire) — the Railsback-curve regime of a real piano
-// - octave stretch: a cubic Railsback-style tuning curve (+30/-37 cents at
-//   the extremes) so the inharmonic partials of low notes line up with the
-//   fundamentals of high ones the way a tuner lays a piano
-// - losses: sigma_n anchored to a fundamental T60 that falls from ~19 s at
-//   A0 to ~0.7 s at C8, plus a quadratic-in-frequency viscoelastic/air term
-//   so high partials die much faster than the fundamental
+//   dispersion law, with B measured on the reference instrument up to C5
+//   (U-shaped: 2.2e-4 at A0, ~7.6e-5 across the wound/plain break, rising
+//   again) and a log-linear law above, to ~6e-3 at C8
+// - octave stretch: the measured tuning up to C4 (-16 cents at A0), a
+//   cubic Railsback-style curve above (+30 cents at C8), so the inharmonic
+//   partials of low notes line up with the fundamentals of high ones the
+//   way a tuner lays a piano
+// - losses: in the wound bass (to ~C3, fading out by C4) each partial's
+//   aftersound decays at a measured intrinsic law and its prompt adds a
+//   bridge-coupling loss linear in the admittance's real part (the
+//   recordings' two-stage decay: ~8-14 dB/s prompt over a ~1-4 dB/s
+//   aftersound); above, sigma_n is anchored to a fundamental T60 law plus
+//   frequency-dependent terms and the squared-admittance coupling
 // - unisons: 1 string A0..E1, 2 strings F1..E2, 3 strings F2..C8, detuned by
-//   ~0.5-1.8 cents; single-string notes get the two polarisations of the one
-//   string instead. Each unison member gets a different decay-rate multiplier
-//   — the Weinreich normal-mode picture of bridge-coupled strings — which is
-//   what produces the prompt-sound/aftersound double decay and the slow
-//   unison beating.
+//   ~0.5-1.8 cents; per partial the strings reduce to a vertical (prompt),
+//   a horizontal (aftersound) and, on unison keys, a mistuned anti-phase
+//   (beat) pole with complex residues (the normal-mode reduction below)
 // - the hammer strikes at x0/L ~ 0.132 (bass) to 0.082 (treble), giving
 //   comb dips near the 8th-12th partials via g_in = sin(n pi x0/L); the
 //   dips have a floor (comb_fill) because the felt contact is wide, the
@@ -35,8 +38,9 @@
 //   rigid — measured piano spectra show shallow dips, never deep nulls
 // - longitudinal modes: each string's longitudinal wave speed (steel core;
 //   the copper winding adds transverse mass but little longitudinal
-//   stiffness) puts free longitudinal modes at m * f0 * (c_long/c_trans),
-//   a bank per key that the squared bridge signal drives (voice.rs) — the
+//   stiffness) puts longitudinal modes at m * f0 * (c_long/c_trans), a bank
+//   per wound key driven by the transverse modal products q_m q_n with
+//   |m - n| or m + n equal to the mode number (voice.rs) — the
 //   phantom-partial mechanism of real strings (tension modulation)
 // - per-key voicing scatter: a real instrument is not 88 copies of one
 //   model; deterministic per-key jitter on felt, detune, losses and noise
@@ -51,8 +55,10 @@ pub const NUM_KEYS: usize = 88;
 /// Keys above this MIDI number have no damper on a real instrument.
 pub const TOP_DAMPED_KEY: u8 = 88; // E6 is the last dampered key here
 
-/// Longitudinal/phantom bank size (padded kernel lanes).
+/// Longitudinal/phantom bank size.
 pub const PH_MODES: usize = 8;
+/// Transverse partials whose modal products drive the longitudinal bank.
+pub const PH_PARENTS: usize = 32;
 
 pub struct KeyDesign {
     pub f0: f32,
@@ -119,10 +125,9 @@ pub struct KeyDesign {
     pub ph_gin: Vec<f32>,
     pub ph_gout: Vec<f32>,
     pub ph_gain: f32,
-    pub ph_direct: f32,
-    pub ph_hp_c: f32,
-    pub ph_pre_c: f32,
-    pub ph_diff_c: f32,
+    /// per-parent slope weight n f0 / f_n (0 beyond the key's partials)
+    pub ph_slope: [f32; PH_PARENTS],
+    pub ph_parents: usize,
     pub ph_drive: f32,
     // Sympathetic bank tables (small, first partials of this string group):
     pub sym_modes: usize,            // padded to 8
@@ -203,17 +208,83 @@ impl C64 {
     }
 }
 
+/// The reference instrument's measured scale at its sampled keys (every
+/// minor third, A0..C5): inharmonicity B and the tuning offset of the
+/// fitted fundamental (cents re equal temperament), from robust
+/// (f_n/n)^2-vs-n^2 regressions of the Salamander Grand V3 recordings
+/// (Yamaha C5; 24-40 resolved partials per note, identical to +-2 % across
+/// velocity layers). Keys between anchors interpolate log B and cents.
+/// The single log-linear law that ran the whole compass (params::b_lo/b_span,
+/// still used above C5) put A0 at
+/// B = 2.4e-5 where the recording measures 2.2e-4: a nearly harmonic
+/// bottom octave (A0's 20th partial 8 cents sharp instead of 70) — the
+/// clean, pitched line of a bass guitar rather than the clangorous stretch
+/// of long wound piano strings. A real scale is U-shaped: B falls from the
+/// bottom singles to its minimum across the wound/plain break (F#2..A2,
+/// ~7.6e-5) and climbs through the plain-wire compass. The law stays in
+/// charge above C5, where the recordings resolve too few partials.
+const MEASURED_SCALE: [(u8, f64, f64); 18] = [
+    (21, 2.24e-4, -16.2),
+    (24, 1.63e-4, -16.0),
+    (27, 1.33e-4, -8.2),
+    (30, 9.10e-5, -10.0),
+    (33, 1.01e-4, -14.8),
+    (36, 9.10e-5, -8.1),
+    (39, 7.64e-5, -3.5),
+    (42, 7.57e-5, -4.0),
+    (45, 8.13e-5, -1.4),
+    (48, 1.12e-4, -5.4),
+    (51, 1.27e-4, -2.8),
+    (54, 1.72e-4, -5.1),
+    (57, 2.18e-4, -0.3),
+    (60, 2.92e-4, -1.0),
+    (63, 3.70e-4, -0.5),
+    (66, 5.10e-4, -2.5),
+    (69, 6.40e-4, 0.8),
+    (72, 8.30e-4, 2.0),
+];
+
+/// (B, cents) for a key inside MEASURED_SCALE's range.
+fn measured_scale(key: u8) -> (f64, f64) {
+    let i = MEASURED_SCALE.partition_point(|a| a.0 < key);
+    let hi = MEASURED_SCALE[i.min(MEASURED_SCALE.len() - 1)];
+    if hi.0 == key || i == 0 {
+        return (hi.1, hi.2);
+    }
+    let lo = MEASURED_SCALE[i - 1];
+    let w = (key - lo.0) as f64 / (hi.0 - lo.0) as f64;
+    ((hi.1.ln() * w + lo.1.ln() * (1.0 - w)).exp(), lo.2 + (hi.2 - lo.2) * w)
+}
+
 pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     let idx = (key - FIRST_KEY) as usize;
     let t = idx as f64 / 87.0;
     let sc = p.scatter;
 
-    // --- tuning ---------------------------------------------------------
-    let stretch_cents = ((idx as f64 - 45.0) / 42.0).powi(3) * 30.0;
+    // --- tuning and inharmonicity ---------------------------------------
+    // Measured scale up to C5 (see MEASURED_SCALE), the smooth laws above.
+    let cubic_cents = ((idx as f64 - 45.0) / 42.0).powi(3) * 30.0;
+    let stretch_cents = if key <= 60 {
+        measured_scale(key).1
+    } else if key < 66 {
+        let w = (key - 60) as f64 / 6.0;
+        (1.0 - w) * measured_scale(60).1 + w * cubic_cents
+    } else {
+        cubic_cents
+    };
     let f0 = 440.0 * ((key as f64 - 69.0) / 12.0 + stretch_cents / 1200.0).exp2();
-
-    // --- inharmonicity --------------------------------------------------
-    let b_coeff = 10f64.powf(p.b_lo + p.b_span * t) * (1.0 + 0.15 * sc * kj(idx, 6));
+    let law_b = 10f64.powf(p.b_lo + p.b_span * t);
+    let top = MEASURED_SCALE[MEASURED_SCALE.len() - 1];
+    let b_base = if key <= top.0 {
+        measured_scale(key).0
+    } else {
+        // meet the law continuously: the C5 measured/law ratio fades out
+        // over the next octave
+        let law_top = 10f64.powf(p.b_lo + p.b_span * (top.0 - FIRST_KEY) as f64 / 87.0);
+        let w = ((key - top.0) as f64 / 12.0).min(1.0);
+        law_b * (top.1 / law_top).powf(1.0 - w)
+    };
+    let b_coeff = b_base * (1.0 + 0.15 * sc * kj(idx, 6));
 
     // --- string scaling -------------------------------------------------
     // Real grand scales run ~1500 N on the wound bass singles down to
@@ -382,6 +453,14 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         0.75
     };
     let couple_amt = p.bridge_couple * (1.0 - t).powf(p.bridge_couple_taper) * lo_fac;
+    // Register weight of the measured wound-bass decay law (params::bass_*):
+    // full up to bass_law_t0, gone by bass_law_t1; the tenor, mid and
+    // treble keep the calibrated law above.
+    let bass_w = if p.bass_law_t1 > p.bass_law_t0 {
+        ((p.bass_law_t1 - t) / (p.bass_law_t1 - p.bass_law_t0)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     // --- mode tables ----------------------------------------------------
     let f_limit = (0.44 * sample_rate).min(20000.0);
@@ -431,7 +510,16 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         // complex bridge admittance at this partial
         let (y_re, y_im) = crate::soundboard::bridge_admittance_c(fn_hz, p);
         let shape = p.bridge_couple_floor + (1.0 - p.bridge_couple_floor) * (y_re * y_re).min(2.0);
-        let g_v = couple_amt * shape; // vertical coupling loss (1/s)
+        // Wound-bass law (weight bass_w, see below): the aftersound decays
+        // at the intrinsic string loss alone, and the prompt adds the weak-
+        // coupling bridge loss, LINEAR in Re Y (sigma_b ~ 2 f0 Z Re Y,
+        // Woodhouse 2021) under a smooth frequency envelope.
+        let sig_after = p.bass_after_base + p.bass_after_slope * fk.powf(p.bass_after_pow) + p.bass_after_a2 * (1.0 - t).powi(6) * fk * fk + p.a4 * fk.powi(4);
+        let g_bass = p.bass_couple * (p.bridge_couple_floor + (1.0 - p.bridge_couple_floor) * y_re.min(2.5))
+            / (1.0 + (fn_hz / p.bass_couple_hz).powi(2))
+            + p.bass_couple_lo / (1.0 + (fn_hz / p.bass_couple_lo_hz).powi(4));
+        let g_v = (1.0 - bass_w) * couple_amt * shape + bass_w * g_bass; // vertical coupling loss (1/s)
+        let sig_intr = (1.0 - bass_w) * sig_intr + bass_w * sig_after;
         // reactive part: the bridge pulls a coupled partial's frequency.
         // Clamped to +-4 cents so the dispersion law stays recognisably a
         // piano's (strong drains on a real instrument wobble, they do not
@@ -452,6 +540,8 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         // (the real C7's second partial is -32 dB rel p1 by 300 ms), so
         // the factor ramps out over the last octave and a half.
         let pol_sig_t = p.pol_sig + (1.0 - p.pol_sig) * ((t - 0.6) / 0.25).clamp(0.0, 1.0);
+        // the wound-bass law's intrinsic loss already IS the aftersound
+        let pol_sig_t = (1.0 - bass_w) * pol_sig_t + bass_w;
         let d_h = C64::new(-sig_intr * pol_sig_t - g_h, dw_pol);
         let gv_c = C64::new(g_v, pull);
         let gh_c = gv_c.scale(p.pol_couple);
@@ -491,12 +581,15 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
             // the reference fits show the prompt/aftersound amplitude
             // split swinging tens of dB partial to partial, so the
             // drive share carries a bounded deterministic jitter.
-            let pd = p.pol_drive * (1.0 + 0.6 * kj(idx * 31 + n, 12));
+            let pd = ((1.0 - bass_w) * p.pol_drive + bass_w * p.bass_pol_drive) * (1.0 + 0.6 * kj(idx * 31 + n, 12));
             let num_v = e0.add(e1.scale(p.pol_rad));
             let num_u = e0.add(e1.scale(pd));
             let den = e0.mul(e0).add(e1.mul(e1));
             let rres = num_v.mul(num_u).div(den);
-            let sig = (-l.re).clamp(0.05, 400.0);
+            // floor 0.1/s (0.9 dB/s, the slowest aftersound the recordings
+            // show): with the calibration's 0.1 decay exponent any slower
+            // pole rounds to |C| >= 1 in f32 at 192 kHz
+            let sig = (-l.re).clamp(0.1, 400.0);
             let r = (-sig * dt).exp();
             let th = core::f64::consts::TAU * fn_hz * dt + l.im * dt;
             let m = slot * modes_padded + (n - 1);
@@ -512,7 +605,7 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
             // so it keeps nearly intrinsic decay and radiates only its
             // mistuning residue; it is what beats against the prompt line.
             let m = 2 * modes_padded + (n - 1);
-            let sig = (sig_intr + p.anti_couple * g_v).min(400.0);
+            let sig = (sig_intr + p.anti_couple * g_v).clamp(0.1, 400.0);
             let r = (-sig * dt).exp();
             let fd = fn_hz * (1.0 + anti_sign * detune_cents * cents);
             let th = core::f64::consts::TAU * fd * dt;
@@ -568,16 +661,22 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     }
 
     // Phantom audibility is a WOUND-string phenomenon; on plain wire the
-    // longitudinal series is a faint colour, not a voice. The smooth
-    // ph_taper alone still left the mid-register bank's strongest mode as
-    // the loudest single component of a forte C4/C5 in 4-10 kHz (one
-    // isolated inharmonic tone at ~6.3 kHz, right at peak ear
-    // sensitivity, on every mid forte note — "bell"). Gate the bank down
-    // hard past the wound/plain transition (idx 24, t~0.28): full on the
-    // wound bass, -12 dB by C4, -20 dB by C5.
+    // longitudinal series is a faint colour, not a voice (a forte C4/C5
+    // bank once measured as one isolated inharmonic tone at ~6.3 kHz on
+    // every note — "bell"). Gated down past the wound/plain transition
+    // (idx 24, t~0.28): full on the wound bass, -20 dB by C4, and switched
+    // off above that (its modal products are not computed there).
     let ph_wound = 1.0 / (1.0 + (((t - 0.28) / 0.10).max(0.0)).powi(2));
+    let ph_level = ph_wound * ((1.0 - t) + 0.05).powf(p.ph_taper);
 
     // --- longitudinal / phantom bank ------------------------------------
+    // Tension modulation couples the transverse partials into the
+    // string's longitudinal modes (Bank & Sujbert, JASA 2005): mode k is
+    // driven by the k-th spatial component of d/dx (y_x)^2, i.e. by the
+    // modal products q_m q_n with |m - n| = k or m + n = k — sum and
+    // difference frequencies of partial PAIRS, resonantly amplified near
+    // the longitudinal frequencies (the phantom partials of the bass).
+    // voice.rs forms those products from the vertical modal states.
     // Longitudinal wave speed: plain wire is bulk steel (~5100 m/s); on
     // wound strings the copper adds transverse mass but almost no
     // longitudinal stiffness, so c_long scales by sqrt(core/total mass).
@@ -599,11 +698,20 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         let th = core::f64::consts::TAU * f * dt;
         ph_cr[i] = (r * th.cos()) as f32;
         ph_ci[i] = (r * th.sin()) as f32;
-        ph_gin[i] = 1.0;
+        // the spatial derivative of the k-th component: drive ~ k
+        ph_gin[i] = m as f32;
         // Same output convention as the soundboard bank (sigma * 0.006):
         // resonant gain ~ sigma/(1-r) is normalised out, so ph_gain is a
         // plateau-comparable level, not a raw state gain.
         ph_gout[i] = ((1.0 / (m as f64).powf(p.ph_tilt)) * sigma * 0.006 * (48000.0 / sample_rate)) as f32;
+    }
+    // Slope amplitude of partial n per unit modal state: the state is
+    // force-normalised (displacement ~ Im z / f_n), slope ~ n x displacement.
+    let ph_parents = if ph_level >= 0.1 { modes_per_osc.min(PH_PARENTS) } else { 0 };
+    let mut ph_slope = [0.0f32; PH_PARENTS];
+    for (i, w) in ph_slope.iter_mut().enumerate().take(ph_parents) {
+        let n = (i + 1) as f64;
+        *w = (1.0 / (1.0 + b_coeff * n * n).sqrt()) as f32;
     }
 
     // --- attack complex parameters --------------------------------------
@@ -710,7 +818,7 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         cs_c_hi: (1.0 - (-core::f64::consts::TAU * p.cs_hi / sample_rate).exp()) as f32,
         cs_c_lo: (1.0 - (-core::f64::consts::TAU * p.cs_lo / sample_rate).exp()) as f32,
         cs_c_tilt: (1.0 - (-core::f64::consts::TAU * p.cs_tilt / sample_rate).exp()) as f32,
-        cs_vpow: p.cs_vpow as f32,
+        cs_vpow: ((1.0 - bass_ramp) * p.cs_vpow + bass_ramp * p.cs_vpow_bass) as f32,
         cr_sus,
         ci_sus,
         damp_mul,
@@ -721,32 +829,14 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         ph_ci,
         ph_gin,
         ph_gout,
-        // Per-key drive normalisation: the tension-modulation drive is
-        // quadratic in the string's own bridge amplitude, which is several
-        // times larger in the bass than the treble at equal dynamic (more
-        // partials, heavier strings). Normalising to the key's typical mf
-        // bridge amplitude keeps the quadratic LAW per key while placing
-        // the ff phantom level comparably across the compass.
-        ph_gain: (p.ph_gain
-            * ph_wound
-            * (0.29 + 0.67 * (1.0 - t).powf(2.4))
-            * ((1.0 - t) + 0.05).powf(p.ph_taper)) as f32,
-        // forced-response path shares the wound gate: phantom audibility
-        // is a wound-bass phenomenon (see ph_gain above)
-        ph_direct: (p.ph_direct * ph_wound) as f32,
-        ph_hp_c: (1.0 - (-core::f64::consts::TAU * p.ph_hp / sample_rate).exp()) as f32,
-        // parents band-limited to ~2.4 kHz: phantom products above that
-        // are inaudible against the direct partials, and the tighter band
-        // keeps attack-edge content out of the quadratic
-        ph_pre_c: (1.0 - (-core::f64::consts::TAU * 2400.0 / sample_rate).exp()) as f32,
-        // slope-weighting differentiator, unity near 700 Hz: the
-        // tension-modulation drive is quadratic in the string SLOPE
-        // (mu xi_tt = ES xi_xx + 1/2 ES d/dx[(y_x)^2], Bank & Sujbert),
-        // and the bridge-force bus under-weights partial n's slope by
-        // 1/f_n; differentiating restores the published weighting so the
-        // quadratic drive is built from slope-weighted modal products.
-        ph_diff_c: (sample_rate / (core::f64::consts::TAU * 700.0)) as f32,
-        ph_drive: (p.ph_norm / (0.29 + 0.67 * (1.0 - t).powf(2.4))) as f32,
+        ph_gain: if ph_parents > 0 { (p.ph_gain * ph_level) as f32 } else { 0.0 },
+        ph_slope,
+        ph_parents,
+        // Drive normalisation: a partial's modal state accumulates force
+        // per sample, so its scale is the momentum a mezzo-forte blow
+        // delivers (2 m v) times the sample rate. Dividing it out makes
+        // ph_norm dimensionless and the quadratic LAW the same on every key.
+        ph_drive: (p.ph_norm / (2.0 * hammer_mass * p.v_mf * sample_rate)) as f32,
         sym_modes,
         sym_cr,
         sym_ci,

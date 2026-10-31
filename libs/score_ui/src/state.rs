@@ -14,7 +14,7 @@ use crate::sound::{InstrumentId, ScoreEngine};
 use makepad_score::{model::AnnotationKind, symbol::Articulation};
 use makepad_score_play::PlaybackState;
 use makepad_score_render::{PageId, PlaybackPosition, SemanticId};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Default)]

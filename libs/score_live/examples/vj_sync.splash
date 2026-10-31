@@ -1,0 +1,57 @@
+// Strobe Cathedral: a house loop built to drive the VJ. It plays on Stage's
+// transport, so the VJ's beat grid follows its kick; `intensity` opens the
+// top layers (a game or the AI sets it with score_set).
+use mod.score.*
+
+let clock = Clock{bpm: 124 sig: [4 4] seed: 5 swing: 0.12 params: {intensity: 0.5}}
+
+let kit = Drums{kit: @analog_hybrid}
+let organ = Synth{preset: @organ cutoff: 2800}
+let bass = Synth{preset: @reese cutoff: 700}
+let lead = Synth{preset: @supersaw}
+
+let kick = Loop{play: kit hits: "x...x...x...x..." amp: 0.95}
+let tops = Loop{play: kit beats: 4 amp: 0.5
+    code: fn(i) {
+        for s in 0..16 {
+            if s % 4 == 2 { hit(@ohat, {amp: 0.6}) }
+            if s % 8 == 4 { hit(@clap, {amp: 0.8}) }
+            if s % 2 == 1 { hit(@shaker, {amp: rand(0.2, 0.4) pan: 0.4}) }
+            sleep(0.25)
+        }
+    }
+}
+let chords = Loop{play: organ beats: 4 amp: 0.35
+    code: fn(i) {
+        let c = if i % 2 == 0 { chord(@f3, @m7) } else { chord(@db3, @maj7) }
+        for s in [0.5 1.5 2.5 3.25] {
+            sleep(s - beat())
+            play(c, {dur: 0.3})
+        }
+        sleep(4 - beat())
+    }
+}
+let low = Loop{play: bass beats: 4 amp: 0.5
+    code: fn(i) {
+        let root = if i % 2 == 0 { @f1 } else { @db1 }
+        for s in 0..4 {
+            sleep(0.5)
+            play(root, {dur: 0.4})
+            sleep(0.5)
+        }
+    }
+}
+/// Comes in as the intensity rises past 0.6.
+let anthem = Loop{play: lead beats: 8 amp: 0.3 follow: {param: @intensity from: 0.55 to: 0.85}
+    code: fn(i) {
+        for n in [@c5 @ab4 @f4 @ab4 @c5 @eb5 @db5 @c5] {
+            play(n, {dur: 0.9})
+            sleep(1)
+        }
+    }
+}
+
+let pump = Duck{in: [chords low anthem] key: kick depth: 6 release: 0.2}
+let hall = Reverb{in: [pump] room: 0.55 mix: 0.18}
+
+Score{label: "Strobe Cathedral" clock kit organ bass lead kick tops chords low anthem pump hall}

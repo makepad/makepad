@@ -20,7 +20,7 @@ use makepad_piano_model::{
     PianoEvent, PianoPreset, TimedEvent as PianoTimedEvent, Voicing,
 };
 use makepad_soundfont::{metronome_click, NoSamples, Sampler, SamplerEvent, TimedEvent};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::{
     ops::Range,
     ptr,

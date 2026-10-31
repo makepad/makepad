@@ -463,6 +463,7 @@ fn encode_clip(path: &Path, name: &str, tex: &[f32]) -> Result<u64, String> {
             audio: None,
             // Decks play these backwards; every frame decodes on its own.
             keyframe_only: true,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("encode open {}: {e}", path.display()))?;
@@ -550,7 +551,7 @@ fn check_dir(dir: &Path) -> Result<(), String> {
                 }
             };
             if frames < 3 {
-                nv12::nv12_to_rgb8(&frame.nv12, frame.width, frame.height, &mut rgb);
+                nv12::nv12_to_rgb8(&frame.nv12, frame.width, frame.height, frame.color, &mut rgb);
                 let st = frame_stat(&rgb, frame.width as usize);
                 heads.push(format!(
                     "{}x{} mean {:.1} cx {:.1}",

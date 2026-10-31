@@ -1,0 +1,40 @@
+// Electric piano from two phase-modulation pairs: a 1:1 body whose index
+// follows velocity (louder is brighter) and a ratio-14 tine ping that dies
+// in ~100 ms; a gentle tremolo and a keyboard-scaled decay.
+let bright = param(1.0, 0, 3)
+let tine = param(0.7, 0, 2)
+let decay = param(2.5, 0.2, 10)
+let release = param(0.3, 0.02, 3)
+let tremolo = param(0.15, 0, 1)
+let gain = param(0.45, 0, 1)
+
+var pb = 0.0
+var pm = 0.0
+var pt = 0.0
+var trem = 0.0
+var t = 0.0
+var amp = Adsr{}
+
+fn voice() {
+    if trigger {
+        t = 0.0
+    }
+    t = t + 1.0 / sample_rate
+    let dt = freq / sample_rate
+    pb = advance(pb, dt)
+    pm = advance(pm, dt)
+    pt = advance(pt, dt * 14.0)
+    trem = advance(trem, 5.5 / sample_rate)
+    // Higher notes decay faster.
+    let d = decay * exp2((60.0 - note) / 24.0)
+    let body_index = bright * velocity * (0.3 + 1.7 * exp(-t * 3.0))
+    let body = sin(TAU * pb + body_index * sin(TAU * pm))
+    let ping = sin(TAU * pb + tine * velocity * sin(TAU * pt) * exp(-t * 30.0))
+    let e = adsr(amp, 0.001, d, 0.0, release)
+    if gate == 0.0 && e == 0.0 {
+        stop()
+    }
+    let x = (body * 0.8 + (ping - body) * 0.35) * e * gain * (0.4 + 0.6 * velocity)
+    let tr = 1.0 - tremolo * 0.5 * (1.0 + sin(TAU * trem))
+    pan(x * tr, 0.3 * sin(TAU * trem))
+}

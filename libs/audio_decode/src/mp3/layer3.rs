@@ -8,6 +8,7 @@
 //! attacker-controlled input and a granule that claims 1000 scalefactor bands
 //! must produce an error, not an index panic.
 
+use makepad_relax::relax;
 use super::bits::BitReader;
 use super::header::FrameHeader;
 use super::synth::Synthesis;
@@ -244,6 +245,7 @@ impl Default for Scalefactors {
 ///
 /// `previous` carries granule 0's values so that `scfsi` can say "reuse them"
 /// for granule 1 — which is why a decoder cannot treat granules independently.
+#[relax(O3, always)]
 fn read_scalefactors_mpeg1(
     r: &mut BitReader,
     gr: &GranuleInfo,
@@ -307,6 +309,7 @@ fn read_scalefactors_mpeg1(
 /// 9-bit `scalefac_compress` that also selects the partition sizes, and the
 /// intensity-stereo right channel reads a different partition family whose
 /// "all ones" value means "not intensity coded".
+#[relax(O3, always)]
 fn read_scalefactors_lsf(
     r: &mut BitReader,
     gr: &mut GranuleInfo,
@@ -388,6 +391,7 @@ fn read_scalefactors_lsf(
 /// `overran` also agrees: `read_bit` raised it exactly when a bit was taken at
 /// or past `len_bits`, which is exactly when the final position exceeds it.
 #[inline]
+#[relax(O3, always)]
 fn huff_leaf(r: &mut BitReader, tree: &[HuffNode]) -> Option<u16> {
     let window = r.peek(24);
     let mut node = 0usize;
@@ -408,6 +412,7 @@ fn huff_leaf(r: &mut BitReader, tree: &[HuffNode]) -> Option<u16> {
 }
 
 #[inline]
+#[relax(O3, always)]
 fn read_signed(r: &mut BitReader, mut v: u32, linbits: u32) -> i32 {
     if linbits > 0 && v == 15 {
         v += r.read(linbits);
@@ -424,6 +429,7 @@ fn read_signed(r: &mut BitReader, mut v: u32, linbits: u32) -> i32 {
 
 /// Decode one granule's quantised spectrum. Returns the number of lines
 /// actually coded; everything above that is the zero region.
+#[relax(O3, always)]
 fn read_spectrum(
     r: &mut BitReader,
     header: &FrameHeader,
@@ -523,6 +529,7 @@ pub fn pow43_table() -> Box<[f32; MAX_QUANT + 1]> {
     t
 }
 
+#[relax(O3, always)]
 fn requantize(
     gr: &GranuleInfo,
     layout: &BandLayout,
@@ -580,6 +587,7 @@ const SQRT2_INV: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// the low bit of its `scalefac_compress`. Reading that bit from the first
 /// channel instead is wrong by a factor of 2^(1/4) per band, which is exactly
 /// what the CoreAudio comparison shows.
+#[relax(O3, always)]
 fn apply_stereo(
     header: &FrameHeader,
     right: &GranuleInfo,
@@ -677,6 +685,7 @@ fn apply_stereo(
 
 /// Short-block spectra arrive grouped by band then window; the filterbank
 /// needs them interleaved window-by-window inside each band.
+#[relax(O3, always)]
 fn reorder(header: &FrameHeader, layout: &BandLayout, xr: &mut [f32; LINES], scratch: &mut [f32; LINES]) {
     if !layout.short {
         return;
@@ -703,6 +712,7 @@ fn reorder(header: &FrameHeader, layout: &BandLayout, xr: &mut [f32; LINES], scr
 /// Cancel the aliasing the analysis filterbank introduced between adjacent
 /// subbands. Short blocks are already alias-free; a mixed block only needs it
 /// at the one boundary inside its long region.
+#[relax(O3, always)]
 fn antialias(layout: &BandLayout, xr: &mut [f32; LINES], cs: &[f32; 8], ca: &[f32; 8]) {
     // Only the long region needs it, and a mixed block's long region is two
     // subbands wide at every rate but 8 kHz, where it is four.
@@ -734,6 +744,7 @@ pub struct Imdct {
     cos12: [[f32; 12]; 6],
 }
 
+#[relax(O3, always)]
 impl Imdct {
     pub fn new() -> Self {
         use std::f64::consts::PI;
@@ -844,6 +855,7 @@ impl Default for ChannelState {
 
 /// IMDCT, overlap-add and frequency inversion: spectrum in, subband time
 /// samples out (`[slot][subband]`, ready for the synthesis filterbank).
+#[relax(O3, always)]
 fn hybrid(
     imdct: &Imdct,
     gr: &GranuleInfo,
@@ -929,6 +941,7 @@ impl Default for GranuleScratch {
 /// `main_data` is the reservoir slice and `bit_pos` the granule's start within
 /// it; the returned position is where the next granule begins.
 #[allow(clippy::too_many_arguments)]
+#[relax(O3, always)]
 pub fn decode_granule(
     header: &FrameHeader,
     side: &SideInfo,

@@ -1,0 +1,19 @@
+[package]
+name = "makepad-score-player"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The realtime half of a Score (live-coded music): per-loop instruments, FX, buses and a sample-accurate musical clock over makepad-audio-synth; hosts as one audio_synth Instrument"
+
+[lib]
+name = "makepad_score_player"
+
+[dependencies]
+makepad-audio-dsp = { path = "../audio_dsp" }
+makepad-audio-synth = { path = "../audio_synth", features = ["instruments"] }
+makepad-script-audio-aot = { path = "../../platform/script/audio_aot" }
+makepad-score-voice = { path = "../score_voice" }
+
+# The neural singer (its model runs natively; a browser build has none).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-score-voice = { path = "../score_voice", features = ["neural"] }
