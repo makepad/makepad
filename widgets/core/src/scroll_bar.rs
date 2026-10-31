@@ -1059,6 +1059,7 @@ impl ScrollBar {
             && match event {
                 Event::MouseDown(e) => {
                     e.button.is_primary()
+                        && cx.fingers.can_mouse_drag_scroll()
                         && cx.fingers.can_join_scroll_drag(live_id!(mouse).into(), axis, scroll_area)
                 }
                 Event::TouchUpdate(e) => {
@@ -1088,7 +1089,7 @@ impl ScrollBar {
             Hit::FingerDown(fe) if fe.is_primary_hit() && cx.fingers.is_drag_claimed_by_widget(fe.digit_id) => {
                 self.stop_fling(fe.time);
             }
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() && (!fe.device.is_mouse() || cx.fingers.can_mouse_drag_scroll()) => {
                 // So a scroller around us can share this drag along an axis we don't take.
                 cx.hold_scroll_drag(fe.digit_id, scroll_area);
                 // A drag moves only the innermost scrollable that can scroll its way.
