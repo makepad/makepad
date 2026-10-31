@@ -1185,7 +1185,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     set_state(id, DomainState::Compiling("package graph".into()));
     let sess = unsafe { crate::jit::unit_session(up) };
     let workspace = crate::run::workspace_dir();
-    let target_dir = crate::dirs::relax_dir().display().to_string();
+    let target_dir = crate::dirs::build_dir().display().to_string();
     let std_dir = crate::std_dir();
     let from_boot = boot_resolved.is_some();
     let resolved = match boot_resolved {

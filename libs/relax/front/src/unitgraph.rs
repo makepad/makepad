@@ -823,6 +823,22 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     for f in &bs.features {
         fh = fnv(f.as_bytes(), fh);
     }
+    let clean_fh = fh;
+    if let Some(ov) = crate::vfs::overlay_digest_for(dir) {
+        fh = fnv(&ov.to_le_bytes(), fh);
+    } else if let Ok(clean_out) = std::fs::read_to_string(format!("{}/build/{}-{:016x}/output", target_dir, name, clean_fh)) {
+        for line in clean_out.lines() {
+            let Some(rest) = line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) else { continue };
+            if let Some(p) = rest.strip_prefix("rerun-if-changed=") {
+                let path = if std::path::Path::new(p).is_absolute() { p.to_string() } else { format!("{}/{}", dir, p) };
+                if let Some(ov) = crate::vfs::overlay_digest_for(&path) {
+                    fh = fnv(&ov.to_le_bytes(), fh);
+                }
+            }
+        }
+    } else if let Some(ov) = crate::vfs::overlay_any_digest() {
+        fh = fnv(&ov.to_le_bytes(), fh);
+    }
     let unit_dir = format!("{}/build-scripts/{:016x}", target_dir, h);
     let units_path = format!("{}/units.json", unit_dir);
     let out_dir = format!("{}/build/{}-{:016x}/out", target_dir, name, fh);
@@ -853,8 +869,10 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     if depth > 2 {
         return (Err(format!("{}: build scripts nest {} deep (a script that runs itself again?); refused", bs.src_path, depth)), out_dir);
     }
+    let relax_dir = crate::dirs::relax_dir().display().to_string();
+    let workspace_dir = crate::dirs::workspace_dir();
     let mut cmd = std::process::Command::new(&exe);
-    cmd.args(["run", "--quiet", "--silent", "--run-dir", target_dir, "--units", &units_path, "build-script-build"]);
+    cmd.args(["run", "--quiet", "--silent", "--run-dir", &relax_dir, "--workspace-dir", &workspace_dir, "--units", &units_path, "build-script-build"]);
     cmd.env("OUT_DIR", &out_dir)
         // Build scripts may test this to skip work only rustc needs.
         .env("MAKEPAD_RUN_BUILD_SCRIPT", "1")
@@ -914,10 +932,15 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     let output_path = format!("{}/output", build_dir);
     let key_path = format!("{}/makepad-run-rerun", build_dir);
     let env_path = format!("{}/makepad-run-rerun-env", build_dir);
+    let used_path = format!("{}/makepad-run-overlay-used", build_dir);
+    let _running = path_lock(&output_path);
     let why = match (std::fs::read_to_string(&output_path), std::fs::read_to_string(&key_path)) {
         (Ok(old), Ok(key)) => {
             let now = rerun_key(&old, dir, &env_key).unwrap_or_default();
             if now == key {
+                if let Ok(used) = std::fs::read_to_string(&used_path) {
+                    crate::vfs::mark_overlay_used(&used);
+                }
                 if sess.runtime.profile { eprintln!("makepad-run build-script: {} cached", pname); }
                 return (Ok(old), out_dir);
             }
@@ -925,6 +948,8 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         }
         _ => "no previous output".to_string(),
     };
+    let _ = std::fs::remove_file(&used_path);
+    cmd.env("MAKEPAD_RUN_OVERLAY_USED", &used_path);
     // why this script runs again, kept beside its output (relax-rerun-why: the last 20) and shown with MAKEPAD_RUN_PROFILE
     if sess.runtime.profile { eprintln!("makepad-run build-script: {} runs: {}", pname, why); }
     note_rerun(&build_dir, &why);
@@ -936,6 +961,9 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     }
     match output {
         Ok(o) if o.status.success() => {
+            if let Ok(used) = std::fs::read_to_string(&used_path) {
+                crate::vfs::mark_overlay_used(&used);
+            }
             let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
             if let Some(key) = rerun_key(&stdout, dir, &env_key) {
                 let _ = std::fs::write(&output_path, &stdout);
@@ -1035,7 +1063,10 @@ fn rerun_key(output: &str, pkg_dir: &str, env_key: &str) -> Option<String> {
             let path = if std::path::Path::new(p).is_absolute() { p.to_string() } else { format!("{}/{}", pkg_dir, p) };
             match crate::vfs::identity(&path) {
                 Some(id) => key.push_str(&format!("f {} {}\n", id, path)),
-                None => key.push_str(&format!("f {} {}\n", newest_mtime(std::path::Path::new(&path)), path)),
+                None => match crate::vfs::overlay_digest_for(&path) {
+                    Some(ov) => key.push_str(&format!("f {:016x} {}\n", ov, path)),
+                    None => key.push_str(&format!("f {} {}\n", newest_mtime(std::path::Path::new(&path)), path)),
+                },
             }
         } else if let Some(v) = rest.strip_prefix("rerun-if-env-changed=") {
             any = true;
@@ -1046,7 +1077,10 @@ fn rerun_key(output: &str, pkg_dir: &str, env_key: &str) -> Option<String> {
         // cargo: a script that names no inputs reruns when any file of its package changes
         match crate::vfs::identity(pkg_dir) {
             Some(id) => key.push_str(&format!("p {} {}\n", id, pkg_dir)),
-            None => key.push_str(&format!("p {} {}\n", newest_mtime_pkg(std::path::Path::new(pkg_dir)), pkg_dir)),
+            None => match crate::vfs::overlay_digest_for(pkg_dir) {
+                Some(ov) => key.push_str(&format!("p {:016x} {}\n", ov, pkg_dir)),
+                None => key.push_str(&format!("p {} {}\n", newest_mtime_pkg(std::path::Path::new(pkg_dir)), pkg_dir)),
+            },
         }
     }
     Some(key)

@@ -50,7 +50,7 @@ pub fn cmd_clean(args: &[String]) -> i32 {
         None => r.tree(&dir),
         Some(p) => {
             r.file(&dir.join("startup").join(format!("{p}.startup")));
-            for f in crate::cache::app_store_files(&dir.join("cache"), &p.replace('-', "_")) {
+            for f in crate::cache::app_store_files(&crate::dirs::cache_dir_in(&dir), &p.replace('-', "_")) {
                 r.file(&f);
             }
         }

@@ -817,7 +817,7 @@ impl Cache {
         let verbose = options.verbose;
         let t0 = std::time::Instant::now();
         pack::ensure_private_dir(&root)?;
-        let dir = root.join("cache");
+        let dir = crate::dirs::cache_dir_in(&root);
         pack::ensure_private_dir(&dir)?;
         let prog = &from.prog;
         // a partial restore's (an edited start): the kept crates' definition tables
@@ -3957,7 +3957,7 @@ pub fn retire_replaced_in_use() {
 /// `open`, and the cap in bytes (None: the default).
 fn prune(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf>, programs: &[(u64, std::collections::BTreeMap<String, String>)], cap: Option<u64>) -> (u64, u64) {
     let mut before = 0u64;
-    let dir = root.join("cache");
+    let dir = crate::dirs::cache_dir_in(root);
     let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = match std::fs::read_dir(&dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
@@ -4939,7 +4939,7 @@ impl FrontImages {
         }
         let root = crate::dirs::relax_dir();
         pack::ensure_private_dir(&root).ok()?;
-        let dir = root.join("cache");
+        let dir = crate::dirs::cache_dir_in(&root);
         pack::ensure_private_dir(&dir).ok()?;
         let sink = ColdFront::enabled(options).then(|| FrontSink::for_dir(&dir));
         Some(Self { dir, sink, ..Default::default() })
