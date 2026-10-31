@@ -1,0 +1,16 @@
+// browser_host only runs hosted (--stdin-loop, started by libs/browser_view
+// for the first web view), never by hand: its tile checks and builds it, and
+// the Browser and WM tiles run it the way it is meant to run, under an app.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-app-browser-host"] targets: ci.host.targets})
+})
+
+ci.step("build", fn(){
+    ci.build({package: "makepad-app-browser-host" binary: "makepad-app-browser-host"})
+})
+
+nil

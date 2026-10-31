@@ -1,0 +1,25 @@
+# browser_host -- the one process that runs Chromium for a makepad app.
+#
+# Apps never load CEF (libs/cef) themselves: libs/browser_view starts this
+# app as a hosted child (libs/app_host) on the first web view and stops it
+# with the last. Every view is one CEF browser (GPU-accelerated paint copied
+# into the app's frame ring) and one hosted window that is never drawn,
+# carrying the page's geometry and input; the app keeps its own chrome
+# (tabs, address bar) and drives the page with browser_view's messages. It
+# only runs hosted (--stdin-loop).
+
+[package]
+name = "makepad-app-browser-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "makepad-app-browser-host"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-cef = { path = "../../libs/cef" }
+makepad-browser-view = { path = "../../libs/browser_view" }
+makepad-app-host = { path = "../../libs/app_host" }

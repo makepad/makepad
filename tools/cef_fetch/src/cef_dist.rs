@@ -1,7 +1,7 @@
-//! Where the CEF distribution comes from when the build has none: the
-//! Spotify CDN's index of official builds, read and unpacked by the build
-//! script itself — in Rust, on every host, with no shell, python or tar
-//! around it. A clean clone builds the browser on Windows as on the Mac.
+//! Where the CEF distribution comes from when the person asks for one: the
+//! Spotify CDN's index of official builds, read and unpacked by this tool
+//! in Rust, on every host, with no external shell, python or tar executable.
+//! Building or running an app never invokes this tool.
 //!
 //! The pieces, each a plain function so the picker is testable without a
 //! network:
@@ -11,15 +11,17 @@
 //!   `stable` `standard` archive for a platform, or the one a pin names.
 //! - [`Pointer`]: which extracted directory `current-<platform>` means. The
 //!   shell script used a symlink; a text file beside it works on every
-//!   filesystem without privileges, so the build reads the file first and
+//!   filesystem without privileges, so the tool reads the file first and
 //!   the symlink only as the older form.
-//! - [`ensure_dist`]: the whole thing — pointer, else download, verify,
-//!   extract, write the pointer. A platform that already has a dist is
-//!   never bumped: the CDN moves on, our pin does not.
+//! - [`ensure_dist`]: the whole thing — the pointer, else an installed
+//!   distribution (the pinned version, or the newest installed), else an
+//!   error naming the explicit fetch. It downloads, verifies and extracts
+//!   only with [`Fetch::Allowed`] (`--fetch`). A platform that already has a dist is never
+//!   bumped: the CDN moves on, our pointer does not.
 //!
 //! The index is 10 MB of JSON; this reads exactly the fields it needs with
-//! a small strict scanner rather than pulling a JSON crate into a build
-//! script. Anything shaped differently is an error, never a guess.
+//! a small strict scanner rather than pulling in a JSON crate. Anything
+//! shaped differently is an error, never a guess.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -402,10 +404,9 @@ impl Pointer {
 
 // ------------------------------------------------------------- the fetch
 
-/// Progress goes to cargo as warnings: a build that sits for minutes on a
-/// 300 MB download must say so.
+/// Explicit fetch progress goes to stderr.
 fn say(msg: &str) {
-    println!("cargo:warning=cef: {msg}");
+    eprintln!("cef: {msg}");
 }
 
 fn http_get<W: Write>(
@@ -421,7 +422,7 @@ fn http_get<W: Write>(
         }
         let mut request = Request::get(&current).limits(Limits {
             max_body_bytes,
-            total_timeout: Duration::from_secs(3600),
+            idle_timeout: Duration::from_secs(120),
             ..Default::default()
         });
         if report_progress {
@@ -550,17 +551,15 @@ fn extract(archive_path: &Path, prebuilt_dir: &Path, dir_name: &str) -> Result<P
     }
     say(&format!("extracting {} into {}", archive_path.display(), prebuilt_dir.display()));
     let file = fs::File::open(archive_path).map_err(|e| format!("cef: open {}: {e}", archive_path.display()))?;
-    let decoder = bzip2::read::MultiBzDecoder::new(std::io::BufReader::new(file));
-    let mut tar = tar::Archive::new(decoder);
-    tar.set_preserve_permissions(true);
-    tar.unpack(prebuilt_dir).map_err(|e| format!("cef: extract {}: {e}", archive_path.display()))?;
+    let decoder = crate::bz2::MultiBzDecoder::new(file);
+    crate::tar::unpack(decoder, prebuilt_dir).map_err(|e| format!("cef: extract {}: {e}", archive_path.display()))?;
     if !dir.join("include").is_dir() {
         return Err(format!("cef: {} unpacked but has no include/ — not a CEF distribution", dir.display()));
     }
     Ok(dir)
 }
 
-/// What the build wants, in one shape for both the real run and the dry run.
+/// What the tool wants, in one shape for both the real run and the dry run.
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub platform: String,
@@ -598,18 +597,76 @@ pub fn plan(prebuilt_dir: &Path, platform: &str, pin: Option<&str>) -> Result<Pl
     })
 }
 
-/// The dist dir for `platform` under `prebuilt_dir`: the one the pointer
-/// names, else downloaded, verified, extracted and pointed at. `offline`
-/// turns a miss into an error naming what to put where.
-pub fn ensure_dist(prebuilt_dir: &Path, platform: &str, pin: Option<&str>, offline: bool) -> Result<PathBuf, String> {
+/// A download happens only when the person asks this tool to fetch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fetch {
+    /// Installed distributions only (the default).
+    Never,
+    /// `--fetch`: fetch the pinned (or newest stable) one when
+    /// nothing usable is installed.
+    Allowed,
+}
+
+/// The command that fetches a distribution explicitly, for error messages.
+pub fn fetch_command(platform: &str) -> String {
+    format!("cargo run --release -p makepad-cef-fetch -- --fetch --platform {platform}   (downloads the {platform} CEF distribution, ~300 MB, from cef-builds.spotifycdn.com into local/cef-prebuilt)")
+}
+
+/// The installed distributions for `platform` (extracted `cef_binary_<version>_<platform>`
+/// directories with headers), newest version first.
+pub fn installed(prebuilt_dir: &Path, platform: &str) -> Vec<(String, PathBuf)> {
+    let suffix = format!("_{platform}");
+    let mut found: Vec<(String, PathBuf)> = fs::read_dir(prebuilt_dir).into_iter().flatten().flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let version = name.strip_prefix("cef_binary_")?.strip_suffix(&suffix)?.to_string();
+            entry.path().join("include").is_dir().then_some((version, entry.path()))
+        })
+        .collect();
+    found.sort_by(|a, b| version_key(&b.0).cmp(&version_key(&a.0)).then_with(|| b.0.cmp(&a.0)));
+    found
+}
+
+/// The dist dir for `platform` under `prebuilt_dir`, from what is installed:
+/// the one the pointer names; else (no pointer) the pinned version if it is
+/// installed, or with no pin the newest installed one, which the pointer then
+/// names. Any installed version is usable: the bindings speak a fixed CEF API
+/// version (`CEF_API_VERSION`), which `cef_api_hash` checks when CEF loads.
+/// Nothing usable installed: a download when `fetch` allows it, else an error
+/// naming the explicit fetch.
+pub fn ensure_dist(prebuilt_dir: &Path, shared: Option<&Path>, platform: &str, pin: Option<&str>, fetch: Fetch) -> Result<PathBuf, String> {
+    // This tree's pointer, else the main checkout's (a git worktree uses the
+    // distribution the checkout it belongs to has chosen).
     if let Some(dir) = Pointer::read(prebuilt_dir, platform) {
         return Ok(dir);
     }
-    if offline {
+    let found = shared.and_then(|shared| Pointer::read(shared, platform)).map(|dir| (String::new(), dir)).or_else(|| {
+        let mut all = installed(prebuilt_dir, platform);
+        if let Some(shared) = shared { all.extend(installed(shared, platform)); }
+        all.sort_by(|a, b| version_key(&b.0).cmp(&version_key(&a.0)).then_with(|| b.0.cmp(&a.0)));
+        match pin {
+            Some(pin) => all.into_iter().find(|(version, _)| version == pin),
+            None => all.into_iter().next(),
+        }
+    });
+    if let Some((_, dir)) = found {
+        // The pointer may name a directory elsewhere: an absolute path joins as itself.
+        let name = if dir.parent() == Some(prebuilt_dir) {
+            dir.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string()
+        } else {
+            dir.canonicalize().unwrap_or_else(|_| dir.clone()).display().to_string()
+        };
+        fs::create_dir_all(prebuilt_dir).map_err(|e| format!("cef: create {}: {e}", prebuilt_dir.display()))?;
+        Pointer::write(prebuilt_dir, platform, &name)?;
+        // Silent: choosing an installed distribution is not news (a cargo
+        // warning would obscure a successful offline selection).
+        return Ok(dir);
+    }
+    if fetch == Fetch::Never {
+        let want = pin.map_or_else(|| "a".to_string(), |pin| format!("version {pin} of the"));
         return Err(format!(
-            "cef: no distribution for {platform} under {} and MAKEPAD_CEF_OFFLINE is set — put a cef_binary_*_{platform} directory there and name it in {}",
-            prebuilt_dir.display(),
-            Pointer::file(prebuilt_dir, platform).display()
+            "cef: no {want} CEF distribution for {platform} is installed under {}{} (apps never download one by themselves).\n  Fetch it explicitly:  {}\n  or point MAKEPAD_CEF_DIST_DIR at an extracted cef_binary_*_{platform} directory.",
+            prebuilt_dir.display(), shared.map_or_else(String::new, |shared| format!(" or {}", shared.display())), fetch_command(platform)
         ));
     }
     fs::create_dir_all(prebuilt_dir).map_err(|e| format!("cef: create {}: {e}", prebuilt_dir.display()))?;

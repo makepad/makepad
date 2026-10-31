@@ -1,0 +1,15 @@
+[package]
+name = "makepad-example-browser-capture-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Records a frame-counter page through the browser host's lossless capture
+# (libs/browser_view) into an MP4 straight from the shared GPU frames, then
+# checks: no frame of the page missing (capture and file), and its sound on
+# the frames' clock (beep vs flash). Needs a built makepad-app-browser-host.
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-browser-view = { path = "../../libs/browser_view" }

@@ -32,6 +32,7 @@ workspace.members = [
     "libs/wm_api",
     "libs/app_registry",
     "libs/app_host",
+    "libs/browser_view",
     "libs/diskmap",
     "libs/workspace",
     "libs/code_arch",
@@ -73,6 +74,7 @@ workspace.members = [
     "libs/geom3d",
     "libs/text_mesh",
     "libs/typography",
+    "libs/web_pack",
     "libs/web_manifest",
     "libs/font_subset",
     "libs/scene",
@@ -147,6 +149,7 @@ workspace.members = [
     "libs/mp4_index",
     # === necessary tools ===
     "platform/video",
+    "tools/cef_fetch",
     "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
@@ -204,6 +207,7 @@ workspace.members = [
     "widgets/families/extras",
     "widgets/families/maps",
     "widgets/families/pdf",
+    "widgets/families/browser",
     "widgets/families/ai",
     "widgets/families/catalog",
     "widgets/families/pickers",
