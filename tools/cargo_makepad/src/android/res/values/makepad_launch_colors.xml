@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The colors shown before the app draws its first frame, like the splash screen.
+  An app can replace them by shipping its own resources/android/res/values/makepad_launch_colors.xml.
+-->
+<resources>
+    <color name="makepad_launch_background_light">#FFF5F7FA</color>
+    <color name="makepad_launch_background_dark">#FF4D4D4D</color>
+</resources>

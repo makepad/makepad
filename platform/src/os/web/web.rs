@@ -1114,6 +1114,7 @@ impl Cx {
                 CxOsOp::SetWindowTitle(_window_id, title) => {
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
                 }
+                CxOsOp::SetNativeAppearance(_) => {}
                 CxOsOp::SetWindowVisuals(_, _) => {}
                 CxOsOp::XrStartPresenting => {
                     self.os.from_wasm(FromWasmXrStartPresenting {});

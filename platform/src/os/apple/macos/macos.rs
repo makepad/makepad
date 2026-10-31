@@ -28,7 +28,7 @@ use {
                 macos::{
                     macos_app::{
                         activate_cocoa_window_on_pointer_down, init_macos_app_global,
-                        with_macos_app, MacosApp,
+                        set_native_appearance, with_macos_app, MacosApp,
                     },
                     macos_event::MacosEvent,
                     macos_window::MacosWindow,
@@ -2222,6 +2222,9 @@ impl Cx {
                 }
                 CxOsOp::ShowInDock(show) => {
                     with_macos_app(|app| app.show_in_dock(show));
+                }
+                CxOsOp::SetNativeAppearance(appearance) => {
+                    set_native_appearance(appearance);
                 }
                 CxOsOp::CheckPermission {
                     permission,

@@ -19,6 +19,17 @@ pub enum SystemBarAppearance {
     LightIcons,
 }
 
+/// Whether the UI that the OS draws for the app is light or dark.
+/// See [`crate::Cx::set_native_appearance`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NativeAppearance {
+    /// Follow the OS's own light/dark setting.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 /// The current context data relevant to adaptive views.
 /// Later to be expanded with more context data like platfrom information, accessibility settings, etc.
 #[derive(Clone, Debug, Default)]
@@ -34,6 +45,8 @@ pub struct DisplayContext {
     /// Set via [`crate::Cx::set_system_bar_appearance`]; resolved and applied
     /// by the `Window` widget.
     pub system_bar_appearance: SystemBarAppearance,
+    /// Set via [`crate::Cx::set_native_appearance`], `None` until the app first sets it.
+    pub(crate) native_appearance: Option<NativeAppearance>,
 }
 
 impl DisplayContext {

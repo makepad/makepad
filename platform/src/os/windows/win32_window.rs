@@ -4,11 +4,13 @@ use {
     crate::{
         area::Area,
         cursor::MouseCursor,
+        display_context::NativeAppearance,
         event::{PopupDismissReason, PopupDismissedEvent, *},
         makepad_math::*,
         os::windows::{
             droptarget::*,
             win32_app::{encode_wide, with_win32_app, Win32App},
+            win32_appearance::apply_native_appearance_to_window,
             win32_event::*,
             win32_screen::{win32_screens, workspace_rect_to_screen},
         },
@@ -542,6 +544,7 @@ impl Win32Window {
         title: &str,
         position: Option<Vec2d>,
         is_fullscreen: bool,
+        native_appearance: Option<NativeAppearance>,
     ) -> Win32Window {
         let title = encode_wide(title);
 
@@ -590,6 +593,9 @@ impl Win32Window {
         // can use our handler). Shape/NCRP here only covers the CreateWindow gap.
         Self::apply_win11_window_shape(hwnd, false);
         Self::set_nc_rendering_enabled(hwnd);
+        if let Some(appearance) = native_appearance {
+            apply_native_appearance_to_window(hwnd, appearance);
+        }
 
         // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
         let drop_target: IDropTarget = DropTarget {
@@ -623,7 +629,12 @@ impl Win32Window {
         }
     }
 
-    pub fn new_popup(window_id: WindowId, position: Vec2d, size: Vec2d) -> Win32Window {
+    pub fn new_popup(
+        window_id: WindowId,
+        position: Vec2d,
+        size: Vec2d,
+        native_appearance: Option<NativeAppearance>,
+    ) -> Win32Window {
         let title = encode_wide("Makepad Popup");
 
         let style = WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
@@ -662,6 +673,9 @@ impl Win32Window {
             .unwrap()
         };
         Self::apply_win11_window_shape(hwnd, true);
+        if let Some(appearance) = native_appearance {
+            apply_native_appearance_to_window(hwnd, appearance);
+        }
 
         Win32Window {
             window_id,

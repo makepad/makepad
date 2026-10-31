@@ -20,6 +20,7 @@ use {
             windows::{
                 d3d11::{D3d11Cx, D3d11Window},
                 win32_app::*,
+                win32_appearance::set_native_appearance,
                 win32_event::*,
                 win32_window::Win32Window,
                 windows_game_input::WindowsGameInput,
@@ -992,6 +993,7 @@ impl Cx {
                         create_position,
                         &window.create_title,
                         window.is_fullscreen,
+                        self.display_context.native_appearance,
                     );
                     let visuals = window.window_visuals();
                     let mut d3d11_window = d3d11_window;
@@ -1040,8 +1042,13 @@ impl Cx {
                         position
                     };
 
-                    let d3d11_window =
-                        D3d11Window::new_popup(window_id, &d3d11_cx, size, screen_position);
+                    let d3d11_window = D3d11Window::new_popup(
+                        window_id,
+                        &d3d11_cx,
+                        size,
+                        screen_position,
+                        self.display_context.native_appearance,
+                    );
                     let mut d3d11_window = d3d11_window;
                     d3d11_window
                         .win32_window
@@ -1144,6 +1151,12 @@ impl Cx {
                     {
                         window.win32_window.set_title(&title);
                     }
+                }
+                CxOsOp::SetNativeAppearance(appearance) => {
+                    set_native_appearance(
+                        appearance,
+                        d3d11_windows.iter().map(|w| w.win32_window.hwnd),
+                    );
                 }
                 CxOsOp::SetWindowVisuals(window_id, visuals) => {
                     if let Some(window) =

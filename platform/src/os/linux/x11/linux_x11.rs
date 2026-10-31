@@ -8,6 +8,7 @@ use {
         x11::x11_sys,
         x11::xlib_app::*,
         x11::xlib_event::*,
+        x11::xlib_window::XlibWindow,
     },
     self::super::opengl_x11::OpenglWindow,
     crate::{
@@ -501,6 +502,7 @@ impl X11Cx {
                         &window.create_title,
                         &window.create_app_id,
                         window.is_fullscreen,
+                        cx.display_context.native_appearance.unwrap_or_default(),
                     );
                     let window = &mut cx.windows[window_id];
                     window.window_geom = opengl_window.window_geom.clone();
@@ -628,6 +630,18 @@ impl X11Cx {
                         opengl_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         window.xlib_window.set_title(&title);
+                    }
+                }
+                CxOsOp::SetNativeAppearance(appearance) => {
+                    let xids = opengl_windows
+                        .iter()
+                        .filter(|w| !w.xlib_window.is_popup)
+                        .filter_map(|w| w.xlib_window.window);
+                    unsafe {
+                        for xid in xids {
+                            XlibWindow::set_x11_native_appearance(xlib_app.display, xid, appearance);
+                        }
+                        x11_sys::XFlush(xlib_app.display);
                     }
                 }
                 CxOsOp::SetWindowVisuals(_window_id, visuals) => {

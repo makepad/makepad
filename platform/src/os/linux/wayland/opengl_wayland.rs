@@ -12,6 +12,10 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Proxy, QueueHandle};
 use wayland_egl::WlEglSurface;
+use wayland_protocols::plasma::server_decoration_palette::client::{
+    org_kde_kwin_server_decoration_palette::OrgKdeKwinServerDecorationPalette,
+    org_kde_kwin_server_decoration_palette_manager::OrgKdeKwinServerDecorationPaletteManager,
+};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
 };
@@ -640,6 +644,7 @@ pub(crate) struct WaylandWindow {
     pub base_surface: wl_surface::WlSurface,
     pub toplevel: xdg_toplevel::XdgToplevel,
     pub decoration: Option<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
+    pub decoration_palette: Option<OrgKdeKwinServerDecorationPalette>,
     pub uses_client_side_decorations: bool,
     pub pending_client_side_decorations: Option<bool>,
     pub is_maximized: bool,
@@ -819,6 +824,7 @@ impl WaylandWindow {
             base_surface,
             toplevel,
             decoration,
+            decoration_palette: None,
             uses_client_side_decorations,
             pending_client_side_decorations: None,
             // Optimistic until the first configure; the compositor overwrites both.
@@ -928,6 +934,32 @@ impl WaylandWindow {
         icon.destroy();
         pool.destroy();
         // wl_buf kept alive until compositor reads it (destroyed on drop)
+    }
+
+    /// Asks KWin to draw this window's title bar with the given `.colors` file,
+    /// or with the user's own scheme when it's `None`.
+    pub fn set_kde_color_scheme(
+        &mut self,
+        palette_manager: Option<&OrgKdeKwinServerDecorationPaletteManager>,
+        color_scheme: Option<&str>,
+        qhandle: &QueueHandle<WaylandState>,
+    ) {
+        match color_scheme {
+            Some(color_scheme) => {
+                if self.decoration_palette.is_none() {
+                    self.decoration_palette = palette_manager
+                        .map(|manager| manager.create(&self.base_surface, qhandle, ()));
+                }
+                if let Some(palette) = &self.decoration_palette {
+                    palette.set_palette(color_scheme.to_owned());
+                }
+            }
+            None => {
+                if let Some(palette) = self.decoration_palette.take() {
+                    palette.release();
+                }
+            }
+        }
     }
 
     pub fn prepare_buffer_size(&mut self, opengl_cx: Option<&OpenglCx>) -> bool {
@@ -1082,6 +1114,9 @@ impl WaylandWindow {
         // Then protocol order: role-specific objects first, base surface last.
         if let Some(decoration) = self.decoration.take() {
             decoration.destroy();
+        }
+        if let Some(palette) = self.decoration_palette.take() {
+            palette.release();
         }
         if let Some(shadow) = self.csd_shadow.take() {
             shadow.destroy();

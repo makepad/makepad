@@ -13,6 +13,7 @@ use crate::makepad_live_id::*;
 use crate::makepad_math::{dvec2, Rect};
 use crate::opengl_cx::OpenglCx;
 use crate::os::linux::gstreamer_sys::LibGStreamer;
+use crate::os::linux::kde_color_scheme::find_kde_color_scheme;
 use crate::os::linux::linux_video_playback::GStreamerVideoPlayer;
 use crate::os::linux::linux_video_player::{
     prepare_desktop_linux_video, LinuxPrepareResult, LinuxVideoPlayer,
@@ -802,7 +803,7 @@ impl WaylandCx {
                     let decoration_preference = self
                         .decoration_preference_override
                         .unwrap_or(window.wayland_decorations);
-                    let window = WaylandWindow::new(
+                    let mut window = WaylandWindow::new(
                         window_id,
                         compositor,
                         state.subcompositor.as_ref(),
@@ -820,6 +821,13 @@ impl WaylandCx {
                         app_id,
                         window.is_fullscreen,
                         decoration_preference,
+                    );
+                    let appearance = cx.display_context.native_appearance.unwrap_or_default();
+                    let color_scheme = find_kde_color_scheme(appearance);
+                    window.set_kde_color_scheme(
+                        state.palette_manager.as_ref(),
+                        color_scheme.as_deref(),
+                        self.qhandle.as_ref().unwrap(),
                     );
                     if cx.windows[window_id].backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();
@@ -992,6 +1000,17 @@ impl WaylandCx {
                 CxOsOp::SetWindowTitle(window_id, title) => {
                     if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
                         window.toplevel.set_title(title);
+                    }
+                }
+                CxOsOp::SetNativeAppearance(appearance) => {
+                    let color_scheme = find_kde_color_scheme(appearance);
+                    let color_scheme = color_scheme.as_deref();
+                    for window in state.windows.iter_mut() {
+                        window.set_kde_color_scheme(
+                            state.palette_manager.as_ref(),
+                            color_scheme,
+                            self.qhandle.as_ref().unwrap(),
+                        );
                     }
                 }
                 CxOsOp::SetWindowVisuals(_window_id, visuals) => {
