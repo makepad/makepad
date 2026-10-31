@@ -365,9 +365,11 @@ impl Cx {
                 };
             }
 
-            // Wait for the next message, or while ticks are paused, for the next due timer.
+            // Wait for the next message, or while ticks are paused, for the next due timer or boost release.
             // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
-            let message = match next_timer_wait {
+            let boost_wait = self.os.frame_rate_boost
+                .then(|| (self.os.frame_rate_boost_time + 1.0 - self.os.timers.time_now()).max(0.0));
+            let message = match next_timer_wait.into_iter().chain(boost_wait).reduce(f64::min) {
                 Some(wait) if !is_render_loop_wanted => from_java_rx.recv_timeout(
                     Duration::try_from_secs_f64(wait).unwrap_or(Duration::MAX)
                 ),
@@ -486,6 +488,11 @@ impl Cx {
                     crate::error!("Error receiving message: {:?}", e);
                     break;
                 }
+            }
+            // Checked after each pass handles its input, so a looping animation like a spinner can't hold the boost.
+            if self.os.frame_rate_boost && self.os.timers.time_now() - self.os.frame_rate_boost_time > 1.0 {
+                self.os.frame_rate_boost = false;
+                unsafe { android_jni::to_java_set_frame_rate_boost(false); }
             }
         }
         #[cfg(use_vulkan)]
@@ -648,6 +655,15 @@ impl Cx {
     }
 
     pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
+        if matches!(msg,
+            FromJavaMessage::Touch(_) | FromJavaMessage::TouchCancel(_) | FromJavaMessage::LongClick { .. }
+            | FromJavaMessage::BackPressed | FromJavaMessage::BackGesture { .. }
+            | FromJavaMessage::KeyDown { .. } | FromJavaMessage::KeyUp { .. }
+            | FromJavaMessage::Character { .. } | FromJavaMessage::SelectionHandleDrag { .. }
+            | FromJavaMessage::ImeTextStateChanged { .. } | FromJavaMessage::ImeEditorAction { .. }
+        ) {
+            self.os.boost_frame_rate();
+        }
         match msg {
             FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id) => {
                 self.os.activity_thread_id = Some(activity_thread_id);
@@ -800,6 +816,11 @@ impl Cx {
                 width,
                 height,
             } => {
+                // The window may be new or on another panel now, like after a fold,
+                // so we ask again for the fastest mode of the display it's on.
+                if self.os.frame_rate_boost && !self.os.in_xr_mode {
+                    unsafe { android_jni::to_java_set_frame_rate_boost(true); }
+                }
                 #[cfg(use_vulkan)]
                 let _has_vulkan = self.os.vulkan.is_some();
                 #[cfg(not(use_vulkan))]
@@ -1100,6 +1121,8 @@ impl Cx {
                     }
                     self.os.last_ime_visible = true;
                     self.os.last_ime_height = height_logical;
+                    // The keyboard's slide sends us no input, so each step of it boosts here instead.
+                    self.os.boost_frame_rate();
                     self.call_event_handler(&Event::VirtualKeyboard(
                         VirtualKeyboardEvent::DidShow {
                             height: height_logical,
@@ -3601,6 +3624,8 @@ impl Default for CxOs {
             last_ime_visible: false,
             last_ime_config: None,
             pending_ime_hide: false,
+            frame_rate_boost: false,
+            frame_rate_boost_time: 0.0,
             media: CxAndroidMedia::default(),
             display: None,
             surface_alive: false,
@@ -3750,6 +3775,9 @@ pub struct CxOs {
     /// Set by `HideTextIME`, which waits until after the next draw, so that moving focus
     /// from one text input to another keeps the keyboard up instead of hiding it.
     pub pending_ime_hide: bool,
+    /// Whether we've asked for the display's fastest mode, see `boost_frame_rate`.
+    pub frame_rate_boost: bool,
+    pub frame_rate_boost_time: f64,
     pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,
@@ -3808,6 +3836,19 @@ pub struct CxOs {
 impl CxOs {
     pub(crate) fn gl(&self) -> &LibGl {
         &self.display.as_ref().unwrap().libgl
+    }
+
+    /// Some Android skins hold apps to 60Hz, so while the user interacts or content keeps moving,
+    /// we ask for the display's fastest mode, and stop once a second passes with neither.
+    pub(crate) fn boost_frame_rate(&mut self) {
+        if self.in_xr_mode {
+            return;
+        }
+        self.frame_rate_boost_time = self.timers.time_now();
+        if !self.frame_rate_boost {
+            self.frame_rate_boost = true;
+            unsafe { android_jni::to_java_set_frame_rate_boost(true); }
+        }
     }
 
     /// True while the Vulkan renderer exists. A Vulkan build whose

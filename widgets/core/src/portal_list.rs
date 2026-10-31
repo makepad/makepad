@@ -3634,6 +3634,8 @@ impl Widget for PortalList {
             }
             ScrollState::Flick { fling, next_frame, .. } => {
                 if let Some(ne) = next_frame.is_event(event) {
+                    // A fling keeps moving after the finger lifts, so it keeps the display fast too.
+                    cx.boost_frame_rate();
                     // The scroll animation lives in `scroll_motion::Fling`, shared with
                     // ScrollBar. Both the touch-drag flick and the trackpad deceleration tail
                     // self-decay; they differ only in decay rate and edge behavior.

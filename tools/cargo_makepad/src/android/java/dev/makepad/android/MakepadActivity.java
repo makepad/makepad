@@ -2280,8 +2280,10 @@ public class MakepadActivity
             // LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS = 3 is API 30+; on 28-29 we
             // fall back to SHORT_EDGES.
             if (Build.VERSION.SDK_INT >= 28) {
-                getWindow().getAttributes().layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams params = getWindow().getAttributes();
+                params.layoutInDisplayCutoutMode =
                     Build.VERSION.SDK_INT >= 30 ? 3 : LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                getWindow().setAttributes(params);
             }
             if (Build.VERSION.SDK_INT >= 30) {
                 getWindow().setDecorFitsSystemWindows(false);
@@ -3418,5 +3420,36 @@ public class MakepadActivity
         }
 
         return refreshRate;
+    }
+
+    // Some Android skins, like OxygenOS, hold apps to 60Hz unless their window asks for a faster
+    // display mode, so Rust turns this on while the user interacts or content keeps moving.
+    public void setFrameRateBoost(final boolean boost) {
+        runOnUiThread(() -> {
+            Display display = getWindow().getDecorView().getDisplay();
+            int modeId = 0;
+            if (boost && display != null) {
+                try {
+                    Display.Mode current = display.getMode();
+                    Display.Mode topMode = current;
+                    for (Display.Mode mode : display.getSupportedModes()) {
+                        if (mode.getPhysicalWidth() == current.getPhysicalWidth()
+                            && mode.getPhysicalHeight() == current.getPhysicalHeight()
+                            && mode.getRefreshRate() > topMode.getRefreshRate()) {
+                            topMode = mode;
+                        }
+                    }
+                    modeId = topMode.getModeId();
+                } catch (IllegalStateException e) {
+                    // getMode() throws if the display's info is ever out of sync, and a boost isn't worth a crash.
+                    return;
+                }
+            }
+            WindowManager.LayoutParams params = getWindow().getAttributes();
+            if (params.preferredDisplayModeId != modeId) {
+                params.preferredDisplayModeId = modeId;
+                getWindow().setAttributes(params);
+            }
+        });
     }
 }

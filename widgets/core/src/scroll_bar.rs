@@ -1460,6 +1460,8 @@ impl ScrollBar {
         let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
         let step = if let ScrollState::Flick { fling, next_frame } = &mut self.scroll_state {
             if let Some(ne) = next_frame.is_event(event) {
+                // A fling keeps moving after the finger lifts, so it keeps the display fast too.
+                cx.boost_frame_rate();
                 Some((fling.step(ne.time), fling.is_active(min_velocity), fling.velocity))
             } else {
                 None
