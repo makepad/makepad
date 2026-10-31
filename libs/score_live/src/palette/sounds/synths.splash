@@ -1,0 +1,63 @@
+// The synth voice architectures a patch is a point of. Each returns recipe
+// layers (freq 440 follows the note). Shared params: a d s r (the amp
+// envelope, s), level, drive (0..20), vib (Hz) vib_depth (semitones).
+
+// Subtractive: two oscillators (detuned in cents), a sub an octave down and
+// noise, through one filter whose envelope falls from cutoff + env to
+// cutoff over fdecay seconds. filter: @lowpass | @ladder | @bandpass | @highpass.
+// width and pwm/pwm_depth shape a @pulse.
+let Analog = {
+    wave: @saw wave2: @saw detune: 7 osc2: 0.8 sub: 0.25 sub_wave: @sine noise: 0
+    filter: @lowpass cutoff: 1800 env: 3000 fdecay: 0.3 res: 1.2
+    a: 0.004 d: 0.4 s: 0.7 r: 0.15 width: 0.5 pwm: 0 pwm_depth: 0 drive: 0 vib: 0 vib_depth: 0 level: 0.3
+}
+let analog = fn(p) { [
+    {osc: p.wave freq: 440 detune: p.detune * 0.5 width: p.width pwm: p.pwm pwm_depth: p.pwm_depth cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: p.filter q: p.res glide: p.fdecay
+     a: p.a d: p.d s: p.s r: p.r drive: p.drive vib: p.vib vib_depth: p.vib_depth gain: p.level}
+    {osc: p.wave2 freq: 440 detune: p.detune * -0.5 width: p.width pwm: p.pwm * 1.13 pwm_depth: p.pwm_depth cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: p.filter q: p.res glide: p.fdecay
+     a: p.a d: p.d s: p.s r: p.r drive: p.drive vib: p.vib vib_depth: p.vib_depth gain: p.level * p.osc2}
+    {osc: p.sub_wave freq: 220 lp: 2000 a: p.a d: p.d s: p.s r: p.r gain: p.level * p.sub}
+    {noise: @white cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: p.filter glide: p.fdecay a: p.a d: p.d s: p.s r: p.r gain: p.level * p.noise}
+] }
+
+// Unison: six saws spread over `spread` cents and across the stereo field,
+// through one low-pass with its envelope; `body` adds a saw an octave down.
+let Supersaw = {spread: 22 width: 0.8 cutoff: 7000 env: 0 fdecay: 0.3 res: 0.8 body: 0 a: 0.01 d: 0.5 s: 0.8 r: 0.35 level: 0.11 vib: 0 vib_depth: 0}
+let supersaw = fn(p) { [
+    {osc: @saw freq: 440 detune: p.spread * -1.0 pan: p.width * -0.9 cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: @lowpass q: p.res glide: p.fdecay a: p.a d: p.d s: p.s r: p.r gain: p.level}
+    {osc: @saw freq: 440 detune: p.spread * -0.55 pan: p.width * -0.5 cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: @lowpass q: p.res glide: p.fdecay a: p.a d: p.d s: p.s r: p.r gain: p.level}
+    {osc: @saw freq: 440 detune: p.spread * -0.18 pan: p.width * -0.15 cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: @lowpass q: p.res glide: p.fdecay a: p.a d: p.d s: p.s r: p.r vib: p.vib vib_depth: p.vib_depth gain: p.level}
+    {osc: @saw freq: 440 detune: p.spread * 0.18 pan: p.width * 0.15 cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: @lowpass q: p.res glide: p.fdecay a: p.a d: p.d s: p.s r: p.r vib: p.vib vib_depth: p.vib_depth gain: p.level}
+    {osc: @saw freq: 440 detune: p.spread * 0.55 pan: p.width * 0.5 cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: @lowpass q: p.res glide: p.fdecay a: p.a d: p.d s: p.s r: p.r gain: p.level}
+    {osc: @saw freq: 220 detune: p.spread * 0.9 pan: p.width * 0.9 cutoff: p.cutoff + p.env cutoff_to: p.cutoff filter: @lowpass q: p.res glide: p.fdecay a: p.a d: p.d s: p.s r: p.r gain: p.level * (0.4 + p.body)}
+] }
+
+// FM: two operator pairs. The main pair's index falls from index to
+// index_to over idecay (the brightness envelope); the second pair (ratio2,
+// index2, a short decay2) is the tine, bell partial or pick.
+let Fm = {wave: @sine ratio: 1 index: 3 index_to: 0.6 idecay: 0.8 ratio2: 14 index2: 1.4 decay2: 0.15 level2: 0.25 partial: 0 a: 0.002 d: 1.5 s: 0.25 r: 0.4 drive: 0 vib: 0 vib_depth: 0 level: 0.3}
+let fm = fn(p) { [
+    {osc: p.wave fm: p.ratio freq: 440 index: p.index index_to: p.index_to glide: p.idecay a: p.a d: p.d s: p.s r: p.r drive: p.drive vib: p.vib vib_depth: p.vib_depth gain: p.level}
+    {osc: @sine fm: p.ratio2 freq: 440 index: p.index2 index_to: 0 glide: p.decay2 a: 0.001 d: p.decay2 s: 0 r: p.r * 0.5 gain: p.level * p.level2}
+    {osc: @sine freq: 880 a: p.a d: p.d * 0.6 s: p.s * 0.5 r: p.r gain: p.level * p.partial}
+] }
+
+// Additive organ: five drawbars (16', 8', 5 1/3', 4', 2') and a key click.
+let Organ = {bars: [0.6 1.0 0.4 0.5 0.25] click: 0.1 drive: 0 vib: 6.5 vib_depth: 0.03 a: 0.005 d: 0.05 s: 1 r: 0.06 level: 0.16}
+let organ = fn(p) { [
+    {osc: @sine freq: 220 a: p.a d: p.d s: p.s r: p.r drive: p.drive vib: p.vib vib_depth: p.vib_depth gain: p.level * p.bars[0]}
+    {osc: @sine freq: 440 a: p.a d: p.d s: p.s r: p.r drive: p.drive vib: p.vib vib_depth: p.vib_depth gain: p.level * p.bars[1]}
+    {osc: @sine freq: 660 a: p.a d: p.d s: p.s r: p.r drive: p.drive vib: p.vib vib_depth: p.vib_depth gain: p.level * p.bars[2]}
+    {osc: @sine freq: 880 a: p.a d: p.d s: p.s r: p.r drive: p.drive gain: p.level * p.bars[3]}
+    {osc: @sine freq: 1760 a: p.a d: p.d s: p.s r: p.r drive: p.drive gain: p.level * p.bars[4]}
+    {noise: @white bp: 3000 q: 1 a: 0.0005 d: 0.012 gain: p.level * p.click}
+] }
+
+// Physical pluck: a damped string (damping 0..1: higher is darker and
+// shorter), a filtered saw for the pick and a sine body.
+let Pluck = {damping: 0.35 decay: 1.6 pick: 0.3 bright: 6000 body: 0.2 r: 0.2 level: 0.45}
+let pluck = fn(p) { [
+    {pluck: p.damping freq: 440 a: 0.001 d: p.decay s: 0 r: p.r gain: p.level}
+    {osc: @saw freq: 440 detune: 6 cutoff: p.bright cutoff_to: 900 filter: @lowpass q: 1.4 glide: 0.12 a: 0.001 d: 0.15 s: 0 r: 0.06 gain: p.level * p.pick}
+    {osc: @sine freq: 440 a: 0.002 d: p.decay * 0.5 s: 0 r: p.r gain: p.level * p.body}
+] }

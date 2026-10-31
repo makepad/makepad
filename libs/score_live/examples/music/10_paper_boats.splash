@@ -1,0 +1,297 @@
+// Paper Boats: a song at 84 in G major for a sung alto, lifted to A major
+// for the last chorus.
+//
+// Form (58 bars): intro 4 (piano and picked guitar) · verse 8 · chorus 8
+// (three-part close harmony under the lead, strings, drums) · verse 8 (a
+// flute counter-melody answers each line) · chorus 8 · bridge 8 (new words
+// over Em Bm C G/B, Am7 D/F# Em E7; the E7 turns the key) · last chorus 8
+// in A (the choir on "ah" above, the piano in octaves) · outro 6 (D E F#m D
+// Esus-E to A, the choir holding the last chord).
+// Harmony: verse G D/F# Em C | G D/F# Am7 D (the bass walks down G F# E);
+// chorus C D Em G/B | C D Gsus4 G; the harmony parts are the melody's
+// diatonic third and sixth below.
+// The chorus hook rises G A B to D ("and we will sail") and falls back;
+// the verse is its quieter, lower relative.
+use mod.score.*
+
+let clock = Clock{bpm: 84 sig: [4 4] seed: 2718 swing: 0.06 params: {swell: 0}}
+
+let lead = Voice{profile: @alto vibrato: 0.28 vibrato_delay: 0.25 portamento: 0.08}
+let harmony = Voice{profile: @soprano choir: 3 parts: 3 vibrato: 0.22 breath: 0.15}
+let choir = Voice{profile: @soprano choir: 6 parts: 3 vibrato: 0.18 breath: 0.25}
+let piano = Instrument{kind: @piano}
+let kit = Instrument{kind: @drums}
+let guitar = Instrument{kind: @soundfont program: @guitar}
+let strings = Instrument{kind: @soundfont program: @strings}
+let flute = Instrument{kind: @soundfont program: @flute}
+let bassyn = Instrument{kind: @soundfont program: @bass}
+
+// ---- harmony: a chord per bar, the bass then the voicing (in G) ---------------------------
+
+let intro_c = [[@g1 @g3 @b3 @d4], [@e2 @g3 @b3 @e4], [@c2 @g3 @c4 @e4], [@d2 @fs3 @a3 @d4]]
+let verse_c = [[@g1 @g3 @b3 @d4], [@fs1 @fs3 @a3 @d4], [@e2 @g3 @b3 @e4], [@c2 @g3 @c4 @e4], [@g1 @g3 @b3 @d4], [@fs1 @fs3 @a3 @d4], [@a1 @g3 @c4 @e4], [@d2 @fs3 @a3 @c4]]
+let chorus_c = [[@c2 @g3 @c4 @e4], [@d2 @fs3 @a3 @d4], [@e2 @g3 @b3 @e4], [@b1 @g3 @b3 @d4], [@c2 @g3 @c4 @e4], [@d2 @fs3 @a3 @d4], [@g1 @g3 @c4 @d4], [@g1 @g3 @b3 @d4]]
+let bridge_c = [[@e2 @g3 @b3 @e4], [@b1 @fs3 @b3 @d4], [@c2 @g3 @c4 @e4], [@b1 @g3 @b3 @d4], [@a1 @g3 @c4 @e4], [@fs1 @fs3 @a3 @d4], [@e2 @g3 @b3 @e4], [@e2 @gs3 @b3 @d4]]
+let outro_c = [[@d2 @fs3 @a3 @d4], [@e2 @gs3 @b3 @e4], [@fs2 @fs3 @a3 @cs4], [@d2 @fs3 @a3 @d4], [@e2 @a3 @b3 @e4], [@a1 @a3 @cs4 @e4]]
+
+/// Part of bar `b`: 0 intro, 1 verse, 2 chorus, 3 bridge, 4 outro; the bar
+/// in it; the key offset.
+let part_of = fn(b) {
+    if b < 4 { [0 b 0] }
+    else { if b < 12 { [1 b - 4 0] }
+    else { if b < 20 { [2 b - 12 0] }
+    else { if b < 28 { [1 b - 20 0] }
+    else { if b < 36 { [2 b - 28 0] }
+    else { if b < 44 { [3 b - 36 0] }
+    else { if b < 52 { [2 b - 44 2] } else { [4 min(5, b - 52) 0] } } } } } } }
+}
+let chord_of = fn(b) {
+    let p = part_of(b)
+    let c = if p[0] == 0 { intro_c[p[1]] } else { if p[0] == 1 { verse_c[p[1]] } else { if p[0] == 2 { chorus_c[p[1]] } else { if p[0] == 3 { bridge_c[p[1]] } else { outro_c[p[1]] } } } }
+    let out = []
+    for n in c { out.push(note(n) + p[2]) }
+    out
+}
+
+// ---- the song ---------------------------------------------------------------------------------
+
+let verse1 = [
+    [[@d4 @d4 @e4 @d4 @b3 @d4 @e4 @g4], [1 0.5 1.5 0.5 0.5 0.5 0.5 2], "fold a boat from yes-ter-day's news"],
+    [[@g4 @g4 @a4 @g4 @e4 @d4 @e4 @d4], [0.5 0.5 1 0.5 0.5 1 0.5 2.5], "set it down where the ri-ver bends"],
+    [[@d4 @d4 @e4 @d4 @b4 @a4 @g4 @a4 @b4], [0.5 0.5 1 0.5 1.5 0.5 0.5 0.5 2], "watch it car-ry all we could not say"],
+    [[@b4 @a4 @g4 @e4 @d4 @e4 @g4 @a4 @a4], [0.5 0.5 1 0.5 0.5 0.5 1 0.5 2.5], "to the har-bour where the day-light ends"]
+]
+let verse2 = [
+    [[@d4 @d4 @e4 @d4 @b3 @d4 @e4 @g4 @a4], [0.5 0.5 1 0.5 0.5 0.5 0.5 0.5 2], "all the let-ters that I ne-ver sent"],
+    [[@g4 @g4 @a4 @g4 @e4 @d4 @e4 @d4], [0.5 0.5 1 0.5 0.5 1 0.5 2.5], "all the words that the rain made blue"],
+    [[@d4 @d4 @e4 @d4 @b4 @a4 @g4 @a4 @b4], [0.5 0.5 1 0.5 1.5 0.5 0.5 0.5 2], "I will fold them in-to pa-per ships"],
+    [[@b4 @a4 @g4 @e4 @d4 @e4 @g4 @a4 @a4], [0.5 0.5 1 0.5 0.5 0.5 1 0.5 2.5], "and I'll send them on the tide to you"]
+]
+let chorus = [
+    [[@g4 @a4 @b4 @d5 @b4], [0.5 0.5 1 3 2], "and we will sail _"],
+    [[@a4 @g4 @a4 @b4 @d5 @b4 @a4 @g4], [1 0.5 0.5 1 1.5 0.5 1 1.5], "light as pa-per far as mor-ning"],
+    [[@b4 @c5 @d5 @e5 @d5], [0.5 0.5 2 1 2], "we will sail _ _"],
+    [[@b4 @a4 @g4 @a4 @b4 @a4 @g4], [0.5 0.5 1 1 1 1 2.5], "with the lan-terns bur-ning low"]
+]
+let bridge = [
+    [[@e4 @g4 @b4 @b4 @a4 @g4 @a4 @b4], [0.5 0.5 1 1 0.5 0.5 1 3], "and if the wa-ter car-ries me"],
+    [[@c5 @b4 @a4 @g4 @e4 @g4 @a4 @g4], [0.5 0.5 1 1 0.5 0.5 1 3], "be-yond the lights I can-not see"],
+    [[@a4 @b4 @c5 @d5 @c5 @b4 @a4 @fs4], [0.5 0.5 1 1 0.5 0.5 1 3], "I'll fold my heart and let it go"],
+    [[@g4 @a4 @b4 @c5 @b4 @a4 @gs4 @b4], [0.5 0.5 1 1 0.5 0.5 1 3], "and fol-low where the ri-vers flow"]
+]
+
+/// The line of the song at two-bar step `k` (none in intro and outro).
+let line_at = fn(b) {
+    let p = part_of(b)
+    let k = floor(p[1] / 2)
+    if p[0] == 1 { if b < 20 { verse1[k] } else { verse2[k] } }
+    else { if p[0] == 2 { chorus[k] } else { if p[0] == 3 { bridge[k] } else { nil } } }
+}
+
+/// The note `steps` scale steps below `n` in G major (A major with `key`
+/// 2): 2 is a third, 5 a sixth. A note outside the scale counts from the
+/// scale note under it.
+let below = fn(n, steps, key) {
+    let scale = [0 2 4 5 7 9 11]
+    let pc = (n - 7 - key + 1200) % 12
+    let found = 0
+    for s in 0..7 { if scale[s] <= pc { found = s } }
+    let t = found - steps
+    let wrap = if t < 0 { 12 } else { 0 }
+    n - pc + scale[(t + 7) % 7] - wrap
+}
+
+/// Sing the line of bar `b` (two bars); `harm` sings the melody with its
+/// third and sixth below.
+let sing_line = fn(b, vel, harm) {
+    let line = line_at(b)
+    if line != nil {
+        let t = part_of(b)[2]
+        let notes = []
+        for n in line[0] {
+            let x = note(n) + t
+            notes.push(if harm { [x below(x, 2, t) below(x, 5, t)] } else { x })
+        }
+        sing(notes, line[2], {durs: line[1] vel: vel})
+    }
+    sleep(8)
+}
+
+let lead_line = Loop{play: lead beats: 8 amp: 3.2 sends: {plate: 0.22 throw: 0.08}
+    code: fn(i) {
+        let b = i * 2
+        let p = part_of(b)
+        sing_line(b, if p[0] == 2 { 0.85 } else { if p[0] == 3 { 0.75 } else { 0.65 } }, false)
+    }
+}
+let harmony_line = Loop{play: harmony beats: 8 amp: 1.4 sends: {plate: 0.3}
+    code: fn(i) { sing_line(i * 2, 0.6, true) }
+}
+
+/// The choir: "ooh" chords under the second chorus, "ah" above the last,
+/// and the final A major held.
+let choir_pad = Loop{play: choir beats: 4 amp: 1.8 sends: {plate: 0.35}
+    code: fn(i) {
+        let c = chord_of(i)
+        let word = if i >= 44 { "ah" } else { "ooh" }
+        if i < 57 { sing([[c[1] + 12 c[2] + 12 c[3] + 12]], word, {dur: 3.8 vel: if i >= 44 { 0.6 } else { 0.45 }}) }
+        if i == 57 { sing([[@a4 @cs5 @e5]], "ah", {dur: 8 vel: 0.5}) }
+        sleep(4)
+    }
+}
+
+/// The flute answers each line of the second verse in its last bar.
+let flute_line = Loop{play: flute beats: 8 amp: 0.32 pan: 0.3 sends: {plate: 0.3 throw: 0.2}
+    code: fn(i) {
+        let c = chord_of(i * 2 + 1)
+        sleep(5.5)
+        for n in [c[3] + 12 c[2] + 12 c[1] + 12 c[2] + 12] {
+            play(n, {dur: 0.45 amp: rand(0.7, 0.85)})
+            sleep(0.5)
+        }
+        sleep(8 - beat())
+    }
+}
+
+// ---- the band ----------------------------------------------------------------------------------
+
+/// Picked guitar: bass note, then the chord tones in eighths, a pattern
+/// that alternates bar by bar.
+let pick = Loop{play: guitar beats: 4 amp: 0.18 pan: -0.3 sends: {room: 0.25}
+    code: fn(i) {
+        let c = chord_of(i)
+        let order = if i % 2 == 0 { [0 2 1 3 2 1 3 2] } else { [0 3 2 1 3 2 1 2] }
+        if i >= 57 {
+            if i == 57 { for n in c { play(n, {dur: 4 amp: 0.6}) sleep(0.06) } }
+            sleep(4 - beat())
+        } else {
+            for s in 0..8 {
+                let r = rand(0, 0.02)
+                sleep(r)
+                let x = if order[s] == 0 { c[0] + 12 } else { c[order[s]] }
+                play(x, {dur: 1.2 amp: if s == 0 { 0.9 } else { rand(0.55, 0.7) }})
+                sleep(0.5 - r)
+            }
+        }
+    }
+}
+
+/// The piano: chords on one and the and-of-two in the verses; whole-bar
+/// chords with the top in octaves in the choruses.
+let keys = Loop{play: piano beats: 4 amp: 0.55 pan: 0.1 sends: {room: 0.2}
+    code: fn(i) {
+        let c = chord_of(i)
+        let p = part_of(i)
+        if p[0] == 2 {
+            play([c[1] c[2] c[3] c[3] + 12], {dur: 3.8 amp: if p[2] == 2 { 0.6 } else { 0.5 }})
+            sleep(2.5)
+            play([c[2] c[3]], {dur: 1.4 amp: 0.4})
+            sleep(1.5)
+        } else {
+            sleep(rand(0, 0.03))
+            play([c[1] c[2] c[3]], {dur: 1.4 amp: 0.45})
+            sleep(1.5 - beat())
+            play([c[1] c[2] c[3]], {dur: 0.9 amp: 0.35})
+            sleep(4 - beat())
+        }
+    }
+}
+
+let pad = Loop{play: strings beats: 4 amp: 0.12 sends: {plate: 0.25}
+    code: fn(i) {
+        let c = chord_of(i)
+        if i < 57 { play([c[1] c[2] c[3] + 12], {dur: 3.9}) }
+        if i == 57 { play([@a3 @cs4 @e4 @a4], {dur: 8}) }
+        sleep(4)
+    }
+}
+
+/// The bass walks between roots on the last eighth.
+let bass = Loop{play: bassyn beats: 4 amp: 0.495
+    code: fn(i) {
+        let r = chord_of(i)[0]
+        let n = chord_of(i + 1)[0]
+        if i >= 57 {
+            if i == 57 { play(@a1, {dur: 7 amp: 0.7}) }
+            sleep(4)
+        } else {
+            play(r, {dur: 1.8 amp: 0.9})
+            sleep(2)
+            play(r + 7, {dur: 0.9 amp: 0.6})
+            sleep(1)
+            play(r + 12, {dur: 0.4 amp: 0.5})
+            sleep(0.5)
+            play(if n > r { n - 1 } else { if n < r { n + 1 } else { r } }, {dur: 0.4 amp: 0.6})
+            sleep(0.5)
+        }
+    }
+}
+
+/// Drums: brushes and a side stick in verse 2, the full kit in the
+/// choruses, toms into each section, a crash on each chorus.
+let drums = Loop{play: kit beats: 4 amp: 3.0 sends: {room: 0.25}
+    code: fn(i) {
+        let p = part_of(i)
+        let big = p[0] == 2
+        let fill = i == 11 || i == 19 || i == 27 || i == 35 || i == 43 || i == 51
+        if big && p[1] == 0 { hit(@crash, {amp: 0.6}) }
+        for s in 0..8 {
+            let r = rand(0, 0.02)
+            sleep(r)
+            if fill && s >= 6 { hit(if s == 6 { @tom2 } else { @floortom }, {amp: 0.6}) }
+            else {
+                if s == 0 || s == 5 { hit(@kick, {amp: rand(0.65, 0.75)}) }
+                if s == 2 || s == 6 { hit(if big { @snare } else { @rim }, {amp: rand(0.55, 0.7)}) }
+            }
+            hit(if big { @ride } else { @hat }, {amp: if s % 2 == 0 { rand(0.35, 0.42) } else { rand(0.2, 0.28) } pan: 0.3})
+            sleep(0.5 - r)
+        }
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: a room for the band, a plate for the voices (it swells into the
+// bridge and the last chorus), a quarter-note throw for line ends.
+let room = Reverb{room: 0.45 mix: 1 damp: 7000}
+let plate = Reverb{room: 0.62 mix: 1 damp: 7500}
+let throw = Delay{time: 1 feedback: 0.35 mix: 1 spread: 1}
+let plate_level = Bus{in: [plate] gain: {param: @swell from: 0.8 to: 1.5 ramp: 8}}
+let returns = Highpass{in: [room plate_level throw] cutoff: 250}
+
+// The lead vocal: high-passed, compressed, a little saturated.
+let vox_hp = Highpass{in: [lead_line] cutoff: 110}
+let vox_comp = Comp{in: [vox_hp] threshold: -22 ratio: 3.5 makeup: 4}
+let vox_warm = Drive{in: [vox_comp] amount: 0.08 mix: 0.2 tone: 12000}
+// Harmony and choir: their own bus, compressed, wide.
+let bgv_hp = Highpass{in: [harmony_line choir_pad] cutoff: 160}
+let bgv_comp = Comp{in: [bgv_hp] threshold: -22 ratio: 3 makeup: 2}
+let bgv_wide = Chorus{in: [bgv_comp] rate: 0.3 depth: 5 mix: 0.35}
+// The band: drums glued, bass compressed, keys, pad and flute carved.
+let drum_bus = Comp{in: [drums] threshold: -18 ratio: 3 makeup: 2}
+let drum_tape = Drive{in: [drum_bus] amount: 0.12 mix: 0.3 tone: 10000}
+let bass_comp = Comp{in: [bass] threshold: -18 ratio: 3 makeup: 1}
+let lift = Highpass{in: [keys pad flute_line pick] cutoff: 150}
+let band_wide = Chorus{in: [lift] rate: 0.35 depth: 4 mix: 0.2}
+
+/// The master: gentle glue (the master limiter follows).
+let glue = Comp{in: [returns vox_warm bgv_wide drum_tape bass_comp band_wide] threshold: -14 ratio: 1.8 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.43}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let intro = Section{bars: 4 loops: [pick keys bass]}
+let verse_a = Section{bars: 8 loops: [lead_line pick keys bass]}
+let chorus_a = Section{bars: 8 loops: [lead_line harmony_line pick keys pad bass drums]}
+let verse_b = Section{bars: 8 loops: [lead_line flute_line pick keys bass drums]}
+let chorus_b = Section{bars: 8 loops: [lead_line harmony_line choir_pad pick keys pad bass drums]}
+let bridge_s = Section{bars: 8 set: {swell: 1} loops: [lead_line pick keys pad bass drums]}
+let last = Section{bars: 8 loops: [lead_line harmony_line choir_pad pick keys pad bass drums]}
+let outro = Section{bars: 6 set: {swell: 1} loops: [choir_pad pick keys pad bass] next: @stop}
+
+Score{label: "Paper Boats" clock lead harmony choir piano kit guitar strings flute bassyn lead_line harmony_line choir_pad flute_line pick keys pad bass drums room plate throw plate_level returns vox_hp vox_comp vox_warm bgv_hp bgv_comp bgv_wide drum_bus drum_tape bass_comp lift band_wide glue master_eq master_width master_peak master_limit master_lp intro verse_a chorus_a verse_b chorus_b bridge_s last outro ceiling: -1 master: 1.0 arrange: [intro verse_a chorus_a verse_b chorus_b bridge_s last outro]}

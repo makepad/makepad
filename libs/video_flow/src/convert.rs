@@ -290,6 +290,7 @@ fn convert_inner(
             // Bounce loops play BACKWARDS: every frame must decode on its
             // own, never by forward-walking a GOP.
             keyframe_only: true,
+            ..Default::default()
         },
     )
     .map_err(|e| ConvertError::Video(format!("encode open: {e}")))?;
@@ -337,7 +338,7 @@ fn convert_inner(
                 .push_frame_nv12(&frame.nv12, None)
                 .map_err(|e| ConvertError::Video(format!("encode: {e}")))?;
         } else {
-            nv12::nv12_to_rgb8(&frame.nv12, frame.width, frame.height, &mut rgb);
+            nv12::nv12_to_rgb8(&frame.nv12, frame.width, frame.height, frame.color, &mut rgb);
             let scaled = resample_rgb(&rgb, src_w, src_h, out_w, out_h);
             encoder
                 .push_frame_rgb8(&scaled, None)

@@ -1,0 +1,289 @@
+// Paper Lanterns: lo-fi hip hop at 78 in F major, swung.
+//
+// Form (52 bars): intro 4 (the grand piano alone through the tape, vinyl
+// dust) · A 8 (lazy drums, the electric piano comping, a walking bass) ·
+// B 16 (the piano sings the melody, a kalimba answers in its gaps, the
+// shaker) · bridge 4 (the harmony slips to the borrowed Dbmaj7 and Ebmaj9,
+// the drums fall to a rim and brushes, then C7sus-C7 back home) · B' 16 (the
+// melody again, doubled by a soft sung "ooh", the counter-line in the
+// electric piano's top voice, the ride) · outro 4 (the drums stop, the
+// piano holds Fmaj9).
+// Harmony, a bar each: Gm9 C13 Fmaj9 Dm9 | Gm9 C7b9 Am7 D7#9 (V of ii) |
+// Bbmaj7 Bbm6 (the borrowed minor iv) Am7 Abdim7 (a passing diminished) |
+// Gm9 C13 Fmaj9; rootless voicings in the middle, voice-led by step.
+// The bass walks: root, fifth, seventh and a chromatic step into the
+// next chord.
+use mod.score.*
+
+let clock = Clock{bpm: 78 sig: [4 4] seed: 4178 swing: 0.2}
+
+let kit = Drums{kit: @lofi gain: {hat: 0.8 snare: 1.1 shaker: 0.8}}
+let acoustic = Instrument{kind: @drums}
+let piano = Instrument{kind: @piano}
+let ep = Shader{lib: "epiano" tremolo: 0.3 bright: 0.7 decay: 3}
+let tine = Shader{lib: "pluck" t60: 1.5 bright: 0.35 position: 0.12}
+let bassyn = Instrument{kind: @soundfont program: @bass}
+let dust = Synth{recipe: "noise=velvet density=0.015 hp=1800 a=0.8 s=1 r=1.5 gain=0.5; noise=pink bp=3000 q=0.7 a=0.8 s=1 r=1.5 gain=0.035"}
+let hum = Voice{profile: @alto vibrato: 0.15 breath: 0.35}
+
+// ---- harmony ----------------------------------------------------------------------
+
+let roots = [@g2 @c2 @f2 @d2 @g2 @c2 @a2 @d2 @bb1 @bb1 @a1 @ab1 @g1 @c2 @f2 @f2]
+let chords = [
+    [@f3 @a3 @bb3 @d4], [@e3 @a3 @bb3 @d4], [@e3 @g3 @a3 @c4], [@f3 @a3 @c4 @e4],
+    [@f3 @a3 @bb3 @d4], [@e3 @g3 @bb3 @db4], [@e3 @g3 @c4 @e4], [@fs3 @c4 @f4 @a4],
+    [@f3 @a3 @d4 @e4], [@f3 @g3 @db4 @f4], [@e3 @g3 @c4 @e4], [@f3 @b3 @d4 @ab4],
+    [@f3 @a3 @bb3 @d4], [@e3 @a3 @bb3 @d4], [@e3 @g3 @a3 @c4], [@e3 @g3 @a3 @c4]
+]
+let bridge_roots = [@db2 @eb2 @c2 @c2]
+let bridge_chords = [[@f3 @ab3 @c4 @eb4], [@f3 @g3 @bb3 @d4], [@f3 @bb3 @c4 @e4], [@e3 @g3 @bb3 @d4]]
+
+/// The chord index of bar `b` (-1..-4 for the bridge's four bars).
+let index_of = fn(b) {
+    if b < 4 { 12 + b }
+    else { if b < 12 { b - 4 }
+    else { if b < 28 { b - 12 }
+    else { if b < 32 { 0 - (b - 27) }
+    else { if b < 48 { b - 32 } else { min(15, 12 + (b - 48)) } } } } }
+}
+let root_of = fn(b) {
+    let k = index_of(b)
+    if k < 0 { note(bridge_roots[0 - k - 1]) } else { note(roots[k]) }
+}
+let chord_of = fn(b) {
+    let k = index_of(b)
+    if k < 0 { bridge_chords[0 - k - 1] } else { chords[k] }
+}
+
+let phrase = fn(ns, ds, tr, amp, leg) {
+    let k = 0
+    for d in ds {
+        let r = rand(0.01, 0.04)
+        sleep(r)
+        let n = ns[k]
+        if n != @r { play(note(n) + tr, {dur: d * leg amp: amp * if d >= 1.5 { 1.0 } else { rand(0.78, 0.9) }}) }
+        sleep(d - r)
+        k = k + 1
+    }
+}
+
+// ---- the melody, four lines of four bars --------------------------------------------
+
+let mel = [
+    [[@r @a4 @c5 @d5 @c5 @a4 @g4 @r @f4 @g4 @a4 @c5 @a4 @r], [0.5 0.5 0.5 1 0.5 0.5 2.5 1 0.5 0.5 1 1.5 3.5 2]],
+    [[@r @bb4 @d5 @f5 @e5 @db5 @c5 @r @e5 @g5 @e5 @c5 @fs4 @a4], [0.5 0.5 0.5 1 0.5 0.5 2.5 1 0.5 0.5 1 1.5 1.5 4]],
+    [[@d5 @c5 @a4 @f4 @db5 @bb4 @g4 @r @c5 @e5 @g5 @e5 @d5 @b4 @ab4], [1 0.5 0.5 2 1 0.5 0.5 2 0.5 0.5 1 2 1.5 0.5 2]],
+    [[@a4 @bb4 @a4 @g4 @e4 @f4 @g4 @a4 @c5 @a4 @r], [1.5 0.5 1 1 1.5 0.5 1 1 2 4 2]]
+]
+
+/// The grand piano: the intro's chords, then the melody in B and B'.
+let piano_intro = Loop{play: piano beats: 4 amp: 0.8 sends: {plate: 0.3}
+    code: fn(i) {
+        let c = chord_of(i)
+        let r = root_of(i) - 12
+        play(r, {dur: 3.6 amp: 0.5})
+        for n in c { sleep(rand(0.03, 0.06)) play(n, {dur: 3.4 amp: rand(0.36, 0.44)}) }
+        sleep(2.5 - beat())
+        play([note(c[2]) + 12 note(c[3]) + 12], {dur: 1.2 amp: 0.4})
+        sleep(4 - beat())
+    }
+}
+let melody = Loop{play: piano beats: 16 amp: 0.9 pan: 0.05 sends: {plate: 0.3}
+    code: fn(i) {
+        let line = mel[floor(index_of(i * 4) / 4)]
+        phrase(line[0], line[1], 0, 0.62, 0.95)
+    }
+}
+/// B': the melody sung softly on "ooh", an octave below the piano.
+let sung = Loop{play: hum beats: 16 amp: 2.0 sends: {plate: 0.35}
+    code: fn(i) {
+        let line = mel[floor(index_of(i * 4) / 4)]
+        let ns = line[0]
+        let notes = []
+        for n in ns {
+            notes.push(if n == @r { nil } else { note(n) - 12 })
+        }
+        sleep(sing(notes, "ooh ooh ooh ooh ooh ooh ooh ooh ooh ooh ooh ooh ooh ooh ooh", {durs: line[1] vel: 0.45}))
+        sleep(16 - beat())
+    }
+}
+
+/// The kalimba answers in the melody's gaps: three falling chord tones on
+/// the last beat of every other bar.
+let answers = Loop{play: tine beats: 8 amp: 0.4 pan: -0.3 sends: {throw: 0.3 room: 0.2}
+    code: fn(i) {
+        let c = chord_of(i * 2 + 1)
+        sleep(7)
+        phrase([note(c[3]) + 12 note(c[2]) + 12 note(c[1]) + 12], [0.33 0.33 0.34], 0, 0.6, 1.2)
+    }
+}
+
+// ---- keys and bass -----------------------------------------------------------------------
+
+/// The electric piano: the chord late on one, a push into the next bar on
+/// the and-of-four when the chord changes, a second hit from a pool.
+let comp = Loop{play: ep beats: 4 amp: 0.55 pan: -0.15 sends: {room: 0.2}
+    code: fn(i) {
+        let c = chord_of(i)
+        let next = chord_of(i + 1)
+        sleep(rand(0.03, 0.07))
+        for n in c { play(n, {dur: 1.8 amp: rand(0.55, 0.68)}) sleep(0.02) }
+        let second = [2 2.5 1.5][irand(0, 2)]
+        sleep(second - beat())
+        play([c[1] c[2] c[3]], {dur: 0.6 amp: rand(0.38, 0.48)})
+        sleep(3.5 - beat())
+        if i % 2 == 1 { for n in next { play(n, {dur: 0.9 amp: 0.45}) } }
+        sleep(4 - beat())
+    }
+}
+
+/// In B', the electric piano's top voice becomes a counter-line: a slow
+/// descending line of chord tones against the melody.
+let counter = Loop{play: ep beats: 4 amp: 0.45 pan: 0.25 sends: {room: 0.2}
+    code: fn(i) {
+        let c = chord_of(i)
+        sleep(1)
+        phrase([note(c[3]) + 12 note(c[2]) + 12], [1.5 1.5], 0, 0.5, 1.0)
+    }
+}
+
+let bass = Loop{play: bassyn beats: 4 amp: 0.495
+    code: fn(i) {
+        let r = root_of(i)
+        let n = root_of(i + 1)
+        let approach = if n > r { n - 1 } else { n + 1 }
+        if i >= 50 || i < 4 {
+            if i == 50 { play(@f1, {dur: 7 amp: 0.7}) }
+            if i < 4 { sleep(0.06) play(r, {dur: 3.8 amp: 0.6}) }
+            sleep(4 - beat())
+        } else {
+            sleep(0.04)
+            play(r, {dur: 1.3 amp: 0.9})
+            sleep(1.46)
+            play(r + 7, {dur: 0.8 amp: 0.62})
+            sleep(1)
+            play(r + if i % 2 == 0 { 10 } else { 12 }, {dur: 0.4 amp: 0.55})
+            sleep(0.75)
+            play(approach, {dur: 0.5 amp: 0.62})
+            sleep(4 - beat())
+        }
+    }
+}
+
+// ---- drums ----------------------------------------------------------------------------------
+
+/// Kick and snare, behind the beat; the kick pattern changes every four
+/// bars, the last bar of each eight drops a beat and fills with ghosts.
+let drums = Loop{play: kit beats: 4 amp: 0.8 sends: {room: 0.2 smash: 0.3}
+    code: fn(i) {
+        let kicks = ["x......x..x.....", "x.....x...x..x..", "x......x.x......", "x.x.......x....."]
+        let k = steps(kicks[floor(i / 4) % 4])
+        let last = i % 8 == 7
+        for s in 0..16 {
+            let r = rand(0.01, 0.035)
+            sleep(r)
+            if k[s] != nil && (last == false || s < 12) { hit(@kick, {amp: rand(0.8, 0.95)}) }
+            if s == 4 || (s == 12 && last == false) { hit(@snare, {amp: rand(0.82, 0.95)}) }
+            if last && s >= 12 && s % 2 == 1 { hit(@snare, {amp: 0.18 + (s - 12) * 0.05}) }
+            sleep(0.25 - r)
+        }
+    }
+}
+
+let hats = Loop{play: kit beats: 4 amp: 1.0 sends: {room: 0.15}
+    code: fn(i) {
+        for s in 0..8 {
+            let r = rand(0, 0.04)
+            sleep(r)
+            hit(@hat, {amp: if s % 2 == 0 { rand(0.55, 0.7) } else { rand(0.3, 0.45) } pan: 0.25})
+            if s == 7 && i % 4 == 3 { hit(@ohat, {amp: 0.4 pan: 0.25}) }
+            sleep(0.5 - r)
+        }
+    }
+}
+
+let shaker = Loop{play: kit beats: 4 amp: 1.4 sends: {room: 0.15}
+    code: fn(i) {
+        for s in 0..16 {
+            if s % 2 == 1 || chance(0.4) { hit(@shaker, {amp: if s % 4 == 2 { 0.45 } else { rand(0.15, 0.28) } pan: -0.35}) }
+            sleep(0.25)
+        }
+    }
+}
+
+let ride = Loop{play: acoustic beats: 4 amp: 2.5 sends: {room: 0.2}
+    code: fn(i) {
+        for s in 0..4 {
+            hit(@ride, {amp: rand(0.3, 0.38) pan: 0.4})
+            sleep(0.67)
+            hit(@ride, {amp: rand(0.18, 0.24) pan: 0.4})
+            sleep(0.33)
+        }
+    }
+}
+
+/// The bridge: a rim on three and brushed hats.
+let brushes = Loop{play: acoustic beats: 4 amp: 1.0 sends: {room: 0.3}
+    code: fn(i) {
+        for s in 0..8 {
+            if s == 4 { hit(@rim, {amp: 0.55}) }
+            if s == 0 && i % 2 == 0 { hit(@kick, {amp: 0.5}) }
+            hit(@pedalhat, {amp: rand(0.2, 0.3) pan: 0.2})
+            sleep(0.5)
+        }
+    }
+}
+
+let vinyl = Loop{play: dust beats: 16 amp: 0.28
+    code: fn(i) {
+        play(@a4, {dur: if i == 12 { 14 } else { 16.2 }})
+        sleep(16)
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: a small warm room for everything, a darker plate for the piano and
+// the sung line, and a slow delay throw for the kalimba.
+let room = Reverb{room: 0.45 mix: 1 damp: 4500}
+let plate = Reverb{room: 0.6 mix: 1 damp: 5000}
+let throw = Delay{time: 0.75 feedback: 0.4 mix: 1 spread: 1}
+let returns = Highpass{in: [room plate throw] cutoff: 250}
+
+// Drums: glued hard and saturated (lo-fi), with a parallel smash.
+let drum_bus = Comp{in: [drums hats shaker ride brushes] threshold: -18 ratio: 4 makeup: 3}
+let drum_tape = Drive{in: [drum_bus] amount: 0.3 mix: 0.4 tone: 7000}
+let smash = Comp{threshold: -34 ratio: 12 makeup: 10}
+// The bass under the kick; the keys pushed by the drums, carved and wide.
+let bass_comp = Comp{in: [bass] threshold: -18 ratio: 3 makeup: 1}
+let keys_hp = Highpass{in: [comp counter answers] cutoff: 150}
+let bump = Duck{in: [keys_hp] key: drums depth: 3 release: 0.3}
+let keys_wide = Chorus{in: [bump] rate: 0.35 depth: 5 mix: 0.35}
+// The piano and the sung line: compressed, high-passed.
+let piano_comp = Comp{in: [piano_intro melody] threshold: -20 ratio: 2.5 makeup: 2}
+let piano_hp = Highpass{in: [piano_comp] cutoff: 50}
+let vox_hp = Highpass{in: [sung] cutoff: 140}
+let vox_comp = Comp{in: [vox_hp] threshold: -22 ratio: 3 makeup: 3}
+
+/// The tape: the whole mix saturated a little and darkened, then glued (the
+/// master limiter follows).
+let tape_drive = Drive{in: [vinyl returns drum_tape smash bass_comp keys_wide piano_hp vox_comp] amount: 0.2 mix: 0.35 tone: 8000}
+let tape = Lowpass{in: [tape_drive] cutoff: 8000}
+let glue = Comp{in: [tape] threshold: -14 ratio: 2 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.46}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let intro = Section{bars: 4 loops: [piano_intro bass vinyl]}
+let a = Section{bars: 8 loops: [comp bass drums hats vinyl]}
+let b = Section{bars: 16 loops: [comp bass drums hats shaker melody answers vinyl]}
+let bridge = Section{bars: 4 loops: [comp bass brushes piano_intro vinyl]}
+let b2 = Section{bars: 16 loops: [comp counter bass drums hats shaker ride melody sung answers vinyl]}
+let outro = Section{bars: 4 loops: [piano_intro bass vinyl] next: @stop}
+
+Score{label: "Paper Lanterns" clock kit acoustic piano ep tine bassyn dust hum piano_intro melody sung answers comp counter bass drums hats shaker ride brushes vinyl room plate throw returns drum_bus drum_tape smash bass_comp keys_hp bump keys_wide piano_comp piano_hp vox_hp vox_comp tape_drive tape glue master_eq master_width master_peak master_limit master_lp intro a b bridge b2 outro ceiling: -1 master: 1.0 arrange: [intro a b bridge b2 outro]}

@@ -1,0 +1,160 @@
+# The General MIDI SoundFont's melodic presets: what each is for. Measured features are added by `score_palette measure-gm` into catalogue.tsv.
+# bank	program	name	family	roles	root	phrase	tags
+0	0	Acoustic Grand	keys	chords lead	60	melody	acoustic piano grand ballad pop jazz classical rock warm natural
+0	1	Bright Piano	keys	chords lead	60	melody	acoustic piano bright pop rock 80s 90s ballad cutting
+0	2	Electric Grand	keys	chords	60	melody	electric piano 70s 80s ballad pop new_wave bright
+0	3	Honky-tonk	keys	chords	60	melody	piano detuned saloon ragtime country rock_and_roll vintage
+0	4	Electric Piano 1	keys	chords	60	chords	electric_piano tine soul funk jazz 70s ballad soft warm mellow neo_soul lofi
+0	5	Electric Piano 2	keys	chords	60	chords	electric_piano fm 80s ballad pop glassy bright sophisti_pop city_pop
+0	6	Harpsichord	keys	chords lead	60	melody	baroque classical plucked bright vintage 60s
+0	7	Clavinet	keys	chords	60	chords	funk 70s percussive stabby bright soul disco
+0	8	Celesta	mallet	lead	72	melody	bell sweet magical classical film soft
+0	9	Glockenspiel	mallet	lead	79	melody	bell bright metallic film pop sparkle
+0	10	Music Box	mallet	lead	79	melody	bell toy sweet lullaby soft nostalgic
+0	11	Vibraphone	mallet	chords lead	67	melody	mallet jazz lounge cool soft warm vibrato
+0	12	Marimba	mallet	lead arp	67	melody	mallet wooden percussive tropical world warm
+0	13	Xylophone	mallet	lead	79	melody	mallet wooden bright percussive cartoon
+0	14	Tubular Bells	mallet	hits	67	single	bell chime church film big dramatic
+0	15	Dulcimer	mallet	lead	67	melody	hammered folk world plucked bright
+0	16	Drawbar Organ	organ	chords	60	chords	organ tonewheel soul gospel rock 60s 70s jazz warm
+0	17	Percussive Organ	organ	chords	60	chords	organ click 60s 70s rock soul house stab
+0	18	Rock Organ	organ	chords	60	chords	organ overdriven rock 70s gritty
+0	19	Church Organ	organ	chords pad	60	chords	organ pipe church classical huge dramatic gothic
+0	20	Reed Organ	organ	chords	60	chords	organ harmonium folk soft vintage
+0	21	Accordion	organ	chords lead	60	melody	accordion folk world french tango musette
+0	22	Harmonica	reed	lead	67	melody	harmonica blues country folk rock reedy
+0	23	Tango Accordion	organ	chords lead	60	melody	accordion bandoneon tango world reedy
+0	24	Nylon Guitar	guitar	chords lead	52	chords	acoustic guitar classical bossa latin folk soft warm
+0	25	Steel Guitar	guitar	chords	52	chords	acoustic guitar folk pop country singer_songwriter bright
+0	26	Jazz Guitar	guitar	chords lead	52	chords	electric guitar jazz clean warm mellow hollow
+0	27	Clean Guitar	guitar	chords lead	52	chords	electric guitar clean pop funk new_wave 80s indie bright
+0	28	Muted Guitar	guitar	chords bass	52	hits	electric guitar palm_muted funk disco percussive short
+0	29	Overdriven Guitar	guitar	chords lead	52	chords	electric guitar overdrive rock blues crunchy gritty
+0	30	Distortion Guitar	guitar	chords lead	47	chords	electric guitar distortion metal hard_rock power_chords aggressive
+0	31	Guitar Harmonics	guitar	lead fx	64	hits	electric guitar harmonics bell ambient chime
+0	32	Acoustic Bass	bass	bass	36	bass	upright double_bass jazz acoustic warm round
+0	33	Finger Bass	bass	bass	36	bass	electric bass fingered pop rock soul funk warm round
+0	34	Pick Bass	bass	bass	36	bass	electric bass picked rock punk new_wave bright punchy
+0	35	Fretless Bass	bass	bass	36	bass	electric bass fretless jazz fusion sophisti_pop 80s smooth singing
+0	36	Slap Bass 1	bass	bass	36	bass	electric bass slap funk disco 80s percussive bright
+0	37	Slap Bass 2	bass	bass	36	bass	electric bass slap funk 80s percussive bright
+0	38	Synth Bass 1	bass	bass	36	bass	synth bass analog 80s synthpop electro new_wave punchy
+0	39	Synth Bass 2	bass	bass	36	bass	synth bass 80s 90s house techno resonant rubbery
+0	40	Violin	strings	lead	67	melody	orchestral solo violin classical film expressive bowed
+0	41	Viola	strings	lead	60	melody	orchestral solo viola classical film bowed warm
+0	42	Cello	strings	lead bass	48	melody	orchestral solo cello classical film bowed warm deep
+0	43	Contrabass	strings	bass	36	bass	orchestral double_bass classical film bowed deep
+0	44	Tremolo Strings	strings	pad texture	60	chords	orchestral tremolo film tension suspense
+0	45	Pizzicato Strings	strings	arp chords	60	melody	orchestral pizzicato plucked playful film classical short
+0	46	Orchestral Harp	strings	arp chords	60	melody	harp plucked orchestral film magical glissando soft
+0	47	Timpani	perc	hits bass	41	hits	orchestral timpani drum film epic dramatic
+0	48	String Ensemble 1	ensemble	pad chords	60	chords	orchestral strings section film ballad disco lush warm
+0	49	String Ensemble 2	ensemble	pad chords	60	chords	orchestral strings section slow film lush soft
+0	50	Synth Strings 1	ensemble	pad chords	60	chords	synth strings analog 70s 80s disco synthpop lush
+0	51	Synth Strings 2	ensemble	pad chords	60	chords	synth strings 80s pad warm soft
+0	52	Choir Aahs	choir	pad chords	60	chords	choir vocal aah film gospel epic soft
+0	53	Voice Oohs	choir	pad chords	60	chords	vocal ooh soft pop doo_wop backing
+0	54	Synth Voice	choir	pad lead	60	chords	vocal synth 80s synthpop airy breathy
+0	55	Orchestra Hit	ensemble	hits	60	hits	orchestra_hit stab 80s hip_hop freestyle new_jack big dramatic
+0	56	Trumpet	brass	lead	67	melody	brass solo trumpet jazz latin soul fanfare bright
+0	57	Trombone	brass	lead	53	melody	brass solo trombone jazz ska soul warm
+0	58	Tuba	brass	bass	41	bass	brass tuba oompah march film deep
+0	59	Muted Trumpet	brass	lead	67	melody	brass muted jazz noir soft
+0	60	French Horn	brass	lead pad	58	melody	brass horn orchestral film heroic warm
+0	61	Brass Section	brass	chords hits	60	chords	brass section soul funk disco big_band stabs punchy
+0	62	Synth Brass 1	brass	chords hits	60	chords	synth brass analog 80s synthpop stab bright
+0	63	Synth Brass 2	brass	chords pad	60	chords	synth brass 80s soft pad warm
+0	64	Soprano Sax	reed	lead	72	melody	sax soprano smooth_jazz 80s lead bright
+0	65	Alto Sax	reed	lead	63	melody	sax alto jazz soul pop 80s lead expressive
+0	66	Tenor Sax	reed	lead	55	melody	sax tenor jazz soul rock_and_roll 80s lead warm
+0	67	Baritone Sax	reed	bass lead	48	bass	sax baritone funk soul ska deep
+0	68	Oboe	reed	lead	70	melody	woodwind oboe classical film pastoral nasal
+0	69	English Horn	reed	lead	62	melody	woodwind english_horn classical film melancholic
+0	70	Bassoon	reed	bass lead	48	melody	woodwind bassoon classical film comic woody
+0	71	Clarinet	reed	lead	62	melody	woodwind clarinet classical jazz klezmer woody warm
+0	72	Piccolo	pipe	lead	84	melody	woodwind piccolo orchestral march bright shrill
+0	73	Flute	pipe	lead	72	melody	woodwind flute classical film soft airy
+0	74	Recorder	pipe	lead	72	melody	woodwind recorder folk medieval soft simple
+0	75	Pan Flute	pipe	lead	72	melody	pan_flute world ambient new_age breathy 80s
+0	76	Blown Bottle	pipe	lead texture	72	melody	breathy airy ambient world
+0	77	Shakuhachi	pipe	lead	67	melody	world japanese breathy ambient expressive
+0	78	Whistle	pipe	lead	79	melody	whistle western folk bright pure
+0	79	Ocarina	pipe	lead	72	melody	ocarina world game soft pure
+0	80	Square Lead	lead	lead	72	melody	synth lead square chiptune 80s synthpop hollow bright
+0	81	Saw Lead	lead	lead	72	melody	synth lead saw 80s synthpop trance edm bright buzzy
+0	82	Calliope Lead	lead	lead	72	melody	synth lead calliope breathy fairground soft
+0	83	Chiff Lead	lead	lead	72	melody	synth lead chiff breathy airy
+0	84	Charang Lead	lead	lead	67	melody	synth lead distorted guitar_like rock edgy
+0	85	Voice Lead	lead	lead	72	melody	synth lead vocal airy soft 80s
+0	86	Fifths Lead	lead	lead	67	melody	synth lead fifths 80s 90s rave big
+0	87	Bass + Lead	lead	bass lead	48	bass	synth lead bass 80s synthpop punchy buzzy
+0	88	New Age Pad	pad	pad	60	chords	synth pad new_age 80s bell soft shimmering
+0	89	Warm Pad	pad	pad	60	chords	synth pad analog warm soft lush 80s ballad
+0	90	Polysynth Pad	pad	pad chords	60	chords	synth pad polysynth 80s synthpop bright brassy
+0	91	Choir Pad	pad	pad	60	chords	synth pad vocal choir airy ambient
+0	92	Bowed Pad	pad	pad	60	chords	synth pad bowed glassy ambient soft
+0	93	Metallic Pad	pad	pad texture	60	chords	synth pad metallic cold industrial ambient
+0	94	Halo Pad	pad	pad	60	chords	synth pad halo airy vocal ambient soft
+0	95	Sweep Pad	pad	pad texture	60	chords	synth pad sweep filter movement 80s 90s
+0	96	Rain	fx	texture fx	60	chords	synth fx rain sparkle ambient
+0	97	Soundtrack	fx	pad texture	60	chords	synth fx soundtrack film ambient dark
+0	98	Crystal	fx	arp texture	72	melody	synth fx crystal bell glassy sparkle
+0	99	Atmosphere	fx	pad texture	60	chords	synth fx atmosphere ambient plucked airy
+0	100	Brightness	fx	pad texture	60	chords	synth fx bright shimmer ambient
+0	101	Goblins	fx	texture fx	60	chords	synth fx eerie dark horror
+0	102	Echoes	fx	texture fx	60	chords	synth fx echo ambient spacey
+0	103	Sci-fi	fx	texture fx	60	chords	synth fx sci_fi spacey eerie
+0	104	Sitar	world	lead	60	melody	world sitar indian psychedelic 60s twangy
+0	105	Banjo	world	chords lead	60	melody	banjo bluegrass country folk plucked bright
+0	106	Shamisen	world	lead	60	melody	world japanese plucked twangy
+0	107	Koto	world	lead arp	60	melody	world japanese plucked bright
+0	108	Kalimba	world	lead arp	72	melody	kalimba thumb_piano african plucked soft lofi
+0	109	Bagpipe	world	lead	67	melody	bagpipe celtic folk drone nasal
+0	110	Fiddle	world	lead	67	melody	fiddle folk celtic country bowed bright
+0	111	Shanai	world	lead	67	melody	world indian reed nasal
+0	112	Tinkle Bell	perc	hits	84	melody	bell tinkle sparkle christmas
+0	113	Agogo	perc	hits	72	hits	percussion agogo latin samba metallic
+0	114	Steel Drums	perc	lead	72	melody	steel_drum caribbean calypso tropical bright
+0	115	Woodblock	perc	hits	72	hits	percussion woodblock wooden click
+0	116	Taiko Drum	perc	hits	48	hits	percussion taiko japanese epic big drum
+0	117	Melodic Tom	perc	hits	48	hits	percussion tom 80s disco electronic
+0	118	Synth Drum	perc	hits	48	hits	percussion synth_drum 80s disco electronic pew
+0	119	Reverse Cymbal	fx	fx	60	single	fx reverse cymbal riser transition
+0	120	Guitar Fret Noise	fx	fx	60	single	fx guitar fret noise
+0	121	Breath Noise	fx	fx	60	single	fx breath noise
+0	122	Seashore	fx	fx texture	60	single	fx seashore waves ambient noise
+0	123	Bird Tweet	fx	fx	72	single	fx bird nature
+0	124	Telephone	fx	fx	60	single	fx telephone ring
+0	125	Helicopter	fx	fx	60	single	fx helicopter noise
+0	126	Applause	fx	fx	60	single	fx applause crowd
+0	127	Gunshot	fx	fx	60	single	fx impact shot
+8	4	Detuned EP 1	keys	chords	60	chords	electric_piano tine detuned chorus 70s 80s soul warm lush
+8	5	Detuned EP 2	keys	chords	60	chords	electric_piano fm detuned chorus 80s ballad glassy lush
+8	6	Coupled Harpsichord	keys	chords lead	60	melody	baroque harpsichord octave bright
+8	14	Church Bell	mallet	hits	60	single	bell church big
+8	16	Detuned Organ 1	organ	chords	60	chords	organ detuned chorus 60s 70s warm
+8	17	Detuned Organ 2	organ	chords	60	chords	organ detuned percussive house 90s
+8	19	Church Organ 2	organ	chords pad	60	chords	organ pipe church huge
+8	21	Italian Accordion	organ	chords lead	60	melody	accordion musette italian folk
+8	24	Ukulele	guitar	chords	60	chords	ukulele hawaiian plucked bright happy
+8	25	12 String Guitar	guitar	chords	52	chords	acoustic guitar 12_string jangle folk 60s 80s bright
+8	26	Hawaiian Guitar	guitar	lead	60	melody	slide steel_guitar hawaiian country
+8	28	Funk Guitar	guitar	chords	52	hits	electric guitar funk muted disco percussive
+8	30	Feedback Guitar	guitar	lead	59	melody	electric guitar feedback distortion rock aggressive
+8	31	Guitar Feedback	guitar	fx	59	single	electric guitar feedback noise rock
+8	38	Synth Bass 3	bass	bass	36	bass	synth bass resonant acid 80s 90s squelchy
+8	39	Synth Bass 4	bass	bass	36	bass	synth bass rubbery 80s house punchy
+8	40	Slow Violin	strings	lead pad	67	melody	orchestral violin slow_attack film soft
+8	48	Orchestral Pad	ensemble	pad chords	60	chords	orchestral strings full film lush big
+8	50	Synth Strings 3	ensemble	pad chords	60	chords	synth strings analog 80s lush
+8	61	Brass 2	brass	chords hits	60	chords	brass section soul funk big_band stabs
+8	62	Synth Brass 3	brass	chords hits	60	chords	synth brass analog 80s stab bright punchy
+8	63	Synth Brass 4	brass	chords	60	chords	synth brass 80s soft warm
+8	80	Sine Wave	lead	lead	72	melody	synth sine pure soft simple
+8	107	Taisho Koto	world	lead	60	melody	world japanese plucked bright
+8	115	Castanets	perc	hits	72	hits	percussion castanets spanish flamenco click
+8	116	Concert Bass Drum	perc	hits	48	hits	percussion orchestral bass_drum film boom
+8	117	Melo Tom 2	perc	hits	48	hits	percussion tom 80s electronic
+8	118	Analog Tom	perc	hits	48	hits	percussion tom analog_drum_machine 80s electro hip_hop
+9	125	Burst Noise	fx	fx	60	single	fx noise burst
+16	25	Mandolin	guitar	lead	67	melody	mandolin folk bluegrass italian tremolo plucked bright

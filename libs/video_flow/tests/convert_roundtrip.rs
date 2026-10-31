@@ -86,6 +86,7 @@ fn write_source(path: &std::path::Path) {
             video_bitrate_bps: 20_000_000,
             audio: None,
             keyframe_only: false,
+            ..Default::default()
         },
     )
     .expect("source encoder");

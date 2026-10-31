@@ -1,0 +1,341 @@
+// Lowlight Runner: liquid drum and bass at 174 in F minor.
+//
+// Form (104 bars): intro 16 (pads, the piano states the motif, filtered
+// hats, a riser) · drop 32 (the acoustic break, reese and sub, electric
+// piano stabs; from bar 33 the ride, a bell counter-melody and the lead) ·
+// breakdown 16 (halftime; the harmony turns to D flat major and the
+// borrowed G flat, the piano develops the motif in sequence, choir "ooh",
+// strings) · drop 2 32 (a whole step up in G minor: the lead sings the
+// motif an octave higher, the choir, the counter-melody inverted) · outro 8
+// (the break drops away, the piano ends on F minor add 9).
+// Harmony: Fm9 Dbmaj7 Bbm9 C7sus-C7, and Fm9 Ab/Eb Dbmaj7 Gm7b5-C7b9 (a
+// ii-V back into F minor); the breakdown: Dbmaj9 Ab/C Bbm7 Ab, Gbmaj7 Eb/G
+// Absus Ab, then C7.
+// The motif: C Eb F Ab, then falling G F Eb C, in long notes against the
+// fast break; answered a step lower, sequenced up in the breakdown,
+// inverted by the bells.
+use mod.score.*
+
+let clock = Clock{bpm: 174 sig: [4 4] seed: 9174 params: {sweep: 1 swell: 0}}
+
+let kit = Instrument{kind: @drums}
+let reese = Synth{recipe: "saw freq=440 detune=16 a=0.01 d=0.4 s=0.85 r=0.1 gain=0.26 lp=900 q=1.4; saw freq=440 detune=-16 a=0.01 d=0.4 s=0.85 r=0.1 gain=0.26 lp=900 q=1.4; saw freq=880 detune=5 a=0.01 d=0.4 s=0.6 r=0.1 gain=0.08 lp=1400 q=1"}
+let sub = Synth{recipe: "sine freq=440 a=0.005 d=0.3 s=0.9 r=0.08 gain=0.75"}
+let glass = Synth{preset: @glass_pad attack: 1.4 release: 3}
+let strings = Instrument{kind: @soundfont program: @strings}
+let piano = Instrument{kind: @piano}
+let ep = Shader{lib: "epiano" tremolo: 0.2}
+let lead_syn = Shader{lib: "supersaw" cutoff: 4200 attack: 0.03 release: 0.5 gain: 0.3}
+let bell = Shader{lib: "modal_bell" t60: 2 stiffness: 0.3}
+let choir = Voice{profile: @soprano choir: 6 parts: 3 vibrato: 0.2 breath: 0.25}
+let air = Synth{recipe: "noise=white bp=400>9000 glide=10.5 q=1.3 a=10.4 d=0.02 s=0 r=0.02 gain=0.35"}
+
+// ---- harmony -----------------------------------------------------------------
+
+let roots = [@f1 @db2 @bb1 @c2 @c2 @eb2 @g1 @c2 @db2 @c2 @bb1 @ab1 @gb1 @g1 @ab1 @c2]
+let voicings = [
+    [@ab3 @c4 @eb4 @g4], [@ab3 @c4 @f4], [@ab3 @db4 @f4 @c5], [@bb3 @f4 @g4], [@bb3 @e4 @g4],
+    [@ab3 @c4 @eb4], [@bb3 @db4 @f4], [@bb3 @db4 @e4], [@ab3 @c4 @f4 @eb5], [@ab3 @c4 @eb4],
+    [@ab3 @db4 @f4], [@ab3 @c4 @eb4], [@bb3 @db4 @f4], [@bb3 @eb4 @g4], [@ab3 @db4 @eb4], [@bb3 @e4 @g4]
+]
+// Two bars per chord.
+let prog_a = [0 1 2 3]
+let prog_b = [0 5 1 6]
+let prog_break = [8 9 10 11 12 13 14 15]
+
+let chord_of = fn(b) {
+    let h = floor(b / 2)
+    if b >= 48 && b < 64 { prog_break[h - 24] }
+    else { if b % 16 >= 8 { if h % 4 == 3 && b % 2 == 1 { 7 } else { prog_b[h % 4] } } else { if h % 4 == 3 && b % 2 == 1 { 4 } else { prog_a[h % 4] } } }
+}
+let lift_of = fn(b) { if b >= 64 && b < 96 { 2 } else { 0 } }
+let root_of = fn(b) { note(roots[chord_of(b)]) + lift_of(b) }
+let voicing_of = fn(b) {
+    let v = voicings[chord_of(b)]
+    let out = []
+    for n in v { out.push(note(n) + lift_of(b)) }
+    out
+}
+
+let phrase = fn(ns, ds, tr, amp, leg) {
+    let k = 0
+    for d in ds {
+        let r = rand(0, 0.02)
+        sleep(r)
+        let n = ns[k]
+        if n != @r { play(note(n) + tr, {dur: d * leg amp: amp * if d >= 2 { 1.0 } else { rand(0.8, 0.92) }}) }
+        sleep(d - r)
+        k = k + 1
+    }
+}
+
+// The motif, four bars, and its answer.
+let motif = [@c5 @eb5 @f5 @ab5 @g5 @f5 @eb5 @c5]
+let motif_d = [2 1 1 4 2 2 2 2]
+let answer = [@bb4 @c5 @eb5 @f5 @eb5 @db5 @c5 @r]
+let answer_d = [2 1 1 4 2 2 3 1]
+
+// ---- drums ---------------------------------------------------------------------
+
+/// The break: two-step kick, snare on two and four, ghost snares, closed
+/// and pedal hats; every fourth bar edits the kick, every eighth rolls into
+/// the next with toms.
+let brk = Loop{play: kit beats: 4 amp: 2.0 sends: {room: 0.12 smash: 0.35}
+    code: fn(i) {
+        let kicks = if i % 4 == 3 { "x.x.......x.x..." } else { if i % 8 == 5 { "x.........x..x.." } else { "x.........x....." } }
+        let ghosts = if i % 2 == 0 { ".......o.o......" } else { "......o...o...o." }
+        let k = steps(kicks)
+        let g = steps(ghosts)
+        for s in 0..16 {
+            let r = rand(0, 0.012)
+            sleep(r)
+            if i % 8 == 7 && s >= 12 {
+                hit(if s < 13 { @tom1 } else { if s < 14 { @tom2 } else { if s < 15 { @tom3 } else { @floortom } } }, {amp: 0.75 + (s - 12) * 0.06})
+            } else {
+                if k[s] != nil { hit(@kick, {amp: k[s] + 0.1}) }
+                if s == 4 || s == 12 { hit(@snare, {amp: rand(0.92, 1.0)}) }
+                if g[s] != nil { hit(@snare, {amp: rand(0.14, 0.24)}) }
+            }
+            if s % 2 == 0 { hit(if s % 4 == 2 { @hat } else { @pedalhat }, {amp: if s % 4 == 2 { 0.55 } else { 0.35 } * rand(0.85, 1.05) pan: -0.3}) }
+            if s % 2 == 1 && chance(0.3) { hit(@hat, {amp: rand(0.15, 0.25) pan: -0.35}) }
+            sleep(0.25 - r)
+        }
+    }
+}
+
+/// The ride and open hats for the second half of each drop.
+let ride = Loop{play: kit beats: 4 amp: 1.6 sends: {room: 0.15}
+    code: fn(i) {
+        for s in 0..8 {
+            hit(@ride, {amp: if s % 2 == 1 { 0.55 } else { 0.35 } pan: 0.35})
+            if s == 7 && i % 2 == 1 { hit(@ohat, {amp: 0.45 pan: -0.2}) }
+            sleep(0.5)
+        }
+    }
+}
+
+/// The intro's hats: closed and pedal, thin, a rim on every fourth bar.
+let ticks = Loop{play: kit beats: 4 amp: 3.0 sends: {room: 0.1}
+    code: fn(i) {
+        for s in 0..8 {
+            hit(if s % 2 == 1 { @hat } else { @pedalhat }, {amp: if s % 2 == 1 { 0.5 } else { 0.25 }})
+            if s == 7 && i % 4 == 3 { hit(@rim, {amp: 0.5 pan: 0.3}) }
+            sleep(0.5)
+        }
+    }
+}
+
+/// Halftime for the breakdown: kick on one, snare on three, brushes of hat.
+let half = Loop{play: kit beats: 4 amp: 1.8 sends: {room: 0.2 smash: 0.3}
+    code: fn(i) {
+        for s in 0..16 {
+            if s == 0 || (s == 10 && i % 2 == 1) { hit(@kick, {amp: 0.85}) }
+            if s == 8 { hit(@snare, {amp: 0.8}) }
+            if s % 4 == 2 { hit(@hat, {amp: 0.3 pan: -0.3}) }
+            if i >= 60 && s >= 8 { hit(@snare, {amp: 0.15 + (i - 60) * 0.12 + s * 0.01}) }
+            sleep(0.25)
+        }
+    }
+}
+
+let crash = Loop{play: kit beats: 4 amp: 1.0 sends: {hall: 0.3}
+    code: fn(i) {
+        if i == 16 || i == 32 || i == 48 || i == 64 || i == 80 || i == 96 { hit(@crash, {amp: 0.85}) }
+        sleep(4)
+    }
+}
+
+// ---- bass --------------------------------------------------------------------------
+
+/// The reese: roots with pushes and octave answers; its filter opens on the
+/// long notes and on the second bar of each chord.
+let bass = Loop{play: reese beats: 4 amp: 0.45
+    code: fn(i) {
+        let r = root_of(i) + 12
+        let second = i % 2 == 1
+        if second {
+            play(r, {dur: 1.4 cutoff: rand(700, 1100)})
+            sleep(1.5)
+            play(r + 12, {dur: 0.4 cutoff: 1600})
+            sleep(0.5)
+            play(r + 7, {dur: 0.9 cutoff: 1300})
+            sleep(1)
+            let n = root_of(i + 1) + 12
+            play(if n > r { n - 1 } else { n + 1 }, {dur: 0.9 cutoff: 1100})
+            sleep(1)
+        } else {
+            play(r, {dur: 2.4 cutoff: rand(500, 800)})
+            sleep(2.5)
+            play(r, {dur: 1.4 cutoff: rand(800, 1200)})
+            sleep(1.5)
+        }
+    }
+}
+let low = Loop{play: sub beats: 4 amp: 0.4
+    code: fn(i) {
+        let r = root_of(i) + 12
+        if i < 16 || i >= 96 {
+            if i % 2 == 0 && i < 102 { play(r, {dur: 7.6 amp: 0.55}) }
+            sleep(4)
+        } else {
+            play(r, {dur: 2.4})
+            sleep(2.5)
+            play(r, {dur: 1.4})
+            sleep(1.5)
+        }
+    }
+}
+
+// ---- harmony and melody ------------------------------------------------------------
+
+let pads = Loop{play: glass beats: 8 amp: 0.3 sends: {hall: 0.3}
+    code: fn(i) {
+        let b = i * 2
+        if b < 102 { play(voicing_of(b), {dur: 7.8 amp: rand(0.85, 1.0)}) }
+        if b == 102 { play([@f3 @ab3 @c4 @g4], {dur: 10}) }
+        sleep(8)
+    }
+}
+
+/// The electric piano: a stab on the "and" of one and a push into three,
+/// changing with each chord.
+let stabs = Loop{play: ep beats: 4 amp: 0.5 pan: -0.15 sends: {plate: 0.2 throw: 0.12}
+    code: fn(i) {
+        let v = voicing_of(i)
+        let cells = [[0.5 2.75], [1.5 3.5], [0.5 1.75 3.5], [0 2.5]]
+        for t in cells[i % 4] {
+            sleep(t - beat() + rand(0, 0.015))
+            play(v, {dur: 0.4 amp: rand(0.7, 0.9)})
+        }
+        sleep(4 - beat())
+    }
+}
+
+/// The piano's motif: stated in the intro, sequenced in the breakdown,
+/// remembered in the outro.
+let piano_line = Loop{play: piano beats: 32 amp: 0.9 sends: {plate: 0.3 hall: 0.15}
+    code: fn(i) {
+        if i == 0 {
+            sleep(16)
+            phrase(motif, motif_d, 0, 0.6, 1.0)
+        }
+        if i == 6 {
+            phrase(motif, motif_d, 1, 0.55, 1.0)
+            phrase([@eb5 @f5 @ab5 @bb5 @ab5 @gb5 @f5 @eb5], motif_d, 0, 0.62, 1.0)
+        }
+        if i == 12 {
+            phrase([@c5 @eb5 @f5 @ab5 @g5 @f5], [2 1 1 4 4 4], 0, 0.5, 1.0)
+            play([@f3 @c4 @ab4 @c5 @g5], {dur: 8 amp: 0.4})
+        }
+        sleep(32 - beat())
+    }
+}
+/// Breakdown piano chords, rolled.
+let piano_chords = Loop{play: piano beats: 8 amp: 0.6 sends: {plate: 0.3}
+    code: fn(i) {
+        let v = voicing_of(i * 2)
+        let r = root_of(i * 2) + 24
+        play(r, {dur: 7 amp: 0.45})
+        for n in v { sleep(0.05) play(n, {dur: 6 amp: 0.4}) }
+        sleep(8 - beat())
+    }
+}
+
+/// The lead: the motif in the first drop's second half, an octave up
+/// (and a whole step up) in drop 2, answered.
+let lead = Loop{play: lead_syn beats: 64 amp: 0.55 pan: 0.05 sends: {plate: 0.2 throw: 0.2}
+    code: fn(i) {
+        let up = if i >= 4 { 12 } else { 0 }
+        phrase(motif, motif_d, lift_of(i * 16), 0.8, 0.95)
+        phrase(answer, answer_d, lift_of(i * 16), 0.75, 0.95)
+        phrase(motif, motif_d, lift_of(i * 16) + up, 0.85, 0.95)
+        phrase([@c6 @bb5 @ab5 @g5 @f5 @eb5 @f5 @r], [2 1 1 2 2 2 5 1], lift_of(i * 16) + up - 12, 0.8, 0.95)
+    }
+}
+
+/// The bells: the motif inverted (falling where it rose), in the gaps.
+let bells = Loop{play: bell beats: 16 amp: 0.3 pan: 0.4 sends: {hall: 0.25 throw: 0.25}
+    code: fn(i) {
+        let t = lift_of(i * 4)
+        sleep(4)
+        phrase([@ab5 @f5 @eb5 @c5], [1 1 1 1], t, 0.6, 0.9)
+        sleep(4)
+        phrase([@g5 @eb5 @db5 @bb4 @c5], [1 1 1 1 4], t, 0.55, 0.9)
+    }
+}
+
+let ooh = Loop{play: choir beats: 8 amp: 1.4 sends: {hall: 0.4}
+    code: fn(i) {
+        let v = voicing_of(i * 2)
+        sing([[v[0] + 12 v[1] + 12 v[2] + 12]], if i >= 32 { "ah" } else { "ooh" }, {dur: 7.6 vel: 0.55})
+        sleep(8)
+    }
+}
+let violas = Loop{play: strings beats: 8 amp: 0.14 sends: {hall: 0.3}
+    code: fn(i) {
+        let v = voicing_of(i * 2)
+        play([v[0] - 12 v[1] - 12], {dur: 7.8})
+        sleep(8)
+    }
+}
+
+let riser = Loop{play: air beats: 4 amp: 0.3 sends: {hall: 0.5}
+    code: fn(i) {
+        if i == 12 || i == 60 || i == 92 { play(@a4, {dur: 15.8}) }
+        sleep(4)
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// Returns: a short room for the break, a plate for the piano and lead, a hall
+// for pads, choir and effects (it swells into the breakdown), a delay throw.
+let room = Reverb{room: 0.3 mix: 1 damp: 8000}
+let plate = Reverb{room: 0.6 mix: 1 damp: 7000}
+let hall = Reverb{room: 0.8 mix: 1 damp: 6000}
+let throw = Delay{time: 0.75 feedback: 0.4 mix: 1 spread: 1}
+let hall_level = Bus{in: [hall] gain: {param: @swell from: 0.8 to: 1.6 ramp: 8}}
+let returns = Highpass{in: [room plate hall_level throw] cutoff: 280}
+
+// Drums: bus glue, parallel smash from sends, tape; the intro's hats soft.
+let hatsoft = Lowpass{in: [ticks] cutoff: 7000}
+let drum_bus = Comp{in: [brk half ride crash hatsoft] threshold: -16 ratio: 3 makeup: 3}
+let drum_tape = Drive{in: [drum_bus] amount: 0.15 mix: 0.3 tone: 12000}
+let smash = Comp{threshold: -34 ratio: 12 makeup: 11}
+// Bass: the reese and the sub together, compressed, ducked a little by the
+// break.
+let bass_bus = Comp{in: [bass low] threshold: -16 ratio: 3 makeup: 1}
+let bass_duck = Duck{in: [bass_bus] key: brk depth: 3 release: 0.15}
+// Pads, choir and violas: carved, pumped by the break, wide.
+let pad_hp = Highpass{in: [pads ooh violas] cutoff: 220}
+let pad_lp = Eq{in: [pad_hp] b1: [@peak, 500, -3, 1] b2: [@highshelf, 9000, -2]}
+let pump = Duck{in: [pad_lp] key: brk depth: 4 release: 0.25}
+let pad_wide = Chorus{in: [pump] rate: 0.3 depth: 6 mix: 0.45}
+// Keys and lead: high-passed, the lead a little wider.
+let keys_hp = Highpass{in: [stabs bells lead] cutoff: 180}
+let keys_wide = Chorus{in: [keys_hp] rate: 0.5 depth: 3 mix: 0.2}
+/// The music bus's filter: closes into the breakdown, opens into drop 2.
+let sweep = Lowpass{in: [pad_wide keys_wide] cutoff: {param: @sweep from: 500 to: 18000 ramp: 16}}
+let music_tape = Drive{in: [sweep] amount: 0.1 mix: 0.25 tone: 12000}
+let piano_hp = Highpass{in: [piano_line piano_chords] cutoff: 160}
+
+/// The master: gentle glue over everything (the master limiter follows).
+let glue = Comp{in: [riser returns drum_tape smash bass_duck music_tape piano_hp] threshold: -12 ratio: 1.8 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 1.65}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let intro = Section{bars: 16 loops: [pads piano_line ticks low riser bells]}
+let drop = Section{bars: 16 loops: [brk bass low pads stabs crash]}
+let drop_b = Section{bars: 16 loops: [brk ride bass low pads stabs bells lead crash]}
+let breakdown = Section{bars: 12 set: {sweep: 0 swell: 1} loops: [half pads piano_line piano_chords ooh violas low riser crash]}
+let build = Section{bars: 4 set: {sweep: 1} loops: [half pads piano_line piano_chords ooh violas low riser crash]}
+let drop2 = Section{bars: 32 set: {swell: 0} loops: [brk ride bass low pads stabs lead bells ooh crash riser]}
+let outro = Section{bars: 8 set: {swell: 1} loops: [pads piano_line ticks low crash bells] next: @stop}
+
+Score{label: "Lowlight Runner" clock kit reese sub glass strings piano ep lead_syn bell choir air brk ride ticks half crash bass low pads stabs piano_line piano_chords lead bells ooh violas riser room plate hall throw hall_level returns hatsoft drum_bus drum_tape smash bass_bus bass_duck pad_hp pad_lp pump pad_wide keys_hp keys_wide sweep music_tape piano_hp glue master_eq master_width master_peak master_limit master_lp intro drop drop_b breakdown build drop2 outro ceiling: -1 master: 1.0 arrange: [intro drop drop_b breakdown build drop2 outro]}

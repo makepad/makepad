@@ -1,0 +1,42 @@
+[package]
+name = "makepad-score-voice"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Sung voices for a Score: a realtime harmonic-plus-noise singer driven by notes and lyrics, voice profiles (built in, or analysed from Kokoro speech), vocal analysis-resynthesis and choirs"
+
+[lib]
+name = "makepad_score_voice"
+
+[features]
+# Kokoro: pronounce lyrics with its G2P and analyse any Kokoro voice into a
+# singer profile (`voice_profile` tool). Off by default: the singer itself is
+# std-only.
+kokoro = ["dep:makepad-ai-speech"]
+# The neural voice (Cantor) for offline renders: `neural::render`.
+neural = ["dep:makepad-ai-sing"]
+# The sung-voice eval (DSP vs neural, scored by our speech recogniser).
+eval = ["neural", "kokoro", "makepad-ai-speech/whisper"]
+
+[dependencies]
+makepad-ai-speech = { path = "../ai/models/speech", default-features = false, features = ["kokoro"], optional = true }
+makepad-ai-sing = { path = "../ai/models/sing", optional = true }
+
+[[bin]]
+name = "score_voice_demo"
+path = "src/bin/demo.rs"
+
+[[bin]]
+name = "voice_profile"
+path = "src/bin/voice_profile.rs"
+required-features = ["kokoro"]
+
+[[bin]]
+name = "voice_eval"
+path = "src/bin/voice_eval.rs"
+required-features = ["eval"]
+
+[[bin]]
+name = "cantor_install"
+path = "src/bin/cantor_install.rs"
+required-features = ["neural"]

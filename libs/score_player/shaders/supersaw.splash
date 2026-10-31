@@ -1,0 +1,75 @@
+// Supersaw with drift: seven band-limited saws whose detune offsets are
+// re-drawn a few times a second (a living ensemble, not a fixed beat),
+// random start phases, spread across the stereo field, then a low-pass
+// with its own envelope.
+let N = 7
+let detune = param(0.18, 0, 1)
+let drift = param(8, 0, 60)
+let spread = param(0.8, 0, 1)
+let cutoff = param(5200, 100, 16000)
+let res = param(0.7, 0.5, 4)
+let env_amt = param(3000, 0, 10000)
+let attack = param(0.01, 0.001, 4)
+let decay = param(0.6, 0.01, 8)
+let sustain = param(0.8, 0, 1)
+let release = param(0.4, 0.01, 8)
+let gain = param(0.35, 0, 1)
+
+var ph = [0.0; N]
+var off = [0.0; N]
+var target = [0.0; N]
+var redraw = 0.0
+var dts = [0.0; N]
+var fl = Svf{}
+var fr = Svf{}
+var amp = Adsr{}
+var fenv = Adsr{}
+
+// Control rate: the drifting offsets glide toward their targets and each
+// saw's phase increment is recomputed (64 samples is far finer than drift).
+fn block() {
+    let c = cutoff + env_amt * fenv.level
+    svf_set(fl, c, res)
+    svf_set(fr, c, res)
+    for i in 0..N {
+        off[i] = off[i] + (target[i] - off[i]) * 0.03
+        let spread_i = (i - 3) / 3.0
+        dts[i] = freq * exp2((spread_i + off[i] * 0.25) * detune / 12.0) / sample_rate
+    }
+}
+
+fn voice() {
+    if trigger {
+        for i in 0..N {
+            ph[i] = rand() * 0.5 + 0.5
+            target[i] = rand()
+            off[i] = target[i]
+        }
+    }
+    // Re-draw the detune offsets `drift` times a second, gliding to them.
+    redraw = redraw + drift / sample_rate
+    if redraw >= 1.0 {
+        redraw = redraw - 1.0
+        for i in 0..N {
+            target[i] = rand()
+        }
+    }
+    let l = 0.0
+    let r = 0.0
+    for i in 0..N {
+        // Symmetric spread: voice 3 is the centre, the edges go widest.
+        let spread_i = (i - 3) / 3.0
+        let dt = dts[i]
+        ph[i] = advance(ph[i], dt)
+        let s = saw_blep(ph[i], dt)
+        let p = 0.5 + 0.5 * spread_i * spread
+        l = l + s * (1.0 - p)
+        r = r + s * p
+    }
+    let e = adsr(amp, attack, decay, sustain, release)
+    adsr(fenv, 0.001, decay * 0.5, 0.0, release)
+    if gate == 0.0 && e == 0.0 {
+        stop()
+    }
+    vec2(svf_lp(fl, l), svf_lp(fr, r)) * (e * gain * velocity * 0.4)
+}

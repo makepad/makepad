@@ -1,0 +1,22 @@
+[package]
+name = "makepad-beat"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The one beat and tempo detector: a streaming core for live audio and a whole-file mode for decks, from the same onset front end"
+
+[lib]
+name = "makepad_beat"
+path = "src/lib.rs"
+
+[features]
+# The accuracy harness (synthetic fixtures, the independent judge and the
+# standard metrics) as a public module, for callers that want to score
+# another detector against the same fixtures.
+eval = []
+
+[dependencies]
+
+[dev-dependencies]
+# Decodes the opt-in local corpus for the accuracy harness.
+makepad-audio-decode = { path = "../audio_decode" }

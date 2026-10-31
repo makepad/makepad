@@ -2,7 +2,7 @@
 //! controls. These deliberately restyle the standard widget kit so keyboard,
 //! focus, hover, pressed, and disabled behaviour remain native.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.score.*

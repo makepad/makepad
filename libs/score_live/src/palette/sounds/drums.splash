@@ -1,0 +1,110 @@
+// The drum voice model: each piece of a kit is one model with a handful of
+// meaningful params, so a kit is a point in their space, not a hand-written
+// sound. A piece's function returns its recipe layers (the audio_synth
+// recipe keys: osc/noise, freq to glide, lp/hp/bp, q, a d s r, drive, gain,
+// repeat every, delay, fm index). Params, all with defaults on the protos:
+//   tune   the body's pitch (Hz)          sweep  where the pitch starts (x tune)
+//   bend   how fast it falls (s)          decay  the body's decay (s)
+//   body   body level 0..1                noise  noise level 0..1
+//   color  the noise's centre (Hz)        tone   brightness 0..1
+//   click  the attack transient 0..1      drive  saturation 0..1
+//   level  the piece's level (1 sits it in a balanced kit)
+
+let Kick = {tune: 50 sweep: 3.5 bend: 0.045 decay: 0.45 click: 0.3 noise: 0.1 tone: 0.5 drive: 0.3 level: 1}
+let kick = fn(p) { [
+    {osc: @sine freq: p.tune * p.sweep to: p.tune glide: p.bend a: 0.0005 d: p.decay r: 0.05 drive: p.drive * 3 gain: p.level * 0.8}
+    {osc: @sine freq: p.tune * p.sweep * 2 to: p.tune * 2 glide: p.bend * 0.6 a: 0.0005 d: p.decay * 0.25 gain: p.level * 0.8 * p.tone * 0.12}
+    {osc: @tri freq: 2000 + p.tone * 3500 to: 500 glide: 0.006 d: 0.006 + p.click * 0.006 gain: p.click * 0.35}
+    {noise: @pink lp: 600 + p.tone * 4000 d: 0.015 + p.decay * 0.04 gain: p.noise * 0.45}
+] }
+
+let Snare = {tune: 190 sweep: 1.35 decay: 0.12 body: 0.5 noise: 0.6 color: 5000 noise_decay: 0.2 snap: 0.4 tone: 0.5 drive: 0 level: 1}
+let snare = fn(p) { [
+    {osc: @tri freq: p.tune * p.sweep to: p.tune glide: 0.03 a: 0.0005 d: p.decay drive: p.drive * 3 gain: p.body * 0.45 * p.level * 2.0}
+    {osc: @tri freq: p.tune * 1.62 a: 0.0005 d: p.decay * 0.7 gain: p.body * 0.2 * p.level * 2.0}
+    {noise: @white bp: p.color q: 0.7 a: 0.0008 d: p.noise_decay drive: p.drive * 2 gain: p.noise * 0.55 * p.level * 2.0}
+    {noise: @white hp: 5000 + p.tone * 4000 a: 0.0005 d: p.noise_decay * 0.5 gain: p.snap * 0.3 * p.level * 2.0}
+] }
+
+let Clap = {color: 1200 taps: 3 spread: 0.0105 tail: 0.18 tone: 0.5 level: 1}
+let clap = fn(p) { [
+    {noise: @white bp: p.color q: 1.4 a: 0.0005 d: 0.011 repeat: p.taps every: p.spread gain: 0.6 * p.level * 3.6}
+    {noise: @white bp: p.color * 0.92 q: 1.0 delay: p.spread * p.taps a: 0.001 d: p.tail gain: 0.55 * p.level * 3.6}
+    {noise: @white hp: 4000 + p.tone * 4000 delay: p.spread * p.taps d: p.tail * 0.4 gain: p.tone * 0.15 * p.level * 3.6}
+] }
+
+// Hats: noise through a high-pass plus a metallic FM square cluster.
+let Hat = {tune: 4000 metal: 0.3 noise: 0.7 color: 7500 decay: 0.04 tone: 0.5 level: 1}
+let hat = fn(p) { [
+    {noise: @white bp: p.color q: 0.55 a: 0.0005 d: p.decay gain: p.noise * 0.9 * p.level * 2.0}
+    {noise: @white bp: p.color + 2500 * p.tone q: 1.5 a: 0.0005 d: p.decay * 0.7 gain: p.tone * 0.3 * p.level * 2.0}
+    {osc: @square fm: 3.41 index: 3 freq: p.tune hp: p.color * 0.85 a: 0.0005 d: p.decay * 0.8 gain: p.metal * 0.18 * p.level * 2.0}
+] }
+
+let Tom = {tune: 100 sweep: 1.45 bend: 0.15 decay: 0.38 noise: 0.15 tone: 0.5 drive: 0.2 level: 1}
+let tom = fn(p, ratio) { [
+    {osc: @sine freq: p.tune * ratio * p.sweep to: p.tune * ratio glide: p.bend a: 0.0005 d: p.decay / (0.6 + ratio * 0.4) drive: p.drive * 2 gain: p.level * 0.7}
+    {noise: @pink lp: 900 + p.tone * 3000 a: 0.0005 d: 0.03 gain: p.noise * 0.5 * p.level * 0.7}
+] }
+
+let Rim = {tune: 1700 decay: 0.02 noise: 0.3 color: 2800 level: 1}
+let rim = fn(p) { [
+    {osc: @tri freq: p.tune a: 0.0003 d: p.decay gain: p.level * 0.6}
+    {osc: @tri freq: p.tune * 0.53 a: 0.0003 d: p.decay * 0.8 gain: p.level * 0.6 * 0.4}
+    {noise: @white bp: p.color q: 3 d: p.decay * 0.5 gain: p.noise * p.level * 0.6}
+] }
+
+let Cowbell = {tune: 560 decay: 0.26 tone: 0.5 level: 1}
+let cowbell = fn(p) { [
+    {osc: @square freq: p.tune bp: 800 + p.tone * 600 q: 2 a: 0.0005 d: p.decay gain: p.level * 0.45 * 0.6}
+    {osc: @square freq: p.tune * 1.505 bp: 1000 + p.tone * 600 q: 2 a: 0.0005 d: p.decay gain: p.level * 0.45 * 0.55}
+    {osc: @square freq: p.tune bp: 900 q: 2 d: 0.02 gain: p.level * 0.45 * 0.5}
+] }
+
+let Shaker = {color: 6500 attack: 0.012 decay: 0.055 level: 1}
+let shaker = fn(p) { [
+    {noise: @white bp: p.color q: 2 a: p.attack d: p.decay gain: p.level * 0.5}
+] }
+
+// Cymbals: a metallic FM cluster and bright noise, long.
+let Cymbal = {tune: 3200 metal: 0.3 noise: 0.6 color: 4800 decay: 1.6 bell: 0 tone: 0.5 level: 1}
+let cymbal = fn(p) { [
+    {noise: @white bp: p.color * 1.2 q: 0.5 a: 0.0008 d: p.decay gain: p.noise * 1.2 * p.level * 0.6}
+    {noise: @white bp: p.color * 1.5 q: 1 d: p.decay * 0.7 gain: p.tone * 0.35 * p.level * 0.6}
+    {osc: @square fm: 2.71 index: 5 index_to: 1.5 glide: p.decay freq: p.tune hp: p.color * 0.8 a: 0.0005 d: p.decay * 0.8 gain: p.metal * 0.15 * p.level * 0.6}
+    {osc: @tri freq: p.tune * 1.03 a: 0.0005 d: p.decay * 0.6 gain: p.bell * 0.12 * p.level * 0.6}
+] }
+
+let Conga = {tune: 320 sweep: 1.12 decay: 0.22 slap: 0.15 level: 1}
+let conga = fn(p) { [
+    {osc: @sine freq: p.tune * p.sweep to: p.tune glide: 0.04 a: 0.0005 d: p.decay gain: p.level * 0.6}
+    {noise: @pink bp: 1500 q: 2 a: 0.0005 d: 0.008 gain: p.slap * p.level * 0.6}
+] }
+
+let Snap = {color: 2400 decay: 0.045 level: 1}
+let snap = fn(p) { [
+    {noise: @white bp: p.color q: 2 a: 0.0005 d: p.decay gain: p.level * 0.8}
+    {osc: @tri freq: p.color * 0.62 d: 0.007 gain: p.level * 0.8 * 0.2}
+] }
+
+let Zap = {from: 2200 to: 120 bend: 0.12 decay: 0.14 level: 1}
+let zap = fn(p) { [
+    {osc: @sine freq: p.from to: p.to glide: p.bend a: 0.0005 d: p.decay gain: p.level * 0.4}
+] }
+
+// A kit: the sixteen slots from its pieces. The toms are one Tom at three
+// pitches; the open hat is a Hat with its own decay; crash and ride are
+// Cymbals. A slot the kit leaves out plays the proto's default.
+let Kit = {
+    about: "" tags: ""
+    kick: Kick{} snare: Snare{} clap: Clap{} hat: Hat{} ohat: Hat{decay: 0.35} rim: Rim{} tom: Tom{}
+    crash: Cymbal{} ride: Cymbal{tune: 4200 decay: 1.2 noise: 0.3 metal: 0.5 bell: 0.4 color: 6000} shaker: Shaker{}
+    cowbell: Cowbell{} conga: Conga{} snap: Snap{} zap: Zap{}
+}
+let kit = fn(k) { {
+    about: k.about tags: k.tags
+    kick: kick(k.kick) snare: snare(k.snare) clap: clap(k.clap) hat: hat(k.hat) ohat: hat(k.ohat) rim: rim(k.rim)
+    tom_lo: tom(k.tom, 1.0) tom_mid: tom(k.tom, 1.33) tom_hi: tom(k.tom, 1.78)
+    crash: cymbal(k.crash) ride: cymbal(k.ride) shaker: shaker(k.shaker) cowbell: cowbell(k.cowbell)
+    conga: conga(k.conga) snap: snap(k.snap) zap: zap(k.zap)
+} }

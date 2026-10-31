@@ -1,0 +1,52 @@
+// Acid bass, the 303 contract: one voice per line (play it mono and use
+// legato notes for slides), saw or square into a resonant ladder whose
+// envelope decays per note; accents (velocity above 0.8) open the filter
+// further, decay faster and play louder; slides glide the pitch.
+let cutoff = param(380, 30, 8000)
+let res = param(0.72, 0, 1)
+let env_mod = param(0.6, 0, 1)
+let decay = param(0.25, 0.02, 2)
+let accent = param(0.7, 0, 1)
+let slide = param(0.06, 0.005, 0.5)
+let square = param(0, 0, 1)
+let drive = param(1.6, 1, 8)
+let gain = param(0.5, 0, 1)
+
+var ph = 0.0
+var hz = 0.0
+var env = 0.0
+var acc = 0.0
+var amp = 0.0
+var slide_k = 0.0
+var lad = Ladder{}
+var dc = DcBlock{}
+
+fn block() {
+    let sweep = cutoff * exp2(env_mod * 6.0 * env + acc * accent * 2.0)
+    ladder_set(lad, sweep, res)
+    slide_k = 1.0 - exp(-5.0 / (slide * sample_rate))
+}
+
+fn voice() {
+    if trigger {
+        hz = freq
+        env = 1.0
+        acc = if velocity > 0.8 { 1.0 } else { 0.0 }
+    }
+    // Slide: legato notes move `freq`; `slide` is the time to get there.
+    hz = hz + (freq - hz) * slide_k
+    env = env * exp(-5.0 / (decay * (1.0 - 0.5 * acc) * sample_rate))
+    let dt = hz / sample_rate
+    ph = advance(ph, dt)
+    let osc = if square > 0.5 { pulse_blep(ph, dt, 0.5) } else { saw_blep(ph, dt) }
+    let y = ladder(lad, osc * drive * 0.5)
+    if gate > 0.0 {
+        amp = min(amp + 400.0 / sample_rate, 1.0)
+    } else {
+        amp = amp * exp(-1.0 / (0.012 * sample_rate))
+        if amp < 0.00001 {
+            stop()
+        }
+    }
+    dc_block(dc, soft_clip(y * drive)) * amp * gain * (1.0 + 0.4 * acc * accent)
+}

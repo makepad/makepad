@@ -1,0 +1,12 @@
+[package]
+name = "makepad-audio-dsp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "DSP for scores and decks: the Ironfish synth and a state-variable filter"
+
+[lib]
+name = "makepad_audio_dsp"
+
+[dependencies]
+makepad-audio-synth = { path = "../audio_synth" }

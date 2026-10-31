@@ -1,0 +1,47 @@
+// Phaser: six first-order allpass stages per side swept by a triangle LFO
+// on an exponential scale, feedback around the chain, the right side's
+// LFO a quarter cycle behind for width. Slow on pads is the 70s string
+// machine; fast with feedback is a swirl. `sync` > 0 locks the LFO to
+// that many beats.
+let N = 6
+let rate = param(0.25, 0.01, 8)
+let sync = param(0, 0, 16)
+let bpm = param(120, 20, 300)
+let depth = param(0.8, 0, 1)
+let center = param(900, 100, 4000)
+let feedback = param(0.5, 0, 0.95)
+let blend = param(0.5, 0, 1)
+
+var al = [Allpass1{}; N]
+var ar = [Allpass1{}; N]
+var lfo = 0.0
+var fbl = 0.0
+var fbr = 0.0
+
+fn coef(ph) {
+    let tri = 2.0 * abs(2.0 * fract(ph) - 1.0) - 1.0
+    let f = center * exp2(tri * depth * 2.0)
+    let t = tan(PI * min(f, sample_rate * 0.45) / sample_rate)
+    (t - 1.0) / (t + 1.0)
+}
+
+fn chain(a, x, c) {
+    let y = x
+    for i in 0..N {
+        y = allpass1(a[i], y, c)
+    }
+    y
+}
+
+fn effect(l, r) {
+    let hz = if sync > 0.0 { bpm / (60.0 * sync) } else { rate }
+    lfo = advance(lfo, hz / sample_rate)
+    let cl = coef(lfo)
+    let cr = coef(lfo + 0.25)
+    let yl = chain(al, l + fbl * feedback, cl)
+    let yr = chain(ar, r + fbr * feedback, cr)
+    fbl = yl
+    fbr = yr
+    // Equal parts dry and phased make the notches; `blend` fades them in.
+    vec2(mix(l, (l + yl) * 0.5, blend * 2.0), mix(r, (r + yr) * 0.5, blend * 2.0))
+}

@@ -2,7 +2,7 @@ use crate::{playback::RoomSettings, sound::SoundParam};
 use makepad_piano_model::fx::ReverbPreset;
 use crate::sound::InstrumentId;
 use makepad_score::model::AnnotationKind;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

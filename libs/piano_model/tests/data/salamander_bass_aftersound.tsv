@@ -1,0 +1,14 @@
+# salamander-bass-aftersound-v1
+# provenance {"corpus": "Salamander Grand Piano V3 48kHz/24bit", "author": "Alexander Holm", "license": "CC BY 3.0", "license_url": "http://creativecommons.org/licenses/by/3.0/", "layer": 9, "velocity": 68}
+# method {"onset": "first 1ms frame > -40 dB re peak frame (tools/acoustic.py)", "partials": "f_n = n f0 sqrt(1 + B n^2), f0 and B fitted to the recording", "power": "stereo mean of 0.2 s periodic-Hann band power, +-min(0.3 f0, 12 Hz) around f_n", "late_slope": "negative OLS slope of 10log10 power over window starts 1.5..3.5 s (0.05 s hop), dB/s", "groups": "median over partials 2-6 and 7-20"}
+note	name	late_db_s_2_6	late_db_s_7_20	fitted_b	sha256
+21	A0	2.820	4.524	2.2269e-04	3b037bcc94c3643ee8717513dc20fa859bf0091b8b750765c437f6f5bf6bef0d
+24	C1	2.997	3.778	1.6295e-04	d4a52a320aa1d6322849369f31c750221a11b3c7b52d93c7b40b6a25cc7530ad
+27	D#1	3.950	2.820	1.3168e-04	f8fde12052865241143825a4d3f27e09641a6be5d9c6e585aea93c3a3619107f
+30	F#1	5.778	2.799	9.1036e-05	1c21b1d904aff6e6cf3fd4f79bebc38f4d51e36342e3661e59adb1f9dd788f87
+33	A1	2.491	1.224	9.0692e-05	77a1324a69c290b4ba5d1e085a293a969e666200af5205d18155e2193c47201d
+36	C2	4.450	2.717	9.1212e-05	6fbbac815696bb2d72d6fd7f0dc4877c13308e7c44db2dcfe91f3e91b353c1d8
+39	D#2	-0.045	4.708	7.6416e-05	ce8471acff12543f6b3afa564839fdf5802894ccc2464c01eea3b69dd4788dcc
+42	F#2	2.251	4.800	7.5711e-05	13e8631aa39f4d58b082e6bab9de09fce61add6bf36e81c9e509bd996b0961cd
+45	A2	2.887	4.882	8.0853e-05	c8aaf9e022ec8818730aeba38ee3dd2b232650212ac8e012e27d3b4adbdaf7dc
+48	C3	3.969	5.401	1.1073e-04	7070a8dba781ec66836d84dc2e1621db68063f1ad8aad5030df2f851daeee0b8

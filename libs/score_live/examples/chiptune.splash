@@ -1,0 +1,55 @@
+// Pixel Quest: a chiptune at 150. Pulse lead, triangle-ish bass,
+// arpeggiated chords a note per sixteenth, noise drums.
+use mod.score.*
+
+let clock = Clock{bpm: 150 sig: [4 4] seed: 3}
+
+let kit = Drums{kit: @chip}
+let lead = Synth{preset: @square_lead cutoff: 6000}
+let arp = Synth{preset: @chip}
+let bass = Synth{osc: @tri attack: 0.002 decay: 0.1 sustain: 0.8 release: 0.05 gain: 1.2}
+
+let drums = Loop{play: kit hits: "x...o.x.x...o..." amp: 0.8}
+let snare = Loop{play: kit hits: "....x.......x..x" note: @snare amp: 0.6}
+
+let arps = Loop{play: arp beats: 8 amp: 0.3
+    code: fn(i) {
+        let progression = [chord(@c4, @major) chord(@a3, @minor) chord(@f3, @major) chord(@g3, @major)]
+        for c in 0..4 {
+            for s in 0..8 {
+                play(at(progression[c], s), {dur: 0.2})
+                sleep(0.25)
+            }
+        }
+    }
+}
+
+let bassline = Loop{play: bass beats: 8 amp: 0.55
+    code: fn(i) {
+        for root in [@c2 @a1 @f1 @g1] {
+            for s in 0..4 {
+                play(note(root) + 12 * (s % 2), {dur: 0.4})
+                sleep(0.5)
+            }
+        }
+    }
+}
+
+let tune = Loop{play: lead beats: 16 amp: 0.4
+    code: fn(i) {
+        let a = [@e5 @g5 @c6 @b5 @a5 @g5 @e5 @d5]
+        let b = [@c5 @e5 @g5 @a5 @g5 @f5 @e5 @d5]
+        let phrase = if i % 2 == 0 { a } else { b }
+        for n in 0..8 {
+            play(phrase[n], {dur: 0.8})
+            sleep(if n % 2 == 0 { 1.5 } else { 2.5 })
+        }
+    }
+}
+
+let crunch = Crush{in: [tune arps] bits: 7 down: 2 mix: 0.5}
+
+let start = Section{bars: 4 loops: [drums arps bassline]}
+let theme = Section{bars: 16 loops: [drums snare arps bassline tune]}
+
+Score{label: "Pixel Quest" clock kit lead arp bass drums snare arps bassline tune crunch start theme arrange: [start theme]}
