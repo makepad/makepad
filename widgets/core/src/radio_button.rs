@@ -97,34 +97,7 @@ script_mod! {
             }
         }
 
-        draw_text +: {
-            focus: instance(0.0)
-            hover: instance(0.0)
-            down: instance(0.0)
-            active: instance(0.0)
-            disabled: instance(0.0)
-
-            ink_centered: true
-
-            color: theme.color_label_outer
-            color_hover: uniform(theme.color_label_outer_hover)
-            color_down: uniform(theme.color_label_outer_down)
-            color_focus: uniform(theme.color_label_outer_focus)
-            color_active: uniform(theme.color_label_outer_active)
-            color_disabled: uniform(theme.color_label_outer_disabled)
-
-            get_color: fn() {
-                return self.color
-                    .mix(self.color_focus, self.focus)
-                    .mix(self.color_active, self.active)
-                    .mix(self.color_hover, self.hover)
-                    .mix(self.color_down, self.down)
-                    .mix(self.color_disabled, self.disabled)
-            }
-            text_style: theme.font_regular{
-                font_size: theme.font_size_p
-            }
-        }
+        draw_text: mod.widgets.DrawCheckLabel{}
 
         animator: Animator{
             disabled: {
