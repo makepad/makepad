@@ -336,8 +336,12 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         // ok so we need to check if our turtle position has changed since last time.
         // if it did, we redraw
         let rect = self.peek_walk_turtle(walk);
-        if draw_list_2d.dirty_check_rect != rect {
+        // Every instance bakes in its clip, so a list that didn't move still has to redraw
+        // when a parent's clip did (like a scroll view that shrinks as a bar slides in under it).
+        let clip = self.turtle_clip();
+        if draw_list_2d.dirty_check_rect != rect || draw_list_2d.dirty_check_clip != clip {
             draw_list_2d.dirty_check_rect = rect;
+            draw_list_2d.dirty_check_clip = clip;
             return true;
         }
         self.draw_event
