@@ -21,7 +21,8 @@ pub fn big_limits() -> Limits {
         max_trailer_bytes: 8 * 1024,
         max_body_bytes: 2 * 1024 * 1024 * 1024,
         max_chunk_line_bytes: 4096,
-        total_timeout: Duration::from_secs(3 * 3600),
+        connect_timeout: Duration::from_secs(30),
+        idle_timeout: Duration::from_secs(120),
     }
 }
 
@@ -267,7 +268,7 @@ pub fn download_probe() -> Result<(), String> {
     let count = callbacks.clone();
     let last = AtomicU64::new(0);
     let mut limits = big_limits();
-    limits.total_timeout = Duration::from_secs(20);
+    limits.idle_timeout = Duration::from_secs(20);
     let mut request = Request::get(&url).limits(limits).on_body_progress(move |loaded, total| {
         let start = std::time::Instant::now();
         bytes.store(loaded, Ordering::Relaxed);

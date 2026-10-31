@@ -56,18 +56,21 @@ Use the apt-get command below, or run the script on Ubuntu/WSL2:
 sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config clang ca-certificates libssl-dev libx11-dev libxcursor-dev libxkbcommon-dev libxrandr-dev libxi-dev libxinerama-dev libasound2-dev libpulse-dev libwayland-dev wayland-protocols libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libglx-dev libdrm-dev libgbm-dev libgl1-mesa-dri mesa-vulkan-drivers mesa-utils mesa-utils-extra x11-apps gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-gl gstreamer1.0-alsa gstreamer1.0-pipewire libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgstreamer-gl1.0-0
 ```
 
-## Build And Run Makepad Studio
+## Build And Run The Makepad Desktop
 
-Makepad Studio is the main entry point for exploring examples and iterating on UI.
+The Makepad desktop (window manager) is the main entry point for exploring the apps in this repository.
 
 ```bash
-cargo run -p makepad-director --release
+cargo run -p makepad-app-wm --release
 ```
 
-If you want a local install (note: may lag the repo):
+## Build And Run The Widget Catalogue
+
+The widget catalogue shows every widget in the library, organised,
+documented and previewed live.
 
 ```bash
-cargo install makepad-director
+cargo run -p makepad-app-storybook --release
 ```
 
 ## Examples
@@ -165,3 +168,9 @@ cargo run -p cargo-makepad --release -- android run -p makepad-example-ironfish
 ## Notes
 
 - Studio uses `cargo-makepad` internally for non-standard targets.
+
+## Contributing
+
+Open pull requests against `main`. `main` holds validated milestones; `work` is the fast-moving
+development branch, squashed onto `main` and re-pointed at its tip about every week, so rebase
+any branch based on `work` after a re-point.

@@ -4,6 +4,16 @@ import android.view.Surface;
 import android.view.MotionEvent;
 
 public class MakepadNative {
+    // ABI checked against the Android adapter's single Rust native table at registration.
+    public static native Object[] a11yNode(int virtualId);
+    public static native long a11yAction(int virtualId, int action, String text, int start, int end, float value, boolean wait);
+    public static native int a11yHitTest(float x, float y);
+    public static native int a11yFindFocus(int focus);
+    public static native void a11yState(boolean enabled, boolean touchExploration);
+    public static native void onNativeLayerState(int session, long id, int what, long a, long b, String text);
+    public static native boolean commitNativeLayerFrame(long ticket, Object transaction, Object[] surfaces, int originX, int originY);
+    public static native void discardNativeLayerFrame(long ticket);
+    public static native void releaseNativeLayerSurfaces(Object[] surfaces);
     // belongs to MakepadActivity class
     public native static void activityOnCreate(Object activity);
     public native static void activityOnStart();
@@ -13,7 +23,10 @@ public class MakepadNative {
     public native static void activityOnDestroy();
     public native static void activityOnWindowFocusChanged(boolean has_focus);
     public static native void onAndroidParams(String cache_path, String data_path, float density, boolean isEmulator, String androidVersion, String buildNumber,
-        String kernelVersion);
+        String kernelVersion, boolean nightMode);
+
+    public static native void onNightModeChanged(boolean nightMode);
+    public static native void onDisplayRotation(int rotation);
 
     public native static void initChoreographer(float deviceRefreshRate, int sdkVersion);
 
@@ -64,6 +77,10 @@ public class MakepadNative {
     // IME editor action (for single-line inputs: Done, Go, Search, etc.)
     // Called when user presses the action button on the soft keyboard
     public native static void onImeEditorAction(int actionCode);
+
+    // The activity was asked to open something (an ACTION_VIEW URI, a file
+    // as its path, or ACTION_SEND text): Event::AppOpen.
+    public native static void onAppOpen(String item, boolean isPath, boolean atLaunch);
 
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);

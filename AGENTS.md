@@ -13,20 +13,90 @@ use current source for API signatures and working examples.
 - When adding an example crate, update its Cargo workspace and
   `makepad.splash`.
 - Prefer `rg` / `rg --files` for source searches. Check existing patterns in
-  `widgets/core/src/`, `widgets/families/`, `code_editor/`, and `apps/director/` before changing Splash syntax.
+  `widgets/core/src/`, `widgets/families/`, `code_editor/`, and `apps/` before changing Splash syntax.
   The archived `old/` tree is not the reference for current widget APIs.
 
 ## Current agent workflow
 
-- Codex manages the work and reviews Fable's designs and results.
-- Fable designs and executes the difficult implementation work.
-- Grok handles bounded mechanical work and validation under precise briefs.
-- Keep one persistent Fable session for related tasks; send follow-ups to that
-  session or resume it with its existing context. Do not repeatedly start fresh
-  Fable sessions and repay the same input context. Idle without polling/model
-  turns while waiting for related work.
-- This is the user's current workflow (2026-09-16) and supersedes older role
-  assignments in local skills or memories. Preserve the manager/implementer split.
+- Opus 5.5 does all work that takes judgement: implementation lanes, reviews
+  of every lane's diff, research and design.
+- Grok handles only hyper-mechanical work (bulk renames, repetitive edits,
+  transcription, log sweeps) under precise briefs.
+- Codex, Sol and Fable are not used for now.
+- Resume a finished lane with its context for follow-ups instead of starting
+  a fresh one that repays the same input. Idle without polling while waiting.
+- This is the user's current workflow (2026-09-27) and supersedes older role
+  assignments in local skills or memories (including the 2026-09-16 one).
+
+## Sending your changes to Makepad
+
+People who installed Makepad apps with the Makepad Builder change them with
+their own coding agent. When the person asks you to "send what I changed",
+"share my changes with Makepad" or similar, write a change report and send
+it only with their approval. The format, limits and anonymisation rules are
+in [Change reports](docs/agents/change-report.md); the steps:
+
+1. Find the installation. This checkout is `builder/sources/<release>/makepad`
+   inside it (app repositories at `makepad/apps/<name>`); the installation
+   folder holds `makepad-builder.exe` (Windows) or `makepad-builder.sh`
+   (macOS, Linux). `builder/installed/<app>.json` names the app (`"id"`) and
+   the release its source came from (`"release"`, `"repositories"`). Below,
+   `BUILDER` is `<installation>\makepad-builder.exe` or
+   `<installation>/makepad-builder.sh`.
+2. Collect the changes: `BUILDER changes <app>` prints the diff of the app's
+   source against that release (`--files` lists the files). Edits saved by
+   an earlier update are in `builder/changes/<app>-<date>.diff`. With git
+   available, `git status` and `git diff HEAD` in each repository give the
+   same. Skip build output and anything unrelated to the app.
+3. Write the list as concepts, not code: per change a one-line title, a
+   kind (fix, feature, tweak, ui, performance, refactor, docs, other), what
+   is different for someone using the app and why, and the screens or
+   components it touches. Add a tiny snippet only when a change cannot be
+   told without it.
+4. Anonymise everything that will be sent: replace names and usernames,
+   email addresses, host names and private IP addresses, absolute and home
+   folder paths (use repo-relative paths), keys, tokens and passwords,
+   private service URLs and personal data in strings or comments with
+   `[name]`, `[email]`, `[host]`, `[path]`, `[secret]`, `[private-url]` or
+   `[personal]`, and count what you took out, by kind.
+5. Show the person the list and what was taken out, ask whether to include
+   a trimmed diff (default: no) and whether Makepad may reply by email, and
+   wait for their explicit approval or edits. Never send without it.
+6. Write `builder/changes/<app>-report/` with `report.json` (schema:
+   `docs/agents/change-report.schema.json`), `REPORT.md` (the same list for
+   people) and, only when they opted in, `changes.diff`. `BUILDER
+   send-changes <app>` checks it (schema, 256 KB limit, the anonymisation
+   scan) and prints what would be sent; fix what it reports.
+7. Send it: `BUILDER send-changes <app> --yes`, adding `--with-email` only
+   when the person wants a reply (the Builder adds the address it is logged
+   in with; you never need it). Or leave the report for them to read and
+   send in the Builder (`e` on the app's row). Without the Builder, POST the
+   zip: `curl -sS -X POST -H 'X-Makepad-Feedback: 1' -H 'Content-Type:
+   application/zip' --data-binary @report.zip
+   https://makepad.nl/api/feedback/changes`.
+8. Tell the person the report id the Builder (or the server's
+   `{"ok":true,"id":N}`) returned.
+
+## Clean up after work
+
+Standing order: once a lane's work is merged (or abandoned by the user's
+decision), its owner cleans up what it created, the same day. On every machine
+it used (this one and any build or bench node):
+
+- Remove its git worktrees (`git worktree remove`) and delete its merged
+  branches. First check that every commit's content is on the branch it was
+  merged into; a branch or worktree with unmerged commits is kept and reported,
+  never deleted.
+- Delete its build output (cargo `target` dirs, alternate target dirs), its
+  scratch and temp dirs, sweep/bench outputs that were already summarised in a
+  report, and its per-lane directories on remote nodes.
+- Stop its processes and hidden app instances by recorded PID (never by
+  pattern), and release any lock or slot it held.
+- Keep reports and plans under `local/`, and leave alone anything another lane,
+  a running service or the user owns. Untracked files the user created are
+  kept; when unsure whether something is still needed, copy it aside and ask.
+- When a machine runs low on disk, clean up finished lanes first, then report
+  what is left and who owns it.
 
 ## Software installation requires explicit approval
 
@@ -52,7 +122,7 @@ use current source for API signatures and working examples.
 ## Commit content and Studio iteration history
 
 - NEVER create or publish additional public branches in `makepad/makepad`.
-  Use only the established `local` → `work` → `dev` workflow. `local` remains
+  Use only the established `local` → `work` → `main` workflow. `local` remains
   private and must never be pushed. Feature, test, release, packaging, and
   distribution work do not authorize another public branch; using a separate
   checkout or worktree does not change this rule.
@@ -72,14 +142,18 @@ use current source for API signatures and working examples.
 - Run the existing repository tests for validation. Do not add generated test
   files, inline test code, or test scaffolding unless the user explicitly requests
   that change. Preserve existing tests; do not remove or weaken them to pass.
-- Studio's source hierarchy is `local` → `work` → `dev`: `local` records every
-  build iteration, `work` contains coherent feature commits, and `dev` contains
-  lower-frequency, validated milestones and incoming external PRs.
+- The source hierarchy is `local` → `work` → `main`: `local` records every
+  build iteration, `work` carries day-to-day landings, and `main` holds validated
+  milestones, one squashed commit per logical block, and incoming external PRs.
+- About every week `work` is squashed onto `main` and then re-pointed at `main`'s
+  tip (`makepad devhub promote`). The old chain stays local as `work-old-<date>`;
+  `work` history is rewritten at each re-point, so a branch off `work` rebases
+  after it (lanes are carried over by devhub). External PRs target `main`.
 - NEVER push `local`, its private flow branches, or checkpoint/archive refs.
   Never merge private checkpoint ancestry into a public branch. Promote only
-  by squash from `local` into `work`, then squash feature groups from `work`
-  into named `dev` milestones. Fetch/sync incoming `work` and `dev` changes
-  without rewriting published history or discarding unrelated work.
+  by squash from `local` into `work`, then squash logical blocks from `work`
+  onto `main`. `main` is never rewritten; fetch incoming `work` and `main`
+  changes without discarding unrelated work.
 - For Studio-managed flow builds, use this order: platform build checks,
   rustfmt on changed Rust, repeat checks if formatting changed the source,
   commit the exact eligible source to `local`, release binary build, existing
@@ -98,11 +172,11 @@ use current source for API signatures and working examples.
   package/target support matrix. Missing SDKs, runners, or required tests are
   blocked coverage, not passes. Do not suppress warnings to obtain a green gate.
 - Validate the exact resulting source for each feature/milestone promotion so
-  `dev` remains useful for bisecting. Public squash/push operations must expose
+  `main` remains useful for bisecting. Public squash/push operations must expose
   their source, destination, included changes, validation, and conflicts.
-- Agents working in Studio flows must also follow
-  [Director flow instructions](apps/director/AGENTS.md). This covers todo deltas,
-  terminal image delivery, test ownership, recordings, and revision feedback.
+- An app with its own `AGENTS.md` (including the private products in the
+  commercial repository checked out at `apps/commercial`) adds flow
+  instructions for agents working in it; follow them alongside these.
 
 ## Builds and runtime verification
 
@@ -119,12 +193,20 @@ use current source for API signatures and working examples.
 - Build profiles live in the root `Cargo.toml`: dev keeps line tables only,
   release is incremental without LTO. cargo-makepad's packaging commands
   build release non-incrementally.
-- A private app repository cloned into `apps/<name>` (Stage) has no
-  workspace of its own: its root `Cargo.toml` is a package whose
-  `cfg(any())` path dependencies make its crates members of this workspace
+- The private commercial repository (`makepad/commercial`: Stage,
+  Scope, Sandbox) is cloned into `apps/commercial` and has no workspace of
+  its own: its root `Cargo.toml` is a package whose `cfg(any())` path
+  dependencies make Stage's and Scope's crates members of this workspace
   (matched by `apps/*/src/..`), so they share its profiles, patches and
-  `target/`, and every Makepad crate compiles once for all apps. Nothing is
-  required when it is absent. `Cargo.lock` is not committed.
+  `target/`, and every Makepad crate compiles once for all apps. Sandbox
+  (`apps/commercial/sandbox`) is its own workspace, excluded here. Nothing is
+  required when the clone is absent. `Cargo.lock` is not committed.
+- Reference videos from the web (YouTube, X posts, most pages with a video):
+  `./target/release/makepad-stage-web-grab <url> --every 0.5 --dir <folder>
+  --launch <scratch>` grabs one through Stage's web grab in its own hidden,
+  muted Stage (H.264-only sites such as X via the media file behind the page)
+  and writes the clip, provenance and frames. See
+  `apps/commercial/stage/WEB-GRABS.md`.
 - The parallel rustc frontend is a local opt-in, never for CI or shipped
   builds. It needs `RUSTC_BOOTSTRAP` on stable and roughly halves a clean
   dev build. Put it in the user config, `~/.cargo/config.toml`, so every
@@ -142,19 +224,24 @@ use current source for API signatures and working examples.
   visual verification is needed. Avoid unrelated or routine captures.
 - Command-line builds, tests, linting, and file operations run directly in
   the shell.
-- Rendering is verified on the real GPU backend, never on the gpusim
-  raster (the CPU simulated-GPU backend, `MAKEPAD=gpusim`, formerly called
-  "headless"; user, 2026-09-11: "chasing bugs in headless is useless"). Any
-  picture, pixel, outline, colour, LOD, tile or frame-timing question is
-  answered with an owned `--remote` instance of the release build on the
-  native backend (Metal here) and `/g` / `/gseq` grabs, compared in RGB.
-  `MAKEPAD=gpusim` suites are for logic and data-structure tests only
-  (layout, budgets, orderings, parsers); a gpusim raster gate never
-  stands in for a GPU proof and is never used to diagnose a rendering bug.
+- Never pass a variable that could be empty or unset to `rm` (or `rm -rf`),
+  e.g. `rm -rf "$DIR/"*` or `rm -rf $TMP/build`: an empty value turns it into
+  a delete at `/` or `$HOME` and raises a macOS permission popup for the
+  user. Delete literal, absolute paths inside the repo or scratchpad, or
+  guard first (`: "${DIR:?}"` / `[ -n "$DIR" ] || exit 1`).
+- Rendering is verified on the real GPU backend, never on the HAL headless
+  backend (`MAKEPAD_HAL_BACKEND=headless`: no GPU, no raster; user,
+  2026-09-11: "chasing bugs in headless is useless"). Any picture, pixel,
+  outline, colour, LOD, tile or frame-timing question is answered with an
+  owned `--remote` instance of the release build on the native backend
+  (Metal here) and `grab` / `gseq` grabs, compared in RGB. Headless suites
+  are for logic and data-structure tests only (layout, budgets, orderings,
+  parsers); they never stand in for a GPU proof and are never used to
+  diagnose a rendering bug.
   The window need not be visible: a hidden instance (`MAKEPAD_HIDE_WINDOWS=1`)
-  on the native backend is the normal pixel-proof rig; `/g` forces a present
+  on the native backend is the normal pixel-proof rig; `grab` forces a present
   (about 2 s per grab on a hidden window). Only rest/settle timing proofs
-  need a window that presents on its own. Close it with `/gq`.
+  need a window that presents on its own. Close it with `gq`.
 - Apps that embed the AI chat build only its CLI/MCP/cloud backends. The
   local model runtimes (Qwen on Metal/CUDA, the metallib and kernel builds)
   come in through the app's own `localai` cargo feature
@@ -175,8 +262,8 @@ use current source for API signatures and working examples.
   suspend agent testing or require a handoff. Continue inspecting, driving,
   closing and restarting that app as needed, preserving its workspace and
   saved state. This is the user's standing authorization (2026-09-22).
-- Read `/activity` and use `if_user_seq` for each bounded input sequence.
-  A changed counter or HTTP 409 invalidates that sequence's evidence, not
+- Read `activity` and pass `if_user_seq` to each bounded input sequence.
+  A changed counter or a `user_intervened` answer invalidates that sequence's evidence, not
   authorization to continue: inspect whether the action was applied, read a
   fresh counter and retry or restart the sequence without asking permission.
   Never replay an already-applied toggle or edit blindly. See
@@ -191,14 +278,14 @@ use current source for API signatures and working examples.
   their own distinct test profile. Never run two instances on the user's
   profile at once. `MAKEPAD_HOME` and asset roots are separate state; keep
   them as they were.
-- Capture only the app's own drawable through `/g`, `/gq`, `/tweak/grab`,
+- Capture only the app's own drawable through `grab`, `gq`, `tweak grab`,
   or an app-provided capture hook. OS/window/display screenshots are forbidden.
   If native chrome or another app matters, ask the user for an image.
 - A `user closed` log entry means the human dismissed the window, not a crash.
   Continue the active workflow, including launching a needed replacement,
   unless the user has asked to stop.
-- Finish test sessions with `GET /gq` (grab and quit). If grabbing is
-  unavailable, use `/close` and/or `/quit`. Verify your process exits;
+- Finish test sessions with `gq` (grab and quit). If grabbing is
+  unavailable, use `close` and/or `quit`. Verify your process exits;
   only fall back to stopping its exact owned PID if graceful cleanup fails.
 - The exception is an app the user explicitly asks to keep open for them:
   hand off that instance and close any separate test/capture instances.
@@ -206,23 +293,46 @@ use current source for API signatures and working examples.
 
 ## Remote control quick start
 
-1. Build the release binary and launch your own instance with `--remote`.
-2. Read its startup line for port, PID, and grab directory.
-3. Fetch `GET /` for the running binary's current protocol.
-4. Use `/snap?q=...` to find widget rectangles, then inject input.
-5. Inspect results through snapshots/logs and, when needed, `/g`.
-6. Finish with `/gq` and confirm shutdown.
+1. Build the release binary and the client (`cargo build --release -p makepad-remote`);
+   launch your own instance with `--remote` (a Unix socket, no TCP port).
+2. Read its startup line `[makepad-remote] pid=<pid> app=<app> socket=<path>`.
+3. Run `makepad-remote app <pid> help` for the running binary's commands.
+4. Use `ui find q=...` to find semantic nodes, then `ui act node=ID press wait=1`.
+5. Inspect results through `ui`, `ui diff`, and logs and, when needed, `grab`.
+6. Finish with `gq` and confirm shutdown.
+
+Commands are `makepad-remote app <pid|app-name|socket> <command> [k=v ...]`
+(`makepad inspect <pid> <command>` is the same); exit status 1 means an error
+line, 2 an unreachable app. Details: [App remote control](docs/agents/app-remote.md).
 
 Coordinates are window-local layout points; no DPI conversion is needed.
-Add `wait=1` to input requests to wait for the resulting frame.
+Add `wait=1` to input commands to wait for the resulting frame.
 
-Read [App remote control](docs/agents/app-remote.md) for routes and examples,
+Read [App remote control](docs/agents/app-remote.md) for commands and examples,
 or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
+
+## Drag and drop, and pointer feedback
+
+The user's rules for every drag in every app (stated repeatedly; the dock's
+tab drag is the reference):
+
+- The cursor holds what it drags: a chip, image or label of the item rides
+  the pointer from the press to the drop.
+- Near a drop target the app shows how the drop would look BEFORE it
+  happens. In a design case (placing a widget, docking a panel) the layout
+  reflows as if the item had been dropped: other elements move or scale to
+  make room, and a ghost occupies that space until the drop or the leave.
+- The one exception is a list reorder, where an insertion line between the
+  rows is the right feedback.
+- The pointer is a hand while it hovers anything that can be dragged.
+- The panel's controls are responsive: rows of buttons and inputs wrap or
+  resize when the panel narrows; tab rows fall back to icons.
 
 ## Threading and realtime ownership
 
-- The UI thread never takes a `Mutex`, `RwLock`, or `Condvar` another thread
-  can hold, and never waits on a channel.
+- The UI thread never waits on a channel or a `Condvar`, and takes a lock
+  another thread can hold only when every holder keeps it briefly (see the
+  spin rule below).
 - UI-to-worker/audio commands use bounded, non-blocking sends. Report a
   full queue and retain/retry the command on a subsequent frame.
 - Workers/audio publish snapshots through atomics, a triple buffer, or a
@@ -233,11 +343,29 @@ or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 - A realtime audio callback owns its state, does not allocate on its hot
   path, and never takes a lock the UI or a worker can hold.
 - Use one mechanism on native and wasm. Do not retain a desktop shared-lock
-  path alongside a wasm workaround. UI/audio threads must not use
-  `Atomics.wait` or spin-wait fallbacks.
-- `lock_from_ui` is allowed only for state provably touched by the UI alone.
+  path alongside a wasm workaround. The UI thread and the audio worklet never
+  block or wait on long work. Brief spins on short locks (held only for a
+  few field updates, never across I/O, parsing, evaluation or a job) are
+  allowed; on wasm the optimiser's `waits` pass turns a contended
+  `Atomics.wait` on those threads into such a spin, so plain `.lock()` is
+  the one mechanism. Anything longer goes to a worker and returns through a
+  channel.
 - Do not spawn a temporary thread for each job. Use `cx.thread_spawner()`,
   the pool TaskHandle API, or a long-lived platform worker fed by a channel.
+
+## Performance dynamics and limits
+
+- Always carefully evaluate the performance dynamics a change has on the main
+  UI loop: what now runs per frame, per event, or per item, how that cost
+  scales with data size and view state, and what moves on or off the UI
+  thread. State this in the change's report, with measurements for hot paths.
+- Never add arbitrary limits (memory caps, CPU/time budgets, chunk or item
+  counts, queue sizes, retry counts) that only surface as random failures
+  when real data reaches them. It is better to keep working with a
+  performance hiccup than to stop working.
+- Where a bound is genuinely required, hitting it must degrade gracefully
+  (queue, spill, split, slow down, or retry on a later frame) and never
+  drop data, refuse input, or fail the operation; log when it happens.
 
 ## Platform changes stay application-neutral
 

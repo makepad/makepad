@@ -2,8 +2,8 @@
   {
     "id": "aichat",
     "title": "AI Chat",
-    "package": "makepad-aichat",
-    "binary": "aichat",
+    "package": "makepad-app-aichat",
+    "binary": "makepad-app-aichat",
     "workspace": "makepad/apps/aichat",
     "features": [
       "engine",
@@ -12,9 +12,9 @@
   },
   {
     "id": "ai-hub",
-    "title": "AI Hub",
+    "title": "AI Hub (headless)",
     "package": "makepad-app-ai-hub",
-    "binary": "makepad-ai-hub",
+    "binary": "makepad-app-ai-hub",
     "workspace": "makepad/apps/ai-hub",
     "features": [
       "localai",
@@ -44,18 +44,80 @@
     ]
   },
   {
+    "id": "aihub",
+    "title": "AI Hub",
+    "package": "makepad-app-aihub",
+    "binary": "makepad-app-aihub",
+    "workspace": "makepad/apps/aihub",
+    "features": [
+      "localai"
+    ]
+  },
+  {
+    "id": "amp",
+    "title": "Amp",
+    "package": "makepad-app-amp",
+    "binary": "makepad-app-amp",
+    "workspace": "makepad/apps/amp",
+    "features": [],
+    "menu": "other"
+  },
+  {
+    "id": "flow",
+    "title": "Flow",
+    "package": "makepad-app-flow",
+    "binary": "makepad-app-flow",
+    "workspace": "makepad/apps/flow",
+    "features": [],
+    "menu": "other"
+  },
+  {
+    "id": "synth",
+    "title": "Synth",
+    "package": "makepad-app-synth",
+    "binary": "makepad-app-synth",
+    "workspace": "makepad/apps/synth",
+    "features": [],
+    "menu": "other"
+  },
+  {
+    "id": "code",
+    "title": "Code",
+    "package": "makepad-app-code",
+    "binary": "makepad-app-code",
+    "workspace": "makepad/apps/code",
+    "features": [],
+    "menu": "other"
+  },
+  {
+    "id": "box3d",
+    "title": "Box3D",
+    "package": "makepad-example-box3d",
+    "binary": "makepad-example-box3d",
+    "workspace": "makepad/examples/box3d",
+    "features": []
+  },
+  {
+    "id": "counter",
+    "title": "Counter",
+    "package": "makepad-example-counter",
+    "binary": "makepad-example-counter",
+    "workspace": "makepad/examples/counter",
+    "features": []
+  },
+  {
     "id": "browser",
     "title": "Browser",
-    "package": "makepad-browser",
-    "binary": "browser",
+    "package": "makepad-app-browser",
+    "binary": "makepad-app-browser",
     "workspace": "makepad/apps/browser",
     "features": []
   },
   {
     "id": "calculator",
     "title": "Calculator",
-    "package": "makepad-calculator",
-    "binary": "calculator",
+    "package": "makepad-app-calculator",
+    "binary": "makepad-app-calculator",
     "workspace": "makepad/apps/calculator",
     "features": [
       "standalone"
@@ -65,8 +127,8 @@
   {
     "id": "calendar",
     "title": "Calendar",
-    "package": "makepad-calendar",
-    "binary": "calendar",
+    "package": "makepad-app-calendar",
+    "binary": "makepad-app-calendar",
     "workspace": "makepad/apps/calendar",
     "features": [
       "standalone"
@@ -74,10 +136,19 @@
     "menu": "other"
   },
   {
+    "id": "camera",
+    "title": "Camera",
+    "package": "makepad-app-camera",
+    "binary": "makepad-app-camera",
+    "workspace": "makepad/apps/camera",
+    "features": [],
+    "menu": "other"
+  },
+  {
     "id": "clock",
     "title": "Clock",
-    "package": "makepad-clock",
-    "binary": "clock",
+    "package": "makepad-app-clock",
+    "binary": "makepad-app-clock",
     "workspace": "makepad/apps/clock",
     "features": [
       "standalone"
@@ -85,30 +156,10 @@
     "menu": "other"
   },
   {
-    "id": "director",
-    "title": "Director",
-    "package": "makepad-director",
-    "binary": "director",
-    "workspace": "makepad/apps/director",
-    "features": [],
-    "menu": "other"
-  },
-  {
-    "id": "fab",
-    "title": "Fab",
-    "package": "makepad-fab",
-    "binary": "makepad-fab",
-    "workspace": "makepad/apps/fab",
-    "features": [
-      "gltf"
-    ],
-    "menu": "other"
-  },
-  {
     "id": "fabric",
     "title": "Fabric",
-    "package": "makepad-fabric",
-    "binary": "makepad-fabric",
+    "package": "makepad-app-fabric",
+    "binary": "makepad-app-fabric",
     "workspace": "makepad/apps/fabric",
     "features": [],
     "menu": "other"
@@ -116,8 +167,8 @@
   {
     "id": "files",
     "title": "Files",
-    "package": "makepad-files",
-    "binary": "files",
+    "package": "makepad-app-files",
+    "binary": "makepad-app-files",
     "workspace": "makepad/apps/files",
     "features": [
       "standalone"
@@ -127,8 +178,8 @@
   {
     "id": "finance",
     "title": "Finance",
-    "package": "makepad-finance",
-    "binary": "finance",
+    "package": "makepad-app-finance",
+    "binary": "makepad-app-finance",
     "workspace": "makepad/apps/finance",
     "features": [
       "standalone"
@@ -136,18 +187,10 @@
     "menu": "other"
   },
   {
-    "id": "gltf",
-    "title": "Gltf",
-    "package": "makepad-fab-loader-gltf",
-    "binary": "makepad-fab-loader-gltf",
-    "workspace": "makepad/apps/fab/loaders/gltf",
-    "features": []
-  },
-  {
     "id": "image",
     "title": "Image",
-    "package": "makepad-image",
-    "binary": "image",
+    "package": "makepad-app-image",
+    "binary": "makepad-app-image",
     "workspace": "makepad/apps/image",
     "features": [],
     "menu": "other"
@@ -155,8 +198,8 @@
   {
     "id": "mail",
     "title": "Mail",
-    "package": "makepad-mail",
-    "binary": "mail",
+    "package": "makepad-app-mail",
+    "binary": "makepad-app-mail",
     "workspace": "makepad/apps/mail",
     "features": [
       "standalone"
@@ -166,8 +209,8 @@
   {
     "id": "mixer",
     "title": "Mixer",
-    "package": "makepad-mixer",
-    "binary": "makepad-mixer",
+    "package": "makepad-app-mixer",
+    "binary": "makepad-app-mixer",
     "workspace": "makepad/apps/mixer",
     "features": [],
     "menu": "other"
@@ -175,8 +218,8 @@
   {
     "id": "notes",
     "title": "Notes",
-    "package": "makepad-notes",
-    "binary": "notes",
+    "package": "makepad-app-notes",
+    "binary": "makepad-app-notes",
     "workspace": "makepad/apps/notes",
     "features": [
       "standalone"
@@ -186,16 +229,16 @@
   {
     "id": "pdf",
     "title": "PDF",
-    "package": "makepad-pdf",
-    "binary": "pdf",
+    "package": "makepad-app-pdf",
+    "binary": "makepad-app-pdf",
     "workspace": "makepad/apps/pdf",
     "features": []
   },
   {
     "id": "photos",
     "title": "Photos",
-    "package": "makepad-photos",
-    "binary": "photos",
+    "package": "makepad-app-photos",
+    "binary": "makepad-app-photos",
     "workspace": "makepad/apps/photos",
     "features": [
       "standalone"
@@ -205,8 +248,8 @@
   {
     "id": "reminders",
     "title": "Reminders",
-    "package": "makepad-reminders",
-    "binary": "reminders",
+    "package": "makepad-app-reminders",
+    "binary": "makepad-app-reminders",
     "workspace": "makepad/apps/reminders",
     "features": [
       "standalone"
@@ -217,7 +260,7 @@
     "id": "route",
     "title": "Route",
     "package": "makepad-app-route",
-    "binary": "route",
+    "binary": "makepad-app-route",
     "workspace": "makepad/apps/route",
     "features": [
       "standalone",
@@ -237,8 +280,8 @@
   {
     "id": "sheets",
     "title": "Sheets",
-    "package": "makepad-sheets",
-    "binary": "sheets",
+    "package": "makepad-app-sheets",
+    "binary": "makepad-app-sheets",
     "workspace": "makepad/apps/sheets",
     "features": [
       "standalone"
@@ -248,8 +291,8 @@
   {
     "id": "task",
     "title": "Task",
-    "package": "makepad-task",
-    "binary": "task",
+    "package": "makepad-app-task",
+    "binary": "makepad-app-task",
     "workspace": "makepad/apps/task",
     "features": [],
     "menu": "other"
@@ -257,8 +300,8 @@
   {
     "id": "terminal",
     "title": "Terminal",
-    "package": "makepad-terminal",
-    "binary": "terminal",
+    "package": "makepad-app-terminal",
+    "binary": "makepad-app-terminal",
     "workspace": "makepad/apps/terminal",
     "features": [],
     "menu": "other"
@@ -266,16 +309,25 @@
   {
     "id": "video",
     "title": "Video",
-    "package": "makepad-video",
-    "binary": "video",
+    "package": "makepad-app-video",
+    "binary": "makepad-app-video",
     "workspace": "makepad/apps/video",
     "features": []
   },
   {
+    "id": "translator",
+    "title": "Translator",
+    "package": "makepad-app-translator",
+    "binary": "makepad-app-translator",
+    "workspace": "makepad/apps/translator",
+    "features": [],
+    "menu": "other"
+  },
+  {
     "id": "weather",
     "title": "Weather",
-    "package": "makepad-weather",
-    "binary": "weather",
+    "package": "makepad-app-weather",
+    "binary": "makepad-app-weather",
     "workspace": "makepad/apps/weather",
     "features": [
       "standalone"
@@ -285,8 +337,8 @@
   {
     "id": "wm",
     "title": "Makepad WM",
-    "package": "makepad-wm",
-    "binary": "wm",
+    "package": "makepad-app-wm",
+    "binary": "makepad-app-wm",
     "workspace": "makepad/apps/wm",
     "features": [],
     "menu": "primary"
@@ -294,8 +346,8 @@
   {
     "id": "wm-all",
     "title": "Window Manager (all apps)",
-    "package": "makepad-wm-all",
-    "binary": "wm-all",
+    "package": "makepad-app-wm-all",
+    "binary": "makepad-app-wm-all",
     "workspace": "makepad/apps/wm-all",
     "features": []
   }
