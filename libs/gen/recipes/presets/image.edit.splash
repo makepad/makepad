@@ -1,0 +1,14 @@
+use mod.flow.*
+
+/** The picture to change. */
+let source = Input{ type: @image }
+/** What to change, as an instruction. */
+let prompt = Input{ type: @text default: "make it night, lit by street lamps" }
+let edit = ImageEdit{ prompt: prompt.text() image: source.image() }
+let published = Publish{ value: edit.out(@image) tags: ["image"] }
+
+Flow{
+    label: "Edit image"
+    brief: "Changes a picture by an instruction, keeping the rest of it."
+    source, prompt, edit, published
+}

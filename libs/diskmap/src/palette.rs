@@ -1,7 +1,7 @@
 //! Colours the map paints with. Tokyo Night is the standalone default; a host
 //! that already has a theme (the files app) can push its own hexes in.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// The hues the disk map draws with.
 #[derive(Clone, Debug)]

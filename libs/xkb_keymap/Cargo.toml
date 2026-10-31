@@ -1,0 +1,10 @@
+[package]
+name = "makepad-xkb-keymap"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "XKB v1 keymap text writer, layout tables and modifier tracker (no libxkbcommon)."
+
+[lib]
+name = "xkb_keymap"

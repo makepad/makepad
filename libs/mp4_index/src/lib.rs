@@ -317,13 +317,54 @@ fn parse_trak(trak: &[u8]) -> Result<Option<Mp4Index>, Mp4Error> {
         VideoCodec::Other(String::from_utf8_lossy(fourcc).into_owned())
     };
 
+    let table = sample_table(&stbl_kids)?;
+    let sample_count = table.sizes.len();
+    let (dts, sizes, offsets, sync) = (table.dts, table.sizes, table.offsets, table.sync);
+    let ctts_offsets: Vec<i64> = table.cts_offsets;
+
+    // ---- assemble, zero-based pts (shifted in ticks, so no rounding drift)
+    let cts: Vec<i64> = (0..sample_count)
+        .map(|i| dts[i] + ctts_offsets.get(i).copied().unwrap_or(0))
+        .collect();
+    let min_cts = cts.iter().copied().min().unwrap_or(0);
+    let mut samples: Vec<Sample> = Vec::with_capacity(sample_count);
+    for i in 0..sample_count {
+        samples.push(Sample {
+            offset: offsets[i],
+            size: sizes[i],
+            dts_100ns: to_hns(dts[i], timescale),
+            pts_100ns: to_hns(cts[i] - min_cts, timescale),
+            sync: sync[i],
+        });
+    }
+    let duration_100ns = to_hns(duration, timescale).max(
+        samples.last().map(|s| s.pts_100ns).unwrap_or(0),
+    );
+    Ok(Some(Mp4Index { timescale, duration_100ns, width, height, codec, samples }))
+}
+
+/// One track's sample table in its own timescale ticks: what `stts`,
+/// `ctts`, `stsz`, `stsc`/`stco` and `stss` say, per sample, decode order.
+struct SampleTable {
+    dts: Vec<i64>,
+    durations: Vec<u32>,
+    /// Composition offsets (empty: all zero). `ctts` v0 values are
+    /// reinterpreted as signed 32-bit, as every writer means them.
+    cts_offsets: Vec<i64>,
+    sizes: Vec<u32>,
+    offsets: Vec<u64>,
+    sync: Vec<bool>,
+}
+
+fn sample_table(stbl_kids: &[([u8; 4], &[u8])]) -> Result<SampleTable, Mp4Error> {
     // ---- timing
-    let stts = child(&stbl_kids, b"stts").ok_or(Mp4Error::Missing("stts"))?;
+    let stts = child(stbl_kids, b"stts").ok_or(Mp4Error::Missing("stts"))?;
     let (_, stts) = full_box(stts, "stts")?;
     need(stts, 0, 4, "stts count")?;
     let stts_count = be_u32(stts, 0) as usize;
     need(stts, 4, stts_count.checked_mul(8).ok_or(Mp4Error::TooLarge)?, "stts entries")?;
     let mut dts: Vec<i64> = Vec::new();
+    let mut durations: Vec<u32> = Vec::new();
     let mut t: i64 = 0;
     for i in 0..stts_count {
         let count = be_u32(stts, 4 + i * 8) as usize;
@@ -333,24 +374,21 @@ fn parse_trak(trak: &[u8]) -> Result<Option<Mp4Index>, Mp4Error> {
         }
         for _ in 0..count {
             dts.push(t);
+            durations.push(delta as u32);
             t += delta;
         }
     }
     let sample_count = dts.len();
 
     let mut ctts_offsets: Vec<i64> = Vec::new();
-    if let Some(ctts) = child(&stbl_kids, b"ctts") {
-        let (version, ctts) = full_box(ctts, "ctts")?;
+    if let Some(ctts) = child(stbl_kids, b"ctts") {
+        let (_, ctts) = full_box(ctts, "ctts")?;
         need(ctts, 0, 4, "ctts count")?;
         let n = be_u32(ctts, 0) as usize;
         need(ctts, 4, n.checked_mul(8).ok_or(Mp4Error::TooLarge)?, "ctts entries")?;
         for i in 0..n {
             let count = be_u32(ctts, 4 + i * 8) as usize;
-            let offset = if version == 1 {
-                be_i32(ctts, 8 + i * 8) as i64
-            } else {
-                be_u32(ctts, 8 + i * 8) as i64
-            };
+            let offset = be_i32(ctts, 8 + i * 8) as i64;
             if ctts_offsets.len() + count > MAX_SAMPLES {
                 return Err(Mp4Error::TooLarge);
             }
@@ -361,7 +399,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<Mp4Index>, Mp4Error> {
     }
 
     // ---- sizes
-    let stsz = child(&stbl_kids, b"stsz").ok_or(Mp4Error::Missing("stsz"))?;
+    let stsz = child(stbl_kids, b"stsz").ok_or(Mp4Error::Missing("stsz"))?;
     let (_, stsz) = full_box(stsz, "stsz")?;
     need(stsz, 0, 8, "stsz header")?;
     let uniform = be_u32(stsz, 0);
@@ -380,7 +418,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<Mp4Index>, Mp4Error> {
     }
 
     // ---- chunks → offsets
-    let stsc = child(&stbl_kids, b"stsc").ok_or(Mp4Error::Missing("stsc"))?;
+    let stsc = child(stbl_kids, b"stsc").ok_or(Mp4Error::Missing("stsc"))?;
     let (_, stsc) = full_box(stsc, "stsc")?;
     need(stsc, 0, 4, "stsc count")?;
     let stsc_count = be_u32(stsc, 0) as usize;
@@ -389,13 +427,13 @@ fn parse_trak(trak: &[u8]) -> Result<Option<Mp4Index>, Mp4Error> {
     for i in 0..stsc_count {
         runs.push((be_u32(stsc, 4 + i * 12), be_u32(stsc, 8 + i * 12)));
     }
-    let chunk_offsets: Vec<u64> = if let Some(stco) = child(&stbl_kids, b"stco") {
+    let chunk_offsets: Vec<u64> = if let Some(stco) = child(stbl_kids, b"stco") {
         let (_, stco) = full_box(stco, "stco")?;
         need(stco, 0, 4, "stco count")?;
         let n = be_u32(stco, 0) as usize;
         need(stco, 4, n.checked_mul(4).ok_or(Mp4Error::TooLarge)?, "stco entries")?;
         (0..n).map(|i| be_u32(stco, 4 + i * 4) as u64).collect()
-    } else if let Some(co64) = child(&stbl_kids, b"co64") {
+    } else if let Some(co64) = child(stbl_kids, b"co64") {
         let (_, co64) = full_box(co64, "co64")?;
         need(co64, 0, 4, "co64 count")?;
         let n = be_u32(co64, 0) as usize;
@@ -429,7 +467,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<Mp4Index>, Mp4Error> {
 
     // ---- keyframes
     let mut sync = vec![true; sample_count];
-    if let Some(stss) = child(&stbl_kids, b"stss") {
+    if let Some(stss) = child(stbl_kids, b"stss") {
         let (_, stss) = full_box(stss, "stss")?;
         need(stss, 0, 4, "stss count")?;
         let n = be_u32(stss, 0) as usize;
@@ -443,25 +481,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<Mp4Index>, Mp4Error> {
         }
     }
 
-    // ---- assemble, zero-based pts (shifted in ticks, so no rounding drift)
-    let cts: Vec<i64> = (0..sample_count)
-        .map(|i| dts[i] + ctts_offsets.get(i).copied().unwrap_or(0))
-        .collect();
-    let min_cts = cts.iter().copied().min().unwrap_or(0);
-    let mut samples: Vec<Sample> = Vec::with_capacity(sample_count);
-    for i in 0..sample_count {
-        samples.push(Sample {
-            offset: offsets[i],
-            size: sizes[i],
-            dts_100ns: to_hns(dts[i], timescale),
-            pts_100ns: to_hns(cts[i] - min_cts, timescale),
-            sync: sync[i],
-        });
-    }
-    let duration_100ns = to_hns(duration, timescale).max(
-        samples.last().map(|s| s.pts_100ns).unwrap_or(0),
-    );
-    Ok(Some(Mp4Index { timescale, duration_100ns, width, height, codec, samples }))
+    Ok(SampleTable { dts, durations, cts_offsets: ctts_offsets, sizes, offsets, sync })
 }
 
 fn parse_avcc(avcc: &[u8]) -> Result<VideoCodec, Mp4Error> {
@@ -532,6 +552,142 @@ pub fn parameter_sets_annex_b(codec: &VideoCodec) -> Vec<u8> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------- tracks
+
+/// One sample of any track, in the track's own timescale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrackSample {
+    pub offset: u64,
+    pub size: u32,
+    /// Decode duration.
+    pub duration: u32,
+    /// Composition offset (signed).
+    pub cts: i32,
+    pub sync: bool,
+}
+
+/// One track of a file, whatever its kind: the sample table in its own
+/// timescale, with the boxes a writer needs to carry the track over
+/// unchanged (what a lossless join does).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Track {
+    /// `vide`, `soun`, ...
+    pub handler: [u8; 4],
+    pub timescale: u32,
+    /// The whole `stsd` box, header included, as found.
+    pub stsd: Vec<u8>,
+    /// `tkhd` width and height, 16.16 fixed point.
+    pub width: u32,
+    pub height: u32,
+    /// Edit list: (segment duration in movie units, media time).
+    pub edits: Vec<(u64, i64)>,
+    pub movie_timescale: u32,
+    pub samples: Vec<TrackSample>,
+    /// The sample-group boxes (`sgpd`, `sbgp`: an AAC track's pre-roll),
+    /// whole, as found; they index this track's own samples.
+    pub groups: Vec<u8>,
+}
+
+/// A whole box, 32-bit header, around `payload`.
+fn whole_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    out.extend_from_slice(&(payload.len() as u32 + 8).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Every track of the unfragmented file whose `moov` payload this is.
+pub fn tracks(moov: &[u8]) -> Result<Vec<Track>, Mp4Error> {
+    if moov.len() as u64 > MAX_MOOV_BYTES {
+        return Err(Mp4Error::TooLarge);
+    }
+    let kids = children(moov)?;
+    if kids.iter().any(|(k, _)| k == b"mvex") {
+        return Err(Mp4Error::Fragmented);
+    }
+    let mvhd = child(&kids, b"mvhd").ok_or(Mp4Error::Missing("mvhd"))?;
+    let (version, mvhd) = full_box(mvhd, "mvhd")?;
+    let movie_timescale = if version == 1 {
+        need(mvhd, 0, 20, "mvhd v1")?;
+        be_u32(mvhd, 16)
+    } else {
+        need(mvhd, 0, 12, "mvhd v0")?;
+        be_u32(mvhd, 8)
+    };
+    let mut out = Vec::new();
+    for (kind, trak) in &kids {
+        if kind != b"trak" {
+            continue;
+        }
+        let trak_kids = children(trak)?;
+        let tkhd = child(&trak_kids, b"tkhd").ok_or(Mp4Error::Missing("tkhd"))?;
+        let (version, tkhd) = full_box(tkhd, "tkhd")?;
+        let at = if version == 1 { 32 } else { 20 } + 8 + 2 + 2 + 2 + 2 + 36;
+        need(tkhd, at, 8, "tkhd size")?;
+        let (width, height) = (be_u32(tkhd, at), be_u32(tkhd, at + 4));
+        let mut edits = Vec::new();
+        if let Some(edts) = child(&trak_kids, b"edts") {
+            if let Some(elst) = child(&children(edts)?, b"elst") {
+                let (version, elst) = full_box(elst, "elst")?;
+                need(elst, 0, 4, "elst count")?;
+                let count = be_u32(elst, 0) as usize;
+                if count > MAX_EDITS {
+                    return Err(Mp4Error::Malformed("elst count"));
+                }
+                let entry_len = if version == 1 { 20 } else { 12 };
+                need(elst, 4, count * entry_len, "elst entry")?;
+                for i in 0..count {
+                    let at = 4 + i * entry_len;
+                    edits.push(if version == 1 {
+                        (be_u64(elst, at), be_u64(elst, at + 8) as i64)
+                    } else {
+                        (be_u32(elst, at) as u64, be_i32(elst, at + 4) as i64)
+                    });
+                }
+            }
+        }
+        let mdia = child(&trak_kids, b"mdia").ok_or(Mp4Error::Missing("mdia"))?;
+        let mdia_kids = children(mdia)?;
+        let mdhd = child(&mdia_kids, b"mdhd").ok_or(Mp4Error::Missing("mdhd"))?;
+        let (version, mdhd) = full_box(mdhd, "mdhd")?;
+        let timescale = if version == 1 {
+            need(mdhd, 0, 28, "mdhd v1")?;
+            be_u32(mdhd, 16)
+        } else {
+            need(mdhd, 0, 16, "mdhd v0")?;
+            be_u32(mdhd, 8)
+        };
+        let hdlr = child(&mdia_kids, b"hdlr").ok_or(Mp4Error::Missing("hdlr"))?;
+        let (_, hdlr) = full_box(hdlr, "hdlr")?;
+        need(hdlr, 4, 4, "hdlr handler")?;
+        let handler = [hdlr[4], hdlr[5], hdlr[6], hdlr[7]];
+        let minf = child(&mdia_kids, b"minf").ok_or(Mp4Error::Missing("minf"))?;
+        let minf_kids = children(minf)?;
+        let stbl = child(&minf_kids, b"stbl").ok_or(Mp4Error::Missing("stbl"))?;
+        let stbl_kids = children(stbl)?;
+        let stsd = whole_box(b"stsd", child(&stbl_kids, b"stsd").ok_or(Mp4Error::Missing("stsd"))?);
+        let table = sample_table(&stbl_kids)?;
+        let samples = (0..table.sizes.len())
+            .map(|i| TrackSample {
+                offset: table.offsets[i],
+                size: table.sizes[i],
+                duration: table.durations[i],
+                cts: table.cts_offsets.get(i).copied().unwrap_or(0) as i32,
+                sync: table.sync[i],
+            })
+            .collect();
+        let mut groups = Vec::new();
+        for (kind, payload) in &stbl_kids {
+            if kind == b"sgpd" || kind == b"sbgp" {
+                groups.extend(whole_box(kind, payload));
+            }
+        }
+        out.push(Track { handler, timescale, stsd, width, height, edits, movie_timescale, samples, groups });
+    }
+    Ok(out)
 }
 
 // ------------------------------------------------------------ audio edit
@@ -864,6 +1020,36 @@ mod tests {
         avcc.extend_from_slice(&pps);
         entry.extend_from_slice(&bx(b"avcC", &avcc));
         bx(b"avc1", &entry)
+    }
+
+    #[test]
+    fn tracks_keep_ticks_stsd_and_edits() {
+        let file = synthetic(avc1());
+        let header = locate_moov(file.len() as u64, &mut |o, n| Ok(file[o as usize..(o as usize + n).min(file.len())].to_vec())).unwrap();
+        let moov = &file[(header.offset + header.header_len) as usize..(header.offset + header.size.unwrap()) as usize];
+        let video = children(moov).unwrap().into_iter().filter(|(k, _)| k == b"trak").nth(1).unwrap().1;
+        let mut trak_kids = children(video).unwrap();
+        let mut elst = u32s(&[1, 600, 0]);
+        elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        let edts = bx(b"edts", &full(b"elst", 0, &elst));
+        let mut payload = Vec::new();
+        for (kind, body) in trak_kids.drain(..) {
+            payload.extend(bx(&kind, body));
+        }
+        payload.extend(edts);
+        let mut mvhd = u32s(&[0, 0, 600, 0]);
+        mvhd.extend_from_slice(&[0u8; 80]);
+        let moov = [full(b"mvhd", 0, &mvhd), bx(b"trak", &payload)].concat();
+        let tracks = tracks(&moov).unwrap();
+        assert_eq!(tracks.len(), 1);
+        let t = &tracks[0];
+        assert_eq!((&t.handler, t.timescale, t.movie_timescale), (b"vide", 90000, 600));
+        assert_eq!((t.width >> 16, t.height >> 16), (640, 360));
+        assert_eq!(t.edits, vec![(600, 0)]);
+        assert_eq!(&t.stsd[4..8], b"stsd");
+        assert_eq!(t.samples.len(), 3);
+        assert_eq!((t.samples[1].offset, t.samples[1].size, t.samples[1].duration, t.samples[1].cts), (1100, 50, 3000, 9000));
+        assert!(t.samples[0].sync && !t.samples[1].sync);
     }
 
     #[test]

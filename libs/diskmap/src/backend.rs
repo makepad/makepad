@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use makepad_widgets::makepad_platform::thread::TaskPool;
+use makepad_widgets_core::makepad_platform::thread::TaskPool;
 
 use crate::{
     kind::{self, kind_for},

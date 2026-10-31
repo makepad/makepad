@@ -414,6 +414,29 @@ pub fn extract_pack_from_response(response: &GitHttpResponse) -> Result<Option<V
         return Ok(Some(response.body.clone()));
     }
 
+    // without side-band the pack follows the negotiation lines raw (pack-protocol.txt:
+    // "NAK" / "ACK ..." / "shallow ..." pkt-lines, then the pack bytes unframed)
+    let body = &response.body;
+    let mut at = 0;
+    while at + 4 <= body.len() {
+        if body[at..].starts_with(b"PACK") {
+            return Ok(Some(body[at..].to_vec()));
+        }
+        let Some(len) = std::str::from_utf8(&body[at..at + 4]).ok().and_then(|h| usize::from_str_radix(h, 16).ok()) else { break };
+        if len == 0 {
+            at += 4;
+            continue;
+        }
+        if len < 4 || at + len > body.len() {
+            break;
+        }
+        let line = &body[at + 4..at + len];
+        if !(line.starts_with(b"NAK") || line.starts_with(b"ACK ") || line.starts_with(b"shallow ") || line.starts_with(b"unshallow ")) {
+            break;
+        }
+        at += len;
+    }
+
     let mut reader = PktLineReader::new(&response.body);
     let mut pack_data = Vec::new();
     let mut saw_pkt_lines = false;
@@ -612,13 +635,21 @@ struct ResolvedPackObject {
     oid: ObjectId,
 }
 
-fn import_pack(
-    git_dir: &Path,
+/// A pack parsed and every object resolved (deltas applied), in memory.
+struct ResolvedPack {
+    /// The entries' offsets in pack order.
+    offsets: Vec<u64>,
+    checksum_at: usize,
+    by_offset: HashMap<u64, ResolvedPackObject>,
+    /// Whether a base came from outside the pack (a thin pack).
+    used_external: bool,
+}
+
+fn parse_and_resolve(
     pack_data: &[u8],
-    mut existing_repo: Option<&mut Repository>,
-    fresh: bool,
+    external: &mut dyn FnMut(&ObjectId) -> Option<Object>,
     hooks: &mut dyn HttpSyncHooks,
-) -> Result<HashMap<ObjectId, Arc<Object>>, GitError> {
+) -> Result<ResolvedPack, GitError> {
     if pack_data.len() < 32 {
         return Err(GitError::CorruptPack("pack too small".to_string()));
     }
@@ -800,14 +831,9 @@ fn import_pack(
                         })
                     } else if let Some(obj) = external_cache.get(base_oid).cloned() {
                         Some(obj)
-                    } else if let Some(repo) = existing_repo.as_deref_mut() {
-                        match repo.read_object(base_oid) {
-                            Ok(obj) => {
-                                external_cache.insert(*base_oid, obj.clone());
-                                Some(obj)
-                            }
-                            Err(_) => None,
-                        }
+                    } else if let Some(obj) = external(base_oid) {
+                        external_cache.insert(*base_oid, obj.clone());
+                        Some(obj)
                     } else {
                         None
                     };
@@ -841,13 +867,48 @@ fn import_pack(
         unresolved = next;
     }
 
-    if fresh && external_cache.is_empty() {
+    Ok(ResolvedPack {
+        offsets: parsed.iter().map(|e| e.offset).collect(),
+        checksum_at,
+        used_external: !external_cache.is_empty(),
+        by_offset: resolved_by_offset,
+    })
+}
+
+/// Every object of `pack_data` with its id, deltas resolved in memory (ref-delta bases outside
+/// the pack come from `external`), in pack order. Nothing is written anywhere.
+pub fn unpack_pack(
+    pack_data: &[u8],
+    external: &mut dyn FnMut(&ObjectId) -> Option<Object>,
+) -> Result<Vec<(ObjectId, Object)>, GitError> {
+    let mut r = parse_and_resolve(pack_data, external, &mut NoopHttpSyncHooks)?;
+    Ok(r.offsets.iter().map(|o| {
+        let obj = r.by_offset.remove(o).expect("resolved");
+        (obj.oid, Object { kind: obj.kind, data: obj.data })
+    }).collect())
+}
+
+fn import_pack(
+    git_dir: &Path,
+    pack_data: &[u8],
+    mut existing_repo: Option<&mut Repository>,
+    fresh: bool,
+    hooks: &mut dyn HttpSyncHooks,
+) -> Result<HashMap<ObjectId, Arc<Object>>, GitError> {
+    let mut external = |oid: &ObjectId| existing_repo.as_deref_mut().and_then(|repo| repo.read_object(oid).ok());
+    let resolved = parse_and_resolve(pack_data, &mut external, hooks)?;
+    let num_objects = resolved.offsets.len();
+    let checksum_at = resolved.checksum_at;
+    let resolved_by_offset = resolved.by_offset;
+    let parsed_offsets = resolved.offsets;
+    let used_external = resolved.used_external;
+    if fresh && !used_external {
         // The server sends a complete depth-one pack. Keep its compression and
         // deltas; materializing thousands of loose objects doubles file I/O.
         hooks.on_import_progress(ImportPhase::SavePack, 0, pack_data.len());
-        let entries: Vec<_> = parsed.iter().enumerate().map(|(i, entry)| {
-            let end = parsed.get(i + 1).map_or(checksum_at as u64, |e| e.offset);
-            (resolved_by_offset[&entry.offset].oid, entry.offset, end)
+        let entries: Vec<_> = parsed_offsets.iter().enumerate().map(|(i, offset)| {
+            let end = parsed_offsets.get(i + 1).map_or(checksum_at as u64, |e| *e);
+            (resolved_by_offset[offset].oid, *offset, end)
         }).collect();
         crate::pack::write_imported_pack(git_dir, pack_data, &entries)?;
         hooks.on_import_progress(ImportPhase::SavePack, pack_data.len(), pack_data.len());
@@ -855,8 +916,8 @@ fn import_pack(
         // A thin fetch can depend on objects outside this pack; preserve the
         // general HTTP fetch path until it has a self-contained pack.
         hooks.on_import_progress(ImportPhase::Write, 0, num_objects);
-        for (ordinal, entry) in parsed.iter().enumerate() {
-            let obj = &resolved_by_offset[&entry.offset];
+        for (ordinal, offset) in parsed_offsets.iter().enumerate() {
+            let obj = &resolved_by_offset[offset];
             if write_loose_object_fast(git_dir, obj.kind, &obj.data)? != obj.oid {
                 return Err(GitError::CorruptPack("object hash mismatch".into()));
             }

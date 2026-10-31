@@ -3,7 +3,7 @@
 //! border and selection outline. They used to live in the removed flow graph
 //! crate; Studio owns them now so no surface depends on a graph editor.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*

@@ -1,8 +1,8 @@
 //! Disk-space treemap: a streaming scan of a folder's bytes and the widget
 //! that draws them as a 2D / isometric / perspective map.
 
-pub use makepad_widgets;
-use makepad_widgets::*;
+pub use makepad_widgets_core;
+use makepad_widgets_core::*;
 
 pub mod backend;
 pub mod disk_map;
@@ -39,8 +39,8 @@ mod smoke {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use makepad_widgets::makepad_platform::thread::TaskPool;
-    use makepad_widgets::Cx;
+    use makepad_widgets_core::makepad_platform::thread::TaskPool;
+    use makepad_widgets_core::Cx;
 
     fn unique_dir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()

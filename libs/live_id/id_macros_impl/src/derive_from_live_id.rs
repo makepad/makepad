@@ -1,4 +1,4 @@
-use proc_macro::TokenStream;
+use makepad_micro_proc_macro::proc_macro::TokenStream;
 
 use makepad_micro_proc_macro::{TokenBuilder, TokenParser};
 

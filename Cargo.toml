@@ -1,19 +1,35 @@
 workspace.members = [
     # === app ===
+    "libs/xkb_keymap",
+    "libs/a11y",
+    "libs/dbus_wire",
+    "libs/atspi",
     "tools/dbus_codegen",
+    "libs/xr_core",
+    "libs/civil_time",
+    "libs/code_arch",
+    "libs/code_language",
     "libs/search",
     "libs/lz4",
     "libs/zstd_decode",
     # === Flow: the generation studio and graph workbench's libraries ===
+    "libs/gen/tools",
     # The tiled-RTS map generator, shared by the importer and the sandbox.
     "libs/rtsmap",
+    "libs/texcomp",
     # The AI stack: loader (disk), cuda/metal (kernel and residency stores),
     # job (the one cross-model contract), llm and models/* (per-family model
     # crates), the generate hub and the live pipe.
     # Constructive solid geometry.
+    "libs/csg/csg_math",
+    "libs/web_manifest",
     "libs/soft_body",
+    "libs/bounded_http",
     # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
+    "libs/core_util",
     "libs/strict_json",
+    "libs/cell_width",
+    "libs/loader_bundle",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/xatlas",
     # Editable polygon topology and worker-owned model documents.
@@ -45,9 +61,11 @@ workspace.members = [
     # === image tile wall: HEVC tape atlases + baker CLI + TileGrid widget
     # (the engine extracted from the Source Library picture wall) ===
     # === mp4 sample index for range-streaming playback ===
+    "libs/mp4_index",
     # === necessary tools ===
     "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
+    "libs/stack",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)

@@ -9,8 +9,8 @@
 //!   cargo test --release -p makepad-workspace --test document_worker_latency -- --ignored --nocapture
 
 use makepad_workspace::document_worker::{DocumentWorker, FileSnapshot, MAX_DOCUMENTS};
-use makepad_workspace::makepad_widgets::makepad_platform::makepad_network::install_ui_waker;
-use makepad_workspace::makepad_widgets::Cx;
+use makepad_workspace::makepad_widgets_core::makepad_platform::makepad_network::install_ui_waker;
+use makepad_workspace::makepad_widgets_core::Cx;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

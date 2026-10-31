@@ -1,0 +1,12 @@
+# The gen.* tools' shared text and shapes: every app that offers generation
+# registers them with the same descriptions.
+
+[package]
+name = "makepad-gen-tools"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The gen.* AI tool definitions shared by the apps that run generation presets"
+
+[dependencies]
+makepad-strict-json = { path = "../../strict_json" }

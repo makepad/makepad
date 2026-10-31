@@ -1,9 +1,8 @@
 use proc_macro::TokenStream;
 
-mod derive_animator;
-mod derive_widget;
-use crate::derive_animator::*;
-use crate::derive_widget::*;
+// The expansion logic lives in the library crate makepad-derive-widget-impl (Rapid links it
+// directly); these are the rustc proc-macro entry points.
+use makepad_derive_widget_impl::*;
 
 /*
 #[proc_macro_derive(Widget)]
