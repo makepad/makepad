@@ -206,6 +206,7 @@ mod tests {
             call_id: "c1".into(),
             tool: "run".into(),
             args: format!(r#"{{"command":"{command}"}}"#),
+            caller: None,
         }
     }
 

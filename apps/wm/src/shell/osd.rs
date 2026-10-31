@@ -1,4 +1,4 @@
-//! `shell/plugins/osd/` — the volume / brightness / mic popup.
+//! `shell/plugins/osd/` — the volume / mic popup.
 //!
 //! `Osd.qml`: a card `space(16)` padded around a `displayLarge` (28px)
 //! glyph, a 142×6 progress bar and a bold `title` (14px) readout, centered
@@ -24,6 +24,9 @@ const BAR_HEIGHT: f64 = 6.0;
 const GAP_WITH_BAR: f64 = 16.0;
 /// `round(gap * 2/3)` when there is no bar.
 const GAP_MESSAGE: f64 = 11.0;
+/// The longest a message-only readout gets before it is elided (a layout
+/// scrub reads "Layout 12 min ago (3/57)").
+const MESSAGE_MAX_WIDTH: f64 = 280.0;
 const CARD_ALPHA: f32 = 0.97;
 /// `hideTimer.interval` — the default `duration`.
 pub const DEFAULT_DURATION: f64 = 1.2;
@@ -42,6 +45,10 @@ pub struct OsdShow {
 }
 
 impl OsdShow {
+    /// A short text-only notice.
+    pub fn message(text: &str) -> Self {
+        Self { icon: Ico::Dot, value: None, message: text.to_string(), duration: 1.6 }
+    }
     pub fn volume(level: u32, muted: bool) -> Self {
         Self {
             icon: super::bar::volume_icon(Some(level), muted),
@@ -51,15 +58,6 @@ impl OsdShow {
             } else {
                 format!("{}%", level)
             },
-            duration: DEFAULT_DURATION,
-        }
-    }
-
-    pub fn brightness(level: u32) -> Self {
-        Self {
-            icon: Ico::Brightness,
-            value: Some(level as f64 / 100.0),
-            message: format!("{}%", level),
             duration: DEFAULT_DURATION,
         }
     }
@@ -113,10 +111,19 @@ pub struct ShellOsd {
     /// The animated fill, chasing `show.value`.
     #[rust]
     fill: f64,
+    /// The area the card is drawn in: redraws must reach it, or the scene's
+    /// texture cache keeps showing the desk without the card.
+    #[redraw]
+    #[area]
     #[rust]
     area: Area,
     #[rust]
     screen: Rect,
+    /// Where the surface draws instead of the whole overlay: the screen it
+    /// was opened on, on a multi-screen desktop (set by the WM before each
+    /// draw). `None` draws across the overlay, as on one screen.
+    #[rust]
+    pub target: Option<Rect>,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -161,7 +168,7 @@ impl ShellOsd {
         } else {
             self.d
                 .measure(cx, true, tok.font.title, &show.message)
-                .min(190.0)
+                .min(MESSAGE_MAX_WIDTH)
         };
         let content = if show.value.is_some() {
             icon + gap + BAR_WIDTH + gap + text_w
@@ -241,7 +248,7 @@ impl ShellOsd {
 impl Widget for ShellOsd {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
-        let screen = cx.turtle().rect();
+        let screen = self.target.unwrap_or_else(|| cx.turtle().rect());
         self.draw_surface(cx, screen);
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()

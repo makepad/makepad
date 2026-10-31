@@ -21,12 +21,9 @@ pub struct WmBuild {
     /// Every app is a module: no client hub, no warm pool, no cargo
     /// launches — the all-in-one. A desktop build hosts processes too.
     pub modules_only: bool,
-    /// Android super-app: opening a tile is `cargo rustc --crate-type dylib`
-    /// of that crate against the packaged checkout, then `dlopen`.
-    pub dynamic_dylibs: bool,
     /// The style the desk comes up in.
     pub style: DesktopStyle,
-    /// The assistant's widget families (`makepad_aichat::script_mod`), when
+    /// The assistant's widget families (`makepad_app_aichat::script_mod`), when
     /// the pane seats the assistant in-process.
     pub assistant: Option<fn(&mut ScriptVm)>,
     /// The window's title.
@@ -35,13 +32,12 @@ pub struct WmBuild {
 
 impl Default for WmBuild {
     /// The desktop window manager: processes, no linked modules, the
-    /// Omarchy desk, the assistant as a child process.
+    /// macOS desk, the assistant as a child process.
     fn default() -> Self {
         WmBuild {
             modules: Vec::new(),
             modules_only: false,
-            dynamic_dylibs: false,
-            style: DesktopStyle::Omarchy,
+            style: DesktopStyle::Macos,
             assistant: None,
             title: "makepad-wm".to_string(),
         }
@@ -76,7 +72,7 @@ mod tests {
     fn the_default_build_is_the_desktop_and_cx_carries_a_binary_s_choice() {
         let d = WmBuild::default();
         assert!(d.modules.is_empty() && !d.modules_only && d.assistant.is_none());
-        assert_eq!(d.style, DesktopStyle::Omarchy);
+        assert_eq!(d.style, DesktopStyle::Macos);
         let mut cx = Cx::new(Box::new(|_, _| {}));
         assert_eq!(WmBuild::from_cx(&mut cx).title, "makepad-wm");
         cx.set_global(WmBuild { modules_only: true, style: DesktopStyle::Ios, title: "all".into(), ..Default::default() });

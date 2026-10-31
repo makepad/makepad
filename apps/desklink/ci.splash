@@ -1,0 +1,21 @@
+// CI smoke test for apps/desklink (the Desk Link viewer). With no Desk Host on the CI box it
+// shows a dark window with one status line, which a vision judge reads as "no interface"
+// (red on every run): it comes up when it launches, opens its window and logs no error.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-app-desklink"] targets: ci.host.targets})
+})
+
+let app = ci.launch({package: "makepad-app-desklink" binary: "makepad-app-desklink" cwd: "."})
+
+ci.step("comes up", fn(){
+    ci.sleep(3.0)
+    app.no_errors()
+})
+
+app.no_errors()
+app.quit()
+nil

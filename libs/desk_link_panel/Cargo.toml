@@ -1,0 +1,10 @@
+[package]
+name = "makepad-desk-link-panel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Desk Link's panels drawn with the shell kit: a desktop's viewers (the WM's bar flyout, Desk Host's tray dropdown), the viewer's desktops (Desk Link's menu-bar dropdown) and their tray glyphs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-shell-kit = { path = "../shell_kit" }

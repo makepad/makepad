@@ -266,6 +266,7 @@ impl Outbox {
 
 fn run(commands: Receiver<Command>, tx: SyncSender<Message>, initial_interval_ms: u64) {
     let mut backend = backend::new_backend();
+    let mut jit_names = crate::jit_names::JitNames::default();
     log!("task: sampling via {}", backend.name());
     let mut outbox = Outbox { tx, queue: VecDeque::new(), dropped: 0, supp_dropped: false };
     let wait = CancellationToken::new();
@@ -319,7 +320,8 @@ fn run(commands: Receiver<Command>, tx: SyncSender<Message>, initial_interval_ms
         let time_ms = backend::now_ms();
         let span_ms = if previous_time_ms == 0 { 0 } else { time_ms.saturating_sub(previous_time_ms).min(u32::MAX as u64) as u32 };
         previous_time_ms = time_ms;
-        let snapshot = backend.sample();
+        let mut snapshot = backend.sample();
+        jit_names.update(&mut snapshot.processes);
         let cost_us = ((Cx::monotonic_now() - started) * 1e6).clamp(0.0, u32::MAX as f64) as u32;
         let mut sample = Sample::from_snapshot(snapshot, time_ms, interval_ms as u32, span_ms, session);
         sample.cost_us = cost_us;

@@ -1,0 +1,76 @@
+# Real-WM domain gate (native GPU; headless is only a logic check).
+# MUSIC_MUTE=1 MUSIC_SPOTIFY_CLI=/nonexistent (Amp stays silent and off any Spotify install)
+# MAKEPAD_HOME=<fresh dir: saved calculator/WM state otherwise leaks in> \
+# MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HAL_STEP_TIMEOUT_MS=120000 \
+# MAKEPAD_HAL_SCRIPT=apps/wm/scripts/domains.hal MAKEPAD_HAL_SNAPSHOTS=<dir> \
+# makepad run --privileged makepad-app-wm --remote
+# Launcher rows are drawn by ShellMenu; it filters on KeyDown, so the script presses the keys.
+wait_frame
+sleep_frames 20
+key Space logo alt
+# the shell menu opens on a later frame; it filters on KeyDown (as a physical keyboard)
+sleep_frames 10
+key KeyC
+key KeyA
+key KeyL
+key KeyC
+key KeyU
+key KeyL
+key KeyA
+key KeyT
+key KeyO
+key KeyR
+key ReturnKey
+domain makepad-app-calculator
+expect_text display.result "0"
+domain -
+snapshot wm_calculator_open
+# A launched window takes the keyboard focus; typing is forwarded to the child.
+sleep_frames 10
+text "7+8="
+sleep_frames 10
+domain makepad-app-calculator
+expect_text display.result "15"
+snapshot calculator_15
+domain -
+key Space logo alt
+# the shell menu opens on a later frame; it filters on KeyDown (as a physical keyboard)
+sleep_frames 10
+key KeyC
+key KeyL
+key KeyO
+key KeyC
+key KeyK
+key ReturnKey
+domain makepad-app-clock
+wait_frame
+domain -
+snapshot wm_two_domains
+# Relaunch the focused clock through the WM, then close it through the ordinary WM binding.
+key F5 ctrl
+sleep_frames 60
+domain makepad-app-clock
+wait_frame
+domain -
+key KeyW logo
+sleep_frames 120
+# The calculator survives and takes the keyboard again after the clock leaves the layout.
+sleep_frames 10
+text "9+1="
+sleep_frames 10
+domain makepad-app-calculator
+expect_text display.result "10"
+domain -
+snapshot wm_after_close
+# Amp as a third domain (muted; MUSIC_SPOTIFY_CLI=/nonexistent so it never touches a Spotify install).
+key Space logo alt
+sleep_frames 10
+key KeyA
+key KeyM
+key KeyP
+key ReturnKey
+domain makepad-app-amp
+wait_frame
+sleep_frames 30
+domain -
+snapshot wm_amp

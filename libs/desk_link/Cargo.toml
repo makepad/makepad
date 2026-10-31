@@ -1,0 +1,65 @@
+[package]
+name = "makepad-desk-link"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Desk Link: the remote desktop wire protocol of the window manager and its viewer, and the server they share"
+
+[features]
+# The server (listener, TLS, fleet credentials, sessions): desktops that serve Desk Link.
+server = ["dep:makepad-hal", "dep:makepad-remote", "dep:makepad-network", "dep:makepad-teamtalk", "dep:makepad-core-util"]
+# The per-engine tile encoders every stream shares (`tiles`: the WM's desktop and the XR picture).
+tiles = ["dep:makepad-platform-video", "dep:makepad-hal"]
+# The deskhost engine (`host`): a picture source (a desktop's screens, a JIT host's render)
+# served through the platform's hardware encoder.
+host = ["server", "tiles"]
+# The agent's driver (`desk-link-drive`): pictures decoded to PNGs, input from steps.
+drive = ["server", "dep:makepad-platform-video", "dep:makepad-zune-png", "dep:makepad-key-code"]
+
+[dependencies]
+makepad-remote = { path = "../remote", optional = true }
+makepad-network = { path = "../../platform/network", optional = true }
+makepad-platform-video = { path = "../../platform/video", optional = true }
+makepad-hal = { path = "../../platform/hal", optional = true }
+# The XR stream's game audio: the jitter buffer, concealment, drift nudge and resampler.
+makepad-teamtalk = { path = "../teamtalk", optional = true }
+# The XR pairing probe: the reuse-group UDP bind (every server instance on a machine hears a
+# headset's broadcast) and the interfaces' broadcast addresses.
+makepad-core-util = { path = "../core_util", optional = true }
+makepad-zune-png = { path = "../zune/zune-png", optional = true }
+makepad-key-code = { path = "../../platform/key_code", optional = true }
+
+[[bin]]
+name = "desk-link-probe"
+path = "src/bin/desk_link_probe.rs"
+required-features = ["server"]
+
+[[bin]]
+name = "desk-link-drive"
+path = "src/bin/desk_link_drive.rs"
+required-features = ["drive"]
+
+[[bin]]
+name = "desk-link-xr-probe"
+path = "src/bin/desk_link_xr_probe.rs"
+required-features = ["host"]
+
+[[test]]
+name = "server_admin"
+path = "tests/server_admin.rs"
+required-features = ["server"]
+
+[[bin]]
+name = "desk-link-testhost"
+path = "src/bin/desk_link_testhost.rs"
+required-features = ["server"]
+
+[[test]]
+name = "server_input"
+path = "tests/server_input.rs"
+required-features = ["server"]
+
+[[test]]
+name = "slow_reader"
+path = "tests/slow_reader.rs"
+required-features = ["server"]

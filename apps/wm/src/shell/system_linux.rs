@@ -1,14 +1,13 @@
 //! Linux system controls behind the shell's audio, monitor and power panels:
 //! the default audio output and input (device lists, selection, volume,
-//! mute), backlight brightness where the hardware has one, and the system
-//! battery. Backend only — the panels draw what a [`SystemSnapshot`] says.
+//! mute) and the system battery. Backend only — the panels draw what a [`SystemSnapshot`] says.
 //!
 //! # Shape
 //!
 //! One long-lived worker (`cx.thread_spawner()`, thread `wm-system`) owns
 //! every OS call. The UI talks to it through [`SystemController`]:
 //!
-//! * Slider values (output volume, input volume, brightness) go into one
+//! * Slider values (output volume, input volume) go into one
 //!   atomic slot each. A drag overwrites the slot; the worker takes the
 //!   latest value per pass, so a drag can never queue more than one
 //!   process per slider.
@@ -23,8 +22,8 @@
 //! * The worker sleeps in `poll(2)` on an eventfd the controller writes and
 //!   on the stdout of a `pactl subscribe` child, so hotplug, default-device
 //!   changes and volume changes made elsewhere arrive as events, not polls.
-//!   Backlight and battery are re-read from sysfs every few seconds (two
-//!   tiny file reads) and on [`SystemCommand::Refresh`].
+//!   Battery and GPUs are re-read from sysfs every few seconds (tiny file
+//!   reads) and on [`SystemCommand::Refresh`].
 //!
 //! # OS primitives
 //!
@@ -39,11 +38,6 @@
 //!   for every default-following stream, native or Pulse; the outcome then
 //!   reports which streams were observed on the new default (`pw-dump`,
 //!   the whole graph) and which stayed, instead of claiming a move.
-//! * Brightness: `/sys/class/backlight/*`. Writes try the sysfs node first
-//!   (works where a udev rule grants the seat user write access) and fall
-//!   back to logind's `Session.SetBrightness` over `busctl` (the caller's own
-//!   active session, no polkit, no privilege). A denied write is reported as
-//!   such; nothing is dimmed by other means.
 //! * Battery: `/sys/class/power_supply/*` with `type=Battery`, excluding
 //!   `scope=Device` (mouse/keyboard batteries) and absent packs. Mains/USB
 //!   supplies give the AC state.
@@ -57,20 +51,31 @@
 //!   file renamed over the target. The scale itself is applied by the UI
 //!   through the platform's `dpi_override`; a failed save is reported as an
 //!   outcome and changes nothing on screen.
-//! * Display source ("Optimize for"): the connector name whose native
-//!   pixels define the shared framebuffer, in `display-source` next to
-//!   `display-scale`, same read/write rules ([`SystemCommand::SaveDisplaySource`],
-//!   `display_source`). The name is data for the renderer's own selection
-//!   API, never a command; it is validated as a bounded connector name.
-//! * GPU choice ("Compositor"): which GPU the compositor should start on
-//!   next time, in `display-gpu` beside the two above as the PCI identity
-//!   `<pci-address> <vendor>:<device>` (`cardN` numbering is not stable
-//!   across boots). This is the display GPU, not each application's.
-//!   Nothing changes at runtime: the session script resolves the identity
-//!   to that boot's card and sets `MAKEPAD_DRM_DEVICE` for the WM process
-//!   with `MAKEPAD_WM_GPU_FROM_SAVED=1`; an external `MAKEPAD_DRM_DEVICE`
-//!   (marker unset) is recorded as `gpu_env`. The panel shows the current
-//!   GPU and the next-start one. The worker also lists the GPUs from
+//! * Display layout: the screens' left-to-right order, the main screen,
+//!   per-screen modes and the render-on GPU, in `display-layout` next to
+//!   `display-scale` ([`super::display_layout`] has the format; screens
+//!   are keyed by card PCI address and connector, which survive card
+//!   renumbering). The worker reads it once at start-up into
+//!   `display_layout` and rewrites the whole file on
+//!   [`SystemCommand::SaveDisplayLayout`], same atomic write. When it is
+//!   missing, the older `display-source` (one card-prefixed connector
+//!   name) and `display-gpu` (`<pci-address> <vendor>:<device>`) are read
+//!   once and migrated in memory; the next save writes `display-layout`,
+//!   and the old files are never written again. The WM restores order,
+//!   modes and the main screen at runtime as a safety net; the session
+//!   script turns the file into `MAKEPAD_DISPLAY_ORDER`,
+//!   `MAKEPAD_DRM_MODES` and `MAKEPAD_VULKAN_COMPOSITOR_PCI` (with
+//!   `MAKEPAD_WM_GPU_FROM_SAVED=1`, and, per var,
+//!   `MAKEPAD_WM_ORDER_FROM_SAVED=1` / `MAKEPAD_WM_MODES_FROM_SAVED=1`) so
+//!   the first frame is already right, since the renderer reads those
+//!   before the WM starts. A `MAKEPAD_VULKAN_COMPOSITOR_PCI`/`_UUID` set
+//!   from outside (marker unset) is recorded as `gpu_env`; likewise an
+//!   externally pinned, non-empty `MAKEPAD_DISPLAY_ORDER` /
+//!   `MAKEPAD_DRM_MODES` (its own marker unset) is `order_env` /
+//!   `modes_env`, which the runtime restore (`linux_controls.rs`) must
+//!   not override, the same rule the session script itself applies: an
+//!   external env var wins over the file at both session start and
+//!   runtime, never only the first. The worker also lists the GPUs from
 //!   `/sys/class/drm` (PCI ids, driver, connected connectors) so the panel
 //!   can offer only usable ones.
 //! * Pointer speed: mouse and touchpad multipliers as integer hundredths
@@ -80,13 +85,23 @@
 //!   reads each once at start-up (`input_settings_loaded` says the read
 //!   happened; a slot is `Some` only for a valid in-range value). The UI
 //!   applies the platform's process-wide speed; this only persists it.
+//! * BlackShark V3 Pro headset: the receiver's hidraw settings interface
+//!   is one more descriptor in the worker's `poll`, with its own request
+//!   deadlines ([`super::blackshark::device_linux`]). Its edits do not use
+//!   the command queue: the controller writes them into one shared record
+//!   (newest value per setting) and wakes the worker.
 //!
 //! Compiled for Linux only (the inner `cfg` below makes the module empty
 //! elsewhere), so no other platform's behaviour changes.
 
-#![cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#![cfg(target_os = "linux")]
 
 use {
+    super::blackshark::{
+        device_linux::{HeadsetLink, HeadsetShared},
+        HeadsetEdit, HeadsetEdits, HeadsetSnapshot,
+    },
+    super::display_layout::DisplayLayout,
     makepad_strict_json::{parse as parse_json, Value},
     makepad_widgets::{
         makepad_platform::{
@@ -127,12 +142,9 @@ use {
 
 /// `PA_VOLUME_NORM`: the raw volume that is 100%.
 const PA_VOLUME_NORM: u64 = 0x10000;
-const BACKLIGHT_ROOT: &str = "/sys/class/backlight";
 const POWER_ROOT: &str = "/sys/class/power_supply";
 /// Deadline for one `pactl` invocation.
 const COMMAND_TIMEOUT: f64 = 2.5;
-/// Deadline for the logind call (busctl gets its own 2s bus timeout inside).
-const LOGIND_TIMEOUT: f64 = 3.5;
 /// Read cap for device lists (verbose property maps per device).
 const LIST_OUTPUT_CAP: usize = 4 << 20;
 /// Read cap for everything else, and for stderr.
@@ -149,7 +161,7 @@ const AUDIO_DEBOUNCE: f64 = 0.15;
 const AUDIO_MIN_INTERVAL: f64 = 0.25;
 /// Audio poll cadence while the event stream is down.
 const AUDIO_POLL_INTERVAL: f64 = 5.0;
-/// Backlight and battery re-read cadence.
+/// Battery and GPU re-read cadence.
 const SYSFS_INTERVAL: f64 = 5.0;
 const SUBSCRIBE_BACKOFF_MIN: f64 = 2.0;
 const SUBSCRIBE_BACKOFF_MAX: f64 = 30.0;
@@ -160,10 +172,6 @@ const COMMAND_QUEUE: usize = 32;
 /// pass so slider values and sysfs reads are never starved by a backlog.
 const COMMANDS_PER_PASS: usize = 8;
 const SNAPSHOT_QUEUE: usize = 4;
-/// Re-reads of a backlight after a write, 40ms apart, for hardware that
-/// applies asynchronously.
-const BRIGHTNESS_SETTLE_READS: usize = 3;
-const BRIGHTNESS_SETTLE: Duration = Duration::from_millis(40);
 /// Grace before re-counting streams after a default-device change, so the
 /// session manager's re-links are observed rather than raced.
 const STREAM_SETTLE: Duration = Duration::from_millis(150);
@@ -182,6 +190,10 @@ const DISPLAY_SOURCE_FILE: &str = "display-source";
 /// `HDMI-A-1`, `eDP-1` are a few bytes; this is a sanity bound).
 pub const DISPLAY_SOURCE_MAX_LEN: usize = 128;
 const DISPLAY_GPU_FILE: &str = "display-gpu";
+/// The saved arrangement; supersedes `display-source` and `display-gpu`.
+const DISPLAY_LAYOUT_FILE: &str = "display-layout";
+/// Longest `display-layout` read: a few dozen short lines in practice.
+const DISPLAY_LAYOUT_MAX_LEN: u64 = 64 << 10;
 /// Longest persisted GPU identity line (`0000:01:00.0 10de:2b85`).
 pub const GPU_CHOICE_MAX_LEN: usize = 128;
 const MOUSE_SPEED_FILE: &str = "mouse-speed";
@@ -316,50 +328,6 @@ impl AudioState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BrightnessCapability {
-    /// No `/sys/class/backlight` device: the panel says "Fixed brightness".
-    NoBacklight,
-    Backlight,
-}
-
-/// How the last brightness write got through, learned by trying.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BrightnessAccess {
-    Untested,
-    Sysfs,
-    Logind,
-    Denied(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Backlight {
-    pub name: String,
-    /// The kernel's `type`: `raw`, `firmware` or `platform`.
-    pub kind: String,
-    pub max: u32,
-    pub raw: u32,
-    pub percent: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BrightnessState {
-    pub capability: BrightnessCapability,
-    /// Preferred device first (`raw` before `firmware` before `platform`).
-    pub devices: Vec<Backlight>,
-    pub access: BrightnessAccess,
-}
-
-impl BrightnessState {
-    pub fn primary(&self) -> Option<&Backlight> {
-        self.devices.first()
-    }
-
-    pub fn percent(&self) -> Option<u32> {
-        self.primary().map(|b| b.percent)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowerCapability {
     /// No system battery (a desktop): show nothing.
     NoBattery,
@@ -479,6 +447,7 @@ impl GpuInfo {
 /// coalescing setters on the controller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemCommand {
+    PairXbox(String),
     SetOutputMuted(bool),
     ToggleOutputMute,
     SetInputMuted(bool),
@@ -493,16 +462,11 @@ pub enum SystemCommand {
     /// slider is released. The scale is already applied on screen by then;
     /// this only decides what the next start uses.
     SaveDpiScale(u32),
-    /// Persist the "Optimize for" output: the connector name (as the
-    /// renderer lists it) whose native pixels define the shared
-    /// framebuffer. Only what the next start asks the renderer for.
-    SaveDisplaySource(String),
-    /// Persist which GPU the compositor should start on next time:
-    /// `Some(identity)` from [`GpuInfo::identity`], `None` for Auto (the
-    /// renderer's own preference, which removes the file). Nothing changes
-    /// until the WM restarts; the session script resolves the identity to
-    /// that boot's DRM card. This is the display GPU, not each app's.
-    SaveGpuChoice(Option<String>),
+    /// Persist the whole display layout (order, main screen, modes,
+    /// render-on GPU) to `display-layout`. What is on screen is already
+    /// applied by then; this decides what the next start (and the session
+    /// script) uses.
+    SaveDisplayLayout(DisplayLayout),
     /// Persist a pointer speed (integer hundredths, 25..=300). The speed is
     /// already applied in-process by then; this only decides the next start.
     SavePointerSpeed { touchpad: bool, value: u32 },
@@ -510,17 +474,16 @@ pub enum SystemCommand {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandKind {
+    PairXbox,
     OutputVolume,
     InputVolume,
-    Brightness,
     OutputMute,
     InputMute,
     SelectOutput,
     SelectInput,
     Refresh,
     DpiScale,
-    DisplaySource,
-    GpuChoice,
+    DisplayLayout,
     PointerSpeed,
 }
 
@@ -566,6 +529,9 @@ pub struct CommandOutcome {
 /// Everything the worker observed, published as one immutable value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SystemSnapshot {
+    pub game_controllers: super::game_controllers::Inventory,
+    /// The BlackShark V3 Pro receiver and headset, as last observed.
+    pub headset: HeadsetSnapshot,
     /// Increments per publish.
     pub serial: u64,
     /// The newest command sequence the worker has finished; a command is
@@ -574,7 +540,6 @@ pub struct SystemSnapshot {
     /// `Cx::monotonic_now()` at publish.
     pub sampled_at: f64,
     pub audio: AudioState,
-    pub brightness: BrightnessState,
     pub power: PowerState,
     /// The last few outcomes, oldest first; match on `seq`.
     pub outcomes: Vec<CommandOutcome>,
@@ -582,24 +547,42 @@ pub struct SystemSnapshot {
     /// start-up, then what the last successful save wrote. `None` when there
     /// is no valid saved value — the launch default stands then.
     pub dpi_scale: Option<u32>,
-    /// The persisted "Optimize for" connector name: what the file held at
-    /// start-up, then what the last successful save wrote. `None` when
-    /// there is no valid saved name — the renderer's own default stands.
-    pub display_source: Option<String>,
+    /// The persisted display layout: what `display-layout` held at
+    /// start-up (or what the legacy `display-source`/`display-gpu` files
+    /// migrate to when it is missing), then what the last successful save
+    /// wrote. Empty when nothing is saved — the renderer's defaults stand.
+    /// `render_on` is the next-start GPU (`None` is Auto).
+    pub display_layout: DisplayLayout,
     /// The start-up read of the display settings files has happened
     /// (whatever they held), so the UI may apply them once.
     pub display_settings_loaded: bool,
     /// The GPUs sysfs lists (`/sys/class/drm/cardN`) with their connected
     /// connectors; the renderer's outputs (`cardN-…`) map onto `card`.
     pub gpus: Vec<GpuInfo>,
-    /// The persisted next-start GPU: `Some(identity)`, or `None` for Auto.
-    pub gpu_choice: Option<String>,
-    /// External `MAKEPAD_DRM_DEVICE` this process was started with. Set
-    /// only when the wrapper did not apply a saved choice
+    /// External `MAKEPAD_VULKAN_COMPOSITOR_PCI` (or, without it,
+    /// `MAKEPAD_VULKAN_COMPOSITOR_UUID`) this process was started with.
+    /// Set only when the session script did not apply a saved choice
     /// (`MAKEPAD_WM_GPU_FROM_SAVED` is not `1`): a true override. `None`
-    /// for Auto, a wrapper-applied saved choice, or no device in the
+    /// for Auto, a script-applied saved choice, or no GPU in the
     /// environment.
     pub gpu_env: Option<String>,
+    /// External, non-empty `MAKEPAD_DISPLAY_ORDER` this process was
+    /// started with, unless the session script set it from the saved
+    /// layout (`MAKEPAD_WM_ORDER_FROM_SAVED` is not `1`). `None` for
+    /// unset/empty or a script-applied saved order. The runtime restore
+    /// (`display_layout::env_restore_plan`) must not reorder the desktop
+    /// while this is `Some`: the external value already won at session
+    /// start and keeps winning.
+    pub order_env: Option<String>,
+    /// External, non-empty `MAKEPAD_DRM_MODES` (the raw
+    /// `name=mode,name=mode` text) this process was started with, unless
+    /// the session script set it from the saved layout
+    /// (`MAKEPAD_WM_MODES_FROM_SAVED` is not `1`). `None` for unset/empty
+    /// or a script-applied saved value. The runtime restore must not set
+    /// a mode the restore would otherwise ask for on any screen this
+    /// names (same review note as `order_env`); a screen it does not
+    /// name is unaffected.
+    pub modes_env: Option<String>,
     /// Saved pointer speeds in hundredths: index 0 mouse, index 1 touchpad.
     /// `None` when that file was missing or out of range — the process
     /// default stands then.
@@ -612,23 +595,21 @@ pub struct SystemSnapshot {
 impl Default for SystemSnapshot {
     fn default() -> Self {
         Self {
+            game_controllers: Default::default(),
+            headset: HeadsetSnapshot::default(),
             serial: 0,
             applied_seq: 0,
             sampled_at: 0.0,
             dpi_scale: None,
-            display_source: None,
+            display_layout: DisplayLayout::default(),
             display_settings_loaded: false,
             gpus: Vec::new(),
-            gpu_choice: None,
             gpu_env: None,
+            order_env: None,
+            modes_env: None,
             pointer_speeds: [None, None],
             input_settings_loaded: false,
             audio: AudioState::unavailable("not sampled yet".into(), false),
-            brightness: BrightnessState {
-                capability: BrightnessCapability::NoBacklight,
-                devices: Vec::new(),
-                access: BrightnessAccess::Untested,
-            },
             power: PowerState {
                 capability: PowerCapability::NoBattery,
                 batteries: Vec::new(),
@@ -680,7 +661,6 @@ const SLOT_EMPTY: u64 = u64::MAX;
 struct Slots {
     output_volume: AtomicU64,
     input_volume: AtomicU64,
-    brightness: AtomicU64,
 }
 
 impl Slots {
@@ -688,7 +668,6 @@ impl Slots {
         Self {
             output_volume: AtomicU64::new(SLOT_EMPTY),
             input_volume: AtomicU64::new(SLOT_EMPTY),
-            brightness: AtomicU64::new(SLOT_EMPTY),
         }
     }
 }
@@ -711,6 +690,7 @@ fn take_slot(slot: &AtomicU64) -> Option<(Seq, u32)> {
 pub struct SystemController {
     commands: SyncSender<Envelope>,
     slots: Arc<Slots>,
+    headset: Arc<HeadsetShared>,
     stop: Arc<AtomicBool>,
     wake: Arc<File>,
     snapshots: ToUIReceiver<Arc<SystemSnapshot>>,
@@ -728,8 +708,9 @@ impl SystemController {
         let queue = NonZeroUsize::new(SNAPSHOT_QUEUE).unwrap_or(NonZeroUsize::MIN);
         let (publish, snapshots) = to_ui_bounded(queue);
         let slots = Arc::new(Slots::new());
+        let headset = Arc::new(HeadsetShared::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let worker = Worker::new(stop.clone(), wake.clone(), command_rx, slots.clone(), publish);
+        let worker = Worker::new(stop.clone(), wake.clone(), command_rx, slots.clone(), headset.clone(), publish);
         let handle = spawner
             .spawn_worker(
                 ThreadOptions {
@@ -742,6 +723,7 @@ impl SystemController {
         Ok(Self {
             commands,
             slots,
+            headset,
             stop,
             wake,
             snapshots,
@@ -779,12 +761,6 @@ impl SystemController {
         self.store_slot(|s| &s.input_volume, percent)
     }
 
-    /// Primary backlight, 0..=100 of its `max_brightness`. Coalesced. Note
-    /// that 0 switches many panels fully off; a UI floor is the panel's call.
-    pub fn set_brightness(&mut self, percent: u32) -> Seq {
-        self.store_slot(|s| &s.brightness, percent)
-    }
-
     /// Queue a discrete command. `Err(command)` means the bounded queue is
     /// full (or the worker is gone — see [`Self::worker_alive`]); keep the
     /// command and try again on a later frame.
@@ -800,6 +776,18 @@ impl SystemController {
                 Err(envelope.command)
             }
         }
+    }
+
+    /// A headset edit: it replaces any earlier value of the same setting
+    /// that the headset has not confirmed yet, and is never dropped.
+    pub fn headset_edit(&mut self, edit: HeadsetEdit) {
+        self.headset.edit(edit);
+        self.wake();
+    }
+
+    /// The headset edits still waiting for the headset's confirmation.
+    pub fn headset_pending(&self) -> HeadsetEdits {
+        self.headset.pending()
     }
 
     /// True until a snapshot whose `applied_seq` covers `seq` has arrived.
@@ -910,6 +898,7 @@ impl fmt::Display for ExecError {
 /// with the worker thread that spawned it.
 fn spawn_process(program: &str, args: &[&str], stdout: Stdio, stderr: Stdio) -> Result<Child, ExecError> {
     let mut command = Command::new(program);
+    makepad_app_registry::child_env::scrub(&mut command);
     command
         .args(args)
         .env("LC_ALL", "C")
@@ -1188,7 +1177,7 @@ fn read_audio(live_events: bool) -> Result<(AudioState, Vec<u32>), ExecError> {
 }
 
 // ======================================================================
-// sysfs: backlight and power supplies
+// sysfs: power supplies
 // ======================================================================
 
 fn read_trim(path: &Path) -> Option<String> {
@@ -1199,62 +1188,6 @@ fn read_trim(path: &Path) -> Option<String> {
 
 fn read_u64(path: &Path) -> Option<u64> {
     read_trim(path)?.parse().ok()
-}
-
-fn kind_rank(kind: &str) -> u8 {
-    match kind {
-        "raw" => 0,
-        "firmware" => 1,
-        "platform" => 2,
-        _ => 3,
-    }
-}
-
-fn read_backlights() -> Vec<Backlight> {
-    let mut devices = Vec::new();
-    let Ok(dir) = std::fs::read_dir(BACKLIGHT_ROOT) else {
-        return devices;
-    };
-    for entry in dir.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let path = entry.path();
-        let Some(max) = read_u64(&path.join("max_brightness")) else {
-            continue;
-        };
-        if max == 0 || max > u32::MAX as u64 {
-            continue;
-        }
-        let raw = read_u64(&path.join("actual_brightness"))
-            .or_else(|| read_u64(&path.join("brightness")))
-            .unwrap_or(0)
-            .min(max);
-        devices.push(Backlight {
-            name,
-            kind: read_trim(&path.join("type")).unwrap_or_default(),
-            max: max as u32,
-            raw: raw as u32,
-            percent: ((raw * 100 + max / 2) / max) as u32,
-        });
-    }
-    devices.sort_by(|a, b| {
-        kind_rank(&a.kind)
-            .cmp(&kind_rank(&b.kind))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    devices
-}
-
-fn read_brightness(access: &BrightnessAccess) -> BrightnessState {
-    let devices = read_backlights();
-    BrightnessState {
-        capability: if devices.is_empty() {
-            BrightnessCapability::NoBacklight
-        } else {
-            BrightnessCapability::Backlight
-        },
-        devices,
-        access: access.clone(),
-    }
 }
 
 fn battery_status(text: Option<&str>) -> BatteryStatus {
@@ -1397,7 +1330,7 @@ fn read_power() -> PowerState {
 // ======================================================================
 
 /// The DRM cards and their connected connectors: a handful of tiny sysfs
-/// reads per card, so it rides the same cadence as the backlight. `pci` is
+/// reads per card, so it rides the same cadence as the battery. `pci` is
 /// the device symlink's target directory (`0000:01:00.0`); a card with no
 /// PCI device (a virtual one) keeps an empty `pci`.
 fn read_gpus() -> Vec<GpuInfo> {
@@ -1513,8 +1446,8 @@ fn read_display_scale() -> Option<u32> {
     parse_display_scale(&read_trim(&path)?)
 }
 
-/// The saved "Optimize for" connector name, or `None` for a missing,
-/// unreadable or invalid file.
+/// The legacy `display-source` connector name, or `None` for a missing,
+/// unreadable or invalid file. Read only to migrate to `display-layout`.
 fn read_display_source() -> Option<String> {
     let path = display_settings_path(DISPLAY_SOURCE_FILE).ok()?;
     let text = read_trim(&path)?;
@@ -1563,12 +1496,83 @@ pub fn validate_gpu_choice(line: &str) -> Result<&str, String> {
     }
 }
 
-/// The saved next-start GPU identity, or `None` (Auto) for a missing,
-/// unreadable or invalid file.
+/// The legacy `display-gpu` identity, or `None` (Auto) for a missing,
+/// unreadable or invalid file. Read only to migrate to `display-layout`.
 fn read_gpu_choice() -> Option<String> {
     let path = display_settings_path(DISPLAY_GPU_FILE).ok()?;
     let text = read_trim(&path)?;
     validate_gpu_choice(&text).ok().map(str::to_string)
+}
+
+/// The saved display layout. `display-layout` whenever it exists (a
+/// malformed line in it is skipped, never fatal; an unreadable one reads
+/// as empty, since the file's presence decides); otherwise the legacy
+/// `display-source` and `display-gpu` migrated in memory, with `gpus`
+/// (this boot's sysfs cards) mapping the source's `cardN` to its PCI
+/// address. Nothing is written here: the next save writes
+/// `display-layout`.
+fn read_display_layout(gpus: &[GpuInfo]) -> DisplayLayout {
+    let text = display_settings_path(DISPLAY_LAYOUT_FILE).ok().filter(|path| path.exists()).map(|path| {
+        let mut text = String::new();
+        let read = File::open(path).and_then(|file| file.take(DISPLAY_LAYOUT_MAX_LEN).read_to_string(&mut text));
+        if read.is_err() {
+            text.clear();
+        }
+        text
+    });
+    if let Some(text) = text {
+        return DisplayLayout::parse(&text);
+    }
+    let card_pci = |card: &str| {
+        gpus.iter().find(|gpu| gpu.card == card && !gpu.pci.is_empty()).map(|gpu| gpu.pci.clone())
+    };
+    DisplayLayout::migrate(read_display_source().as_deref(), read_gpu_choice().as_deref(), &card_pci)
+}
+
+/// The compositor GPU the process environment names from outside:
+/// `MAKEPAD_VULKAN_COMPOSITOR_PCI`, else `MAKEPAD_VULKAN_COMPOSITOR_UUID`
+/// (the variables the renderer reads), unless the session script set it
+/// from the saved choice (`MAKEPAD_WM_GPU_FROM_SAVED=1`).
+fn gpu_env() -> Option<String> {
+    if std::env::var("MAKEPAD_WM_GPU_FROM_SAVED").ok().as_deref() == Some("1") {
+        return None;
+    }
+    ["MAKEPAD_VULKAN_COMPOSITOR_PCI", "MAKEPAD_VULKAN_COMPOSITOR_UUID"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+/// Pure decision behind `order_env`/`modes_env`, and the shape `gpu_env`
+/// above already follows without naming it: `value` only pins this boot
+/// against the saved layout when it is non-empty and `from_saved` is
+/// `false` (the session script's own marker for *this* variable was not
+/// `1`). A marker per variable, not one shared marker, because
+/// `MAKEPAD_DISPLAY_ORDER` and `MAKEPAD_DRM_MODES` are independent
+/// session-script exports that can disagree about which one the helper
+/// derived from the file and which one it left as an outside pin (e.g.
+/// Arch USB's `wm.env` pinning the order but not the modes) — a single
+/// combined marker could not tell the two apart.
+fn env_pin(value: Option<String>, from_saved: bool) -> Option<String> {
+    if from_saved {
+        return None;
+    }
+    value.filter(|value| !value.is_empty())
+}
+
+/// External, non-empty `MAKEPAD_DISPLAY_ORDER` this process was started
+/// with, unless `tools/linux/display-layout-env.sh` set it from the saved
+/// layout (`MAKEPAD_WM_ORDER_FROM_SAVED=1`).
+fn order_env() -> Option<String> {
+    let from_saved = std::env::var("MAKEPAD_WM_ORDER_FROM_SAVED").ok().as_deref() == Some("1");
+    env_pin(std::env::var("MAKEPAD_DISPLAY_ORDER").ok(), from_saved)
+}
+
+/// External, non-empty `MAKEPAD_DRM_MODES` this process was started with,
+/// unless `tools/linux/display-layout-env.sh` set it from the saved
+/// layout (`MAKEPAD_WM_MODES_FROM_SAVED=1`).
+fn modes_env() -> Option<String> {
+    let from_saved = std::env::var("MAKEPAD_WM_MODES_FROM_SAVED").ok().as_deref() == Some("1");
+    env_pin(std::env::var("MAKEPAD_DRM_MODES").ok(), from_saved)
 }
 
 fn pointer_speed_file(touchpad: bool) -> &'static str {
@@ -1588,16 +1592,6 @@ fn parse_pointer_speed(text: &str) -> Option<u32> {
 fn read_pointer_speed(touchpad: bool) -> Option<u32> {
     let path = display_settings_path(pointer_speed_file(touchpad)).ok()?;
     parse_pointer_speed(&read_trim(&path)?)
-}
-
-/// Remove one settings file; one that is already gone is fine.
-fn remove_display_setting(file: &str) -> Result<(), String> {
-    let path = display_settings_path(file)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("remove {}: {error}", path.display())),
-    }
 }
 
 /// Write one settings file atomically: a temporary file unique to this
@@ -1653,6 +1647,9 @@ struct Worker {
     snapshot: SystemSnapshot,
     outcomes: VecDeque<CommandOutcome>,
     subscription: Option<Subscription>,
+    headset: HeadsetLink,
+    /// What `poll` reported for the headset receiver's descriptor.
+    headset_revents: c_short,
     subscribe_retry_at: f64,
     subscribe_backoff: f64,
     audio_dirty_since: Option<f64>,
@@ -1662,7 +1659,6 @@ struct Worker {
     /// Indices of the sources the input filter hid (monitors, loopbacks), so
     /// a screen recorder on a monitor is not counted as a mic stream.
     hidden_source_indices: Vec<u32>,
-    brightness_access: BrightnessAccess,
     /// Discrete commands were left in the queue by the per-pass cap: the
     /// next pass runs without sleeping.
     backlog: bool,
@@ -1675,6 +1671,7 @@ impl Worker {
         wake: Arc<File>,
         commands: Receiver<Envelope>,
         slots: Arc<Slots>,
+        headset: Arc<HeadsetShared>,
         publish: ToUISender<Arc<SystemSnapshot>>,
     ) -> Self {
         Self {
@@ -1687,6 +1684,8 @@ impl Worker {
             snapshot: SystemSnapshot::default(),
             outcomes: VecDeque::new(),
             subscription: None,
+            headset: HeadsetLink::new(headset),
+            headset_revents: 0,
             subscribe_retry_at: 0.0,
             subscribe_backoff: SUBSCRIBE_BACKOFF_MIN,
             audio_dirty_since: None,
@@ -1694,7 +1693,6 @@ impl Worker {
             next_audio_poll: 0.0,
             next_sysfs_sample: 0.0,
             hidden_source_indices: Vec::new(),
-            brightness_access: BrightnessAccess::Untested,
             backlog: false,
             serial: 0,
         }
@@ -1710,15 +1708,12 @@ impl Worker {
         // the sound server is asked anything: the desktop applies them as
         // soon as this first snapshot lands, not after `pactl` answers.
         self.snapshot.dpi_scale = read_display_scale();
-        self.snapshot.display_source = read_display_source();
-        self.snapshot.gpu_choice = read_gpu_choice();
-        // Wrapper-applied saved choice sets MAKEPAD_WM_GPU_FROM_SAVED=1 and
-        // is not an override; only a true external MAKEPAD_DRM_DEVICE is.
-        self.snapshot.gpu_env = if std::env::var("MAKEPAD_WM_GPU_FROM_SAVED").ok().as_deref() == Some("1") {
-            None
-        } else {
-            std::env::var("MAKEPAD_DRM_DEVICE").ok().filter(|v| !v.is_empty())
-        };
+        // The sysfs cards only to migrate a legacy `display-source`'s
+        // `cardN`; the regular sample lists them again below.
+        self.snapshot.display_layout = read_display_layout(&read_gpus());
+        self.snapshot.gpu_env = gpu_env();
+        self.snapshot.order_env = order_env();
+        self.snapshot.modes_env = modes_env();
         self.snapshot.pointer_speeds = [read_pointer_speed(false), read_pointer_speed(true)];
         self.snapshot.display_settings_loaded = true;
         self.snapshot.input_settings_loaded = true;
@@ -1735,6 +1730,7 @@ impl Worker {
             }
             let now = now();
             let mut changed = self.pump_subscription(event, now);
+            changed |= self.service_headset(now);
             // Sliders first (the user's latest intent), then a bounded
             // slice of the discrete queue. Nothing is applied once a
             // shutdown was asked for: queued work is dropped, not done
@@ -1746,6 +1742,9 @@ impl Worker {
             if self.stopping() {
                 break;
             }
+            // A pactl call above can take a while: answers that arrived
+            // meanwhile are taken before any request is timed out.
+            changed |= self.service_headset(Cx::monotonic_now());
             if audio_touched || slots_touched || self.audio_due(now) {
                 changed |= self.sample_audio(now);
             }
@@ -1789,12 +1788,17 @@ impl Worker {
         if self.pending_publish.is_some() {
             deadline = deadline.min(now + 0.05);
         }
+        if let Some(due) = self.headset.deadline(now) {
+            deadline = deadline.min(due);
+        }
         ((deadline - now).max(0.0) * 1000.0).ceil().min(MAX_POLL_MS) as c_int
     }
 
     /// Sleep until the controller wakes us, the event stream has something,
     /// or the next deadline.
     fn wait(&mut self, timeout_ms: c_int) -> PipeEvent {
+        // A negative descriptor is ignored by `poll`, so the subscription
+        // and the headset receiver keep fixed slots whether open or not.
         let mut fds = [
             PollFd {
                 fd: self.wake.as_raw_fd(),
@@ -1806,8 +1810,14 @@ impl Worker {
                 events: POLLIN,
                 revents: 0,
             },
+            PollFd {
+                fd: self.headset.poll_fd().unwrap_or(-1),
+                events: POLLIN,
+                revents: 0,
+            },
         ];
-        let count = if self.subscription.is_some() { 2 } else { 1 };
+        let count = fds.len() as c_ulong;
+        self.headset_revents = 0;
         // SAFETY: `fds` is a live array of `count` pollfd structs.
         let ready = unsafe { poll(fds.as_mut_ptr(), count, timeout_ms) };
         if ready < 0 {
@@ -1820,10 +1830,12 @@ impl Worker {
         if fds[0].revents & POLLIN != 0 {
             self.drain_wake();
         }
+        self.headset_revents = fds[2].revents;
         let revents = fds[1].revents;
-        if count == 2 && revents & POLLIN != 0 {
+        let subscribed = self.subscription.is_some();
+        if subscribed && revents & POLLIN != 0 {
             PipeEvent::Readable
-        } else if count == 2 && revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
+        } else if subscribed && revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
             PipeEvent::HungUp
         } else {
             PipeEvent::Nothing
@@ -1920,6 +1932,18 @@ impl Worker {
         }
     }
 
+    /// The headset receiver's answers, timeouts and next request. Its
+    /// revents are consumed by the first call after a `wait`.
+    fn service_headset(&mut self, now: f64) -> bool {
+        let revents = std::mem::take(&mut self.headset_revents);
+        if self.headset.service(now, revents) {
+            self.snapshot.headset = self.headset.snapshot().clone();
+            true
+        } else {
+            false
+        }
+    }
+
     fn mark_audio_dirty(&mut self, now: f64) {
         if self.audio_dirty_since.is_none() {
             self.audio_dirty_since = Some(now);
@@ -1977,19 +2001,16 @@ impl Worker {
             audio_touched = true;
             changed = true;
         }
-        if self.stopping() {
-            return (changed, audio_touched);
-        }
-        if let Some((seq, percent)) = take_slot(&self.slots.brightness) {
-            let result = self.set_brightness(percent, now);
-            self.record(seq, CommandKind::Brightness, result);
-            changed = true;
-        }
         (changed, audio_touched)
     }
 
     fn execute(&mut self, command: SystemCommand, now: f64) -> (CommandKind, CommandResult, bool) {
         match command {
+            SystemCommand::PairXbox(id) => {
+                let result = super::game_controllers::pair(&id).map_or_else(CommandResult::Failed, |_| CommandResult::Applied);
+                self.sample_sysfs(now);
+                (CommandKind::PairXbox, result, false)
+            }
             SystemCommand::SetOutputMuted(muted) => (
                 CommandKind::OutputMute,
                 self.set_mute(AudioDirection::Output, Some(muted), now),
@@ -2026,42 +2047,12 @@ impl Worker {
                 (CommandKind::Refresh, CommandResult::Applied, false)
             }
             SystemCommand::SaveDpiScale(value) => (CommandKind::DpiScale, self.save_display_scale(value), false),
-            SystemCommand::SaveDisplaySource(name) => {
-                (CommandKind::DisplaySource, self.save_display_source(&name), false)
-            }
-            SystemCommand::SaveGpuChoice(choice) => {
-                (CommandKind::GpuChoice, self.save_gpu_choice(choice.as_deref()), false)
+            SystemCommand::SaveDisplayLayout(layout) => {
+                (CommandKind::DisplayLayout, self.save_display_layout(layout), false)
             }
             SystemCommand::SavePointerSpeed { touchpad, value } => {
                 (CommandKind::PointerSpeed, self.save_pointer_speed(touchpad, value), false)
             }
-        }
-    }
-
-    /// Persist the next-start GPU; `None` (Auto) removes the file. The
-    /// snapshot records the choice only once the file reflects it.
-    fn save_gpu_choice(&mut self, choice: Option<&str>) -> CommandResult {
-        match choice {
-            Some(identity) => {
-                let identity = match validate_gpu_choice(identity) {
-                    Ok(identity) => identity,
-                    Err(message) => return CommandResult::Failed(message),
-                };
-                match write_display_setting(DISPLAY_GPU_FILE, identity) {
-                    Ok(_) => {
-                        self.snapshot.gpu_choice = Some(identity.to_string());
-                        CommandResult::Applied
-                    }
-                    Err(message) => CommandResult::Failed(format!("GPU choice not saved: {message}")),
-                }
-            }
-            None => match remove_display_setting(DISPLAY_GPU_FILE) {
-                Ok(()) => {
-                    self.snapshot.gpu_choice = None;
-                    CommandResult::Applied
-                }
-                Err(message) => CommandResult::Failed(format!("GPU choice not cleared: {message}")),
-            },
         }
     }
 
@@ -2102,18 +2093,17 @@ impl Worker {
         }
     }
 
-    /// Persist the "Optimize for" connector name, same rules as the scale.
-    fn save_display_source(&mut self, name: &str) -> CommandResult {
-        let name = match validate_display_source(name) {
-            Ok(name) => name,
-            Err(message) => return CommandResult::Failed(message),
-        };
-        match write_display_setting(DISPLAY_SOURCE_FILE, name) {
+    /// Persist the whole display layout. The snapshot records it only
+    /// once it is on disk; a failed write reports why and leaves the
+    /// recorded layout alone.
+    fn save_display_layout(&mut self, layout: DisplayLayout) -> CommandResult {
+        let text = layout.serialize();
+        match write_display_setting(DISPLAY_LAYOUT_FILE, text.trim_end()) {
             Ok(_) => {
-                self.snapshot.display_source = Some(name.to_string());
+                self.snapshot.display_layout = layout;
                 CommandResult::Applied
             }
-            Err(message) => CommandResult::Failed(format!("display source not saved: {message}")),
+            Err(message) => CommandResult::Failed(format!("display layout not saved: {message}")),
         }
     }
 
@@ -2289,71 +2279,6 @@ impl Worker {
         Ok(follow)
     }
 
-    /// Write the primary backlight: sysfs first, logind when sysfs denies.
-    /// Success is the device reading back what was written.
-    fn set_brightness(&mut self, percent: u32, now: f64) -> CommandResult {
-        let Some(device) = self.snapshot.brightness.devices.first().cloned() else {
-            return CommandResult::Failed("no backlight device".into());
-        };
-        let raw = ((percent.min(100) as u64 * device.max as u64 + 50) / 100) as u32;
-        let node = Path::new(BACKLIGHT_ROOT).join(&device.name).join("brightness");
-        let access = match std::fs::write(&node, raw.to_string()) {
-            Ok(()) => BrightnessAccess::Sysfs,
-            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
-                let value = raw.to_string();
-                match run_bounded(
-                    "busctl",
-                    &[
-                        "--timeout=2",
-                        "call",
-                        "org.freedesktop.login1",
-                        "/org/freedesktop/login1/session/auto",
-                        "org.freedesktop.login1.Session",
-                        "SetBrightness",
-                        "ssu",
-                        "backlight",
-                        &device.name,
-                        &value,
-                    ],
-                    LOGIND_TIMEOUT,
-                    SMALL_OUTPUT_CAP,
-                ) {
-                    Ok(_) => BrightnessAccess::Logind,
-                    Err(logind) => BrightnessAccess::Denied(format!(
-                        "sysfs: {error}; logind: {logind}"
-                    )),
-                }
-            }
-            Err(error) => BrightnessAccess::Denied(format!("sysfs write failed: {error}")),
-        };
-        self.brightness_access = access.clone();
-        if let BrightnessAccess::Denied(message) = access {
-            self.sample_sysfs(now);
-            return CommandResult::Failed(message);
-        }
-        // Success is the driver holding the requested value (`brightness`).
-        // The physical reading (`actual_brightness`) can lag or quantise;
-        // give it a short bounded settle so the snapshot that follows shows
-        // the level the user will see, but do not fail on it.
-        let actual_node = Path::new(BACKLIGHT_ROOT).join(&device.name).join("actual_brightness");
-        for _ in 0..BRIGHTNESS_SETTLE_READS {
-            if read_u64(&actual_node) == Some(raw as u64) {
-                break;
-            }
-            sleep(BRIGHTNESS_SETTLE);
-        }
-        let requested = read_u64(&node);
-        self.sample_sysfs(now);
-        match requested {
-            Some(held) if held == raw as u64 => CommandResult::Applied,
-            Some(held) => CommandResult::Failed(format!(
-                "asked {} for {raw}, driver holds {held}",
-                device.name
-            )),
-            None => CommandResult::Failed(format!("{} vanished after the write", device.name)),
-        }
-    }
-
     // ---- sampling -------------------------------------------------------
 
     fn sample_audio(&mut self, now: f64) -> bool {
@@ -2378,11 +2303,12 @@ impl Worker {
 
     fn sample_sysfs(&mut self, now: f64) -> bool {
         self.next_sysfs_sample = now + SYSFS_INTERVAL;
-        let brightness = read_brightness(&self.brightness_access);
         let power = read_power();
-        let mut changed = false;
-        if brightness != self.snapshot.brightness {
-            self.snapshot.brightness = brightness;
+        let controllers = super::game_controllers::sample();
+        let mut changed = controllers != self.snapshot.game_controllers;
+        self.snapshot.game_controllers = controllers;
+        if self.headset.scan(now) {
+            self.snapshot.headset = self.headset.snapshot().clone();
             changed = true;
         }
         if power != self.snapshot.power {
@@ -2433,4 +2359,42 @@ fn is_device_event(line: &str) -> bool {
     };
     let facility = rest.trim_start().split([' ', '#']).next().unwrap_or("");
     matches!(facility, "sink" | "source" | "server" | "card")
+}
+
+#[cfg(test)]
+mod env_pin_tests {
+    use super::env_pin;
+
+    // `order_env`/`modes_env` only wrap `env_pin` around `std::env::var`,
+    // which is process-global state the test harness's parallel threads
+    // would race over; the pure decision is what is worth a unit test
+    // (mirrors `gpu_env`, never itself tested for the same reason).
+
+    #[test]
+    fn present_and_not_from_saved_pins() {
+        assert_eq!(env_pin(Some("x".to_string()), false), Some("x".to_string()));
+    }
+
+    #[test]
+    fn present_and_from_saved_does_not_pin() {
+        // The helper set it from the file: the value already equals the
+        // file, so the runtime restore is free to act (and would be a
+        // no-op by equality anyway).
+        assert_eq!(env_pin(Some("x".to_string()), true), None);
+    }
+
+    #[test]
+    fn absent_never_pins_regardless_of_the_marker() {
+        assert_eq!(env_pin(None, false), None);
+        assert_eq!(env_pin(None, true), None);
+    }
+
+    #[test]
+    fn empty_never_pins_regardless_of_the_marker() {
+        // `_mdl_set_env` never exports an empty value, but an external
+        // caller could still set `FOO=`; an empty var is not a pin either
+        // way, same as `gpu_env`'s own `filter(|value| !value.is_empty())`.
+        assert_eq!(env_pin(Some(String::new()), false), None);
+        assert_eq!(env_pin(Some(String::new()), true), None);
+    }
 }

@@ -3,8 +3,8 @@
 //! Omarchy desk, the assistant as a child process). The all-in-one
 //! builds are the same `App` with another `WmBuild` (apps/wm-all).
 
-use makepad_wm::makepad_widgets::*;
-use makepad_wm::App;
+use makepad_app_wm::makepad_widgets::*;
+use makepad_app_wm::App;
 
 app_main!(
     App,

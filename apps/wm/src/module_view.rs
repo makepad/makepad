@@ -32,7 +32,7 @@
 
 use crate::desk::phone::DrawPhoneApp;
 use crate::dock_warp::WindowFrame;
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 use crate::run_view::MpRunViewAction;
 use crate::tile::TileHost;
 use makepad_widgets::gauss_view::CaptureGauss;
@@ -107,6 +107,7 @@ pub struct MpModuleView {
     #[rust]
     vm_id: SplashVmId,
     #[rust]
+    #[area]
     area: Area,
     /// FOCUS RULE (see `MpRunView`): a preview never takes the keyboard.
     #[rust(true)]
@@ -134,6 +135,22 @@ impl MpModuleView {
         self.drawn = false;
         self.crashed = None;
         self.draw_bg.redraw(cx);
+    }
+
+    /// The keyboard is (as far as can be told) on a widget of this tile's
+    /// root. A module's widgets claim the key focus themselves, so there is
+    /// no one area to compare as `MpRunView` does; they draw in the tile's
+    /// draw list inside its rect, so a focused area that does both counts
+    /// as ours. A field elsewhere (another tile, the bar, a flyout away
+    /// from this tile) keeps the keyboard.
+    fn holds_key_focus(&self, cx: &Cx) -> bool {
+        let key = cx.key_focus();
+        if key == Area::Empty || !key.is_valid(cx) || !self.area.is_valid(cx) {
+            return false;
+        }
+        key.draw_list_id().is_some()
+            && key.draw_list_id() == self.area.draw_list_id()
+            && self.area.rect(cx).contains(key.rect(cx).center())
     }
 
     /// What the root's panic said, once it has.
@@ -210,10 +227,15 @@ impl TileHost for MpModuleView {
     }
 
     fn release_keyboard(&mut self, cx: &mut Cx) {
+        let held = self.focused && self.holds_key_focus(cx);
         self.focused = false;
         // Whatever inside held the keyboard must let go too, or a field in
-        // a tile behind the pane would keep eating keys.
-        cx.set_key_focus(Area::Empty);
+        // a tile behind the pane would keep eating keys. Only when it is
+        // ours (as `MpRunView` checks `has_key_focus`): a field in a menu,
+        // flyout or another tile keeps it.
+        if held {
+            cx.set_key_focus(Area::Empty);
+        }
     }
 
     fn set_takes_key_focus(&mut self, on: bool) {
@@ -292,9 +314,9 @@ impl Widget for MpModuleView {
         // `color_bg_app`, what its own window would clear to — never the
         // desk's colour: a light-theme app that leaves its ground showing
         // put its dark ink on the desk's dark ground (the clock's title).
-        if let Some(ground) = cx.cx.with_script_vm_id_trusted(self.vm_id, |vm| {
+        if let Some(ground) = cx.cx.with_script_vm_id(self.vm_id, |vm| {
             let theme = vm.module(id!(theme));
-            vm.bx.heap.value(theme, id!(color_bg_app).into(), NoTrap).as_color()
+            vm.value(theme, id!(color_bg_app)).as_color()
         }) {
             self.draw_bg.color = vec4(((ground >> 24) & 0xff) as f32 / 255.0, ((ground >> 16) & 0xff) as f32 / 255.0, ((ground >> 8) & 0xff) as f32 / 255.0, 1.0);
         }

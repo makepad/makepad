@@ -41,7 +41,18 @@ impl WmScene {
     /// ancestor walk.  Force that cache to be rebuilt when a new frame is
     /// available so transparent captures and backdrop passes never reveal a
     /// previous scene underneath the current application.
+    ///
+    /// Only the scene's own draw list is recorded again: the views and cached
+    /// textures inside it (the wallpaper) have not changed because a window
+    /// presented, and keep their last recording.
     pub fn redraw_content(&mut self, cx: &mut Cx) {
+        self.view.redraw_texture_cache();
+        self.view.redraw_self(cx);
+    }
+
+    /// Like `redraw_content`, for pixels drawn into the scene by something
+    /// other than the desk's own draws: everything under the view is redrawn.
+    pub fn redraw_content_all(&mut self, cx: &mut Cx) {
         self.view.redraw_texture_cache();
         self.view.redraw(cx);
     }
@@ -86,6 +97,10 @@ impl WmScene {
 }
 impl Widget for WmScene {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // the frozen frames of a transition were GPU-only: the transition ends
+        if let Event::GpuReset = event {
+            self.frozen.clear();
+        }
         if let Some(ne) = self.next.is_event(event) {
             let dt = if self.last == 0.0 {
                 0.0
@@ -117,6 +132,9 @@ impl Widget for WmScene {
                 &[contribution / accumulated.max(0.00001)],
             );
             self.draw_old.draw_abs(cx, self.view.area().rect(cx));
+        }
+        if let Some(mut desk) = self.view.widget(cx, ids!(desk_row.desk)).borrow_mut::<crate::desk::WmDesk>() {
+            desk.draw_vr_output(cx);
         }
         DrawStep::done()
     }

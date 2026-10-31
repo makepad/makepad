@@ -155,7 +155,7 @@ def refresh_source(assets, host, root):
         manifest = json.loads((unpacked/'manifest.json').read_text())
         manifest['host'] = host
         for name, expected in manifest['binary_sha256'].items():
-            if name not in ('wm', 'makepad-ai-hub') or digest(unpacked/'binaries'/name) != expected:
+            if name not in ('makepad-app-wm', 'makepad-app-ai-hub') or digest(unpacked/'binaries'/name) != expected:
                 raise ValueError(f'Exported service binary hash mismatch: {name}')
         source = stage/'prepared'
         source.mkdir()
