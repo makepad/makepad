@@ -429,7 +429,7 @@ impl StackNavigationView {
         match state {
             StackNavigationViewState::Active => {
                 if self.cancel_scope.is_none() {
-                    self.cancel_scope = Some(self.begin_cancel_scope_for(cx, CancelScopeKind::Back));
+                    self.cancel_scope = Some(cx.begin_widget_back_swipe_scope(self.widget_uid().0));
                 }
             }
             StackNavigationViewState::Inactive => {
@@ -460,7 +460,7 @@ impl StackNavigationViewRef {
             inner.view.visible = true;
             inner.slide = 1.0;
             inner.set_nav_state(cx, StackNavigationViewState::Inactive);
-            inner.cancel_scope = Some(inner.begin_cancel_scope_for(cx, CancelScopeKind::Back));
+            inner.cancel_scope = Some(cx.begin_widget_back_swipe_scope(inner.widget_uid().0));
 
             // Always slide in from fully hidden, wherever an earlier slide left off.
             inner.animator_cut(cx, ids!(slide.hide));

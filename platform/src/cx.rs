@@ -870,7 +870,12 @@ impl Cx {
     /// ID. Zero is reserved for global scopes. A widgets resolver must be installed
     /// for a bound scope to receive input.
     pub fn begin_widget_cancel_scope(&mut self, owner: u64, kind: CancelScopeKind) -> CancelScope {
-        self.cancel_scopes.begin_widget(owner, kind)
+        self.cancel_scopes.begin_widget(owner, kind, false)
+    }
+
+    /// Begins a widget's Back scope that can also own a back swipe, see [`Self::owns_back_swipe()`].
+    pub fn begin_widget_back_swipe_scope(&mut self, owner: u64) -> CancelScope {
+        self.cancel_scopes.begin_widget(owner, CancelScopeKind::Back, true)
     }
 
     /// Gives up a scope from [`Self::begin_cancel_scope()`]. Dropping it does the same.
@@ -890,8 +895,8 @@ impl Cx {
         self.cancel_scopes.has_press_owner()
     }
 
-    /// Whether a back swipe by a touch that starts in the event being delivered would belong
-    /// to `scope`, since Back would go to it right now. Only meaningful during that event.
+    /// Whether a back swipe by a touch starting in the event being delivered belongs to `scope`, a scope
+    /// from [`Self::begin_widget_back_swipe_scope()`] that Back would go to right now. Only meaningful during that event.
     pub fn owns_back_swipe(&self, scope: &CancelScope) -> bool {
         self.cancel_scopes.owns_back_swipe(scope)
     }
