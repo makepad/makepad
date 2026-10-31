@@ -165,8 +165,19 @@ pub fn parse(bytes: &[u8]) -> Result<Value, &'static str> {
 /// nest deeper than the default (a flow graph, for instance). Every other
 /// rule is unchanged.
 pub fn parse_depth(bytes: &[u8], max_depth: u32) -> Result<Value, &'static str> {
+    parse_with(bytes, max_depth, false)
+}
+
+/// `parse_depth` for files written by other tools that repeat a key in one
+/// object: the last value of a repeated key replaces the earlier one (in its
+/// place). Every other rule is unchanged.
+pub fn parse_depth_last_key_wins(bytes: &[u8], max_depth: u32) -> Result<Value, &'static str> {
+    parse_with(bytes, max_depth, true)
+}
+
+fn parse_with(bytes: &[u8], max_depth: u32, last_key_wins: bool) -> Result<Value, &'static str> {
     let text = std::str::from_utf8(bytes).map_err(|_| "invalid utf-8")?;
-    let mut p = P { b: text.as_bytes(), i: 0, max_depth };
+    let mut p = P { b: text.as_bytes(), i: 0, max_depth, last_key_wins };
     p.skip_ws();
     let v = p.value(0)?;
     p.skip_ws();
@@ -180,6 +191,7 @@ struct P<'a> {
     b: &'a [u8],
     i: usize,
     max_depth: u32,
+    last_key_wins: bool,
 }
 
 impl<'a> P<'a> {
@@ -254,14 +266,18 @@ impl<'a> P<'a> {
         loop {
             self.skip_ws();
             let key = self.string()?;
-            if pairs.iter().any(|(k, _)| *k == key) {
+            let dup = pairs.iter().position(|(k, _)| *k == key);
+            if dup.is_some() && !self.last_key_wins {
                 return Err("duplicate key");
             }
             self.skip_ws();
             self.expect(b':')?;
             self.skip_ws();
             let v = self.value(depth + 1)?;
-            pairs.push((key, v));
+            match dup {
+                Some(i) => pairs[i].1 = v,
+                None => pairs.push((key, v)),
+            }
             self.skip_ws();
             match self.next()? {
                 b',' => continue,

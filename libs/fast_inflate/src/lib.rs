@@ -109,6 +109,27 @@ pub mod deflate {
     pub fn compress_to_vec_zlib(input: &[u8], level: u8) -> Vec<u8> {
         crate::miniz_deflate::compress_to_vec_zlib(input, level)
     }
+
+    /// Raw DEFLATE of one part of a stream (parts in order concatenate to
+    /// one stream; only the `last` part ends it): parts compress in parallel.
+    pub fn compress_part_to_vec(input: &[u8], level: u8, last: bool) -> Vec<u8> {
+        crate::miniz_deflate::compress_part_to_vec(input, level, last)
+    }
+}
+
+#[cfg(test)]
+mod part_tests {
+    /// Parts compressed apart and concatenated inflate to the whole input.
+    #[test]
+    fn parts_concatenate_to_one_stream() {
+        let data: Vec<u8> = (0..300_000u32).flat_map(|i| format!("G1 X{} Y{} E{}\n", i % 977, i % 313, i % 7).into_bytes()).collect();
+        let parts: Vec<&[u8]> = data.chunks(65_536).collect();
+        let mut z = Vec::new();
+        for (k, p) in parts.iter().enumerate() {
+            z.extend(super::deflate::compress_part_to_vec(p, 6, k + 1 == parts.len()));
+        }
+        assert_eq!(super::inflate::decompress_to_vec(&z).unwrap(), data);
+    }
 }
 
 #[cfg(test)]

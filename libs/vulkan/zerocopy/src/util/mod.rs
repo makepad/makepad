@@ -240,7 +240,6 @@ pub(crate) const fn round_down_to_next_multiple_of_alignment(
     }
 
     let align = align.get();
-    #[cfg(not(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0))]
     debug_assert!(align.is_power_of_two());
 
     // Subtraction can't underflow because `align.get() >= 1`.

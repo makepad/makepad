@@ -268,7 +268,7 @@ macro_rules! float_impl {
             fn abs(self) -> Self {
                 cfg_if! {
                     // FIXME(msrv): `abs` is available in `core` starting with 1.85.
-                    if #[cfg(intrinsics_enabled)] {
+                    if #[cfg(all(feature = "unstable-intrinsics", not(feature = "force-soft-floats")))] {
                         self.abs()
                     } else {
                         super::super::generic::fabs(self)
@@ -278,7 +278,7 @@ macro_rules! float_impl {
             fn copysign(self, other: Self) -> Self {
                 cfg_if! {
                     // FIXME(msrv): `copysign` is available in `core` starting with 1.85.
-                    if #[cfg(intrinsics_enabled)] {
+                    if #[cfg(all(feature = "unstable-intrinsics", not(feature = "force-soft-floats")))] {
                         self.copysign(other)
                     } else {
                         super::super::generic::copysign(self, other)
@@ -288,7 +288,7 @@ macro_rules! float_impl {
             fn fma(self, y: Self, z: Self) -> Self {
                 cfg_if! {
                     // fma is not yet available in `core`
-                    if #[cfg(intrinsics_enabled)] {
+                    if #[cfg(all(feature = "unstable-intrinsics", not(feature = "force-soft-floats")))] {
                         // FIXME(msrv,bench): once our benchmark rustc version is above the
                         // 2022-09-23 nightly, this can be removed.
                         #[allow(unused_unsafe)]

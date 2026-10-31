@@ -2,15 +2,15 @@
 name = "makepad-fast-inflate"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Fast DEFLATE/zlib decompression ported from libdeflate"
 
-[dependencies]
+# files outside this crate its sources include (its tests' PNGs; makepad-source-slice ships them so makepad run's
+# source identity of this crate is the same in a slice or source archive)
+[package.metadata.commercial]
+include = ["../../examples/splash/resources/app_icon.png", "../../examples/uizoo/resources/logo_makepad.png", "../../examples/xr/resources/android/res/mipmap-mdpi/ic_launcher.png"]
 
-[dev-dependencies]
-flate2 = "1"
-miniz_oxide = "0.8"
-libdeflater = "1.25"
-rand = "0.8"
+[dependencies]
 
 [[bench]]
 name = "decompress_bench"

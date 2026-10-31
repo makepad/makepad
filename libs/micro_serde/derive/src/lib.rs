@@ -1,14 +1,9 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
 
-mod derive_bin;
-use crate::derive_bin::*;
-
-mod derive_ron;
-use crate::derive_ron::*;
-
-mod derive_json;
-use crate::derive_json::*;
+// The expansion logic lives in the library crate makepad-micro-serde-derive-impl (relax links
+// it directly); these are the rustc proc-macro entry points.
+use makepad_micro_serde_derive_impl::*;
 
 #[proc_macro_derive(SerBin)]
 pub fn derive_ser_bin(input: TokenStream) -> TokenStream {

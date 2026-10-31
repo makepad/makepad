@@ -548,11 +548,8 @@ macro_rules! maybe_const_trait_bounded_fn {
     // non-method functions. Each `$args` may optionally be followed by `:
     // $arg_tys:ty`, which can be omitted for `self`.
     ($(#[$attr:meta])* $vis:vis const fn $name:ident($($args:ident $(: $arg_tys:ty)?),* $(,)?) $(-> $ret_ty:ty)? $body:block) => {
-        #[cfg(not(no_zerocopy_generic_bounds_in_const_fn_1_61_0))]
         $(#[$attr])* $vis const fn $name($($args $(: $arg_tys)?),*) $(-> $ret_ty)? $body
 
-        #[cfg(no_zerocopy_generic_bounds_in_const_fn_1_61_0)]
-        $(#[$attr])* $vis fn $name($($args $(: $arg_tys)?),*) $(-> $ret_ty)? $body
     };
 }
 
@@ -572,10 +569,7 @@ macro_rules! const_panic {
         panic[0]
     }};
     ($($arg:tt)+) => {{
-        #[cfg(not(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0))]
         panic!($($arg)+);
-        #[cfg(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0)]
-        const_panic!(@non_panic $($arg)+)
     }};
 }
 
@@ -585,46 +579,17 @@ macro_rules! const_panic {
 /// accommodate old toolchains.
 macro_rules! const_assert {
     ($e:expr) => {{
-        #[cfg(not(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0))]
         assert!($e);
-        #[cfg(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0)]
-        {
-            let e = $e;
-            if !e {
-                let _: () = const_panic!(@non_panic concat!("assertion failed: ", stringify!($e)));
-            }
-        }
     }};
     ($e:expr, $($args:tt)+) => {{
-        #[cfg(not(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0))]
         assert!($e, $($args)+);
-        #[cfg(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0)]
-        {
-            let e = $e;
-            if !e {
-                let _: () = const_panic!(@non_panic concat!("assertion failed: ", stringify!($e), ": ", stringify!($arg)), $($args)*);
-            }
-        }
     }};
 }
 
 /// Like `const_assert!`, but relative to `debug_assert!`.
 macro_rules! const_debug_assert {
     ($e:expr $(, $msg:expr)?) => {{
-        #[cfg(not(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0))]
         debug_assert!($e $(, $msg)?);
-        #[cfg(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0)]
-        {
-            // Use this (rather than `#[cfg(debug_assertions)]`) to ensure that
-            // `$e` is always compiled even if it will never be evaluated at
-            // runtime.
-            if cfg!(debug_assertions) {
-                let e = $e;
-                if !e {
-                    let _: () = const_panic!(@non_panic concat!("assertion failed: ", stringify!($e) $(, ": ", $msg)?));
-                }
-            }
-        }
     }}
 }
 
@@ -632,11 +597,8 @@ macro_rules! const_debug_assert {
 /// toolchain supports panicking in `const fn`.
 macro_rules! const_unreachable {
     () => {{
-        #[cfg(not(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0))]
         unreachable!();
 
-        #[cfg(no_zerocopy_panic_in_const_and_vec_try_reserve_1_57_0)]
-        loop {}
     }};
 }
 

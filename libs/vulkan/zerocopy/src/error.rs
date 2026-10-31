@@ -115,15 +115,12 @@
 //!         .map_err(|err| err.to_string())
 //! }).join().unwrap();
 //! ```
-#[cfg(not(no_zerocopy_core_error_1_81_0))]
 use core::error::Error;
 use core::{
     convert::Infallible,
     fmt::{self, Debug, Write},
     ops::Deref,
 };
-#[cfg(all(no_zerocopy_core_error_1_81_0, any(feature = "std", test)))]
-use std::error::Error;
 
 use crate::{util::SendSyncPhantomData, KnownLayout, TryFromBytes, Unaligned};
 #[cfg(doc)]
@@ -234,7 +231,6 @@ impl<A: fmt::Display, S: fmt::Display, V: fmt::Display> fmt::Display for Convert
     }
 }
 
-#[cfg(any(not(no_zerocopy_core_error_1_81_0), feature = "std", test))]
 #[cfg_attr(doc_cfg, doc(cfg(all(rust = "1.81.0", feature = "std"))))]
 impl<A, S, V> Error for ConvertError<A, S, V>
 where
@@ -407,7 +403,6 @@ where
     }
 }
 
-#[cfg(any(not(no_zerocopy_core_error_1_81_0), feature = "std", test))]
 #[cfg_attr(doc_cfg, doc(cfg(all(rust = "1.81.0", feature = "std"))))]
 impl<Src, Dst: ?Sized> Error for AlignmentError<Src, Dst>
 where
@@ -568,7 +563,6 @@ where
     }
 }
 
-#[cfg(any(not(no_zerocopy_core_error_1_81_0), feature = "std", test))]
 #[cfg_attr(doc_cfg, doc(cfg(all(rust = "1.81.0", feature = "std"))))]
 impl<Src, Dst: ?Sized> Error for SizeError<Src, Dst>
 where
@@ -703,7 +697,6 @@ where
     }
 }
 
-#[cfg(any(not(no_zerocopy_core_error_1_81_0), feature = "std", test))]
 #[cfg_attr(doc_cfg, doc(cfg(all(rust = "1.81.0", feature = "std"))))]
 impl<Src, Dst: ?Sized> Error for ValidityError<Src, Dst> where Dst: KnownLayout + TryFromBytes {}
 

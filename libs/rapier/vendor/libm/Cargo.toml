@@ -9,7 +9,6 @@ authors = [
     "Jorge Aparicio <japaricious@gmail.com>",
     "Trevor Gross <tg@trevorgross.com>",
 ]
-build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false
@@ -44,4 +43,9 @@ path = "src/lib.rs"
 [lints.rust.unexpected_cfgs]
 level = "warn"
 priority = 0
-check-cfg = ['cfg(feature, values("compiler-builtins"))']
+check-cfg = [
+    'cfg(feature, values("compiler-builtins"))',
+    # f16/f128 need nightly; no longer probed, so they are never enabled.
+    "cfg(f16_enabled)",
+    "cfg(f128_enabled)",
+]

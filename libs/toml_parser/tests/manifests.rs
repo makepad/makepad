@@ -16,27 +16,29 @@ fn root_workspace_manifest() {
         .get_path(&["workspace", "members"])
         .and_then(Toml::as_array)
         .expect("workspace.members");
-    assert!(members.iter().any(|m| m.as_str() == Some("apps/director")));
+    assert!(members.iter().any(|m| m.as_str() == Some("apps/wm")));
     assert!(members.iter().any(|m| m.as_str() == Some("apps/terminal")));
     assert!(members.len() > 50);
 }
 
 #[test]
-fn director_manifest_has_four_bins_and_a_lib() {
-    let doc = parse(include_str!("../../../apps/director/Cargo.toml"));
-    assert_eq!(get_str(&doc, &["package", "name"]), Some("makepad-director"));
-    assert_eq!(get_str(&doc, &["lib", "name"]), Some("makepad_director"));
+fn mail_manifest_has_a_lib_and_two_split_bins() {
+    // The two [[bin]] tables are separated by [features] and [dependencies]:
+    // they still form one array.
+    let doc = parse(include_str!("../../../apps/mail/Cargo.toml"));
+    assert_eq!(get_str(&doc, &["package", "name"]), Some("makepad-app-mail"));
+    assert_eq!(get_str(&doc, &["lib", "name"]), Some("makepad_app_mail"));
     let bins = doc
         .get_path(&["bin"])
         .and_then(Toml::as_array_of_tables)
         .expect("[[bin]] entries");
     let names: Vec<&str> = bins.iter().map(|b| b["name"].as_str().unwrap()).collect();
-    assert_eq!(
-        names,
-        ["director", "director-git-guard", "director-rustc-guard", "director-flow"]
-    );
-    assert_eq!(bins[1]["test"].as_bool(), Some(false));
+    assert_eq!(names, ["makepad-app-mail", "mail-index"]);
     assert_eq!(bins[0]["path"].as_str(), Some("src/main.rs"));
+    assert_eq!(
+        bins[1]["required-features"].as_array().and_then(|a| a[0].as_str()),
+        Some("standalone")
+    );
     assert_eq!(
         get_str(&doc, &["dependencies", "makepad-widgets", "path"]),
         Some("../../widgets")
@@ -46,7 +48,7 @@ fn director_manifest_has_four_bins_and_a_lib() {
 #[test]
 fn terminal_manifest() {
     let doc = parse(include_str!("../../../apps/terminal/Cargo.toml"));
-    assert_eq!(get_str(&doc, &["package", "name"]), Some("makepad-terminal"));
+    assert_eq!(get_str(&doc, &["package", "name"]), Some("makepad-app-terminal"));
     assert!(doc.get_path(&["dependencies"]).and_then(Toml::as_table).is_some());
 }
 

@@ -7,6 +7,12 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
 
+#[cfg(target_os = "macos")]
+pub mod accessibility;
+
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
+pub mod ui_accessibility;
+
 pub const fn four_char_as_u32(s: &str) -> u32 {
     let b = s.as_bytes();
     ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
@@ -278,6 +284,13 @@ extern "C" {
     pub static AVVideoAverageBitRateKey: ObjcId;
     pub static AVVideoExpectedSourceFrameRateKey: ObjcId;
     pub static AVVideoMaxKeyFrameIntervalKey: ObjcId;
+    /// The colour a writer tags (and converts to): a dictionary of the
+    /// primaries, transfer function and YCbCr matrix keys below, whose values
+    /// are the CoreVideo colour strings (`CV*GetStringForIntegerCodePoint`).
+    pub static AVVideoColorPropertiesKey: ObjcId;
+    pub static AVVideoColorPrimariesKey: ObjcId;
+    pub static AVVideoTransferFunctionKey: ObjcId;
+    pub static AVVideoYCbCrMatrixKey: ObjcId;
     pub static AVVideoCodecTypeHEVC: ObjcId;
     pub static AVVideoCodecTypeH264: ObjcId;
     pub static AVFormatIDKey: ObjcId;
@@ -468,6 +481,15 @@ extern "C" {
         nalUnitHeaderLengthOut: *mut i32,
     ) -> OSStatus;
 
+    pub fn CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+        videoDesc: CMFormatDescriptionRef,
+        parameterSetIndex: usize,
+        parameterSetPointerOut: *mut *const u8,
+        parameterSetSizeOut: *mut usize,
+        parameterSetCountOut: *mut usize,
+        nalUnitHeaderLengthOut: *mut i32,
+    ) -> OSStatus;
+
     pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
     /// The codec's own sample-description extensions — for HEVC this is where
     /// the ready-made `hvcC` atom lives, which an mp4 needs verbatim.
@@ -566,6 +588,29 @@ extern "C" {
     pub static kCVPixelBufferIOSurfacePropertiesKey: CFStringRef;
     pub static kCVPixelBufferOpenGLESCompatibilityKey: CFStringRef;
     pub static kCVPixelBufferMetalCompatibilityKey: CFStringRef;
+    /// Colour attachments of an image buffer (and, under the same names, the
+    /// extensions of a video format description).
+    pub static kCVImageBufferColorPrimariesKey: CFStringRef;
+    pub static kCVImageBufferTransferFunctionKey: CFStringRef;
+    pub static kCVImageBufferYCbCrMatrixKey: CFStringRef;
+    /// H.273 code points of the CoreVideo colour strings, both ways
+    /// (0 / null for one CoreVideo does not name).
+    pub fn CVColorPrimariesGetIntegerCodePointForString(s: CFStringRef) -> i32;
+    pub fn CVTransferFunctionGetIntegerCodePointForString(s: CFStringRef) -> i32;
+    pub fn CVYCbCrMatrixGetIntegerCodePointForString(s: CFStringRef) -> i32;
+    pub fn CVColorPrimariesGetStringForIntegerCodePoint(code: i32) -> CFStringRef;
+    pub fn CVTransferFunctionGetStringForIntegerCodePoint(code: i32) -> CFStringRef;
+    pub fn CVYCbCrMatrixGetStringForIntegerCodePoint(code: i32) -> CFStringRef;
+    pub fn CVBufferCopyAttachment(buffer: CVPixelBufferRef, key: CFStringRef, mode: *mut u32) -> *const c_void;
+    /// `mode`: 1 = kCVAttachmentMode_ShouldPropagate.
+    pub fn CVBufferSetAttachment(buffer: CVPixelBufferRef, key: CFStringRef, value: *const c_void, mode: u32);
+    /// A pixel buffer over an existing IOSurface (no copy).
+    pub fn CVPixelBufferCreateWithIOSurface(
+        allocator: CFAllocatorRef,
+        surface: *mut c_void,
+        pixel_buffer_attributes: CFDictionaryRef,
+        pixel_buffer_out: *mut CVPixelBufferRef,
+    ) -> CVReturn;
     pub fn CVPixelBufferCreate(
         allocator: *const c_void,
         width: usize,
@@ -690,13 +735,24 @@ extern "C" {
     pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: CFStringRef;
     pub static kVTCompressionPropertyKey_AllowFrameReordering: CFStringRef;
     pub static kVTCompressionPropertyKey_ProfileLevel: CFStringRef;
+    pub static kVTCompressionPropertyKey_ColorPrimaries: CFStringRef;
+    pub static kVTCompressionPropertyKey_TransferFunction: CFStringRef;
+    pub static kVTCompressionPropertyKey_YCbCrMatrix: CFStringRef;
     pub static kVTProfileLevel_H264_Main_AutoLevel: CFStringRef;
     pub static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
     pub static kVTProfileLevel_HEVC_Main_AutoLevel: CFStringRef;
     pub static kVTCompressionPropertyKey_Quality: CFStringRef;
+    /// macOS 12+: a CFBoolean: the encoder spends less time per picture at some cost in quality.
+    pub static kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality: CFStringRef;
+    /// macOS 10.14+: a CFBoolean: the encoder saves power (and runs slower) where it can.
+    pub static kVTCompressionPropertyKey_MaximizePowerEfficiency: CFStringRef;
+    /// A CFArray of byte count, seconds pairs: hard limits on the stream's rate over those windows.
+    pub static kVTCompressionPropertyKey_DataRateLimits: CFStringRef;
     /// The dictionary of codec atoms hung off a format description, keyed by
     /// atom name (`hvcC` for HEVC).
     pub static kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: CFStringRef;
+    /// A CFBoolean: the stream's samples are full range.
+    pub static kCMFormatDescriptionExtension_FullRangeVideo: CFStringRef;
     pub static kVTEncodeFrameOptionKey_ForceKeyFrame: CFStringRef;
 
     pub fn VTCompressionSessionCreate(
@@ -767,6 +823,9 @@ extern "C" {
     // VTIsHardwareEncodeSupported above is NOT an exported symbol on macOS,
     // see apple_media.rs's dlsym workaround).
     pub static kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: CFStringRef;
+    /// macOS 11.3+: the encoder's low-latency mode (no frame reordering, a short rate-control
+    /// window), set at session creation.
+    pub static kVTVideoEncoderSpecification_EnableLowLatencyRateControl: CFStringRef;
     pub fn VTCopySupportedPropertyDictionaryForEncoder(
         width: i32,
         height: i32,
@@ -1146,12 +1205,19 @@ pub struct MTLClearColor {
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum MTLPixelFormat {
     R8Unorm = 10,
+    R16Float = 25,
     RG8Unorm = 30,
+    R32Uint = 53,
     R32Float = 55,
+    RG16Float = 65,
     RGBA8Unorm = 70,
     BGRA8Unorm = 80,
+    BGRA8Unorm_sRGB = 81,
     RGBA16Float = 115,
     RGBA32Float = 125,
+    BC5_RGUnorm = 142,
+    BC7_RGBAUnorm = 152,
+    ASTC_4x4_LDR = 204,
     Depth32Float = 252,
     //Stencil8 = 253,
     //Depth24Unorm_Stencil8 = 255,
@@ -1393,6 +1459,7 @@ pub type CFTypeID = usize;
 
 pub const kCFNumberSInt32Type: i32 = 3;
 pub const kCFNumberSInt64Type: i32 = 4;
+pub const kCFNumberFloat64Type: i32 = 6;
 
 // CORE AUDIO
 
@@ -1792,7 +1859,7 @@ pub const kAudioObjectSystemObject: AudioDeviceID = 1;
 pub type AudioObjectID = u32;
 pub type AudioDeviceID = u32;
 
-#[link(name = "CoreMidi", kind = "framework")]
+#[link(name = "CoreMIDI", kind = "framework")]
 extern "C" {
     pub static kMIDIPropertyManufacturer: CFStringRef;
     pub static kMIDIPropertyDisplayName: CFStringRef;
@@ -2024,6 +2091,9 @@ extern "C" {
     pub fn IOSurfaceLookupFromMachPort(port: mach_port_t) -> IOSurfaceRef;
     pub fn IOSurfaceGetWidth(surface: IOSurfaceRef) -> usize;
     pub fn IOSurfaceGetHeight(surface: IOSurfaceRef) -> usize;
+    pub fn IOSurfaceGetPlaneCount(surface: IOSurfaceRef) -> usize;
+    pub fn IOSurfaceGetWidthOfPlane(surface: IOSurfaceRef, plane: usize) -> usize;
+    pub fn IOSurfaceGetHeightOfPlane(surface: IOSurfaceRef, plane: usize) -> usize;
     pub fn IOSurfaceIncrementUseCount(surface: IOSurfaceRef);
     pub fn IOSurfaceDecrementUseCount(surface: IOSurfaceRef);
 }
@@ -2038,6 +2108,8 @@ extern "C" {
 
     pub fn CFRelease(cf: *const c_void);
     pub fn CFRetain(cf: *const c_void) -> *const c_void;
+    /// The `CFArrayCallBacks` that retain and release CF values (an opaque struct here).
+    pub static kCFTypeArrayCallBacks: u8;
     pub fn CFArrayCreate(
         allocator: CFAllocatorRef,
         values: *const *const c_void,
@@ -2080,6 +2152,36 @@ extern "C" {
     pub fn CFRunLoopRun();
     #[cfg(target_os = "macos")]
     pub fn CFRunLoopStop(rl: CFRunLoopRef);
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopGetMain() -> CFRunLoopRef;
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopWakeUp(rl: CFRunLoopRef);
+    /// Returns why it returned (`kCFRunLoopRun*`: 1 finished, 2 stopped, 3 timed out, 4 handled a source).
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source_handled: Boolean) -> i32;
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopSourceCreate(allocator: CFAllocatorRef, order: CFIndex, context: *mut CFRunLoopSourceContext) -> CFRunLoopSourceRef;
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopSourceSignal(source: CFRunLoopSourceRef);
+}
+
+pub type CFRunLoopSourceRef = *mut c_void;
+
+/// A version 0 run loop source's callbacks (`CFRunLoopSourceContext`); unused ones are `None`.
+#[repr(C)]
+pub struct CFRunLoopSourceContext {
+    pub version: CFIndex,
+    pub info: *mut c_void,
+    pub retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
+    pub release: Option<extern "C" fn(*const c_void)>,
+    pub copy_description: Option<extern "C" fn(*const c_void) -> CFStringRef>,
+    pub equal: Option<extern "C" fn(*const c_void, *const c_void) -> Boolean>,
+    pub hash: Option<extern "C" fn(*const c_void) -> usize>,
+    pub schedule: Option<extern "C" fn(*mut c_void, CFRunLoopRef, CFStringRef)>,
+    pub cancel: Option<extern "C" fn(*mut c_void, CFRunLoopRef, CFStringRef)>,
+    pub perform: Option<extern "C" fn(*mut c_void)>,
 }
 
 #[cfg(target_os = "macos")]

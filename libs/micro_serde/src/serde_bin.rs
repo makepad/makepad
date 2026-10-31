@@ -393,6 +393,15 @@ where
     }
 }
 
+impl<T, const N: usize> SerBin for [T; N]
+where
+    T: SerBin,
+{
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.as_slice().ser_bin(s)
+    }
+}
+
 unsafe fn de_bin_array_impl_inner<T>(
     top: *mut T,
     count: usize,

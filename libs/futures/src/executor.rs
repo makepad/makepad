@@ -28,9 +28,20 @@ impl Executor {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Called when a task is queued (spawned or woken), from whichever thread did it: the owner of
+/// the [`Executor`] wakes and runs it.
+pub type OnQueued = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Clone)]
 pub struct Spawner {
     task_sender: Sender<Arc<Task>>,
+    on_queued: OnQueued,
+}
+
+impl fmt::Debug for Spawner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Spawner").finish_non_exhaustive()
+    }
 }
 
 impl Spawner {
@@ -41,12 +52,14 @@ impl Spawner {
                 inner: Mutex::new(TaskInner {
                     future: Some(Box::pin(future)),
                     task_sender: self.task_sender.clone(),
+                    on_queued: self.on_queued.clone(),
                 }),
             }))
             .is_err()
         {
             return Err(SpawnError::shutdown());
         }
+        (self.on_queued)();
         Ok(())
     }
 }
@@ -91,23 +104,25 @@ impl Task {
 
 impl Wake for Task {
     fn wake(self: Arc<Task>) {
-        self.inner
-            .lock()
-            .unwrap()
-            .task_sender
-            .send(self.clone())
-            .unwrap();
+        let on_queued = {
+            let inner = self.inner.lock().unwrap();
+            inner.task_sender.send(self.clone()).unwrap();
+            inner.on_queued.clone()
+        };
+        on_queued();
     }
 }
 
 struct TaskInner {
     future: Option<Pin<Box<dyn Future<Output = ()> + 'static>>>,
     task_sender: Sender<Arc<Task>>,
+    on_queued: OnQueued,
 }
 
-pub fn new_executor_and_spawner() -> (Executor, Spawner) {
+/// `on_queued` runs whenever a task is queued, so a sleeping owner wakes to run it.
+pub fn new_executor_and_spawner(on_queued: OnQueued) -> (Executor, Spawner) {
     use std::sync::mpsc;
 
     let (task_sender, task_receiver) = mpsc::channel();
-    (Executor { task_receiver }, Spawner { task_sender })
+    (Executor { task_receiver }, Spawner { task_sender, on_queued })
 }

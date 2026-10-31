@@ -1,0 +1,7 @@
+[package]
+name = "makepad-vulkan"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Vulkan bindings for Makepad, generated from the Khronos registry by tools/vulkan_codegen"
+repository = "https://github.com/makepad/makepad/"

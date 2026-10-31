@@ -2,7 +2,7 @@
 name = "makepad-jni-sys"
 version = "0.4.0"
 authors = ["Steven Fackler <sfackler@gmail.com>", "Robert Bragg <robert@sixbynine.org>"]
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 description = "Rust definitions corresponding to jni.h"
 repository = "https://github.com/jni-rs/jni-sys"
 documentation = "https://docs.rs/jni-sys/0.4.0"

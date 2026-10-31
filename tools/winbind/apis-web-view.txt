@@ -1,0 +1,43 @@
+# System web view hosting. Names below are the type library's API identifiers.
+# Selected type-library interfaces whose single method is Invoke get Rust COM
+# implementation support automatically, including transitive event handlers.
+Windows.TypeLibrary.ICoreWebView2Environment3
+Windows.TypeLibrary.ICoreWebView2CompositionController2
+Windows.TypeLibrary.ICoreWebView2Controller3
+Windows.TypeLibrary.ICoreWebView2
+Windows.TypeLibrary.ICoreWebView2Settings
+Windows.TypeLibrary.ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler
+Windows.TypeLibrary.ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler
+implement Windows.TypeLibrary.ICoreWebView2EnvironmentOptions
+Windows.Win32.System.Com.CoTaskMemAlloc
+Windows.Win32.System.Registry.HKEY_LOCAL_MACHINE
+Windows.Win32.System.Registry.RRF_RT_REG_SZ
+Windows.Win32.System.Registry.RRF_SUBKEY_WOW6432KEY
+Windows.Win32.System.LibraryLoader.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+Windows.Win32.System.LibraryLoader.LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+# The runtime's private dynamic export is absent from the COM type library.
+# Signature verified from the pinned SDK's x64 loader (inspection only; never linked).
+# fnptr <name> <return> <arguments...>; first argument selects the system web view API,
+# second is runtime kind (0 installed, 1 explicit folder), then user data/options/completion.
+fnptr Windows.TypeLibrary.CreateEnvironment Windows.Win32.Foundation.HRESULT bool u32 PCWSTR Windows.TypeLibrary.ICoreWebView2EnvironmentOptions Windows.TypeLibrary.ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler
+# Keyboard focus between the host window and the web view's own input window.
+Windows.Win32.UI.Input.KeyboardAndMouse.SetFocus
+Windows.Win32.UI.WindowsAndMessaging.IsChild
+# Touch and pen input routed to a web view (SendPointerInput).
+Windows.Win32.UI.Input.Pointer.GetPointerType
+Windows.Win32.UI.Input.Pointer.GetPointerInfo
+Windows.Win32.UI.Input.Pointer.GetPointerTouchInfo
+Windows.Win32.UI.Input.Pointer.GetPointerPenInfo
+Windows.Win32.UI.Input.Pointer.GetPointerDeviceRects
+Windows.Win32.UI.WindowsAndMessaging.WM_POINTERDOWN
+Windows.Win32.UI.WindowsAndMessaging.WM_POINTERUP
+Windows.Win32.UI.WindowsAndMessaging.WM_POINTERUPDATE
+Windows.Win32.UI.WindowsAndMessaging.WM_POINTERENTER
+Windows.Win32.UI.WindowsAndMessaging.WM_POINTERLEAVE
+Windows.Win32.UI.WindowsAndMessaging.WM_POINTERCAPTURECHANGED
+Windows.Win32.UI.WindowsAndMessaging.PT_TOUCH
+Windows.Win32.UI.WindowsAndMessaging.PT_PEN
+# DirectComposition repaints the windows of a lost device (the HAL then checks it).
+Windows.Win32.UI.WindowsAndMessaging.WM_PAINT
+# A web view's cursor is copied: the runtime may free the handle it hands out.
+Windows.Win32.UI.WindowsAndMessaging.CopyIcon

@@ -1,7 +1,7 @@
 // zip fileformat reading
 
 pub mod writer;
-pub use writer::{ZipMethod, ZipWriteError, ZipWriter};
+pub use writer::{Packed, ZipMethod, ZipWriteError, ZipWriter};
 
 use makepad_fast_inflate::inflate::decompress_to_vec;
 use std::io::{Read, Seek, SeekFrom};

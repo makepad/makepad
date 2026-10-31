@@ -47,6 +47,11 @@ path = "../error_log"
 [dependencies.smallvec]
 version = "1.6"
 path = "../smallvec"
+# The features the workspace's smallvec carries anyway (wayland-backend asks for them): asked for here
+# too, so a program's crate graph on any one target resolves smallvec to the same features as the
+# workspace-wide `cargo metadata` that fixes the identity of relax's provided crates (makepad-hal
+# reaches smallvec through font-core -> rustybuzz).
+features = ["const_generics", "const_new", "union"]
 
 [dependencies.ttf-parser]
 version = "0.24.1"

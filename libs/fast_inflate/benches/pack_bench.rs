@@ -1,5 +1,4 @@
 // Benchmark: decompress all objects in a real git pack file
-// Compares fast_inflate vs flate2 (miniz_oxide)
 //
 // Run with: cargo bench -p makepad-fast-inflate --bench pack_bench
 
@@ -96,18 +95,18 @@ fn parse_pack_objects(pack_data: &[u8]) -> Vec<PackObject> {
         }
 
         // The rest is zlib-compressed data. We need to figure out how much
-        // compressed data there is. Use flate2 to find the boundary.
+        // compressed data there is. Use the consumed byte count to find the boundary.
         let remaining = &pack_data[pos..];
         if remaining.len() < 2 {
             break;
         }
 
         // Try to decompress to find how many compressed bytes were consumed
-        use std::io::Read;
-        let mut decoder = flate2::read::ZlibDecoder::new(remaining);
-        let mut decompressed = Vec::with_capacity(size);
-        if decoder.read_to_end(&mut decompressed).is_ok() {
-            let consumed = decoder.total_in() as usize;
+        let mut decompressed = vec![0; size];
+        if let Ok((consumed, written)) =
+            makepad_fast_inflate::zlib_decompress(remaining, &mut decompressed)
+        {
+            assert_eq!(written, size);
             objects.push(PackObject {
                 compressed_data: remaining[..consumed].to_vec(),
                 expected_size: decompressed.len(),
@@ -180,77 +179,5 @@ fn main() {
 
     println!();
 
-    // --- flate2 (miniz_oxide) ---
-    println!("flate2/miniz_oxide:");
-    let mut best_miniz = f64::MAX;
-    for i in 0..iterations {
-        let start = Instant::now();
-        let mut total_written = 0usize;
-        for obj in &objects {
-            use std::io::Read;
-            let mut decoder = flate2::read::ZlibDecoder::new(&obj.compressed_data[..]);
-            let mut out = Vec::with_capacity(obj.expected_size);
-            decoder.read_to_end(&mut out).expect("flate2 failed");
-            total_written += out.len();
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-        let throughput = total_decompressed as f64 / elapsed / 1e6;
-        println!(
-            "  run {}: {:.3}s  ({:.1} MB/s decompressed, {} bytes written)",
-            i + 1,
-            elapsed,
-            throughput,
-            total_written
-        );
-        best_miniz = best_miniz.min(elapsed);
-    }
-
-    println!();
-
-    // --- C libdeflater ---
-    println!("C libdeflater:");
-    let mut best_c = f64::MAX;
-    for i in 0..iterations {
-        let start = Instant::now();
-        let mut total_written = 0usize;
-        for obj in &objects {
-            let mut decomp = libdeflater::Decompressor::new();
-            let mut out = vec![0u8; obj.expected_size];
-            let written = decomp
-                .zlib_decompress(&obj.compressed_data, &mut out)
-                .expect("libdeflater failed");
-            total_written += written;
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-        let throughput = total_decompressed as f64 / elapsed / 1e6;
-        println!(
-            "  run {}: {:.3}s  ({:.1} MB/s decompressed, {} bytes written)",
-            i + 1,
-            elapsed,
-            throughput,
-            total_written
-        );
-        best_c = best_c.min(elapsed);
-    }
-
-    println!();
-    println!("=== Summary (best of {}) ===", iterations);
-    let rust_tp = total_decompressed as f64 / best_rust / 1e6;
-    let miniz_tp = total_decompressed as f64 / best_miniz / 1e6;
-    let c_tp = total_decompressed as f64 / best_c / 1e6;
-    println!("  fast_inflate:  {:.3}s  ({:.1} MB/s)", best_rust, rust_tp);
-    println!(
-        "  flate2/miniz:  {:.3}s  ({:.1} MB/s)",
-        best_miniz, miniz_tp
-    );
-    println!("  C libdeflater: {:.3}s  ({:.1} MB/s)", best_c, c_tp);
-    println!();
-    println!(
-        "  fast_inflate vs miniz: {:.2}x faster",
-        best_miniz / best_rust
-    );
-    println!(
-        "  fast_inflate vs C:     {:.2}x (>1 = C faster)",
-        best_c / best_rust
-    );
+    println!("Best: {:.3}s ({:.1} MB/s)", best_rust, total_decompressed as f64 / best_rust / 1e6);
 }

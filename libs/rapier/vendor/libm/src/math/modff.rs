@@ -1,4 +1,3 @@
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn modff(x: f32) -> (f32, f32) {
     let rv2: f32;
     let mut u: u32 = x.to_bits();

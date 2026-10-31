@@ -156,7 +156,10 @@ impl<'a> PngEncoder<'a> {
         // in-repo compressor; retain the store-only fallback for no_std.
         #[cfg(feature = "std")]
         {
-            self.encoded_chunks = makepad_fast_inflate::zlib_compress(&self.filter_scanline, 6);
+            // Effort 0: stored blocks, for an image that is decoded again
+            // in the same process and never kept (a level's material maps).
+            let level = if self.options.effort() == 0 { 0 } else { 6 };
+            self.encoded_chunks = makepad_fast_inflate::zlib_compress(&self.filter_scanline, level);
         }
         #[cfg(not(feature = "std"))]
         {

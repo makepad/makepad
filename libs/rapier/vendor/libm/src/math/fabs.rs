@@ -3,7 +3,6 @@
 /// Calculates the absolute value (magnitude) of the argument `x`,
 /// by direct manipulation of the bit representation of `x`.
 #[cfg(f16_enabled)]
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn fabsf16(x: f16) -> f16 {
     super::generic::fabs(x)
 }
@@ -12,11 +11,10 @@ pub fn fabsf16(x: f16) -> f16 {
 ///
 /// Calculates the absolute value (magnitude) of the argument `x`,
 /// by direct manipulation of the bit representation of `x`.
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn fabsf(x: f32) -> f32 {
     select_implementation! {
         name: fabsf,
-        use_arch: all(target_arch = "wasm32", intrinsics_enabled),
+        use_arch: all(target_arch = "wasm32", all(feature = "unstable-intrinsics", not(feature = "force-soft-floats"))),
         args: x,
     }
 
@@ -27,11 +25,10 @@ pub fn fabsf(x: f32) -> f32 {
 ///
 /// Calculates the absolute value (magnitude) of the argument `x`,
 /// by direct manipulation of the bit representation of `x`.
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn fabs(x: f64) -> f64 {
     select_implementation! {
         name: fabs,
-        use_arch: all(target_arch = "wasm32", intrinsics_enabled),
+        use_arch: all(target_arch = "wasm32", all(feature = "unstable-intrinsics", not(feature = "force-soft-floats"))),
         args: x,
     }
 
@@ -43,7 +40,6 @@ pub fn fabs(x: f64) -> f64 {
 /// Calculates the absolute value (magnitude) of the argument `x`,
 /// by direct manipulation of the bit representation of `x`.
 #[cfg(f128_enabled)]
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn fabsf128(x: f128) -> f128 {
     super::generic::fabs(x)
 }

@@ -18,7 +18,6 @@ authors = [
     "Raph Levien <raph.levien@gmail.com>",
     "Marcus Klaas de Vries <mail@marcusklaas.nl>",
 ]
-build = "build.rs"
 exclude = [
     "/third_party/**/*",
     "/tools/**/*",
@@ -60,7 +59,6 @@ path = "../unicase"
 default = [
     "getopts",
 ]
-gen-tests = []
 # html removed - kept as empty feature to silence cfg warnings
 html = []
 simd = []

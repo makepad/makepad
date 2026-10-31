@@ -15,7 +15,6 @@ rust-version = "1.65"
 name = "wayland-client"
 version = "0.31.12"
 authors = ["Elinor Berger <elinor@safaradeg.net>"]
-build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false
@@ -84,3 +83,6 @@ version = "0.3"
 
 [dev-dependencies.tempfile]
 version = "3.2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)", "cfg(unstable_coverage)"] }

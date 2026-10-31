@@ -18,7 +18,6 @@ authors = [
     "Sam Rijs <srijs@airpost.net>",
     "Alex Crichton <alex@alexcrichton.com>",
 ]
-build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false

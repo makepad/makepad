@@ -7,9 +7,9 @@
 
 // Most implementations should be defined here, to ensure they are not made available when
 // soft floats are required.
-#[cfg(arch_enabled)]
+#[cfg(all(feature = "arch", not(feature = "force-soft-floats")))]
 cfg_if! {
-    if #[cfg(all(target_arch = "wasm32", intrinsics_enabled))] {
+    if #[cfg(all(target_arch = "wasm32", all(feature = "unstable-intrinsics", not(feature = "force-soft-floats"))))] {
         mod wasm32;
         pub use wasm32::{
             ceil, ceilf, fabs, fabsf, floor, floorf, rint, rintf, sqrt, sqrtf, trunc, truncf,
@@ -49,7 +49,7 @@ cfg_if! {
     }
 }
 cfg_if! {
-    if #[cfg(x86_no_sse)] {
+    if #[cfg(all(target_arch = "x86", not(target_feature = "sse")))] {
         pub use i586::{x87_exp10f, x87_exp10, x87_expf, x87_exp, x87_exp2f, x87_exp2};
     }
 }
