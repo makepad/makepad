@@ -1245,9 +1245,23 @@ pub(crate) fn cur_unit() -> *mut Unit {
     if t.is_null() { unsafe { UNIT } } else { t }
 }
 
+/// Live auxiliary units (proc-macro worlds): threads spawned by code inside one resolve their
+/// `rt_thread_run` entry against it via `Unit::owns_code`.
+static AUX_UNITS_ANY: AtomicBool = AtomicBool::new(false);
+static AUX_UNITS: relax_session::sync::Mutex<Vec<usize>> = relax_session::sync::Mutex::new(Vec::new());
+
 /// Makes `u` the runtime's unit unless that would put an auxiliary unit (the macro world) in
 /// place of a program's.
 unsafe fn adopt_runtime_unit(u: *mut Unit) {
+    if (*u).aux {
+        let mut aux = AUX_UNITS.lock().unwrap_or_else(|e| e.into_inner());
+        let addr = u as usize;
+        if !aux.contains(&addr) {
+            let _k = crate::zone_alloc::kept();
+            aux.push(addr);
+            AUX_UNITS_ANY.store(true, Ordering::Release);
+        }
+    }
     if UNIT.is_null() || !(*u).aux || (*UNIT).aux {
         UNIT = u;
     }
@@ -2918,7 +2932,15 @@ fn fatal_compile_error(p: &PanicInfo, report: &str) {
 rt_fn! {
 pub(crate) fn rt_thread_run(entry: u64, arg: u64) -> u64 {
     ensure_altstack();
-    let u = cur_unit();
+    let u = if AUX_UNITS_ANY.load(Ordering::Acquire) {
+        let aux = AUX_UNITS.lock().unwrap_or_else(|e| e.into_inner());
+        aux.iter()
+            .copied()
+            .find(|&p| unsafe { (&*(p as *mut Unit)).owns_code(entry) })
+            .map_or_else(cur_unit, |p| p as *mut Unit)
+    } else {
+        cur_unit()
+    };
     // runs on the calling thread, in the domain it is in
     match unsafe { call_jit_in(u, crate::domain::current(), entry, arg) } {
         Ok(_) => 0,
@@ -4899,6 +4921,11 @@ impl Unit {
     /// cannot unwind is a plain call (no cleanup pad behind it).
     pub fn drop_may_unwind(&self, t: TyId) -> bool {
         self.drop_may_unwind_inner(t, &mut TypeCycle::default())
+    }
+
+    fn owns_code(&self, pc: u64) -> bool {
+        (pc >= self.exec_base && pc - self.exec_base < self.exec_size)
+            || self.slots.find(0, pc).is_some()
     }
 
     fn drop_may_unwind_inner(&self, t: TyId, cycle: &mut TypeCycle) -> bool {
@@ -14286,6 +14313,11 @@ pub unsafe fn retire_unit(up: *mut Unit) {
         }
         if UNIT == up {
             UNIT = std::ptr::null_mut();
+        }
+        if AUX_UNITS_ANY.load(Ordering::Acquire) {
+            let mut aux = AUX_UNITS.lock().unwrap_or_else(|e| e.into_inner());
+            aux.retain(|&p| p != up as usize);
+            AUX_UNITS_ANY.store(!aux.is_empty(), Ordering::Release);
         }
     });
     resume_compile_jobs(false);

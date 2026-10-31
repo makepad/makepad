@@ -188,11 +188,52 @@ fn digest_into(pf: &ParsedFile, mut text: Option<&mut Vec<u8>>) -> FileDigest {
     let mut free: Vec<(u128, Vec<u8>)> = Vec::new();
     let mut ordered: Vec<(u128, Vec<u8>)> = Vec::new();
     let mut segs: Vec<(u32, u32)> = ast.root_attrs.iter().filter_map(attr_span).collect();
-    ordered.push(piece(&mut segs, want_text));
-    for &i in ast.root_items.iter() {
+    let mut item_segs: Vec<Vec<(u32, u32)>> = ast.root_items.iter().map(|&i| {
         let it = ast.item(i);
-        let mut segs: Vec<(u32, u32)> = ast.list(it.attrs).iter().filter_map(attr_span).collect();
-        segs.push((it.lo, it.hi));
+        let mut s: Vec<(u32, u32)> = ast.list(it.attrs).iter().filter_map(attr_span).collect();
+        s.push((it.lo, it.hi));
+        s
+    }).collect();
+    // Expansions of macros called inside an interface item (e.g. `include_str!` in a `const`,
+    // or an item macro inside an `impl`/`mod`) sit past `it.hi` in `pf.src`: attach them to
+    // their owning root item unless the call site lies inside a body hole.
+    if !pf.exp_map.is_empty() && (!item_segs.is_empty() || !segs.is_empty()) {
+        let mut root_ranges: Vec<(u32, u32, usize)> = ast.root_items.iter().enumerate().map(|(idx, &i)| {
+            let it = ast.item(i);
+            let rlo = item_segs[idx].iter().map(|s| s.0).min().unwrap_or(it.lo);
+            (rlo, it.hi, idx)
+        }).collect();
+        root_ranges.sort_unstable();
+        for (elo, ehi, cpos) in pf.exp_map.iter() {
+            if elo >= ehi { continue; }
+            let mut pos = cpos;
+            for _ in 0..4096 {
+                let hk = by_pos.partition_point(|x| x.1 <= pos);
+                if hk < by_pos.len() && by_pos[hk].0 <= pos {
+                    break;
+                }
+                let rk = root_ranges.partition_point(|x| x.1 <= pos);
+                if rk < root_ranges.len() && root_ranges[rk].0 <= pos {
+                    let (rlo, rhi, idx) = root_ranges[rk];
+                    if elo < rlo || ehi > rhi {
+                        item_segs[idx].push((elo, ehi));
+                    }
+                    break;
+                }
+                if segs.iter().any(|&(alo, ahi)| alo <= pos && pos < ahi) {
+                    segs.push((elo, ehi));
+                    break;
+                }
+                match pf.exp_map.floor(pos) {
+                    Some((_, (_, rhi, next))) if pos <= rhi && next != pos => pos = next,
+                    _ => break,
+                }
+            }
+        }
+    }
+    ordered.push(piece(&mut segs, want_text));
+    for (&i, mut segs) in ast.root_items.iter().zip(item_segs) {
+        let it = ast.item(i);
         let p = piece(&mut segs, want_text);
         if matches!(it.kind, ItemKind::MacroRules(_) | ItemKind::Mac(_)) { ordered.push(p) } else { free.push(p) }
     }
