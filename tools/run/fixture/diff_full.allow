@@ -1,0 +1,9 @@
+# diff_full.sh corpus: tests whose output differs from rustc's by design, not by a miscompile.
+# One line per test file: <file stem> <reason>. Their diffs are counted as "allowed", not as failures;
+# an allowed file that turns equal is reported so its line can go.
+backtrace_noreturn makepad test has no #[should_panic]: the deliberate panic is FAILED where rustc's harness passes it
+overflow crashes on purpose: the native test process dies of the stack overflow, makepad test recovers and goes on
+t2 hangs and faults on purpose (watchdog, null read, division by zero): the native process dies at the first
+par_parse module_path!: rustc names the crate par_parse, makepad test test_crate
+lazy_reexport a #[cfg(relax)] test runs only under makepad test
+tier1 prints timings (ps/call per batch)

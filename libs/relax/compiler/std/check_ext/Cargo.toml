@@ -1,0 +1,17 @@
+# Differential tests of Relax's built-in smallvec/arrayvec crates (std/smallvec,
+# std/arrayvec) against the real crates under rustc. Not a workspace member.
+[package]
+name = "relax-std-ext-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+smallvec = { path = "../../../../../libs/smallvec", features = ["union"] }
+arrayvec = { path = "../../../../../libs/vulkan/arrayvec" }
+
+[workspace]

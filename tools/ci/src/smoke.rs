@@ -18,6 +18,86 @@ pub struct Script {
     pub path: PathBuf,
     pub name: String,
     pub target: Option<Target>,
+    /// A licensed app's slice of the commercial repository (`slice:<app>`).
+    pub slice: Option<Slice>,
+}
+/// One entry of the commercial repository's `slices.json`: an app license
+/// and the root packages its slice is cut for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slice {
+    pub app: String,
+    pub roots: Vec<String>,
+}
+/// Where the private commercial repository (Stage with Amp, Scope, Sandbox)
+/// is checked out inside the Makepad checkout.
+pub const COMMERCIAL: &str = "apps/commercial";
+/// The script every slice tile runs.
+pub const SLICE_SCRIPT: &str = "tools/ci/slice.ci.splash";
+/// The features a slice is cut, linted and checked with. A release builds
+/// its package with `--no-default-features` and the release's features, and
+/// no release names any (the server's `source.json` has none), so a root's
+/// optional dependencies behind its default features (Scope's `internal`)
+/// are not in the slice.
+pub const SLICE_FEATURES: &[String] = &[];
+
+/// The licensed slices the commercial repository declares in its root
+/// `slices.json`, `{"amp": ["makepad-amp"], "scope": ["makepad-scope"]}`:
+/// app license -> root packages. The server's `source.json` roots for each
+/// app must match it. None without a commercial checkout.
+pub fn slices(root: &Path) -> Result<Vec<Slice>> {
+    let path = root.join(COMMERCIAL).join("slices.json");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let invalid = || format!("{}: expected {{\"<app>\": [\"<root package>\", ...]}}", path.display());
+    let value = makepad_strict_json::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let makepad_strict_json::Value::Obj(apps) = value else { return Err(invalid()) };
+    let id = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    let mut slices = Vec::new();
+    for (app, roots) in apps {
+        let roots: Vec<String> = roots
+            .as_arr()
+            .ok_or_else(invalid)?
+            .iter()
+            .map(|r| r.as_str().filter(|s| id(s)).map(str::to_owned).ok_or_else(invalid))
+            .collect::<Result<_>>()?;
+        if !id(&app) || roots.is_empty() {
+            return Err(invalid());
+        }
+        slices.push(Slice { app, roots });
+    }
+    slices.sort_by(|a, b| a.app.cmp(&b.app));
+    Ok(slices)
+}
+
+/// What a tile is called: `apps/wm` is `wm`, the root script is
+/// `workspace`. In the commercial repository a product is named by itself
+/// (`apps/commercial/scope` is `scope`, its own app `.../stage/app` is
+/// `stage`) and an app of a product by the app (`.../stage/apps/amp` is
+/// `amp`); slice tiles are `slice:<app>`.
+pub fn tile_name(name: &str) -> String {
+    if matches!(name, "." | "") {
+        return "workspace".into();
+    }
+    if let Some(rest) = name.strip_prefix("apps/commercial/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        return match parts.as_slice() {
+            [product] | [product, "app"] => product.to_string(),
+            [_, "apps", app] => app.to_string(),
+            [product, .., leaf] => format!("{product}/{leaf}"),
+            [] => rest.into(),
+        };
+    }
+    let name = name.strip_prefix("apps/").unwrap_or(name);
+    if name.contains('/') {
+        let mut parts = name.rsplit('/');
+        let leaf = parts.next().unwrap_or(name);
+        format!("{}/{leaf}", parts.next().unwrap_or(""))
+    } else {
+        name.into()
+    }
 }
 fn walk(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     if !dir.exists() {
@@ -32,7 +112,9 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if ty.is_dir() {
-            if !matches!(name.as_ref(), "target" | "local" | ".git") && !name.starts_with("target-")
+            // Hidden directories hold tool state (`.git`, agents' `.claude/worktrees`
+            // with whole checkouts), never the checkout's own crates.
+            if !matches!(name.as_ref(), "target" | "local") && !name.starts_with("target-") && !name.starts_with('.')
             {
                 walk(root, &entry.path(), files)?;
             }
@@ -85,6 +167,9 @@ fn targets_from_doc(
     if has_main && bins.is_empty() {
         bins.insert(package.into());
     }
+    // a skip entry also names one binary of a package (`flow-server`: Flow's server binary, not
+    // an app to launch)
+    bins.retain(|b| !skip.iter().any(|s| s == b || Some(s.as_str()) == b.strip_prefix("makepad-")));
     let multiple = bins.len() > 1;
     Ok(bins
         .into_iter()
@@ -173,6 +258,7 @@ pub fn discover(root: &Path, config: &Config) -> Result<(Vec<Target>, Vec<Script
                 dir.display().to_string()
             },
             target,
+            slice: None,
         });
     }
     for target in &targets {
@@ -189,8 +275,19 @@ pub fn discover(root: &Path, config: &Config) -> Result<(Vec<Target>, Vec<Script
                     }
                 ),
                 target: Some(target.clone()),
+                slice: None,
             });
         }
+    }
+    // One tile per licensed slice: the slice of the tested commercial commit
+    // in a clean Makepad checkout, linted and checked (tools/ci/slice.ci.splash).
+    for slice in slices(root)? {
+        scripts.push(Script {
+            path: PathBuf::from(SLICE_SCRIPT),
+            name: format!("slice:{}", slice.app),
+            target: None,
+            slice: Some(slice),
+        });
     }
     Ok((targets, scripts))
 }
@@ -210,6 +307,9 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let d = parse_toml("[package]\nname='makepad-app-flow'\n[[bin]]\nname='makepad-app-flow'\npath='a.rs'\n[[bin]]\nname='makepad-flow-server'\npath='b.rs'").unwrap();
+        let t = targets_from_doc(&d, Path::new("apps/flow"), false, &["flow-server".into()]).unwrap();
+        assert_eq!(t.iter().map(|t| t.binary.as_str()).collect::<Vec<_>>(), ["makepad-app-flow"]);
         let d = parse_toml("[package]\nname='plain'").unwrap();
         assert!(targets_from_doc(&d, Path::new("apps/plain"), false, &[])
             .unwrap()
@@ -234,11 +334,72 @@ mod tests {
             checkout: root.clone(), skip_apps: vec!["private".into()], model: "test".into(),
             targets: Vec::new(), allowed_errors: Vec::new(), no_vision: true, parallel: 1, deep_tests: false,
             machines: Default::default(),
+            yield_to: None,
+            deny_warnings: true,
         };
         let (targets, scripts) = discover(&root, &config).unwrap();
         assert_eq!(targets.iter().map(|t| t.package.as_str()).collect::<Vec<_>>(), vec!["kept"]);
         assert_eq!(scripts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["apps/kept"]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn commercial_scripts_are_found_at_their_depth_and_every_licensed_slice_is_a_tile() {
+        let root = std::env::temp_dir().join(format!("ci-commercial-{}-{}", std::process::id(), crate::report::stamp()));
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("apps/commercial/Cargo.toml", "[package]\nname='makepad-commercial-members'\nversion='0.0.0'\n");
+        write("apps/commercial/src/lib.rs", "");
+        write("apps/commercial/slices.json", "{\"scope\":[\"makepad-scope\"],\"amp\":[\"makepad-amp\"]}");
+        write("apps/commercial/scope/Cargo.toml", "[package]\nname='makepad-scope'\nversion='0.1.0'\n[[bin]]\nname='scope'\npath='src/main.rs'\n");
+        write("apps/commercial/scope/src/main.rs", "fn main() {}\n");
+        write("apps/commercial/scope/ci.splash", "nil\n");
+        write("apps/commercial/stage/apps/amp/Cargo.toml", "[package]\nname='makepad-amp'\nversion='0.1.0'\n");
+        write("apps/commercial/stage/apps/amp/src/main.rs", "fn main() {}\n");
+        write("apps/commercial/stage/apps/amp/ci.splash", "nil\n");
+        write("apps/commercial/local/scratch/ci.splash", "nil\n");
+        let config = Config {
+            remote: "origin".into(), branches: vec!["work".into()], poll_secs: 60,
+            checkout: root.clone(), skip_apps: crate::watch::DEFAULT_SKIPS.iter().map(|s| s.to_string()).collect(), model: "test".into(),
+            targets: Vec::new(), allowed_errors: Vec::new(), no_vision: true, parallel: 1, deep_tests: false,
+            machines: Default::default(),
+            yield_to: None,
+            deny_warnings: true,
+        };
+        let (targets, scripts) = discover(&root, &config).unwrap();
+        assert!(targets.is_empty(), "the members package is no app");
+        let names: Vec<(&str, String)> = scripts.iter().map(|s| (s.name.as_str(), tile_name(&s.name))).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("apps/commercial/scope", "scope".into()),
+                ("apps/commercial/stage/apps/amp", "amp".into()),
+                ("slice:amp", "slice:amp".into()),
+                ("slice:scope", "slice:scope".into()),
+            ]
+        );
+        let amp = scripts.iter().find(|s| s.name == "slice:amp").unwrap();
+        assert_eq!(amp.path, Path::new(SLICE_SCRIPT));
+        assert_eq!(amp.slice, Some(Slice { app: "amp".into(), roots: vec!["makepad-amp".into()] }));
+        write("apps/commercial/slices.json", "{\"amp\":[]}");
+        assert!(discover(&root, &config).is_err(), "a slice without roots stops discovery");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tiles_are_named_by_app() {
+        assert_eq!(tile_name("."), "workspace");
+        assert_eq!(tile_name("apps/wm"), "wm");
+        assert_eq!(tile_name("apps/commercial/scope"), "scope");
+        assert_eq!(tile_name("apps/commercial/stage/app"), "stage");
+        assert_eq!(tile_name("apps/commercial/stage/apps/amp"), "amp");
+        assert_eq!(tile_name("apps/commercial/sandbox"), "sandbox");
+        assert_eq!(tile_name("apps/commercial/sandbox/tools/editor"), "sandbox/editor");
+        assert_eq!(tile_name("slice:amp"), "slice:amp");
+        assert_eq!(tile_name("libs/ai/hub"), "ai/hub");
     }
 
 }

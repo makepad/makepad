@@ -1,0 +1,4 @@
+# cmd parses batch files reliably only with CRLF line endings (labels, UTF-8 after chcp 65001):
+# stored as written (CRLF), never converted, so every copy -- checkout, archive, the service -- has them
+*.bat -text
+*.cmd -text

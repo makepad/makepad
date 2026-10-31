@@ -1,0 +1,15 @@
+[package]
+name = "makepad-relax-api-macro"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad #[relax_api] attribute (proc-macro entry point)"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+makepad-relax-api-macro-impl = { path = "../macro_impl", version = "1.0.0" }

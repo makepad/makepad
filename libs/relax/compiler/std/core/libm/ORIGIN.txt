@@ -1,0 +1,9 @@
+Source: rustc 1.97.1, ~/rust-ref/library/compiler-builtins/libm.
+Selected Rust musl libm functions and their dependencies; upstream file structure
+and copyright notices retained. LICENSE.txt is copied verbatim.
+
+Relax integration: libm.rs selects this tree only under cfg(relax_web).
+The native interface remains the platform extern C library. Module registrations
+and reexports are limited to the required dependency closure. crate::support
+paths become crate::libm::math::support. Unused runtime CPU feature detection
+is omitted; the upstream generic implementations are selected.

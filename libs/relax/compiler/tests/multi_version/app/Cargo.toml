@@ -1,0 +1,10 @@
+[package]
+name = "mv-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mvdep = { path = "../v2" }
+mvold = { package = "mvdep", path = "../v1" }
+mv-mid = { path = "../mid" }

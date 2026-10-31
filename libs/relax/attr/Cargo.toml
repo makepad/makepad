@@ -1,0 +1,10 @@
+[package]
+name = "makepad-relax"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "#[relax(O2)] / #[relax(O3)]: the optimisation level Relax compiles a function at ahead of its first call; a no-op under rustc"
+
+[lib]
+proc-macro = true
+path = "src/lib.rs"

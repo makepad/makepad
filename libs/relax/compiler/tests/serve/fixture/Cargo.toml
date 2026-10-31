@@ -1,0 +1,9 @@
+[package]
+name = "serve_fixture"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+members = ["other"]
+[[bin]]
+name = "serve_fixture"
+path = "main.rs"

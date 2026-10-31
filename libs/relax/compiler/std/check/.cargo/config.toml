@@ -1,0 +1,3 @@
+# Relax-only items in shared std files are gated #[cfg(not(relax_check))].
+[build]
+rustflags = ["--cfg", "relax_check"]

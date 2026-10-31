@@ -1,0 +1,27 @@
+[package]
+name = "makepad-ci-leg"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "The CI shards devhub runs under the JIT that are more than one command: an app's smoke script (ci.splash: launch hidden, drive it, grab, the vision judge on the AI fleet) and a licensed commercial slice"
+default-run = "ci-leg"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ci-leg"
+path = "src/main.rs"
+
+[dependencies]
+makepad-script = { path = "../../platform/script" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-remote = { path = "../../libs/remote" }
+makepad-network = { path = "../../platform/network" }
+makepad-source-slice = { path = "../../libs/source_slice" }
+# the fleet client only (discovery, routing, jobs): no local model runtime
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+# makepad_script is a crate the JIT loader provides, built with the workspace's unified features;
+# this program must resolve it the same way (the draw stack's rustybuzz turns this one on there)
+bytemuck = { path = "../../libs/bytemuck", features = ["extern_crate_alloc"] }

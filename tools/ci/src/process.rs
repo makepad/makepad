@@ -6,13 +6,54 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     thread,
     time::{Duration, Instant},
 };
 
 pub type Result<T> = std::result::Result<T, String>;
+
+/// `yield_to` in ci.toml: a directory whose `*.cmd` files mean another tenant of this machine
+/// needs it quiet (on the mini: the bench worker's spool, which holds a `.cmd` while a timing job
+/// is queued to it or running). While one is there no command starts, and a running one's
+/// process group is stopped (SIGSTOP) until the directory has none again.
+static YIELD_TO: OnceLock<PathBuf> = OnceLock::new();
+pub fn set_yield_to(dir: PathBuf) {
+    let _ = YIELD_TO.set(dir);
+}
+fn must_yield() -> bool {
+    YIELD_TO.get().is_some_and(|dir| {
+        std::fs::read_dir(dir).is_ok_and(|mut entries| {
+            entries.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "cmd")))
+        })
+    })
+}
+/// Waits while a `yield_to` job is there; returns how long it waited.
+fn wait_for_quiet(control: &Control, log: &mut dyn FnMut(&str)) -> Result<Duration> {
+    let start = Instant::now();
+    if must_yield() {
+        log("ci: yielding the machine to a bench job (yield_to in ci.toml)");
+        while must_yield() {
+            control.sleep(2.0)?;
+        }
+        log(&format!("ci: resumed after {:.0} s", start.elapsed().as_secs_f64()));
+    }
+    Ok(start.elapsed())
+}
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+const SIGSTOP_CONT: (i32, i32) = (19, 18);
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+const SIGSTOP_CONT: (i32, i32) = (17, 19);
+#[cfg(unix)]
+fn signal_group(pid: u32, sig: i32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    unsafe {
+        kill(-(pid as i32), sig);
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct Control {
@@ -143,6 +184,7 @@ pub fn run(
     log: &mut dyn FnMut(&str),
 ) -> Result<Output> {
     control.check()?;
+    wait_for_quiet(control, log)?;
     let mut command = if program == "cargo" {
         let mut c = Command::new("nice");
         c.arg("cargo");
@@ -161,6 +203,8 @@ pub fn run(
     }
     let mut child = ChildLog::spawn(&mut command, path)?;
     let start = Instant::now();
+    let mut paused = Duration::ZERO;
+    let mut polls = 0u32;
     let result = loop {
         if let Err(e) = child.drain(log) {
             break Err(e);
@@ -175,7 +219,18 @@ pub fn run(
             Err(e) => break Err(e.to_string()),
             Ok(None) => {}
         }
-        if control.stopped() || start.elapsed() >= Duration::from_secs(timeout_secs.max(1)) {
+        polls += 1;
+        #[cfg(unix)]
+        if polls % 10 == 0 && must_yield() {
+            signal_group(child.child.id(), SIGSTOP_CONT.0);
+            let waited = wait_for_quiet(control, log);
+            signal_group(child.child.id(), SIGSTOP_CONT.1);
+            match waited {
+                Ok(d) => paused += d,
+                Err(e) => break Err(e),
+            }
+        }
+        if control.stopped() || start.elapsed().saturating_sub(paused) >= Duration::from_secs(timeout_secs.max(1)) {
             break Err(if control.stopped() {
                 "stopped by user".into()
             } else {
@@ -186,23 +241,13 @@ pub fn run(
     };
     if result.is_err() {
         #[cfg(unix)]
-        unsafe {
-            unsafe extern "C" {
-                fn kill(pid: i32, sig: i32) -> i32;
-            }
-            kill(-(child.child.id() as i32), 15);
-        }
+        signal_group(child.child.id(), 15);
         let end = Instant::now() + Duration::from_secs(2);
         while child.alive().unwrap_or(false) && Instant::now() < end {
             thread::sleep(Duration::from_millis(50));
         }
         #[cfg(unix)]
-        unsafe {
-            unsafe extern "C" {
-                fn kill(pid: i32, sig: i32) -> i32;
-            }
-            kill(-(child.child.id() as i32), 9);
-        }
+        signal_group(child.child.id(), 9);
         let _ = child.kill_exact();
         let _ = child.finish_output(log);
     }

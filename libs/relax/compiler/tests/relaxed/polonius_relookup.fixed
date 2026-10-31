@@ -1,0 +1,57 @@
+// Relaxed Rust `polonius`: std map lookups whose borrow is returned on the hit path. Polonius accepts
+// them; the write-back is the re-lookup rustc's NLL accepts.
+use std::collections::{BTreeMap, HashMap};
+
+fn get_default<'r>(map: &'r mut HashMap<u32, String>, key: u32) -> &'r mut String {
+    if map.contains_key(&key) { let value = map.get_mut(&key).unwrap(); value } else {
+            map.insert(key, String::new());
+            map.get_mut(&key).unwrap()
+        }
+}
+
+fn get_or_insert<'a>(map: &'a mut HashMap<String, Vec<u32>>, key: &str) -> &'a mut Vec<u32> {
+    if map.contains_key(key) {
+        let v = map.get_mut(key).unwrap();
+        return v;
+    }
+    map.insert(key.to_string(), Vec::new());
+    map.get_mut(key).unwrap()
+}
+
+fn cached<'a>(map: &'a mut BTreeMap<u64, u64>, n: u64) -> &'a u64 {
+    if map.contains_key(&n) {
+        let v = map.get(&n).unwrap();
+        return v;
+    }
+    map.insert(n, n * n);
+    map.get(&n).unwrap()
+}
+
+struct Interner { names: HashMap<u32, String>, misses: u32 }
+impl Interner {
+    fn name(&mut self, id: u32) -> &mut String {
+        if self.names.contains_key(&id) {
+            let s = self.names.get_mut(&id).unwrap();
+            return s;
+        }
+        self.misses += 1;
+        self.names.insert(id, format!("#{id}"));
+        self.names.get_mut(&id).unwrap()
+    }
+}
+
+fn main() {
+    let mut m = HashMap::new();
+    get_default(&mut m, 1).push('a');
+    get_default(&mut m, 1).push('b');
+    assert_eq!(m[&1], "ab");
+    let mut g = HashMap::new();
+    get_or_insert(&mut g, "k").push(3);
+    assert_eq!(g["k"], [3]);
+    let mut c = BTreeMap::new();
+    assert_eq!(*cached(&mut c, 9), 81);
+    let mut i = Interner { names: HashMap::new(), misses: 0 };
+    i.name(5).push('!');
+    assert_eq!(i.name(5), "#5!");
+    println!("polonius_relookup ok");
+}

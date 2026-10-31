@@ -1,0 +1,10 @@
+[package]
+name = "relax-light-http"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "One blocking HTTPS request on the operating system's own TLS stack"
+publish = false
+
+[dependencies]
+relax-session = { workspace = true }

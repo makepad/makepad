@@ -1,0 +1,11 @@
+[package]
+name = "bare-test-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "bare_test_prelude"
+
+[dependencies]
+mac = { package = "bare-test-mac", path = "../mac" }

@@ -13,16 +13,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Apps whose tiles do not run: matched against a package name (with or
+/// without `makepad-`), its directory's name or its path. The commercial
+/// checkout's products are matched the same way where their scripts sit
+/// (apps/commercial/stage/app is `stage`, apps/commercial/sandbox is
+/// `sandbox`); Scope and the `slice:<app>` tiles run.
 pub const DEFAULT_SKIPS: &[&str] = &[
     "stage",
-    "stage-browser",
-    "stage-live",
     "sandbox",
     "source-library",
     "mixer",
     "mail",
     "wm-all",
-    "wm-dyn",
     "asset-server",
     "flow-server",
     "ai-hub",
@@ -42,6 +44,12 @@ pub struct Config {
     /// Run every crate's tests, not only the platform's own. Off by default.
     pub deep_tests: bool,
     pub machines: BTreeMap<String, crate::machine::Machine>,
+    /// `yield_to`: commands wait (and running ones pause) while this directory holds a `*.cmd`
+    /// file; see process::set_yield_to.
+    pub yield_to: Option<PathBuf>,
+    /// `deny_warnings` (default true): a compiler warning fails its tile (red), as an error does;
+    /// false keeps warnings orange.
+    pub deny_warnings: bool,
 }
 impl Config {
     pub fn load(base: &Path, control: &Control) -> Result<Self> {
@@ -72,7 +80,19 @@ impl Config {
             }
         }
         let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        Self::parse(&text, base, installed)
+        let config = Self::parse(&text, base, installed)?;
+        if let Some(dir) = &config.yield_to {
+            process::set_yield_to(dir.clone());
+        }
+        Ok(config)
+    }
+    /// The checkout's own `local/ci/ci.toml` when it has one, else the
+    /// defaults, without writing one (a developer's checkout, for preflight).
+    pub fn load_existing(base: &Path, control: &Control) -> Result<Self> {
+        if base.join("local/ci/ci.toml").is_file() {
+            return Self::load(base, control);
+        }
+        Self::parse("", base, crate::cargo::matrix_targets(&host_target(base, control)?))
     }
     fn parse(text: &str, base: &Path, installed: Vec<String>) -> Result<Self> {
         crate::window_geometry::configured(text)?;
@@ -169,6 +189,16 @@ impl Config {
                 .transpose()?
                 .unwrap_or(false),
             machines,
+            deny_warnings: doc
+                .root
+                .get("deny_warnings")
+                .map(|v| v.as_bool().ok_or("deny_warnings must be true or false"))
+                .transpose()?
+                .unwrap_or(true),
+            yield_to: match string("yield_to", "")? {
+                s if s.is_empty() => None,
+                s => Some(PathBuf::from(s)),
+            },
         })
     }
 }
@@ -186,6 +216,9 @@ fn valid_branch(s: &str) -> bool {
 }
 
 pub(crate) fn probe(program: &str, args: &[String], base: &Path, control: &Control) -> Result<String> {
+    probe_with_timeout(program, args, base, control, 30)
+}
+pub(crate) fn probe_with_timeout(program: &str, args: &[String], base: &Path, control: &Control, timeout: u64) -> Result<String> {
     let dir = base.join("local/ci");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now()
@@ -198,7 +231,7 @@ pub(crate) fn probe(program: &str, args: &[String], base: &Path, control: &Contr
         args,
         base,
         &[],
-        30,
+        timeout,
         path.clone(),
         control,
         &mut |_| {},

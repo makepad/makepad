@@ -1,0 +1,4 @@
+out re-entry keeps the outer frames: true
+out threads keep their own frames: true
+out fuel is per thread: true
+out short call still runs: true

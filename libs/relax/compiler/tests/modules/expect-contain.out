@@ -1,0 +1,7 @@
+out result write traps: true
+out host secret intact: true
+out host secret not readable: true
+out forged fn pointer contained: true
+out big copy contained: true
+out memory budget: true
+out host still fine: true

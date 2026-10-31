@@ -1,0 +1,3 @@
+[workspace]
+members = ["bytes", "cipher", "app"]
+resolver = "2"

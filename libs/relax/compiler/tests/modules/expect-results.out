@@ -1,0 +1,21 @@
+out array: true
+out tuple: true
+out nested array: true
+out host struct: true
+out host enum: true
+out mixed: true
+out large: true
+out empty: true
+out mutable argument: true
+out panic contained: true
+out after panic: true
+out refused reference: true
+out refused boxed: true
+out refused pointer: true
+out refused not_copy: true
+out refused local: true
+out refused local_nested: true
+out module dependency refused: true
+out streamed result: true
+out repeated: true
+out survives unload: true

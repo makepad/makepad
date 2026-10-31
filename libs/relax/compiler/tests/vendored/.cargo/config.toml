@@ -1,0 +1,6 @@
+# crates-io replaced with the vendored directory, as a repo that carries its third-party crates does
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

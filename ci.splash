@@ -1,22 +1,24 @@
 // The workspace script. It runs ALONE while it warms the cache every other
 // script reads, then gives the wall back: the app tiles start while it goes on
 // with the workspace's own checks and tests beside them.
-// A compiler warning is orange, never red: only an error fails a check.
+// A compiler warning fails its check like an error (deny_warnings, default on in ci.toml).
 use mod.std.*
 use mod.ci;
 
-// Director drives cargo builds and child processes: a desktop tool, so it is
-// warmed for the desktop rows only, as its own script asks.
-ci.warm({packages: ci.apps, targets: ci.host.targets, desktop_only: ["makepad-director"]})
+ci.warm({packages: ci.apps, targets: ci.host.targets})
 
-// The pty helper a terminal starts its shell through. The terminal, director
-// and window manager scripts ask for it; built here it is a cache answer for
+// The pty helper a terminal starts its shell through. The terminal and
+// window manager scripts ask for it; built here it is a cache answer for
 // them instead of a cargo run that waits on the test build below.
 ci.step("build the pty helper", fn(){
     ci.build({package: "makepad-agents" binary: "agents"})
 })
 
 ci.shared()
+
+ci.step("no private addresses or paths", fn(){
+    ci.cargo(["run", "-p", "makepad-private-check"])
+})
 
 ci.step("check host", fn(){
     ci.cargo(["check", "--workspace"])

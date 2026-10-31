@@ -1,0 +1,4 @@
+# v1: same captures: the stored closure is recompiled in place (stored 17 = fresh 17)
+v1 patch
+# v2: a capture added: the stored box stays on the v1 code (17), fresh = 5*3+4 = 19
+v2 patch|reinst out=file

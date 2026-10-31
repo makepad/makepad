@@ -1,0 +1,13 @@
+[package]
+name = "relax-live-kinds"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A program tools/run/fixture/live_kinds.py edits while it runs, one edit kind per run: every
+# kind must take visible effect (patched live or restarted in place with its state).
+[[bin]]
+name = "relax-live-kinds"
+path = "src/main.rs"
+
+[workspace]

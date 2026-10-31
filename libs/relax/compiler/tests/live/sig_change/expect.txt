@@ -1,0 +1,4 @@
+# v1: signature change with callers updated in the same save
+v1 patch|reinst
+# v2: return type changed, callers not updated (`s += <u8>` into i64 is a type error at caller_a)
+v2 refuse note=v2.rs:13:

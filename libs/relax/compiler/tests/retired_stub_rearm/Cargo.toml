@@ -1,0 +1,13 @@
+[package]
+name = "retired-stub-rearm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A fn lukewarm first (its count stub retired after slow windows) that turns hot later must still
+# reach O3 (tests/retired_stub_rearm/run.sh).
+[[bin]]
+name = "retired-stub-rearm"
+path = "src/main.rs"
+
+[workspace]

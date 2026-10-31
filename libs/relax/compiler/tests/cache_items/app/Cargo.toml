@@ -1,0 +1,7 @@
+[package]
+name = "cache-items"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cache-items-dep = { path = "../dep" }

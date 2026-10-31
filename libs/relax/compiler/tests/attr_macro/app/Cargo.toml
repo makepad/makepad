@@ -1,0 +1,8 @@
+[package]
+name = "attr-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+attr-mac = { path = "../mac" }

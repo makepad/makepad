@@ -1,0 +1,7 @@
+[
+  {"name":"body-error","replace":["fn value() -> u32 { 1 }", "fn value() -> u32 { \"bad\" }"]},
+  {"name":"revert"},
+  {"name":"signature","replace":["fn value() -> u32 { 1 }", "fn value() -> bool { true }"]},
+  {"name":"new-fn","append":"\nfn added() { let _: u32 = \"bad\"; }\n"},
+  {"name":"unresolved","replace":["fn value() -> u32 { 1 }", "fn value() -> u32 { missing() }"]}
+]

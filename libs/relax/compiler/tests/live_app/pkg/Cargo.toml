@@ -1,0 +1,12 @@
+[package]
+name = "relax-live-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A program the live-driver test edits while it runs (tests/live_app/run.py).
+[[bin]]
+name = "relax-live-app"
+path = "src/main.rs"
+
+[workspace]

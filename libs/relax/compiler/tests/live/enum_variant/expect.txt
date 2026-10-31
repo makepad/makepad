@@ -1,0 +1,4 @@
+# v1: inserted variant: the held value maps by name (still C4)
+v1 patch|reinst
+# v2: removing the held variant without #[default] is refused, naming where the value lives
+v2 refuse note=HELD

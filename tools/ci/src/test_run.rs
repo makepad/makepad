@@ -27,9 +27,9 @@ pub struct TestBinary {
     pub manifest_dir: PathBuf,
 }
 
-/// The package a cargo package id names: `path+file:///x/apps/wm#makepad-wm@0.1.0`,
+/// The package a cargo package id names: `path+file:///x/apps/wm#makepad-app-wm@0.1.0`,
 /// `path+file:///x/libs/foo#0.1.0` (the name is the directory's when they
-/// agree), or the older `makepad-wm 0.1.0 (path+file:///...)`.
+/// agree), or the older `makepad-app-wm 0.1.0 (path+file:///...)`.
 pub fn package_of(id: &str) -> String {
     if let Some((url, tail)) = id.rsplit_once('#') {
         if let Some((name, _version)) = tail.split_once('@') {
@@ -331,7 +331,7 @@ mod tests {
         let out = concat!(
             r#"{"reason":"compiler-artifact","package_id":"path+file:///r/widgets#makepad-widgets@1.0.0","manifest_path":"/r/widgets/Cargo.toml","target":{"name":"makepad_widgets","kind":["lib"]},"profile":{"test":true},"executable":"/r/target/release/deps/makepad_widgets-1"}"#, "\n",
             r#"{"reason":"compiler-artifact","package_id":"path+file:///r/libs/piano_model#0.1.0","manifest_path":"/r/libs/piano_model/Cargo.toml","target":{"name":"acoustic_reference","kind":["test"]},"profile":{"test":true},"executable":"/r/target/release/deps/acoustic_reference-2"}"#, "\n",
-            r#"{"reason":"compiler-artifact","package_id":"makepad-wm 0.1.0 (path+file:///r/apps/wm)","manifest_path":"/r/apps/wm/Cargo.toml","target":{"name":"wm","kind":["bin"]},"profile":{"test":false},"executable":"/r/target/release/wm"}"#, "\n",
+            r#"{"reason":"compiler-artifact","package_id":"makepad-app-wm 0.1.0 (path+file:///r/apps/wm)","manifest_path":"/r/apps/wm/Cargo.toml","target":{"name":"makepad-app-wm","kind":["bin"]},"profile":{"test":false},"executable":"/r/target/release/makepad-app-wm"}"#, "\n",
             r#"{"reason":"compiler-artifact","package_id":"path+file:///r/libs/x#x@0.1.0","manifest_path":"/r/libs/x/Cargo.toml","target":{"name":"x","kind":["lib"]},"profile":{"test":true},"executable":null}"#, "\n",
             r#"{"reason":"build-finished","success":true}"#, "\n",
         );
@@ -340,11 +340,11 @@ mod tests {
         assert_eq!(b[0].name, "makepad-widgets lib");
         assert_eq!(b[0].manifest_dir, PathBuf::from("/r/widgets"));
         assert_eq!(b[1].name, "piano_model test:acoustic_reference");
-        assert_eq!(package_of("makepad-wm 0.1.0 (path+file:///r/apps/wm)"), "makepad-wm");
+        assert_eq!(package_of("makepad-app-wm 0.1.0 (path+file:///r/apps/wm)"), "makepad-app-wm");
     }
     #[test]
     fn packages_are_selected_by_the_directory_their_manifest_lives_in() {
-        let metadata = r#"{"packages":[{"name":"makepad-platform","id":"a","manifest_path":"/r/platform/Cargo.toml"},{"name":"makepad-script","id":"b","manifest_path":"/r/platform/script/Cargo.toml"},{"name":"makepad-wm","id":"c","manifest_path":"/r/apps/wm/Cargo.toml"},{"name":"other","id":"d","manifest_path":"/elsewhere/Cargo.toml"}],"workspace_members":["a","b","c"]}"#;
+        let metadata = r#"{"packages":[{"name":"makepad-platform","id":"a","manifest_path":"/r/platform/Cargo.toml"},{"name":"makepad-script","id":"b","manifest_path":"/r/platform/script/Cargo.toml"},{"name":"makepad-app-wm","id":"c","manifest_path":"/r/apps/wm/Cargo.toml"},{"name":"other","id":"d","manifest_path":"/elsewhere/Cargo.toml"}],"workspace_members":["a","b","c"]}"#;
         let names = packages_under(metadata, Path::new("/r"), &["platform".into(), "tools/ci".into()]).unwrap();
         assert_eq!(names, vec!["makepad-platform", "makepad-script"]);
     }

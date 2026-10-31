@@ -1,0 +1,17 @@
+# Real crates under rustc; Relax substitutes std/smallvec and std/arrayvec.
+# Uses the same local dependencies as std/check_ext.
+[package]
+name = "relax-std1-substitutes"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+doctest = false
+
+[dependencies]
+smallvec = { path = "../../../../smallvec", features = ["union", "const_new"] }
+arrayvec = { path = "../../../../vulkan/arrayvec" }
+
+[workspace]

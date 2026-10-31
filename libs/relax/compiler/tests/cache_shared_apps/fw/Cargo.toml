@@ -1,0 +1,11 @@
+[package]
+name = "sc-fw"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+fast = []
+extra = []
+
+[lib]
+path = "src/lib.rs"

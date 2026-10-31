@@ -1,0 +1,20 @@
+[package]
+name = "relax-base"
+version = "0.1.0"
+edition = "2021"
+description = "Relax base layer (see src/lib.rs)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# files outside this crate its build reads
+[package.metadata.commercial]
+include = ["../self_stamp.rs"]
+
+[dependencies]
+relax-lex = { workspace = true }
+relax-session = { workspace = true }
+relax-backend = { workspace = true }
+
+[lints.rust]
+# `cfg(relax)`: set when makepad run (Relax) compiles the crate
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }

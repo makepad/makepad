@@ -1,0 +1,4 @@
+[workspace]
+members = ["app", "mid"]
+exclude = ["v1", "v2"]
+resolver = "2"

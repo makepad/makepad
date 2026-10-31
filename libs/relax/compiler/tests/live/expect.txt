@@ -1,0 +1,3 @@
+# body_edit: the original demo. v1 changes kernel's body; v2 indexes out of bounds, panics and is rolled back.
+v1 patch
+v2 rollback

@@ -1,0 +1,7 @@
+[package]
+name = "sc-app-c"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sc-fw = { path = "../fw", features = ["fast"] }

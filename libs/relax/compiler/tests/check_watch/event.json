@@ -1,0 +1,7 @@
+[
+  {"name":"body-error","replace":["fn handle_event(&mut self, cx: &mut Cx, event: &Event) {", "fn handle_event(&mut self, cx: &mut Cx, event: &Event) { let _: u32 = \"bad\";"]},
+  {"name":"revert"},
+  {"name":"signature","replace":["fn handle_event(&mut self, cx: &mut Cx, event: &Event)","fn handle_event(&mut self, cx: &mut Cx, event: u32)"]},
+  {"name":"new-fn","append":"\nfn j2_added() { let _: u32 = \"bad\"; }\n"},
+  {"name":"unresolved","replace":["fn handle_event(&mut self, cx: &mut Cx, event: &Event) {","fn handle_event(&mut self, cx: &mut Cx, event: &Event) { j2_missing();"]}
+]

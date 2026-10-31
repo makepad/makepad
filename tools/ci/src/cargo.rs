@@ -13,31 +13,27 @@ pub enum BuildTy {
     Binary,
     BinaryBuildStd,
     Lib,
-    LinuxDirect,
 }
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Platform {
     Web,
     Mobile,
     Desktop,
-    Embedded,
 }
 impl Platform {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Web => "web",
             Self::Mobile => "mobile",
             Self::Desktop => "desktop",
-            Self::Embedded => "embedded",
         }
     }
 }
 // Mirrored from cargo_makepad; the drift test below compares every row.
-pub const TOOLCHAINS: [(&str, BuildTy, Platform); 16] = [
+pub const TOOLCHAINS: [(&str, BuildTy, Platform); 15] = [
     ("aarch64-apple-darwin", BuildTy::Binary, Platform::Desktop),
     ("x86_64-pc-windows-msvc", BuildTy::Binary, Platform::Desktop),
     ("x86_64-unknown-linux-gnu", BuildTy::Binary, Platform::Desktop),
-    ("x86_64-unknown-linux-gnu", BuildTy::LinuxDirect, Platform::Embedded),
     ("wasm32-unknown-unknown", BuildTy::Lib, Platform::Web),
     ("aarch64-linux-android", BuildTy::Lib, Platform::Mobile),
     ("aarch64-apple-ios", BuildTy::Binary, Platform::Mobile),
@@ -251,7 +247,7 @@ pub fn execute(
     env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
     env.push((
         "CARGO_TARGET_DIR".into(),
-        run.root.join("target").display().to_string(),
+        target_dir(&run.root).display().to_string(),
     ));
     env.push(("CARGO_TERM_COLOR".into(), "never".into()));
     let root = run.root.clone();
@@ -272,8 +268,15 @@ pub fn execute(
 pub fn target_env(root: &Path, env: &[(String, String)]) -> Vec<(String, String)> {
     let mut env = env.to_vec();
     env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
-    env.push(("CARGO_TARGET_DIR".into(), root.join("target").display().to_string()));
+    env.push(("CARGO_TARGET_DIR".into(), target_dir(root).display().to_string()));
     env
+}
+/// A preflight builds where its developer builds: the target directory that
+/// checkout already shares (set once, before any command). The CI's own
+/// checkout always builds in its `target/`.
+pub static SHARED_TARGET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+pub fn target_dir(root: &Path) -> PathBuf {
+    SHARED_TARGET.get().cloned().unwrap_or_else(|| root.join("target"))
 }
 
 #[derive(Default)]
@@ -366,17 +369,22 @@ pub fn target_checks(
                 }
                 "lines"
             }
-            BuildTy::LinuxDirect => "linux_direct",
         };
         // build-std supplies the target's std itself; tier-3 targets need not
         // appear in rustup target list when nightly + rust-src are available.
         if ty != BuildTy::BinaryBuildStd && !host.targets.iter().any(|s| s == t) {
             skip = Some("not installed".into());
         }
+        // .cargo/config.toml gives host targets `-C target-cpu=native`; checked from another
+        // machine (x86_64 rows from an arm64 Mac) that names this machine's CPU, which the target
+        // does not have (rustc: "target feature `x87` must be enabled" on every crate). A set
+        // RUSTFLAGS replaces the config's flags (cargo merges a CARGO_TARGET_*_RUSTFLAGS
+        // variable into them instead); with --target it reaches the target's artifacts only.
+        let rustflags = String::from("RUSTFLAGS");
         result.push(TargetCheck {
-            label: if ty == BuildTy::LinuxDirect { format!("{t} (linux_direct)") } else { t.into() },
+            label: t.into(),
             ty, platform, args,
-            env: vec![("MAKEPAD".into(), makepad.into())],
+            env: vec![("MAKEPAD_BUILD".into(), makepad.into()), (rustflags, String::new())],
             toolchain, skip,
         });
     }
@@ -428,8 +436,8 @@ pub fn binary_path(root: &std::path::Path, binary: &str) -> Result<PathBuf> {
     if binary.is_empty() || binary.contains(['/', '\\']) || binary == ".." {
         return Err("binary must be a basename".into());
     }
-    Ok(root
-        .join("target/release")
+    Ok(target_dir(root)
+        .join("release")
         .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX)))
 }
 #[cfg(test)]
@@ -439,13 +447,13 @@ mod tests {
     fn a_desktop_tool_is_left_out_of_a_check_without_disturbing_the_rest() {
         let check = TargetCheck {
             label: "wasm32-unknown-unknown".into(), ty: BuildTy::Lib, platform: Platform::Web,
-            args: ["check", "--target", "wasm32-unknown-unknown", "--lib", "-p", "makepad-wm", "-p", "makepad-director", "-p", "makepad-notes", "--message-format=json"]
+            args: ["check", "--target", "wasm32-unknown-unknown", "--lib", "-p", "makepad-app-wm", "-p", "makepad-app-terminal", "-p", "makepad-app-notes", "--message-format=json"]
                 .iter().map(|s| s.to_string()).collect(),
             env: Vec::new(), toolchain: None, skip: None,
         };
-        let narrowed = check.without_packages(&["makepad-director".to_string()]);
+        let narrowed = check.without_packages(&["makepad-app-terminal".to_string()]);
         assert_eq!(narrowed.args.join(" "),
-            "check --target wasm32-unknown-unknown --lib -p makepad-wm -p makepad-notes --message-format=json");
+            "check --target wasm32-unknown-unknown --lib -p makepad-app-wm -p makepad-app-notes --message-format=json");
     }
     #[test]
     fn other_targets_are_check_only_and_host_is_omitted() {
@@ -514,7 +522,6 @@ mod tests {
         let targets = matrix_targets(&host.target);
         let plan = target_checks(&host, &targets, &strings(&["app"]), false);
         assert_eq!(plan.len(), TOOLCHAINS.len() - 1);
-        assert!(plan.iter().any(|p| p.ty == BuildTy::LinuxDirect && p.env == vec![("MAKEPAD".into(), "linux_direct".into())]));
         assert!(plan.iter().filter(|p| p.ty == BuildTy::BinaryBuildStd).all(|p| p.skip.as_deref() == Some("needs nightly build-std")));
         assert_eq!(plan.iter().find(|p| p.label == "x86_64-pc-windows-msvc").unwrap().skip.as_deref(), Some("not installed"));
         host.nightly = Some("nightly".into());
@@ -534,17 +541,17 @@ mod tests {
     fn upstream_diagnostics_do_not_colour_the_app() {
         let output = r#"{"reason":"compiler-message","package_id":"path+file:///repo/libs/vulkan/libloading#0.8.9","target":{"name":"wm"},"message":{"level":"warning","rendered":"warning: unused function\n  --> lib.rs:3\n"}}
 {"reason":"compiler-message","package_id":"path+file:///repo/platform#makepad-platform@2.0.0","target":{"name":"wm"},"message":{"level":"warning","rendered":"warning: unexpected cfg\n"}}
-{"reason":"compiler-artifact","package_id":"path+file:///repo/apps/wm#makepad-wm@0.1.0"}"#;
+{"reason":"compiler-artifact","package_id":"path+file:///repo/apps/wm#makepad-app-wm@0.1.0"}"#;
         let mut result = CargoResult::parse(Output { code: 0, out: output.into() });
         assert_eq!(result.warnings, BTreeMap::from([("libloading".into(), 1), ("makepad-platform".into(), 1)]));
-        assert!(!result.own_warnings(Some("makepad-wm")));
+        assert!(!result.own_warnings(Some("makepad-app-wm")));
         assert!(result.own_warnings(None));
-        assert_eq!(result.warning_text(Some("makepad-wm")), "upstream warnings: libloading: 1, makepad-platform: 1");
+        assert_eq!(result.warning_text(Some("makepad-app-wm")), "upstream warnings: libloading: 1, makepad-platform: 1");
         let rendered = output.lines().filter_map(rendered_diagnostic).collect::<Vec<_>>();
         assert_eq!(rendered, vec!["warning: unused function\n  --> lib.rs:3", "warning: unexpected cfg"]);
-        result.warnings.insert("makepad-wm".into(), 2);
-        assert!(result.own_warnings(Some("makepad-wm")));
-        assert!(result.warning_text(Some("makepad-wm")).starts_with("makepad-wm: 2 warnings\nupstream warnings:"));
+        result.warnings.insert("makepad-app-wm".into(), 2);
+        assert!(result.own_warnings(Some("makepad-app-wm")));
+        assert!(result.warning_text(Some("makepad-app-wm")).starts_with("makepad-app-wm: 2 warnings\nupstream warnings:"));
     }
 
 }

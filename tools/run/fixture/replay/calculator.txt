@@ -1,0 +1,52 @@
+# Calculator input script for diff_full.sh: `click <query>`, `text <s>`, `step <frames>`, `ui`.
+# Every `ui` appends the display, the tape and the widget tree text to the state dump.
+step 5
+ui
+click path=k_1
+click path=k_2
+click path=k_mul
+click path=k_3
+click path=k_dot
+click path=k_5
+click path=k_eq
+step 3
+ui
+click path=k_clear
+click path=k_9
+click path=k_sqrt
+click path=k_eq
+step 3
+ui
+click path=k_clear
+click path=k_4
+click path=k_5
+click path=k_sin
+click path=k_add
+click path=k_2
+click path=k_power
+click path=k_1
+click path=k_0
+click path=k_eq
+step 3
+ui
+click path=k_clear
+text 7*8-6/4
+click path=k_eq
+step 3
+ui
+click path=k_clear
+click path=k_1
+click path=k_ln
+click path=k_add
+click path=k_pi
+click path=k_mul
+click path=k_e
+click path=k_eq
+step 3
+ui
+click path=k_back
+click path=k_sign
+click path=k_percent
+click path=k_fact
+step 3
+ui

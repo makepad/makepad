@@ -1,0 +1,7 @@
+[package]
+name="n01-round37-macro-edition"
+version="0.1.0"
+edition="2018"
+[dependencies]
+new_macros={path="macros"}
+[workspace]

@@ -1,0 +1,13 @@
+[package]
+name = "cache-warm-twin-tier"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A loop-hot fn whose start comes from the disk cache's startup image as SPEC-V twin code
+# must still reach O3 in the warm run (tests/cache_warm_twin_tier/run.sh).
+[[bin]]
+name = "cache-warm-twin-tier"
+path = "src/main.rs"
+
+[workspace]

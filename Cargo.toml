@@ -6,6 +6,9 @@ workspace.members = [
     "libs/atspi",
     "tools/dbus_codegen",
     "libs/xr_core",
+    "libs/relax_api",
+    "libs/relax_api/macro",
+    "libs/relax_api/macro_impl",
     "libs/civil_time",
     "libs/code_arch",
     "libs/code_language",
@@ -23,6 +26,7 @@ workspace.members = [
     # Constructive solid geometry.
     "libs/csg/csg_math",
     "libs/web_manifest",
+    "libs/font_subset",
     "libs/soft_body",
     "libs/bounded_http",
     # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
@@ -41,8 +45,11 @@ workspace.members = [
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
     # === headless music score engine ===
+    "libs/score",
     "libs/score_layout",
     "libs/score_play",
+    "libs/score_import",
+    "libs/score_pdf",
     "libs/midi_file",
     "libs/drumkit",
     "libs/drumkit_phys",
@@ -68,8 +75,21 @@ workspace.members = [
     "libs/stack",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
+    "tools/run/fixture/diffpkg/tables",
+    "tools/run/android_exe",
+    "tools/run/android_host/fixture",
+    "libs/relax/base",
+    "libs/relax/backend",
+    "libs/relax/codegen",
+    "libs/relax/front",
+    "tools/run/light_http",
+    "libs/relax/session",
+    "libs/relax/types",
+    "tools/run/fixture",
+    "libs/relax/lex",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
     # Relax data-structure microbenchmarks (Vec, iterators, HashMap, BTreeMap, sort, strings, bounds loops)
+    "libs/relax/compiler/dsbench",
     # Send feedback: caption icon + panel (Amp, Scope)
     # === tests ===
     # === makepad-widgets: the core and its family crates (widgets/ is the

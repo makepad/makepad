@@ -1,0 +1,9 @@
+[package]
+name = "test-compile-error"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[features]
+x = []

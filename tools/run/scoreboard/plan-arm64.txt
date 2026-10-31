@@ -1,0 +1,27 @@
+# arm64 subset (Mac mini, one bench-queue job per line)
+game:race
+stage:pdoom
+ui:calculator
+start:stage --settle 90
+start:calculator --settle 90
+rw:text_shape_raster
+rw:sdf_glyphs
+rw:inflate_real
+rw:zip_read
+rw:png_decode
+rw:brotli_decode
+rw:maps_tile_decode
+rw:layout_widgets
+rw:llm_host
+rw:rust_tokenize
+rw:markdown_parse
+rw:html_parse
+rw:piano_render
+rw:ogg_decode
+rw:audio_mix
+rw:splash_eval
+rw:csg_boolean
+rw:box3d_physics
+rw:sandbox_sim
+rw:level_walk
+rw:model_build

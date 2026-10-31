@@ -1,0 +1,10 @@
+[package]
+name = "check_json"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "check_json"
+path = "main.rs"

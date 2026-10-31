@@ -18,9 +18,9 @@ fn array(vm: &mut ScriptVm, v: ScriptValue) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     let a = v.as_array().ok_or("expected array of strings")?;
-    (0..vm.bx.heap.array_len(a))
+    (0..vm.heap().array_len(a))
         .map(|i| {
-            let v = vm.bx.heap.array_index(a, i, NoTrap);
+            let v = vm.heap().array_index(a, i, NoTrap);
             text(vm, v)
         })
         .collect()
@@ -82,6 +82,9 @@ fn record(vm: &mut ScriptVm, result: &CargoResult, opts: &Options) -> Result<boo
         let own = result.warnings.iter()
             .filter(|(name, _)| owner.as_deref().is_none_or(|p| p == name.as_str()))
             .map(|(name, n)| format!("{name}: {n} warnings")).collect::<Vec<_>>().join("\n");
+        if rt(vm).config.deny_warnings {
+            return Err(format!("compiler warnings (deny_warnings in ci.toml)\n{own}\n{warnings}"));
+        }
         warning(vm, &own);
     }
     if result.output.code != 0 && !opts.allow_fail {
@@ -95,7 +98,9 @@ fn cargo_call(
     opts: Options,
     machine: Option<&crate::machine::Machine>,
 ) -> Result<CargoResult> {
-    if rt(vm).validate {
+    // Preflight runs checks only: builds go through `ci.build`, tests stay out.
+    let preflight_skips = rt(vm).preflight.is_some() && args.first().map(String::as_str) != Some("check");
+    if rt(vm).dry() || preflight_skips {
         let host = rt(vm).host.target.clone();
         cargo::command_args(&args, &opts, &host)?;
         return Ok(CargoResult::parse(crate::process::Output {
@@ -104,6 +109,7 @@ fn cargo_call(
         }));
     }
     let r = rt(vm);
+    r.worked = true;
     let host = r.host.clone();
     let command_args = if machine.is_some() {
         args.clone()
@@ -180,7 +186,8 @@ fn build(vm: &mut ScriptVm, v: ScriptValue) -> Result<PathBuf> {
         // The native build API always returns target/release/<bin>.
         opts.target = None;
     }
-    if rt(vm).validate { return Ok(path); }
+    if rt(vm).dry() { return Ok(path); }
+    rt(vm).worked = true;
     let own = rt(vm).step.is_none();
     let i = rt(vm).step.unwrap_or_else(|| {
         let r = rt(vm);
@@ -204,16 +211,14 @@ fn env_pairs(vm: &mut ScriptVm, e: ScriptValue, what: &str) -> Result<Vec<(Strin
     let mut env = Vec::new();
     if !e.is_nil() {
         let obj = e.as_object().ok_or_else(|| format!("{what} must be an object"))?;
-        let entries: Vec<_> = vm
-            .bx
-            .heap
-            .map_ref(obj)
-            .iter()
-            .map(|(k, v)| (*k, v.value))
+        let entries: Vec<_> = vm.heap()
+            .map_entries(obj)
+            .into_iter()
+            .map(|e| (e.key, e.value))
             .collect();
         for (k, v) in entries {
             let mut key = String::new();
-            vm.bx.heap.cast_to_string(k, &mut key);
+            vm.heap().cast_to_string(k, &mut key);
             env.push((key, text(vm, v)?));
         }
     }
@@ -301,8 +306,12 @@ fn finish_batch(vm: &mut ScriptVm, i: usize, outcomes: Result<Vec<(String, crate
             if !libraries.is_empty() {
                 let text = libraries.iter().map(|(name, n)| format!("{name}: {n} warnings")).collect::<Vec<_>>().join("\n");
                 rt(vm).run.annotate(i, &text);
-                warning(vm, &text);
-                orange = true;
+                if rt(vm).config.deny_warnings {
+                    failures.push(format!("compiler warnings in libraries (deny_warnings in ci.toml)\n{text}"));
+                } else {
+                    warning(vm, &text);
+                    orange = true;
+                }
             }
         }
         Ok(outcomes) => for (package, outcome) in outcomes {
@@ -317,7 +326,13 @@ fn finish_batch(vm: &mut ScriptVm, i: usize, outcomes: Result<Vec<(String, crate
     !failures.is_empty()
 }
 fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
-    let packages = fields(vm, v, id!(packages))?;
+    let mut packages = fields(vm, v, id!(packages))?;
+    if let Some(affected) = &rt(vm).preflight {
+        // Preflight checks only what the change reaches; warming is a cache fill.
+        if warm { return Ok(()); }
+        packages.retain(|p| affected.contains(p));
+        if packages.is_empty() && object_field(vm, v, id!(workspace)).as_bool() != Some(true) { return Ok(()); }
+    }
     let workspace = object_field(vm, v, id!(workspace)).as_bool() == Some(true);
     if packages.is_empty() && !workspace {
         // An empty discovered app list has nothing to warm.
@@ -340,8 +355,8 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
         package_manifest(vm, &packages[0]).map(PathBuf::from)
     } else { None };
     // Packages that are desktop tools (they drive cargo and child processes,
-    // and most of them is compiled out elsewhere): not checked for web, mobile
-    // or embedded rows, where they would only report their own absence.
+    // and most of them is compiled out elsewhere): not checked for web or mobile
+    // rows, where they would only report their own absence.
     let desktop_only = fields(vm, v, id!(desktop_only))?;
     let all_packages = packages;
     let mut failed = false;
@@ -356,10 +371,11 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
         if packages.is_empty() && !workspace { continue; }
         let mut check_opts = opts.clone();
         check_opts.toolchain = check.toolchain.clone();
-        check_opts.env.retain(|(key, _)| key != "MAKEPAD");
+        check_opts.env.retain(|(key, _)| key != "MAKEPAD_BUILD");
         check_opts.env.extend(check.env.clone());
         let args = cargo::command_args(&check.args, &check_opts, &host.target)?;
-        if rt(vm).validate { continue; }
+        if rt(vm).dry() { continue; }
+        rt(vm).worked = true;
         let r = rt(vm);
         let i = r.run.plan(&format!("{} / {}check {}", r.group, if warm { "warm " } else { "" }, check.label));
         r.run.begin(i, &crate::report::display_command("cargo", &args));
@@ -378,20 +394,152 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
     }
     if failed { Err("one or more cargo batches failed; see target/build steps".into()) } else { Ok(()) }
 }
+/// A slice tile's app and roots (the script's `slices.json` entry).
+fn slice_spec(vm: &mut ScriptVm) -> Result<(String, Vec<String>)> {
+    let slice = rt(vm).slice.clone().ok_or("only a slice tile (slices.json) checks a slice")?;
+    Ok((slice.app, slice.roots))
+}
+/// The slice tile's Makepad checkout: a Git worktree of the CI checkout in
+/// its target directory (never a workspace member, never walked for
+/// scripts), `target/ci-slices/<app>`.
+fn slice_dir(root: &Path, app: &str) -> PathBuf {
+    root.join("target").join("ci-slices").join(app)
+}
+fn slice_git(vm: &mut ScriptVm, args: &[&str], cwd: &Path) -> Result<String> {
+    let out = rt(vm).run.command("git", &crate::report::strings(args), cwd, &[], 900)?;
+    if out.code != 0 {
+        return Err(format!("git {}: {}", args.join(" "), crate::process::error_lines(&out.out)));
+    }
+    Ok(out.out.trim().to_owned())
+}
+/// Cut the slice of the tested commercial commit (`apps/commercial` HEAD)
+/// and put it where a customer's Builder puts it: a clean checkout of the
+/// tested Makepad commit with the slice at `apps/commercial`, and nothing
+/// else of the commercial repository.
+fn slice_checkout(vm: &mut ScriptVm) -> Result<Value> {
+    let (app, roots) = slice_spec(vm)?;
+    if rt(vm).validate {
+        return Ok(Value::Null);
+    }
+    rt(vm).worked = true;
+    let root = rt(vm).run.root.clone();
+    let commercial = root.join(crate::smoke::COMMERCIAL);
+    let slice = makepad_source_slice::slice(&commercial, "HEAD", &app, &roots, crate::smoke::SLICE_FEATURES)?;
+    let dir = slice_dir(&root, &app);
+    let tip = slice_git(vm, &["rev-parse", "HEAD"], &root)?;
+    if dir.join(".git").exists() {
+        slice_git(vm, &["checkout", "-q", "-f", "--detach", &tip], &dir)?;
+        slice_git(vm, &["clean", "-q", "-ffdx", "-e", "/Cargo.lock", "-e", "/apps/commercial/"], &dir)?;
+    } else {
+        // A removed target directory takes the worktree with it.
+        slice_git(vm, &["worktree", "prune"], &root)?;
+        fs::create_dir_all(dir.parent().unwrap()).map_err(|e| e.to_string())?;
+        slice_git(vm, &["worktree", "add", "-q", "--detach", &dir.display().to_string(), &tip], &root)?;
+    }
+    // The slice is its own repository, whose objects are the commercial
+    // checkout's (where the slicer wrote the slice commit).
+    let sliced = dir.join(crate::smoke::COMMERCIAL);
+    if !sliced.join(".git").exists() {
+        fs::create_dir_all(&sliced).map_err(|e| e.to_string())?;
+        slice_git(vm, &["init", "-q"], &sliced)?;
+        let objects = commercial.join(".git/objects").canonicalize().map_err(|e| e.to_string())?;
+        fs::write(sliced.join(".git/objects/info/alternates"), format!("{}\n", objects.display())).map_err(|e| e.to_string())?;
+    }
+    slice_git(vm, &["checkout", "-q", "-f", "--detach", &slice.commit], &sliced)?;
+    slice_git(vm, &["clean", "-q", "-ffdx"], &sliced)?;
+    let crates = slice.crates.iter().map(|(name, dir)| format!("{name} ({dir})")).collect::<Vec<_>>().join(", ");
+    let placeholders = if slice.placeholders.is_empty() {
+        String::new()
+    } else {
+        format!("; placeholders: {}", slice.placeholders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", "))
+    };
+    let summary = format!(
+        "slice {} of commercial {} for {app}: {} crates, {} files, {} bytes: {crates}{placeholders}",
+        &slice.commit[..12],
+        &slice.source[..12],
+        slice.crates.len(),
+        slice.files,
+        slice.bytes
+    );
+    let r = rt(vm);
+    r.run.log(&summary);
+    if let Some(i) = r.step {
+        r.run.annotate(i, &summary);
+    }
+    Ok(json::obj(vec![
+        ("commit", json::s(&slice.commit)),
+        ("source", json::s(&slice.source)),
+        ("dir", json::s(dir.display().to_string())),
+        ("crates", Value::Arr(slice.crates.iter().map(|(name, _)| json::s(name)).collect())),
+    ]))
+}
+/// References the slice's crates make to files outside their directory
+/// that their `[package.metadata.commercial] include` does not cover.
+fn slice_lint(vm: &mut ScriptVm) -> Result<Value> {
+    let (_, roots) = slice_spec(vm)?;
+    if rt(vm).validate {
+        return Ok(Value::Null);
+    }
+    rt(vm).worked = true;
+    let commercial = rt(vm).run.root.join(crate::smoke::COMMERCIAL);
+    let findings = makepad_source_slice::lint(&commercial, "HEAD", &roots, crate::smoke::SLICE_FEATURES)?;
+    if findings.is_empty() {
+        return Ok(Value::Null);
+    }
+    let shown: Vec<String> = findings.iter().take(40).map(|f| f.to_string()).collect();
+    Err(format!(
+        "{} references outside their crate are not in its [package.metadata.commercial] include{}:\n{}",
+        findings.len(),
+        if findings.len() > shown.len() { " (the first 40)" } else { "" },
+        shown.join("\n")
+    ))
+}
+/// `cargo check --release --no-default-features` of the root packages in
+/// the slice checkout, as the Builder builds a release (with the slice's
+/// features, `SLICE_FEATURES`): the slice ships everything they compile
+/// from.
+fn slice_check(vm: &mut ScriptVm) -> Result<Value> {
+    let (app, roots) = slice_spec(vm)?;
+    if rt(vm).validate {
+        return Ok(Value::Null);
+    }
+    rt(vm).worked = true;
+    let root = rt(vm).run.root.clone();
+    let expected = makepad_source_slice::slice(&root.join(crate::smoke::COMMERCIAL), "HEAD", &app, &roots, crate::smoke::SLICE_FEATURES)?;
+    let dir = slice_dir(&root, &app);
+    let sliced = dir.join(crate::smoke::COMMERCIAL);
+    if !sliced.join(".git").exists() || slice_git(vm, &["rev-parse", "HEAD"], &sliced)? != expected.commit {
+        return Err(format!("{} does not hold the slice {}; the slice step failed", sliced.display(), expected.commit));
+    }
+    let opts = Options { target: None, timeout: 3600, env: Vec::new(), allow_fail: false, deny: Vec::new(), toolchain: None };
+    let mut args = vec!["check".to_string(), "--release".into(), "--no-default-features".into()];
+    for package in &roots {
+        args.extend(["-p".to_string(), package.clone()]);
+    }
+    if !crate::smoke::SLICE_FEATURES.is_empty() {
+        args.extend(["--features".to_string(), crate::smoke::SLICE_FEATURES.join(",")]);
+    }
+    let host = rt(vm).host.target.clone();
+    let args = cargo::command_args(&args, &opts, &host)?;
+    let env = vec![("CARGO_TERM_COLOR".to_string(), "never".to_string())];
+    let result = rt(vm).run.cargo_command("cargo", &args, &dir, &env, opts.timeout)?;
+    record(vm, &result, &opts)?;
+    Ok(result.json())
+}
 pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
     let host = rt(vm).host.json();
     let host = json_value(vm, host);
-    vm.bx.heap.set_value_def(ci, id!(host).into(), host);
+    vm.set_value_def(ci, id!(host), host);
     let mut packages: Vec<_> = rt(vm).run.app_targets.iter().map(|t| t.package.clone()).collect();
     packages.sort();
     packages.dedup();
     let apps = json_value(vm, Value::Arr(packages.iter().map(json::s).collect()));
-    vm.bx.heap.set_value_def(ci, id!(apps).into(), apps);
+    vm.set_value_def(ci, id!(apps), apps);
     // The deep run (every crate's tests) is opt-in: `deep_tests = true` in
     // ci.toml, or `ci --deep`.
     let deep_tests = rt(vm).config.deep_tests;
     let deep = json_value(vm, Value::Bool(deep_tests));
-    vm.bx.heap.set_value_def(ci, id!(deep).into(), deep);
+    vm.set_value_def(ci, id!(deep), deep);
     vm.add_method(ci, id_lut!(exclusive), script_args!(), |vm, _| {
         if allow(vm) {
             let r = rt(vm);
@@ -434,6 +582,19 @@ pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
             result(vm, result_value)
         },
     );
+    for (name, native) in [
+        (id_lut!(slice_checkout), slice_checkout as fn(&mut ScriptVm) -> Result<Value>),
+        (id_lut!(slice_lint), slice_lint),
+        (id_lut!(slice_check), slice_check),
+    ] {
+        vm.add_method(ci, name, script_args!(), move |vm, _| {
+            if !allow(vm) {
+                return NIL;
+            }
+            let r = native(vm);
+            result(vm, r)
+        });
+    }
     for (name, warm) in [(id_lut!(check_targets), false), (id_lut!(warm), true)] {
         vm.add_method(ci, name, script_args!(options = NIL), move |vm, args| {
             if !allow(vm) { return NIL; }
@@ -639,7 +800,7 @@ pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
             if machine.is_none() {
                 warning(vm, &format!("machine {name}: machine not configured"));
             }
-            let obj = vm.bx.heap.new_object();
+            let obj = vm.new_object();
             let sync_machine = machine.clone();
             let sync_name = name.clone();
             vm.add_method(obj, id_lut!(sync), script_args!(), move |vm, _| {
