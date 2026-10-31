@@ -1,0 +1,467 @@
+// title: Bauhaus
+// Bauhaus — Dessau, 1926: an off-white enamel front like heavy paper,
+// laid on a strict grid of heavy black rules; key caps and plates painted
+// with the primary triad (red circle, yellow bar, blue square); a bold
+// geometric sans; a black enamel screen well. Tactile painted enamel:
+// brush-stroke texture, a soft gloss, chipped hard edges.
+//
+// Assignments only, over the base templates in `src/hw.rs`
+// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+use mod.prelude.widgets_internal.*
+
+// ---- palette ----
+mod.widgets.hw_palette.screen_bg = #x151412
+mod.widgets.hw_palette.screen_text = #xf1ebdb
+mod.widgets.hw_palette.screen_muted = #x8f8878
+mod.widgets.hw_palette.accent = #xe23b26
+mod.widgets.hw_palette.panel_text = #x14130f
+mod.widgets.hw_palette.panel_muted = #x4a463d
+mod.widgets.hw_palette.menu_bg = #xefe9da
+mod.widgets.hw_palette.spill_knee = 1.2
+mod.widgets.hw_palette.caption_bg = #x100f0d
+mod.widgets.hw_palette.caption_text = #xf1ebdb
+
+// ---- the front: off-white enamel on a strict grid ----
+mod.widgets.HwChassis.draw_bg.ground = #xe8e1cf
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 0.99, 0.95, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.10, 0.09, 0.08, 1.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(1.0, 0.30, 0.18, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(3.0, 0.7)
+mod.widgets.HwChassis.draw_bg.vignette = vec4(0.5, 0.35, 0.10, 1.03)
+mod.widgets.Window.pass.clear_color = #xe8e1cf
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    // Brushed-on enamel: long soft strokes plus a fine tooth.
+    let stroke = self.hw_noise(vec2(w.x * 0.004, w.y * 0.09)) - 0.5
+    let tooth = self.hw_hash(floor(w * 1.7)) - 0.5
+    var col = base * (1.0 + stroke * 0.05 + tooth * 0.025)
+    // A faint pencilled construction grid every 24 pt.
+    let g = abs(fract(w / 24.0 + vec2(0.5, 0.5)) - vec2(0.5, 0.5)) * 24.0
+    let grid = 1.0 - smoothstep(0.0, 0.6, min(g.x, g.y))
+    col = mix(col, col * 0.93, grid * 0.5)
+    // The heavy black rules and the triad blocks along the foot.
+    let y = self.rect_size.y - p.y
+    let x = p.x / max(self.rect_size.x, 1.0)
+    let foot = 1.0 - smoothstep(9.5, 10.5, y)
+    var ink = vec3(0.07, 0.065, 0.06)
+    if x < 0.12 { ink = vec3(0.83, 0.17, 0.12) }
+    if x > 0.12 && x < 0.18 { ink = vec3(0.95, 0.72, 0.10) }
+    if x > 0.88 { ink = vec3(0.13, 0.30, 0.64) }
+    col = mix(col, ink, foot)
+    let rule = smoothstep(12.5, 13.5, y) * (1.0 - smoothstep(15.5, 16.5, y))
+    col = mix(col, vec3(0.07, 0.065, 0.06), rule)
+    // The heavy rule under the caption.
+    let top = smoothstep(29.5, 30.5, p.y) * (1.0 - smoothstep(33.5, 34.5, p.y))
+    col = mix(col, vec3(0.07, 0.065, 0.06), top)
+    return col
+}
+
+// ---- plates: off-white enamel slabs, a heavy black frame, a primary bar ----
+mod.widgets.HwPlate.draw_bg.ground = #xf2ecdc
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 1.0, 0.97, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.12, 0.11, 0.09, 1.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(2.0, 0.6, 2.5, 0.45)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.6, 0.4, 0.45, 0.5)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.60, 8.0, 1.0, 0.6)
+mod.widgets.HwPlate.draw_bg.sheen = vec4(0.05, 0.35, 0.30, 0.3)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(1.0, 0.30, 0.18, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(3.2, 0.6)
+mod.widgets.HwPlate.radius = 2
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let stroke = self.hw_noise(vec2(w.x * 0.004, w.y * 0.09)) - 0.5
+    var col = base * (1.0 + stroke * 0.045 + (self.hw_hash(floor(w * 1.7)) - 0.5) * 0.02)
+    let s = self.rect_size
+    let e = min(min(p.x, p.y), min(s.x - p.x, s.y - p.y)) - self.inset
+    // A heavy black frame just inside the edge.
+    let frame = smoothstep(2.5, 3.2, e) * (1.0 - smoothstep(6.0, 6.7, e))
+    col = mix(col, vec3(0.07, 0.065, 0.06), frame)
+    // A composition in the plate's free foot on the right wing:
+    // a red circle, a yellow square and a blue quarter disc on a black bar.
+    // The display wing (plate 2) wherever the layout puts it.
+    if self.plate_id > 1.5 && self.plate_id < 2.5 && s.y > 200.0 {
+        let fy = s.y - self.inset - 12.0
+        let cx0 = self.inset + 14.0
+        let q = p - vec2(cx0, fy)
+        // Black base rule.
+        let base_r = step(0.0, q.y) * (1.0 - step(5.0, q.y)) * step(0.0, q.x) * step(q.x, s.x - self.inset * 2.0 - 28.0)
+        let red_d = length(q - vec2(34.0, -30.0)) - 28.0
+        let red = 1.0 - smoothstep(-0.6, 0.6, red_d)
+        let sq = step(58.0, q.x) * step(q.x, 104.0) * step(-46.0, q.y) * step(q.y, 0.0)
+        let qd = length(q - vec2(104.0, 0.0))
+        let quarter = (1.0 - smoothstep(49.4, 50.6, qd)) * step(104.0, q.x) * step(q.y, 0.0)
+        col = mix(col, vec3(0.96, 0.74, 0.11), sq)
+        col = mix(col, vec3(0.84, 0.18, 0.12), red)
+        col = mix(col, vec3(0.14, 0.31, 0.66), quarter)
+        col = mix(col, vec3(0.07, 0.065, 0.06), base_r)
+    }
+    return col
+}
+
+// ---- recessed panels: Bauhaus blue enamel ----
+mod.widgets.HwPanel.draw_bg.ground = #x22469a
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.85, 0.90, 1.0, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.02, 0.03, 0.08, 1.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.80, 8.0, 0.0, 0.5)
+mod.widgets.HwPanel.draw_bg.sheen = vec4(0.04, 0.30, 0.20, 0.3)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(1.0, 0.30, 0.18, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.6, 0.5)
+mod.widgets.HwPanel.radius = 2
+mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let stroke = self.hw_noise(vec2(w.x * 0.004, w.y * 0.09)) - 0.5
+    return base * (1.0 + stroke * 0.07 + (self.hw_hash(floor(w * 1.7)) - 0.5) * 0.03)
+}
+
+// ---- the screen: black enamel well, a yellow inner rule ----
+mod.widgets.HwBezel.draw_bg.ground = #x121110
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.95, 0.93, 0.88, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.relief = vec4(2.0, 0.6, 2.0, 0.8)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.90, 12.0, 0.0, 0.5)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.4, 0.4)
+mod.widgets.HwBezel.radius = 3
+mod.widgets.HwBezel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    var col = base * (1.0 + (self.hw_noise(vec2(w.x * 0.004, w.y * 0.09)) - 0.5) * 0.25)
+    let s = self.rect_size
+    let e = min(min(p.x, p.y), min(s.x - p.x, s.y - p.y)) - self.inset
+    let band = smoothstep(4.0, 4.6, e) * (1.0 - smoothstep(7.0, 7.6, e))
+    col = mix(col, vec3(0.95, 0.72, 0.10), band)
+    return col
+}
+// No dark rim or bulge over the picture: it reads clean and bright.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.07, 0.0, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(1.0, 0.98, 0.92, 0.0)
+mod.widgets.HwGlass.draw_bg.radius = 2.0
+
+// ---- keys: painted enamel caps, each with its primary geometry ----
+mod.widgets.HwKey.draw_bg.ground = #xf3eddd
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 1.0, 0.97, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.10, 0.09, 0.08, 1.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(2.2, 0.5, 3.0, 0.5)
+mod.widgets.HwKey.draw_bg.finish = vec4(0.6, 0.4, 0.5, 0.45)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.70, 5.0, 1.0, 0.7)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.06, 0.30, 0.28, 0.4)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.30, 0.18, 1.0)
+mod.widgets.HwKey.draw_bg.spill = vec2(3.0, 0.5)
+mod.widgets.HwKey.draw_bg.led = vec4(8.0, 8.0, 2.0, 0.0)
+mod.widgets.HwKey.radius = 2
+mod.widgets.HwKey.depth = 3.5
+mod.widgets.HwKey.press = -3.5
+mod.widgets.HwKey.draw_bg.key_face = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let stroke = self.hw_noise(vec2(w.x * 0.01, w.y * 0.12)) - 0.5
+    var col = base * (1.0 + stroke * 0.04)
+    let s = self.rect_size
+    let i = self.inset
+    let f = s - vec2(i * 2.0, i * 2.0)
+    let q = p - vec2(i, i)
+    let org = w - p
+    let kk = floor(org.x / 31.0) + floor(org.y / 31.0) * 2.0
+    let h = (kk - 3.0 * floor(kk / 3.0)) / 3.0 + 0.1
+    let red = vec3(0.84, 0.18, 0.12)
+    let yel = vec3(0.96, 0.74, 0.11)
+    let blu = vec3(0.14, 0.31, 0.66)
+    let blk = vec3(0.07, 0.065, 0.06)
+    if self.critical > 0.5 {
+        if s.y < 46.0 {
+            // PRESETS: a black enamel cap with a red top rule; its word is
+            // printed in the accent when lit and grey when not.
+            col = blk * (1.0 + stroke * 0.3) + vec3(0.02, 0.02, 0.02)
+            let top = 1.0 - smoothstep(4.0, 4.7, q.y)
+            col = mix(col, red, top)
+            return col
+        }
+        // Play: a full red cap with a black foot rule.
+        col = red * (1.0 + stroke * 0.06)
+        let foot = smoothstep(f.y - 5.5, f.y - 4.8, q.y)
+        col = mix(col, blk, foot)
+        return col
+    }
+    if f.x > f.y * 1.8 {
+        // A wide word key: a yellow cap, a black foot rule, a red square
+        // stamped at the left end.
+        col = yel * (1.0 + stroke * 0.06)
+        let foot = smoothstep(f.y - 4.0, f.y - 3.3, q.y)
+        col = mix(col, blk, foot)
+        let sq = (1.0 - smoothstep(6.0, 6.6, q.x)) * (1.0 - smoothstep(f.y - 4.0, f.y - 3.3, q.y))
+        col = mix(col, red, sq)
+        return col
+    }
+    if h < 0.34 {
+        // A red ring round the legend.
+        let r = min(f.x, f.y) * 0.44
+        let d = abs(length(q - f * 0.5) - r) - 2.2
+        col = mix(col, red, 1.0 - smoothstep(-0.6, 0.6, d))
+    } else {
+        if h < 0.67 {
+            // A yellow quarter disc in the top-left corner, a black foot rule.
+            let qd = length(q) - f.y * 0.66
+            col = mix(col, yel, 1.0 - smoothstep(-0.6, 0.6, qd))
+            let foot = smoothstep(f.y - 4.0, f.y - 3.3, q.y)
+            col = mix(col, blk, foot)
+        } else {
+            // A blue bar down the left edge, a thin black rule beside it.
+            let bar = 1.0 - smoothstep(8.0, 8.8, q.x)
+            col = mix(col, blu, bar)
+            let rule = smoothstep(10.0, 10.6, q.x) * (1.0 - smoothstep(12.0, 12.6, q.x))
+            col = mix(col, blk, rule)
+        }
+    }
+    return col
+}
+mod.widgets.HwKeyButton.draw_text.color = #x100f0d
+mod.widgets.HwKeyButton.draw_text.color_hover = #x000000
+mod.widgets.HwKeyButton.draw_text.color_down = #x000000
+mod.widgets.HwKeyButton.draw_text.color_focus = #x100f0d
+mod.widgets.HwKeyText.draw_text.color = #x100f0d
+mod.widgets.HwKeyText.draw_text.color_hover = #x000000
+mod.widgets.HwKeyText.draw_text.color_down = #x000000
+mod.widgets.HwKeyText.draw_text.color_focus = #x100f0d
+mod.widgets.HwKeyButton.draw_text.text_style = theme.font_icons{font_size: 15.0}
+mod.widgets.HwKeyText.draw_text.text_style = theme.font_bold{font_size: 10.0}
+
+// ---- lights: red enamel lamps ----
+mod.widgets.HwDash.emissive = vec4(1.0, 0.22, 0.10, 9.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.25, 0.12, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x1a1816
+mod.widgets.HwDash.radius = 0
+mod.widgets.HwLed.emissive = vec4(1.0, 0.22, 0.10, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.25, 0.12, 1.0)
+
+// ---- knob: a black enamel disc, a yellow cap, a red pointer ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x151412
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(0.95, 0.93, 0.88, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(1.0, 0.66, 12.0, 0.25)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.96, 0.74, 0.11, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.07, 0.065, 0.06, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(12.0, 1.30, 3.2, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.80, 0.77, 0.70, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.90, 0.20, 0.12, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.7, 8.0, 1.0, 0.7)
+mod.widgets.HwKnobFace.emissive = vec4(1.0, 0.22, 0.10, 0.6)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(0.4, 0.5)
+
+// ---- meter: a Bauhaus sunburst. Two quarter fans of painted wedges
+// rise from a heavy black base rule, left channel to the left, right to
+// the right: blue, then yellow, then red toward the top. ----
+mod.widgets.HwMeterFace.depth = -1.5
+mod.widgets.HwMeterFace.radius = 2
+mod.widgets.HwMeterFace.draw_bg.ground = #xf2ecdc
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 9.0, 1.0, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.14, 0.31, 0.66, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(0.84, 0.18, 0.12, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.87, 0.84, 0.76, 1.0)
+mod.widgets.HwMeterFace.draw_bg.shadow_ink = vec4(0.10, 0.09, 0.08, 1.0)
+mod.widgets.HwMeterFace.draw_bg.inner = vec4(0.6, 6.0, 0.0, 0.0)
+mod.widgets.HwMeterFace.emissive = vec4(1.0, 0.22, 0.10, 0.4)
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let s = self.rect_size
+    let p = self.pos * s
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let w = self.world.xy
+    var o = self.layer(self.ground.xyz * (1.0 + (self.hw_noise(vec2(w.x * 0.01, w.y * 0.12)) - 0.5) * 0.05))
+    let blk = vec3(0.07, 0.065, 0.06)
+    let piv = vec2(s.x * 0.5, s.y - 9.0)
+    let rx = s.x * 0.5 - 12.0
+    let ry = s.y - 16.0
+    let q = (p - piv) / vec2(rx, ry)
+    let r = length(q)
+    let ang = atan2(0.0 - q.y, abs(q.x) + 0.00001)
+    let t = 1.0 - ang / 1.5708
+    let left = 1.0 - step(0.0, q.x)
+    let lv = mix(self.level.y, self.level.x, left)
+    let n = max(self.meter.y, 2.0)
+    let seg = floor(t * n)
+    let ft = fract(t * n)
+    // Angular gap of about 1.6 pt at the rim, whatever the radius.
+    let gap = 1.6 / max(r * min(rx, ry) * 1.5708 / n, 0.5)
+    let wedge = smoothstep(gap * 0.5, gap * 0.5 + 0.08, ft) * (1.0 - smoothstep(1.0 - gap * 0.5 - 0.08, 1.0 - gap * 0.5, ft))
+    let ring = smoothstep(0.30, 0.30 + px * 2.0 / ry, r) * (1.0 - smoothstep(1.0 - px * 2.0 / ry, 1.0, r))
+    let above = 1.0 - step(0.0, q.y)
+    let cell = wedge * ring * above * step(0.0, t) * step(t, 1.0)
+    let on = step((seg + 0.5) / n, lv)
+    let u = (seg + 0.5) / n
+    var lit = self.glow_ink.xyz
+    if u > 0.55 { lit = vec3(0.96, 0.74, 0.11) }
+    if u > 0.82 { lit = self.hot_ink.xyz }
+    let col = mix(self.led_off.xyz, lit, on)
+    o = vec4(mix(o.xyz, col, cell), o.w)
+    // Hairline black outline round each off wedge: painted, not printed.
+    // The hub: a black half disc; the heavy base rule under the fan.
+    let hub = (1.0 - smoothstep(0.22 - px / ry, 0.22 + px / ry, r)) * above
+    o = vec4(mix(o.xyz, blk, hub), o.w)
+    let base_y = abs(p.y - piv.y - 1.5) - 1.8
+    let base_x = abs(p.x - piv.x) - (rx + 4.0)
+    let base_r = (1.0 - smoothstep(-px, px, base_y)) * (1.0 - smoothstep(-px, px, base_x))
+    o = vec4(mix(o.xyz, blk, base_r), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- spectrum: stacks of square painted blocks, each capped with a disc,
+// cycling red, yellow, blue across the bands; an off-white peak bar ----
+// Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
+mod.widgets.HwSpectrum.draw_round.pixel = fn() {
+    let s = self.rect_size
+    let p = self.pos * s
+    let c = self.color
+    if self.part > 0.5 && self.part < 1.5 {
+        // The well: black enamel with a faint square grid.
+        let g = abs(fract(p / 24.0) - vec2(0.5, 0.5)) * 24.0
+        let grid = 1.0 - smoothstep(11.0, 11.8, max(g.x, g.y))
+        let col = vec3(0.075, 0.07, 0.065) + vec3(0.03, 0.03, 0.028) * grid
+        let sdf = Sdf2d.viewport(p)
+        sdf.box(0.0, 0.0, s.x, s.y, 3.0)
+        sdf.fill(vec4(col, 1.0))
+        return sdf.result
+    }
+    if (self.part > 1.5 && self.part < 3.5) || (self.part > 5.5 && self.part < 6.5) {
+        if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
+            // Level rules: dashed off-white.
+            let d = step(0.5, fract(p.x / 8.0))
+            return vec4(0.9, 0.87, 0.8, 1.0) * 0.10 * d
+        }
+        // A bar's empty slot: a column of faint square outlines.
+        let pitch = s.x + 2.0
+        let k = fract((s.y - p.y) / pitch) * pitch
+        let box = step(k, s.x)
+        return vec4(0.9, 0.87, 0.8, 1.0) * 0.045 * box
+    }
+    if self.part > 4.5 && self.part < 5.5 {
+        // The peak mark: a heavy off-white bar.
+        return vec4(0.95, 0.92, 0.85, 1.0)
+    }
+    // A lit bar: square blocks from the foot, the top one a disc.
+    let pitch = s.x + 2.0
+    let band = floor((self.rect_pos.x + 1.0) / pitch)
+    let tri = band - 3.0 * floor(band / 3.0)
+    var ink = vec3(0.88, 0.20, 0.13)
+    if tri > 0.5 { ink = vec3(0.98, 0.76, 0.12) }
+    if tri > 1.5 { ink = vec3(0.22, 0.42, 0.85) }
+    let y = s.y - p.y
+    let nblk = max(floor((s.y + 2.0) / pitch), 1.0)
+    let idx = floor(y / pitch)
+    let k = y - idx * pitch
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var a = 0.0
+    if idx < nblk - 1.0 {
+        a = step(k, s.x) * step(0.0, k)
+    } else {
+        if idx < nblk {
+            let d = length(vec2(p.x - s.x * 0.5, k - s.x * 0.5)) - s.x * 0.5
+            a = 1.0 - smoothstep(-px, px, d)
+        }
+    }
+    // A painted face: a touch lighter at the top-left of every block.
+    let shade = 1.0 + 0.10 * (0.5 - p.x / s.x)
+    return vec4(ink * shade * a, a)
+}
+// The waveform: a heavy tricolour rope, a third of a band each colour.
+mod.widgets.HwSpectrum.draw_line.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let a = self.seg_a
+    let b = self.seg_b
+    let pa = p - a
+    let ba = b - a
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    let d = length(pa - ba * h)
+    let aa = 1.0 - smoothstep(1.2, 2.2, d)
+    let x = self.rect_pos.x + p.x
+    let band = floor(x / 36.0)
+    let tri = band - 3.0 * floor(band / 3.0)
+    var ink = vec3(0.88, 0.20, 0.13)
+    if tri > 0.5 { ink = vec3(0.98, 0.76, 0.12) }
+    if tri > 1.5 { ink = vec3(0.22, 0.42, 0.85) }
+    return vec4(ink * aa, aa)
+}
+
+// ---- no album art: a Bauhaus poster, not a record ----
+mod.widgets.HwArtBlank.draw_bg.pixel = fn() {
+    let s = self.rect_size
+    let p = self.pos * s
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let u = p / max(s.x, s.y)
+    let w = self.world.xy
+    var col = vec3(0.94, 0.91, 0.84) * (1.0 + (self.hw_noise(vec2(w.x * 0.01, w.y * 0.12)) - 0.5) * 0.06)
+    let e = px / max(s.x, 1.0)
+    // Blue square, lower right.
+    let sq = step(0.46, u.x) * step(u.x, 0.90) * step(0.46, u.y) * step(u.y, 0.90)
+    col = mix(col, vec3(0.14, 0.31, 0.66), sq)
+    // Red circle, upper left, over the square's corner.
+    let rc = 1.0 - smoothstep(0.26 - e, 0.26 + e, length(u - vec2(0.40, 0.40)))
+    col = mix(col, vec3(0.84, 0.18, 0.12), rc)
+    // Yellow triangle, lower left.
+    let tri = step(0.10, u.x) * step(u.y, 0.92) * step(0.62 + (u.x - 0.10), u.y) * step(u.x, 0.40)
+    col = mix(col, vec3(0.96, 0.74, 0.11), tri)
+    // A heavy black rule across the top and a thin one down the right.
+    let bar = step(0.08, u.y) * step(u.y, 0.13) * step(0.10, u.x) * step(u.x, 0.92)
+    col = mix(col, vec3(0.07, 0.065, 0.06), bar)
+    let bar2 = step(0.86, u.x) * step(u.x, 0.88) * step(0.08, u.y) * step(u.y, 0.92)
+    col = mix(col, vec3(0.07, 0.065, 0.06), bar2)
+    return vec4(col + self.dither(), 1.0)
+}
+
+// ---- the picture's light ----
+mod.widgets.HwSpectrum.light = 6.0
+mod.widgets.HwMilk.light = 3.2
+mod.widgets.HwMilk.light_knee = 1.0
+
+// ---- type: bold black on paper, off-white on blue ----
+mod.widgets.HwCaption.draw_text.color = #x14130f
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold{font_size: 8.5}
+mod.widgets.HwTitle.draw_text.color = #x0c0b09
+mod.widgets.HwText.draw_text.color = #x2a2822
+mod.widgets.HwPanelTitle.draw_text.color = #xf6f0e0
+mod.widgets.HwPanelText.draw_text.color = #xd9d3c3
+mod.widgets.HwNavButton.draw_text.color = #xf6f0e0
+mod.widgets.HwDisplayText.draw_text.color = #xf3c13a
+mod.widgets.HwDisplay.draw_bg.ground = #x151412
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.9, 0.9, 0.9, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.9, 8.0, 0.0, 0.5)
+mod.widgets.HwDisplay.radius = 2
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.07, 0.065, 0.06, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(1.0, 0.95, 0.85, 0.20)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(0.96, 0.74, 0.11, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xf6f0e0
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.07, 0.065, 0.06, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(1.0, 0.95, 0.85, 0.20)
+mod.widgets.HwTextInput.draw_text.color = #xf6f0e0
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.5)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 0.98, 0.92, 0.3)
+// ---- switches: a black slot, a red enamel cap ----
+mod.widgets.HwSegmented.draw_bg.well = vec4(0.07, 0.065, 0.06, 1.0)
+mod.widgets.HwSegmented.draw_bg.rim = vec4(1.0, 0.97, 0.9, 0.15)
+mod.widgets.HwSegmented.draw_pill.cap = vec4(0.84, 0.18, 0.12, 0.88)
+mod.widgets.HwSegmented.draw_pill.glow = vec4(0.96, 0.74, 0.11, 1.0)
+mod.widgets.HwSegmented.draw_text.color = #xb7b0a0
+mod.widgets.HwSegmented.draw_text_selected.color = #xfbf6ea
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x101010
+mod.widgets.hw_palette.map1 = #x1f4fb0
+mod.widgets.hw_palette.map2 = #xd83a26
+mod.widgets.hw_palette.map3 = #xf4c430
+mod.widgets.hw_palette.map_strength = 0.6
+mod.widgets.hw_palette.map_default = 1.0
+// The screen filter with the THEME COLOURS key: halftone: printed ink dots.
+mod.widgets.hw_palette.screen_filter = 3.0
+mod.widgets.hw_palette.screen_filter_strength = 0.85
+mod.widgets.hw_palette.screen_cell = 6.0
+mod.widgets.hw_palette.screen_curve = 0.0
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(5.0, 0.62, 14.0, 2.0)
+mod.widgets.HwEqGraph.draw_fader.segments = vec4(6.0, 2.0, 0.0, 0.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.14, 0.30, 0.70, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.02, 0.02, 0.02, 1.0)
+mod.widgets.HwEqGraph.draw_fader.led_off = vec4(0.40, 0.14, 0.10, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(4.0, 2.0, 4.0, 0.0)
+mod.widgets.HwEqGraph.draw_curve.curve_ink = vec4(0.95, 0.92, 0.86, 1.0)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(3.0, 0.12, 0.35, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.14, 0.0, 0.1, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spec_ink = vec4(0.96, 0.78, 0.12, 1.0)
+true

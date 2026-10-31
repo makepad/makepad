@@ -1,0 +1,118 @@
+// title: Library
+// class: large
+// order: 11
+// min: 820x560
+// pref: 1360x900
+//
+// Library first, for browsing. The screen, what plays, the seek strip and
+// the transport ride in one short strip across the top; under it the
+// playlists and the open list take the whole height, with the display and
+// volume wings racked side by side on the right over Up Next. Every
+// boundary is a splitter.
+use mod.prelude.widgets_internal.*
+use mod.widgets.*
+
+mod.widgets.HwLayout = View{
+    width: Fill
+    height: Fill
+    flow: Down
+    // The strip over the lists (fullscreen folds the lists away, and the
+    // screen takes the whole front).
+    device_split := mod.widgets.HwDeckSplitter{
+        width: Fill
+        height: Fill
+        axis: SplitterAxis.Vertical
+        align: SplitterAlign.FromA(150.0)
+        min_horizontal: 132.0
+        max_horizontal: 440.0
+        a: View{
+            width: Fill
+            height: Fill
+            // The screen block and the playing controls.
+            lib_strip := mod.widgets.HwSplitter{
+                width: Fill
+                height: Fill
+                axis: SplitterAxis.Horizontal
+                align: SplitterAlign.FromA(300.0)
+                min_vertical: 200.0
+                max_vertical: 520.0
+                a: mod.widgets.HwSlot{component: "screen" width: Fill height: Fill}
+                b: View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 8
+                    // What plays beside the transport keys.
+                    View{
+                        width: Fill
+                        height: Fill
+                        flow: Right
+                        spacing: 14
+                        mod.widgets.HwSlot{component: "now" width: Fill height: Fill}
+                        mod.widgets.HwSlot{component: "transport" width: 486 height: Fill}
+                    }
+                    // The seek strip the whole width, and the Up Next key.
+                    View{
+                        width: Fill
+                        height: 44
+                        flow: Right
+                        spacing: 8
+                        mod.widgets.HwSlot{component: "progress" width: Fill height: Fill}
+                        mod.widgets.HwSlot{component: "queue" width: 54 height: Fill}
+                    }
+                }
+            }
+        }
+        b: View{
+            width: Fill
+            height: Fill
+            // The lists and the control rack.
+            lib_body := mod.widgets.HwSplitter{
+                width: Fill
+                height: Fill
+                axis: SplitterAxis.Horizontal
+                align: SplitterAlign.FromB(432.0)
+                min_vertical: 460.0
+                max_vertical: 432.0
+                a: View{
+                    width: Fill
+                    height: Fill
+                    // The playlists beside the open list.
+                    lib_lists := mod.widgets.HwSplitter{
+                        width: Fill
+                        height: Fill
+                        axis: SplitterAxis.Horizontal
+                        align: SplitterAlign.FromA(220.0)
+                        min_vertical: 180.0
+                        max_vertical: 280.0
+                        a: mod.widgets.HwSlot{component: "library" width: Fill height: Fill}
+                        b: mod.widgets.HwSlot{component: "tracks" width: Fill height: Fill}
+                    }
+                }
+                b: View{
+                    width: Fill
+                    height: Fill
+                    // The wings over Up Next (its key folds Up Next away).
+                    split := mod.widgets.HwDeckSplitter{
+                        width: Fill
+                        height: Fill
+                        axis: SplitterAxis.Vertical
+                        align: SplitterAlign.FromB(240.0)
+                        min_horizontal: 322.0
+                        max_horizontal: 110.0
+                        a: View{
+                            width: Fill
+                            height: Fill
+                            flow: Right
+                            spacing: 12
+                            mod.widgets.HwSlot{component: "display" width: 236 height: Fill}
+                            mod.widgets.HwSlot{component: "volume" width: Fill height: Fill}
+                        }
+                        b: mod.widgets.HwSlot{component: "upnext" width: Fill height: Fill}
+                    }
+                }
+            }
+        }
+    }
+}
+true

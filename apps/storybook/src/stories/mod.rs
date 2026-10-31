@@ -16,7 +16,14 @@ use std::sync::Mutex;
 
 pub mod welcome;
 pub mod slug;
+pub mod kitchen_sink;
 pub mod foundations;
+pub mod tween;
+pub mod ease_editor;
+pub mod curve_editor;
+pub mod tween_script;
+pub mod motion_path;
+pub mod sequencer;
 pub mod layout;
 pub mod grid;
 pub mod masonry;
@@ -35,6 +42,7 @@ pub mod moving_panels;
 pub mod glasspanel;
 pub mod glass_surfaces;
 pub mod glass_controls;
+pub mod surface_material;
 pub mod splash;
 pub mod label;
 pub mod typography;
@@ -59,6 +67,7 @@ pub mod textinput;
 pub mod field_well;
 pub mod number_field;
 pub mod slider;
+pub mod slider_fader;
 pub mod range_slider;
 pub mod rotary;
 pub mod rating;
@@ -67,9 +76,12 @@ pub mod date_picker;
 pub mod calendar;
 pub mod time_picker;
 pub mod color;
+pub mod gradient_editor;
 pub mod dropzone;
 pub mod form;
 pub mod property_inspector;
+pub mod hotkeys;
+pub mod gizmo;
 pub mod checkbox;
 pub mod radio_group;
 pub mod select;
@@ -105,6 +117,12 @@ pub mod alert;
 pub mod toast;
 pub mod progress;
 pub mod level_meter;
+pub mod lamp;
+pub mod needle_meter;
+pub mod readout;
+pub mod screen_view;
+pub mod grounds;
+pub mod toggle_switches;
 pub mod spinner;
 pub mod placeholder;
 pub mod empty_state;
@@ -139,6 +157,7 @@ pub mod dropzone_states;
 /// needs a template. The templates are script, they cost real time to
 /// evaluate, and only ever one page of them is on screen -- so they wait
 /// until that page is asked for. See [`script_mod`] for why that matters.
+#[derive(Clone, Copy)]
 pub struct StoryModule {
     /// Evaluating this writes the file's templates into `mod.stories`.
     pub script_mod: fn(&mut ScriptVm) -> ScriptValue,
@@ -165,8 +184,15 @@ static FILES: &[StoryModule] = &[
     file(welcome::script_mod, welcome::STORIES),
     file(crate::coverage::script_mod, crate::coverage::STORIES),
     file(slug::script_mod, slug::STORIES),
+    file(kitchen_sink::script_mod, kitchen_sink::STORIES),
     // 1 Foundations
     file(foundations::script_mod, foundations::STORIES),
+    file(tween::script_mod, tween::STORIES),
+    file(ease_editor::script_mod, ease_editor::STORIES),
+    file(curve_editor::script_mod, curve_editor::STORIES),
+    file(tween_script::script_mod, tween_script::STORIES),
+    file(motion_path::script_mod, motion_path::STORIES),
+    file(sequencer::script_mod, sequencer::STORIES),
     // 2 Layout
     file(layout::script_mod, layout::STORIES),
     file(grid::script_mod, grid::STORIES),
@@ -179,6 +205,7 @@ static FILES: &[StoryModule] = &[
     // 3 Containers
     file(view::script_mod, view::STORIES),
     file(corner_cap_view::script_mod, corner_cap_view::STORIES),
+    file(grounds::script_mod, grounds::STORIES),
     file(card::script_mod, card::STORIES),
     file(accordion::script_mod, accordion::STORIES),
     file(carousel::script_mod, carousel::STORIES),
@@ -187,6 +214,8 @@ static FILES: &[StoryModule] = &[
     file(glasspanel::script_mod, glasspanel::STORIES),
     file(glass_surfaces::script_mod, glass_surfaces::STORIES),
     file(glass_controls::script_mod, glass_controls::STORIES),
+    file(screen_view::script_mod, screen_view::STORIES),
+    file(surface_material::script_mod, surface_material::STORIES),
     file(splash::script_mod, splash::STORIES),
     // 4 Text
     file(label::script_mod, label::STORIES),
@@ -216,6 +245,7 @@ static FILES: &[StoryModule] = &[
     file(field_well::script_mod, field_well::STORIES),
     file(number_field::script_mod, number_field::STORIES),
     file(slider::script_mod, slider::STORIES),
+    file(slider_fader::script_mod, slider_fader::STORIES),
     file(range_slider::script_mod, range_slider::STORIES),
     file(rotary::script_mod, rotary::STORIES),
     file(rating::script_mod, rating::STORIES),
@@ -224,12 +254,16 @@ static FILES: &[StoryModule] = &[
     file(calendar::script_mod, calendar::STORIES),
     file(time_picker::script_mod, time_picker::STORIES),
     file(color::script_mod, color::STORIES),
+    file(gradient_editor::script_mod, gradient_editor::STORIES),
     file(dropzone::script_mod, dropzone::STORIES),
     file(dropzone_states::script_mod, dropzone_states::STORIES),
     file(form::script_mod, form::STORIES),
     file(property_inspector::script_mod, property_inspector::STORIES),
+    file(hotkeys::script_mod, hotkeys::STORIES),
+    file(gizmo::script_mod, gizmo::STORIES),
     // 8 Selection
     file(checkbox::script_mod, checkbox::STORIES),
+    file(toggle_switches::script_mod, toggle_switches::STORIES),
     file(radio_group::script_mod, radio_group::STORIES),
     file(select::script_mod, select::STORIES),
     file(combobox::script_mod, combobox::STORIES),
@@ -267,6 +301,8 @@ static FILES: &[StoryModule] = &[
     file(toast::script_mod, toast::STORIES),
     file(progress::script_mod, progress::STORIES),
     file(level_meter::script_mod, level_meter::STORIES),
+    file(lamp::script_mod, lamp::STORIES),
+    file(needle_meter::script_mod, needle_meter::STORIES),
     file(spinner::script_mod, spinner::STORIES),
     file(spinner_states::script_mod, spinner_states::STORIES),
     file(placeholder::script_mod, placeholder::STORIES),
@@ -286,15 +322,32 @@ static FILES: &[StoryModule] = &[
     file(badge::script_mod, badge::STORIES),
     file(avatar::script_mod, avatar::STORIES),
     file(kbd::script_mod, kbd::STORIES),
+    file(readout::script_mod, readout::STORIES),
     file(chart::script_mod, chart::STORIES),
     file(chart_shapes::script_mod, chart_shapes::STORIES),
     file(timeline::script_mod, timeline::STORIES),
     file(chat::script_mod, chat::STORIES),
 ];
 
-/// Every story file, in navigator order.
+/// Story files from outside this crate, added before the app starts: a
+/// storybook built on this one registers its own pages here and they follow
+/// the public ones in the navigator. Set once; a later call is ignored.
+static EXTRA: std::sync::OnceLock<&'static [StoryModule]> = std::sync::OnceLock::new();
+static ALL: std::sync::OnceLock<Vec<StoryModule>> = std::sync::OnceLock::new();
+
+pub fn extend(files: &'static [StoryModule]) {
+    let _ = EXTRA.set(files);
+}
+
+/// Every story file, in navigator order: this crate's, then any added.
 pub fn modules() -> &'static [StoryModule] {
-    FILES
+    ALL.get_or_init(|| {
+        let mut all = FILES.to_vec();
+        if let Some(extra) = EXTRA.get() {
+            all.extend_from_slice(extra);
+        }
+        all
+    })
 }
 
 /// Which story files have been evaluated into this context's script heap.
@@ -373,6 +426,14 @@ fn evaluate(vm: &mut ScriptVm, index: usize) {
     (modules()[index].script_mod)(vm);
 }
 
+/// Forget which files were evaluated, without touching the module: the next
+/// page a canvas asks for evaluates its file again, on top of what is there.
+/// For a designer preview of one story file: its override is installed,
+/// the record dropped, and the canvas rebuilt, and no other file runs.
+pub fn forget_evaluated(cx: &mut Cx) {
+    cx.global::<Evaluated>().flags.clear();
+}
+
 /// How many story files this context has evaluated.
 pub fn evaluated_count(cx: &mut Cx) -> usize {
     cx.global::<Evaluated>().flags.iter().filter(|on| **on).count()
@@ -400,6 +461,42 @@ pub fn bump(key: LiveId) -> usize {
 }
 
 #[cfg(test)]
+mod wiring {
+    //! A story file that nothing lists is dead code wearing live code's
+    //! clothes: it compiles, it reads well, and the app never sees a line of
+    //! it, because [`FILES`] is the one road from a file to the navigator. A
+    //! file sat here written and unreachable for a day, and what gave it away
+    //! was the story count not moving.
+
+    /// The one entry in [`super::FILES`] that is not a file in this
+    /// directory: the coverage page is written beside the count it draws.
+    const LISTED_FROM_ELSEWHERE: usize = 1;
+
+    #[test]
+    fn every_file_in_this_directory_is_listed() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/stories");
+        let written = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.ends_with(".rs") && name != "mod.rs"
+            })
+            .count();
+        assert_eq!(
+            super::modules().len() - LISTED_FROM_ELSEWHERE,
+            written,
+            concat!(
+                "the table lists one number of story files and the directory holds ",
+                "another; a file nothing lists is evaluated by nothing, and its pages ",
+                "are in no tree, no search and no count"
+            )
+        );
+    }
+}
+
+#[cfg(test)]
 mod lazy_evaluation {
     //! A story file is evaluated when the canvas is asked for a page it
     //! writes, and a style reload makes every file evaluated before it stale.
@@ -409,7 +506,6 @@ mod lazy_evaluation {
     //! altogether, because the reload emptied `mod.stories` and nothing put
     //! the page back.
     use crate::canvas::id_path;
-    use crate::makepad_widgets::makepad_script::trap::NoTrap;
     use crate::makepad_widgets::*;
     use crate::theme::Choice;
 
@@ -437,9 +533,7 @@ mod lazy_evaluation {
     fn page_is_written(cx: &mut Cx) -> bool {
         cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            vm.bx
-                .heap
-                .value(stories, LiveId::from_str(PAGE).into(), NoTrap)
+            vm.value(stories, LiveId::from_str(PAGE))
                 .as_object()
                 .is_some()
         })
@@ -450,10 +544,7 @@ mod lazy_evaluation {
     fn label_color(cx: &mut Cx) -> Vec4f {
         let page = cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            let value = vm
-                .bx
-                .heap
-                .value(stories, LiveId::from_str(PAGE).into(), NoTrap);
+            let value = vm.value(stories, LiveId::from_str(PAGE));
             assert!(value.as_object().is_some(), "no template {PAGE}");
             WidgetRef::script_from_value(vm, value)
         });
@@ -612,7 +703,7 @@ mod cost_of_a_switch {
     /// this was measured in: every story file is ~99% of a reload, the whole
     /// widget library is the other 1%, and the one page on the canvas is a
     /// fraction of one file.
-    /// `cargo test -p makepad-storybook where_a_theme_switch -- --ignored --nocapture`
+    /// `cargo test -p makepad-app-storybook where_a_theme_switch -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn where_a_theme_switch_spends_its_time() {

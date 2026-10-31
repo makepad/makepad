@@ -1,0 +1,64 @@
+[package]
+name = "makepad-flow"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# Feature layers, innermost first:
+#
+#   document  graph source, wire DTOs, values, identities, type registry,
+#             package manifests. Splash evaluation only; no I/O providers.
+#   runtime   the run scheduler, the shared flow store and the bounded
+#             embedding engine (`runtime::Engine`). Builds without widgets,
+#             platform, HTTP, the AI hub, the asset client or video.
+#   ai        Chat and Gen executors over makepad-ai-hub.
+#   http      the Http node executor (the hub's bounded HTTP client).
+#   media     preview/probe decoders and the Publish and archive executors
+#             over a `ResultStore` (implies `ai`: publication names the
+#             generator that made a value).
+#   host      the native HTTP flow-server planes (implies every executor).
+#   client    the HTTP client and embed policy (implies every executor, as
+#             before: existing client consumers also name engine seams).
+#
+# `default` is unchanged for existing consumers.
+[features]
+default = ["client", "host", "hub-chat"]
+document = []
+runtime = ["document"]
+#   live      partition a revision by owner and drive live owners (audio,
+#             frames, worlds) through prepare, stage, commit and retire.
+#             Widget-free like `runtime`, whose lowering it reuses.
+live = ["runtime"]
+ai = ["runtime", "dep:makepad-ai-hub"]
+http = ["runtime", "dep:makepad-ai-hub"]
+media = [
+    "ai",
+    "dep:makepad-audio-decode",
+    "dep:makepad-mp4-index",
+    "dep:makepad-video",
+    "dep:makepad-gltf",
+    "dep:makepad-zune-png",
+    "dep:makepad-zune-jpeg",
+]
+executors = ["ai", "http", "media"]
+client = ["executors"]
+host = ["executors", "dep:makepad-bounded-http"]
+hub-chat = ["ai"]
+
+[dependencies]
+makepad-script = { path = "../../platform/script" }
+makepad-micro-serde = { path = "../micro_serde" }
+makepad-strict-json = { path = "../strict_json" }
+# Zero-dependency shared primitives; the core takes its SHA-256 from here so
+# hashing a value links neither the AI hub nor a store crate.
+makepad-core-util = { path = "../core_util" }
+makepad-ai-hub = { path = "../ai/hub", default-features = false, features = ["llm"], optional = true }
+makepad-audio-decode = { path = "../audio_decode", optional = true }
+makepad-mp4-index = { path = "../mp4_index", optional = true }
+makepad-video = { package = "makepad-platform-video", path = "../../platform/video", optional = true }
+makepad-gltf = { path = "../gltf", optional = true }
+makepad-zune-png = { path = "../zune/zune-png", optional = true }
+makepad-zune-jpeg = { path = "../zune/zune-jpeg", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-bounded-http = { path = "../bounded_http", optional = true }

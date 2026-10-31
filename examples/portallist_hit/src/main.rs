@@ -8,7 +8,7 @@
 //!
 //! Both the row buttons and `outside_button` report what was pressed into
 //! `last_played`, so any consumer that locates a row by its reported rect and
-//! clicks the middle of it — the `--remote` `/snap` + `/click` loop, a
+//! clicks the middle of it — the `--remote` `ui find` + raw `click` loop, a
 //! `makepad_test` locator — can be checked against what the app actually did.
 
 pub use makepad_widgets;
@@ -197,6 +197,8 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         self::script_mod(vm)
     }

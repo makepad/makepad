@@ -1,0 +1,363 @@
+// Headless face placeholders. flow-ui replaces these with its registered widgets.
+mod.flow.ui = {
+    NodeFace: {}
+    InputFace: {}
+    TextFace: {}
+    OutputFace: {}
+    PublishFace: {}
+    LlmFace: {}
+    FnFace: {}
+    HttpFace: {}
+    AskFace: {}
+    GenFace: {}
+    ImageFace: {}
+    VideoFace: {}
+    UpscaleFace: {}
+    ValueImage: {}
+    ValueText: {}
+    ValueJson: {}
+    ValueAudio: {}
+    ValueVideo: {}
+    ValueMesh: {}
+}
+mod.flow.ImageFace = mod.flow.ui.ImageFace
+mod.flow.InputFace = mod.flow.ui.InputFace
+mod.flow.TextFace = mod.flow.ui.TextFace
+mod.flow.OutputFace = mod.flow.ui.OutputFace
+mod.flow.PublishFace = mod.flow.ui.PublishFace
+mod.flow.LlmFace = mod.flow.ui.LlmFace
+mod.flow.FnFace = mod.flow.ui.FnFace
+mod.flow.HttpFace = mod.flow.ui.HttpFace
+mod.flow.AskFace = mod.flow.ui.AskFace
+
+/** Base prototype shared by every flow node. */
+mod.flow.Node = {
+    kind: @node
+    type_name: "Node"
+    /** Canvas position. */
+    at: nil
+    /** Optional canvas size. */
+    size: nil
+    /** Face ports right-to-left (inputs right, outputs left). */
+    flip: false
+    /** Optional node face. */
+    ui: nil
+    /** Failure policy: fail or skip. */
+    on_fail: @fail
+    /** Optional display label. */
+    label: nil
+    out: fn(name) { {node: self, port: name} }
+    // Fn uses `out` for its declaration; this spelling remains callable.
+    port: fn(name) { {node: self, port: name} }
+}
+
+/** A value supplied when a flow is started. */
+mod.flow.Input = mod.flow.Node{
+    kind: @input
+    type_name: "Input"
+    /** Value type: text, image, audio, video, mesh, json, or list. */
+    type: @text
+    /** Design value from the file, overridable per run by the caller. */
+    value: ""
+    /** Nil for one value; a bound (1..256) for an ordered port of that many values at most. */
+    many: nil
+    // Read compatibility for flow files written before `value` became the
+    // canonical design setting. The graph evaluator folds this into `value`.
+    default: ""
+    ui: mod.flow.ui.InputFace
+    text: fn() { self.out(@text) }
+    image: fn() { self.out(@image) }
+    audio: fn() { self.out(@audio) }
+    video: fn() { self.out(@video) }
+    mesh: fn() { self.out(@mesh) }
+    json: fn() { self.out(@json) }
+    list: fn() { self.out(@list) }
+}
+
+/** A text input with the standard textbox face. */
+mod.flow.Text = mod.flow.Input{
+    type_name: "Text"
+    type: @text
+    ui: mod.flow.ui.TextFace
+}
+
+/** A named result returned by the flow. */
+mod.flow.Output = mod.flow.Node{
+    kind: @output
+    type_name: "Output"
+    /** Result value type. */
+    type: @text
+    /** Nil for one value; a bound (1..256) for an ordered result of that many values at most. */
+    many: nil
+    /** Port whose value becomes this result; an ordered result lists entries `[conn(1, a.text()), ...]`. */
+    value: nil
+    ui: mod.flow.ui.OutputFace
+}
+
+/** Publish a terminal flow value into the shared asset library. The value may be image, audio, video, mesh, text, or json. An alias makes later runs create a new revision of the same asset. */
+mod.flow.Publish = mod.flow.Node{
+    kind: @publish
+    type_name: "Publish"
+    /** Optional title; empty becomes "<flow> · <node>". */
+    title: ""
+    /** Asset namespace. */
+    namespace: "flows"
+    /** Search tags; empty becomes ["flow", "<flow name>"]. Each is made a store label (lowercase letters, digits, `-` and `_`, at most 48 bytes). */
+    tags: []
+    /** Optional description; empty inherits an upstream text input when available. */
+    description: ""
+    /** Optional stable alias, with or without the namespace prefix. */
+    alias: ""
+    /** Optional artist credit, for music. */
+    artist: ""
+    /** Optional tempo in beats per minute, for music; zero is unknown. */
+    bpm: 0
+    /** Set by the host that runs a recipe: the recipe digest (64 hex digits) recorded as the revision's parameter digest, so a repeated fixed-seed run can find this product. */
+    recipe_digest: ""
+    /** Terminal value to publish. */
+    value: nil
+    ui: mod.flow.ui.PublishFace
+    asset: fn() { self.out(@asset) }
+}
+
+/** Expand or transform text with a language model. */
+mod.flow.Llm = mod.flow.Node{
+    kind: @chat
+    type_name: "Llm"
+    domain: "text"
+    /** Instruction for the language model. */
+    system: ""
+    /** Text sent to the language model. */
+    prompt: ""
+    /** Model name; empty lets the hub choose. */
+    model: ""
+    /** Sampling temperature. */
+    temperature: 0.7
+    /** Maximum generated tokens; zero uses the provider default. */
+    max_tokens: 0
+    ui: mod.flow.ui.LlmFace
+    text: fn() { self.out(@text) }
+}
+
+/** Run a pure splash closure over declared inputs. */
+mod.flow.Fn = mod.flow.Node{
+    kind: @fn
+    type_name: "Fn"
+    /** Named literal or connected inputs. */
+    in: {}
+    /** Names of values returned by run. */
+    out: []
+    /** Pure splash closure called at run time. */
+    run: nil
+    ui: mod.flow.ui.FnFace
+    text: fn() { {node: self, port: @text} }
+    image: fn() { {node: self, port: @image} }
+    audio: fn() { {node: self, port: @audio} }
+    video: fn() { {node: self, port: @video} }
+    mesh: fn() { {node: self, port: @mesh} }
+    json: fn() { {node: self, port: @json} }
+    list: fn() { {node: self, port: @list} }
+    bytes: fn() { {node: self, port: @bytes} }
+}
+
+/** Make a bounded HTTP request. */
+mod.flow.Http = mod.flow.Node{
+    kind: @http
+    type_name: "Http"
+    /** HTTP method: get, post, put, or delete. */
+    method: @get
+    /** Request URL. */
+    url: ""
+    /** Request header object. */
+    headers: {}
+    /** Optional request body. */
+    body: nil
+    /** Request Content-Type. */
+    content_type: ""
+    /** Response value type: text, json, image, audio, video, or bytes. */
+    out: @text
+    /** Error status codes that should be accepted, for example [404]. */
+    accept: []
+    ui: mod.flow.ui.HttpFace
+    value: fn() { {node: self, port: @value} }
+    meta: fn() { {node: self, port: @meta} }
+}
+
+/** Ask the caller a question and park the run for its answer. */
+mod.flow.Ask = mod.flow.Node{
+    kind: @ask
+    type_name: "Ask"
+    /** Question shown or sent to the caller. */
+    question: ""
+    /** Answer type. */
+    type: @text
+    /** Suggested answers. */
+    options: []
+    /** Answer used when the node is skipped. */
+    default: ""
+    /** Timeout in seconds; zero waits forever. */
+    timeout: 0
+    ui: mod.flow.ui.AskFace
+    text: fn() { self.out(@text) }
+    image: fn() { self.out(@image) }
+    audio: fn() { self.out(@audio) }
+    video: fn() { self.out(@video) }
+    mesh: fn() { self.out(@mesh) }
+    json: fn() { self.out(@json) }
+    list: fn() { self.out(@list) }
+}
+
+/** Run one job once per element of a list: `body` wires the job (an Image,
+Llm, Fn, ...), `bind` names the parameter or input each element sets, and
+the results come back in element order as `items`, whatever order the jobs
+finish in. At most `concurrency` elements run at once. A body with
+`on_fail: @skip` drops the elements it fails on; otherwise one failure fails
+the Map. */
+mod.flow.Map = mod.flow.Node{
+    kind: @map
+    type_name: "Map"
+    /** Type of the body's result, and of each item. */
+    type: @image
+    /** The most elements it maps (1..256). */
+    many: 8
+    /** The job to run per element, as a port: `body: paint.image()`. */
+    body: nil
+    /** The elements, a list: `over: [11, 23, 37]` or a list input. */
+    over: []
+    /** The body parameter or input port each element sets. */
+    bind: @seed
+    /** Most elements running at once. */
+    concurrency: 2
+    items: fn() { self.out(@items) }
+}
+
+/** Park the run until the caller picks one of `from`'s candidates. A `pick`
+index (set, wired, or given for the run) chooses without asking. */
+mod.flow.Choose = mod.flow.Node{
+    kind: @choose
+    type_name: "Choose"
+    /** Type of each candidate and of the choice. */
+    type: @image
+    /** The most candidates it takes (1..256). */
+    many: 8
+    /** The candidates, an ordered input: `from: fan.items()`. */
+    from: nil
+    /** Index of the candidate to take; nil asks the caller. */
+    pick: nil
+    /** Question shown to the caller. */
+    question: ""
+    /** Timeout in seconds; zero waits forever. */
+    timeout: 0
+    ui: mod.flow.ui.AskFace
+    text: fn() { self.out(@text) }
+    image: fn() { self.out(@image) }
+    audio: fn() { self.out(@audio) }
+    video: fn() { self.out(@video) }
+    mesh: fn() { self.out(@mesh) }
+    json: fn() { self.out(@json) }
+}
+
+/** Primitive for a generation request handled by a hub domain. */
+mod.flow.Gen = mod.flow.Node{
+    kind: @gen
+    type_name: "Gen"
+    /** Hub generation domain. */
+    domain: ""
+    /** Typed input and output port declaration: `{in: {name: @type, ...}, out: {name: @type, ...}}`. */
+    ports: {in: {} out: {}}
+    /** Reproducible integer seed; @random or -1 draws a fresh seed for every run. */
+    seed: @random
+    ui: mod.flow.ui.GenFace
+}
+
+/** Paint an image from a prompt on the hub's image lane. */
+mod.flow.Image = mod.flow.Gen{
+    type_name: "Image"
+    domain: "image"
+    /** Text describing the desired image. */
+    prompt: ""
+    /** 256..2048 step 16 */
+    width: 1024
+    /** 256..2048 step 16 */
+    height: 1024
+    /** 1..50 */
+    steps: 8
+    /** Reproducible integer seed; @random or -1 draws a fresh seed for every run. */
+    seed: @random
+    /** Things the image should avoid. */
+    negative: ""
+    /** Model name; empty lets the hub choose. */
+    model: ""
+    /** LoRA list; each strength is one of: 1.0, 0.8, 0.6, 0.4, 1.2. */
+    loras: []
+    ports: {in: {prompt: @text, image: @image} out: {image: @image}}
+    image: fn() { self.out(@image) }
+    ui: mod.flow.ui.ImageFace
+}
+
+/** Enlarge an image with the hub's upscale lane. */
+mod.flow.Upscale = mod.flow.Gen{
+    type_name: "Upscale"
+    domain: "upscale"
+    /** Upscale multiplier; the current RealESRGAN recipe produces 4x. */
+    factor: 2
+    /** Model name; empty lets the hub choose. */
+    model: ""
+    ports: {in: {image: @image} out: {image: @image}}
+    image: fn() { self.out(@image) }
+    ui: mod.flow.ui.UpscaleFace
+}
+
+/** A complete flow graph and its callable projections. */
+mod.flow.Flow = {
+    kind: @flow
+    type_name: "Flow"
+    /** Display label. */
+    label: ""
+    /** Short description used by tool callers. */
+    brief: ""
+    /** Start mode: manual or input. */
+    trigger: @manual
+    /** Maximum simultaneous runs per instance. */
+    concurrency: 1
+    /** Create an instance when the server starts. */
+    autostart: false
+    /** Named callable graph projections. */
+    tools: {}
+    /** Optional whole-flow face. */
+    ui: nil
+}
+
+/** A reusable graph with a boundary: its Input nodes are its input ports,
+its Output nodes its output ports. A package pins the file it is written
+in; a flow instantiates it as a container node. */
+mod.flow.Component = mod.flow.Flow{
+    kind: @component
+    type_name: "Component"
+    /** An instance is a node of its parent: its position, size, facing,
+    failure policy and the `out(port)` reference every node has. */
+    at: nil
+    size: nil
+    flip: false
+    on_fail: @fail
+    out: fn(name) { {node: self, port: name} }
+}
+
+mod.flow.vec2 = fn(x, y) { [x, y] }
+
+/** A named wire resolved within this Flow after its nodes are constructed.
+Use `wire(@source, @port)` when the source is declared later; strings also
+name nodes or ports whose names are not identifiers. This does not evaluate
+or import a node: the named node must be listed in the same Flow. */
+mod.flow.wire = fn(node, port) { {node: node, port: port} }
+
+/** One entry of an ordered input: `conn(id, source.port())`. The id names
+the entry whatever its position and stays with it when entries move. */
+mod.flow.conn = fn(id, port) { {node: port.node, port: port.port, conn: id} }
+
+/** An ordered `Fn` input: `ordered(@text, 8, [conn(1, a.text()), ...])`
+declares the element type and the bound, and lists the entries (none is
+fine: `ordered(@text, 8, [])`). */
+mod.flow.ordered = fn(type, many, entries) { {ordered: true, type: type, many: many, entries: entries} }
+
+nil

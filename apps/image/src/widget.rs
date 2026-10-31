@@ -429,14 +429,14 @@ fn evictable(cached: &[PathBuf], keep: Option<&Path>) -> Vec<PathBuf> {
         .collect()
 }
 
+/// What the viewer opens and walks through in a folder.
+pub const PICTURE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "qoi", "ico"];
+
 fn is_image_path(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "qoi" | "ico"
-    )
+    PICTURE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
 #[cfg(test)]

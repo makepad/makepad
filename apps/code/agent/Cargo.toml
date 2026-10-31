@@ -1,0 +1,24 @@
+# The agent core of Makepad Code: tools, approvals, context, sessions,
+# sub-agents, the scripted mock and the file index. No UI, no GPU: the
+# window (makepad-app-code) and the terminal (makepad-code) both run on it.
+
+[package]
+name = "makepad-code-agent"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Makepad Code's agent core: model loop, tools and sessions, no UI"
+
+[dependencies]
+# The hub chat's election only (machine node, LAN fleet): no in-process
+# model runtime, so no `llm`.
+makepad-ai-hub = { path = "../../../libs/ai/hub", default-features = false }
+# The app-service wire types and the load-progress clock; no platform.
+makepad-ai-services = { path = "../../../libs/ai/services", default-features = false }
+makepad-regex = { path = "../../../libs/regex" }
+makepad-strict-json = { path = "../../../libs/strict_json" }
+makepad-git = { path = "../../../libs/git" }
+# Running makepad apps here and on paired hosts (remote.rs).
+makepad-remote = { path = "../../../libs/remote" }
+# The app table builds and runs come from (runs.rs).
+makepad-app-registry = { path = "../../../libs/app_registry" }

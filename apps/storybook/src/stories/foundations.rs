@@ -10,8 +10,7 @@
 //! cards and stacks at every step, and controls beside rulers.
 use crate::makepad_widgets::animator::Ease;
 use crate::makepad_widgets::file_tree::*;
-use crate::makepad_widgets::makepad_script::trap::NoTrap;
-use crate::makepad_widgets::reflect::{theme_values, ThemeVal};
+use makepad_widgets_tweaker::reflect::{theme_values, ThemeVal};
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -36,14 +35,6 @@ script_mod! {
             text_style: theme.font_body_s
             color: theme.color_text_meta
         }
-    }
-
-    mod.storybook.StillViewBase = #(StillView::register_widget(vm))
-    /** A view that passes no event to anything inside it, so whatever state its children were built in is the state they keep. */
-    mod.storybook.StillView = set_type_default() do mod.storybook.StillViewBase{
-        width: Fill
-        height: Fit
-        flow: Down
     }
 
     mod.storybook.FoundationsFileTreeBase = #(FoundationsFileTree::register_widget(vm))
@@ -713,7 +704,7 @@ pub fn theme_ease(cx: &mut Cx, name: &str) -> Ease {
     let key = LiveId::from_str(name);
     cx.with_vm(|vm| {
         let theme = vm.module(id!(theme));
-        let value = vm.bx.heap.value(theme, key.into(), NoTrap);
+        let value = vm.value(theme, key);
         Ease::script_from_value(vm, value)
     })
 }
@@ -854,23 +845,6 @@ fn motion_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             return;
         }
     }
-}
-
-/// A view that hands no event to its children. The state matrix builds each
-/// control in the state it shows, and a pointer passing over one would play
-/// that control's hover off and leave the cell showing rest.
-#[derive(Script, ScriptHook, Widget)]
-pub struct StillView {
-    #[deref]
-    view: View,
-}
-
-impl Widget for StillView {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.view.draw_walk(cx, scope, walk)
-    }
-
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 }
 
 /// A file tree with six rows that never change: two folders, both open, and

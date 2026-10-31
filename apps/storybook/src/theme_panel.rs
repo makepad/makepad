@@ -24,7 +24,7 @@
 //!   the width for that column and a side panel does not.
 //! * It does not commit an edit when the field loses focus. Return commits;
 //!   clicking away is how a half-typed value is abandoned.
-use crate::makepad_widgets::reflect::{theme_set_value, theme_values, ThemeVal};
+use makepad_widgets_tweaker::reflect::{theme_set_value, theme_values, ThemeVal};
 use crate::makepad_widgets::*;
 use std::collections::HashMap;
 

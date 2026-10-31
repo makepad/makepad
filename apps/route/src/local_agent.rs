@@ -181,6 +181,7 @@ impl Agent for LocalAgent {
                         });
                     }
                 }
+                ChatEvent::Working(_) => {}
                 ChatEvent::ContextFull => {
                     out.push(AgentEvent::PromptError {
                         prompt_id,

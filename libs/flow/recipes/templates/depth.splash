@@ -1,0 +1,19 @@
+use mod.flow.*
+
+/** The image to measure. */
+let image = Input{ type: @image  at: vec2(40, 120) }
+
+let depth = Depth{
+    image: image.image()
+    model: "da3-metric-large"
+    at: vec2(360, 120)
+}
+
+/** The 16-bit metric depth map. */
+let depthmap = Output{ type: @image  value: depth.out(@image)  at: vec2(680, 120) }
+
+Flow{
+    label: "Metric depth"
+    brief: "Estimates a metric depth map from a supplied image."
+    image, depth, depthmap
+}

@@ -1,13 +1,8 @@
-//! The palette. wm exports its active `theme.splash` as MAKEPAD_WM_THEME_SPLASH;
-//! `makepad_wm_theme` line-scans it and retints the stock widgets, and this module
-//! publishes the same colors as `mod.mpf.*` so files' own chrome — which is
-//! all custom views — follows the desktop theme too. Standalone runs get
-//! Tokyo Night, so the app is dark and square either way.
+//! Files chrome and disk-map colours come from the active system theme.
 
 use makepad_widgets::*;
 
-
-/// Every color the DSL reads, as `#rrggbb` strings.
+/// Every color the DSL reads, as `#rrggbbaa` strings.
 #[derive(Clone, Debug)]
 pub struct Palette {
     pub accent: String,
@@ -18,8 +13,7 @@ pub struct Palette {
     pub fg_bright: String,
     pub fg_dim: String,
     pub muted: String,
-    /// Row/tile selection: the accent lifted out of the background enough to
-    /// read at a glance, which a raw theme `selection` often is not.
+    /// Row/tile selection from the system highlight role.
     pub sel: String,
     /// The same selection as a translucent overlay, for the grid — which
     /// paints its selection *over* the cells it has already drawn.
@@ -32,104 +26,59 @@ pub struct Palette {
     /// which is the omarchy menu's own rule.
     pub hover_soft: String,
     /// The one warning color in the app, for the row that cannot be undone.
-    /// It comes from the theme's red, because a theme that has a red has an
-    /// opinion about what danger looks like.
+    /// It comes from the system error role.
     pub danger: String,
-    /// The treemap's kind classes, in the order [`KIND_COLOR_KEYS`] names
-    /// them: video, image, audio, code, text, archive, other. They come from
-    /// the theme's terminal palette, which is the only place a WM theme keeps
-    /// a full spread of hues — the chrome palette is all one family by design.
+    /// The treemap's kind classes: video, image, audio, code, text, archive,
+    /// other, each bound to a semantic system colour.
     pub kinds: [String; 7],
 }
 
-/// The terminal-palette keys the treemap's kind colors come from, with the
-/// Tokyo Night value each falls back to. Order matches [`Palette::kinds`].
-/// The theme's red, when it has none of its own: Tokyo Night's.
-const DANGER_FALLBACK: &str = "#f7768e";
-
-const KIND_COLOR_KEYS: [(&str, &str); 7] = [
-    ("term.color4", "#7aa2f7"),  // video   — blue
-    ("term.color2", "#9ece6a"),  // image   — green
-    ("term.color3", "#e0af68"),  // audio   — yellow
-    ("term.color6", "#7dcfff"),  // code    — cyan
-    ("term.color7", "#a9b1d6"),  // text    — foreground
-    ("term.color5", "#bb9af7"),  // archive — magenta
-    ("term.color8", "#414868"),  // other   — muted
+/// Semantic colours in the order of [`Palette::kinds`].
+const KIND_COLOR_ROLES: [&str; 7] = [
+    "color_info",            // video
+    "color_success",         // image
+    "color_warning",         // audio
+    "color_info",            // code
+    "color_text",            // text
+    "color_tertiary",        // archive
+    "color_bevel_outset_2",  // other
 ];
 
-impl Default for Palette {
-    fn default() -> Self {
-        Self::tokyo_night()
-    }
-}
-
 impl Palette {
-    /// The fallback theme, matching wm's default.
-    pub fn tokyo_night() -> Self {
-        Self::derive(
-            "#7aa2f7", "#1a1b26", "#16161e", "#24283b", "#a9b1d6", "#c0caf5", "#565f89", "#414868",
-            DANGER_FALLBACK,
-            KIND_COLOR_KEYS.map(|(_, fallback)| fallback.to_string()),
-        )
-    }
-
-    /// Resolve against the owning Splash VM on each application/style reload.
+    /// Read the owning VM on every application/style reload.
     pub fn for_vm(vm: &mut ScriptVm) -> Self {
-        Self::from_palette(makepad_wm_theme::current_for_vm(vm))
-    }
-    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
-    #[cfg(test)]
-    pub fn load() -> Self { Self::from_palette(makepad_wm_theme::current()) }
-    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
-
-        let Some(p) = palette else {
-            return Self::tokyo_night();
+        let mut hex = |role| {
+            let color = theme_tokens::color(vm, role)
+                .unwrap_or_else(|| panic!("missing system theme colour: {role}"));
+            format!("#{:08x}", color.to_u32())
         };
-        Self::derive(
-            &p.hex("accent", "#7aa2f7"),
-            &p.hex("background", "#1a1b26"),
-            &p.hex("darker_background", "#16161e"),
-            &p.hex("lighter_background", "#24283b"),
-            &p.hex("foreground", "#a9b1d6"),
-            &p.hex("bright_foreground", "#c0caf5"),
-            &p.hex("dark_foreground", "#565f89"),
-            &p.hex("muted", "#414868"),
-            &p.hex("term.color1", DANGER_FALLBACK),
-            KIND_COLOR_KEYS.map(|(key, fallback)| p.hex(key, fallback)),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn derive(
-        accent: &str,
-        bg: &str,
-        bg_dark: &str,
-        bg_light: &str,
-        fg: &str,
-        fg_bright: &str,
-        fg_dim: &str,
-        muted: &str,
-        danger: &str,
-        kinds: [String; 7],
-    ) -> Self {
+        let accent = hex("color_focus");
+        let bg = hex("color_bg_app");
+        let bg_light = hex("color_fg_app");
+        let fg = hex("color_text");
+        let sel = hex("color_bg_highlight");
+        let mut sel_soft = Self::vec4(&sel);
+        sel_soft.w *= 77.0 / 255.0;
         Self {
-            sel: mix(accent, bg, 0.34),
-            sel_soft: format!("#{}4d", accent.trim().trim_start_matches('#')),
-            hover: mix(accent, bg, 0.13),
-            hover_soft: mix(fg, bg, 0.08),
-            danger: danger.to_string(),
-            stripe: mix(bg_light, bg, 0.4),
-            accent: accent.to_string(),
-            bg: bg.to_string(),
-            bg_dark: bg_dark.to_string(),
-            bg_light: bg_light.to_string(),
-            fg: fg.to_string(),
-            fg_bright: fg_bright.to_string(),
-            fg_dim: fg_dim.to_string(),
-            muted: muted.to_string(),
-            kinds,
+            sel_soft: format!("#{:08x}", sel_soft.to_u32()),
+            sel,
+            hover: mix(&accent, &bg, 0.13),
+            hover_soft: mix(&fg, &bg, 0.08),
+            stripe: mix(&bg_light, &bg, 0.4),
+            accent,
+            bg,
+            bg_dark: hex("color_bg_container"),
+            bg_light,
+            fg,
+            fg_bright: hex("color_text_hover"),
+            fg_dim: hex("color_text_disabled"),
+            muted: hex("color_bevel_outset_2"),
+            danger: hex("color_error"),
+            kinds: KIND_COLOR_ROLES.map(&mut hex),
         }
     }
+
+    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
 
     /// Colours the disk map paints with, matching this palette.
     pub fn map_palette(&self) -> makepad_diskmap::MapPalette {
@@ -159,53 +108,34 @@ impl Palette {
             x: r as f32 / 255.0,
             y: g as f32 / 255.0,
             z: b as f32 / 255.0,
-            w: 1.0,
+            w: hex.trim().trim_start_matches('#').get(6..8)
+                .and_then(|a| u8::from_str_radix(a, 16).ok())
+                .map_or(1.0, |a| a as f32 / 255.0),
         }
     }
 
-    /// Publish the palette as `mod.mpf` so `script_mod!` can read it. Call
-    /// after `makepad_widgets::script_mod` and before the app's own module.
+    /// Bind the app's Splash roles to the installed system theme.
     pub fn publish(&self, vm: &mut ScriptVm) {
-        let code = format!(
-            "mod.mpf = {{\n\
-             accent: {accent}\n\
-             bg: {bg}\n\
-             bg_dark: {bg_dark}\n\
-             bg_light: {bg_light}\n\
-             fg: {fg}\n\
-             fg_bright: {fg_bright}\n\
-             fg_dim: {fg_dim}\n\
-             muted: {muted}\n\
-             sel: {sel}\n\
-             sel_soft: {sel_soft}\n\
-             hover: {hover}\n\
-             stripe: {stripe}\n\
-             }}\n\
-             true\n",
-            accent = self.accent,
-            bg = self.bg,
-            bg_dark = self.bg_dark,
-            bg_light = self.bg_light,
-            fg = self.fg,
-            fg_bright = self.fg_bright,
-            fg_dim = self.fg_dim,
-            muted = self.muted,
-            sel = self.sel,
-            sel_soft = self.sel_soft,
-            hover = self.hover,
-            stripe = self.stripe,
-        );
-        vm.eval(ScriptMod {
-            cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-            module_path: "files_palette".to_string(),
-            file: "palette.splash".to_string(),
-            line: 0,
-            column: 0,
-            code,
-            values: vec![],
+        vm.eval(script! {
+            use mod.prelude.widgets.*
+            mod.mpf = {
+                accent: theme.color_focus
+                bg: theme.color_bg_app
+                bg_dark: theme.color_bg_container
+                bg_light: theme.color_fg_app
+                fg: theme.color_text
+                fg_bright: theme.color_text_hover
+                fg_dim: theme.color_text_disabled
+                muted: theme.color_bevel_outset_2
+                sel: theme.color_bg_highlight
+                sel_soft: theme.color_bg_highlight * vec4(1.0, 1.0, 1.0, 0.3019608)
+                hover: mix(theme.color_bg_app, theme.color_focus, 0.13)
+                stripe: mix(theme.color_bg_app, theme.color_fg_app, 0.4)
+            }
+            true
         });
         for e in vm.take_errors() {
-            log!("files palette: {}", e);
+            log!("files theme: {}", e);
         }
     }
 }
@@ -221,12 +151,12 @@ fn rgb(hex: &str) -> (u8, u8, u8) {
     (byte(0), byte(2), byte(4))
 }
 
-/// `a` over `b` at `t`, as a `#rrggbb` string.
+/// `a` over `b` at `t`, as a `#rrggbbaa` string.
 fn mix(a: &str, b: &str, t: f64) -> String {
-    let (ar, ag, ab) = rgb(a);
-    let (br, bg, bb) = rgb(b);
-    let c = |x: u8, y: u8| (x as f64 * t + y as f64 * (1.0 - t)).round().clamp(0.0, 255.0) as u8;
-    format!("#{:02x}{:02x}{:02x}", c(ar, br), c(ag, bg), c(ab, bb))
+    let a = Palette::vec4(a);
+    let b = Palette::vec4(b);
+    let c = |x: f32, y: f32| ((x as f64 * t + y as f64 * (1.0 - t)) * 255.0).round().clamp(0.0, 255.0) as u8;
+    format!("#{:02x}{:02x}{:02x}{:02x}", c(a.x, b.x), c(a.y, b.y), c(a.z, b.z), c(a.w, b.w))
 }
 
 // The one text-field shape the whole app uses: flat, square, borderless,
@@ -249,39 +179,39 @@ script_mod! {
         draw_bg +: {
             border_radius: uniform(theme.corner_radius)
             border_size: uniform(1.0)
-            color: mod.mpf.bg
-            color_hover: uniform(mod.mpf.bg)
-            color_focus: uniform(mod.mpf.bg)
-            color_down: uniform(mod.mpf.bg)
-            color_empty: uniform(mod.mpf.bg)
-            color_disabled: uniform(mod.mpf.bg)
+            color: mod.theme.color_bg_app
+            color_hover: uniform(mod.theme.color_bg_app)
+            color_focus: uniform(mod.theme.color_bg_app)
+            color_down: uniform(mod.theme.color_bg_app)
+            color_empty: uniform(mod.theme.color_bg_app)
+            color_disabled: uniform(mod.theme.color_bg_app)
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
-            border_color: uniform(mod.mpf.muted)
-            border_color_hover: uniform(mod.mpf.muted)
-            border_color_focus: uniform(mod.mpf.accent)
-            border_color_down: uniform(mod.mpf.accent)
-            border_color_empty: uniform(mod.mpf.muted)
-            border_color_disabled: uniform(mod.mpf.muted)
+            border_color: uniform(mod.theme.color_bevel_outset_2)
+            border_color_hover: uniform(mod.theme.color_bevel_outset_2)
+            border_color_focus: uniform(mod.theme.color_focus)
+            border_color_down: uniform(mod.theme.color_focus)
+            border_color_empty: uniform(mod.theme.color_bevel_outset_2)
+            border_color_disabled: uniform(mod.theme.color_bevel_outset_2)
             border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
         }
         draw_text +: {
-            color: mod.mpf.fg_bright
-            color_hover: uniform(mod.mpf.fg_bright)
-            color_focus: uniform(mod.mpf.fg_bright)
-            color_down: uniform(mod.mpf.fg_bright)
-            color_disabled: uniform(mod.mpf.fg_dim)
-            color_empty: uniform(mod.mpf.fg_dim)
-            color_empty_hover: uniform(mod.mpf.fg_dim)
-            color_empty_focus: uniform(mod.mpf.fg_dim)
+            color: mod.theme.color_text_hover
+            color_hover: uniform(mod.theme.color_text_hover)
+            color_focus: uniform(mod.theme.color_text_hover)
+            color_down: uniform(mod.theme.color_text_hover)
+            color_disabled: uniform(mod.theme.color_text_disabled)
+            color_empty: uniform(mod.theme.color_text_disabled)
+            color_empty_hover: uniform(mod.theme.color_text_disabled)
+            color_empty_focus: uniform(mod.theme.color_text_disabled)
             text_style: theme.font_regular{font_size: 9.5}
         }
-        draw_cursor +: {color: uniform(mod.mpf.accent)}
+        draw_cursor +: {color: uniform(mod.theme.color_focus)}
         draw_selection +: {
             border_radius: uniform(theme.textselection_corner_radius)
-            color: uniform(mod.mpf.sel)
-            color_hover: uniform(mod.mpf.sel)
-            color_focus: uniform(mod.mpf.sel)
-            color_down: uniform(mod.mpf.sel)
+            color: uniform(mod.theme.color_bg_highlight)
+            color_hover: uniform(mod.theme.color_bg_highlight)
+            color_focus: uniform(mod.theme.color_bg_highlight)
+            color_down: uniform(mod.theme.color_bg_highlight)
         }
     }
 }
@@ -292,32 +222,36 @@ mod tests {
 
     #[test]
     fn mixes_toward_the_first_color() {
-        assert_eq!(mix("#ffffff", "#000000", 0.0), "#000000");
-        assert_eq!(mix("#ffffff", "#000000", 1.0), "#ffffff");
-        assert_eq!(mix("#ffffff", "#000000", 0.5), "#808080");
+        assert_eq!(mix("#ffffff", "#000000", 0.0), "#000000ff");
+        assert_eq!(mix("#ffffff", "#000000", 1.0), "#ffffffff");
+        assert_eq!(mix("#ffffff", "#000000", 0.5), "#808080ff");
     }
 
     #[test]
-    fn selection_sits_between_accent_and_background() {
-        let p = Palette::tokyo_night();
-        assert_ne!(p.sel, p.bg);
-        assert_ne!(p.sel, p.accent);
-        // Hover is the quieter of the two.
-        assert_ne!(p.hover, p.sel);
+    fn selection_follows_the_system_highlight() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        cx.with_vm(|vm| {
+            let p = Palette::for_vm(vm);
+            assert_eq!(Palette::vec4(&p.sel), theme_tokens::color(vm, "color_bg_highlight").unwrap());
+            p.publish(vm);
+            let files = vm.module(id!(mpf));
+            assert_eq!(vm.value(files, id!(sel)).as_color().map(Vec4f::from_u32), theme_tokens::color(vm, "color_bg_highlight"));
+        });
     }
 
     #[test]
-    fn every_treemap_kind_has_its_own_hue() {
-        let p = Palette::tokyo_night();
-        let mut seen: Vec<&str> = p.kinds.iter().map(String::as_str).collect();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), p.kinds.len(), "kind colors must be distinct");
-        // Every class resolves, and an out-of-range one falls to "other".
-        for class in 0..p.kinds.len() {
-            assert_eq!(p.kind_color(class), Palette::vec4(&p.kinds[class]));
-        }
-        assert_eq!(p.kind_color(99), p.kind_color(p.kinds.len() - 1));
+    fn every_treemap_kind_uses_its_system_role() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        cx.with_vm(|vm| {
+            let p = Palette::for_vm(vm);
+            for (class, role) in KIND_COLOR_ROLES.iter().enumerate() {
+                let expected = theme_tokens::color(vm, role).unwrap();
+                assert_eq!(p.kind_color(class), expected);
+            }
+            assert_eq!(p.kind_color(99), p.kind_color(p.kinds.len() - 1));
+        });
     }
 
     #[test]

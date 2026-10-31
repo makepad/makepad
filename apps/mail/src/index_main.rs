@@ -1,5 +1,5 @@
 //! Command-line cache builder and search client, using the same worker as Mail.
-use makepad_mail::{
+use makepad_app_mail::{
     mail_worker::{MailWorker, Reply, Request},
     source::LocalConfig,
 };

@@ -1,0 +1,617 @@
+// title: Steampunk
+// Steampunk — a Victorian aether engine: riveted sheets of aged copper gone
+// green with verdigris, antique brass escutcheons with rivet rows and
+// engraved rules, oxblood leather wells with brass stitching, a porthole
+// flange round a glass of glowing aether, valve-wheel volume, twin pressure
+// gauges for the levels, glass gas tubes for the spectrum, and gaslight amber
+// everywhere a lamp burns.
+use mod.prelude.widgets_internal.*
+
+// ---- palette: aether-dark glass, parchment type, gaslight amber ----
+mod.widgets.hw_palette.screen_bg = #x0b1916
+mod.widgets.hw_palette.screen_text = #xf2e2bc
+mod.widgets.hw_palette.screen_muted = #x8fa593
+mod.widgets.hw_palette.accent = #xffac3c
+mod.widgets.hw_palette.panel_text = #xeccf8e
+mod.widgets.hw_palette.panel_muted = #xb99462
+mod.widgets.hw_palette.menu_bg = #x2a100c
+mod.widgets.hw_palette.spill_knee = 1.2
+
+// ---- the front: riveted sheets of aged copper, verdigris in the laps ----
+mod.widgets.HwChassis.draw_bg.ground = #x7c4227
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 0.86, 0.66, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.14, 0.06, 0.03, 1.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(1.0, 0.62, 0.22, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(2.6, 0.7)
+mod.widgets.HwChassis.draw_bg.vignette = vec4(0.5, 0.28, 0.42, 1.12)
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    // Hammered copper: broad mottling, soft dimples, fine speckle.
+    let n = self.hw_noise(w * 0.018) * 0.55 + self.hw_noise(w * 0.07) * 0.3 + self.hw_noise(w * 0.3) * 0.15
+    var col = base * (0.80 + 0.40 * n)
+    col = col * (0.93 + 0.14 * self.hw_noise(w * 0.12))
+    col = col * (1.0 + (self.hw_hash(floor(w * 1.4)) - 0.5) * 0.06)
+    // Tarnish: dark brown clouds.
+    let tar = smoothstep(0.5, 0.85, self.hw_noise(w * 0.009 + vec2(11.0, 5.0)))
+    col = mix(col, vec3(0.22, 0.10, 0.05), tar * 0.5)
+    // The sheets: lapped seams on a grid.
+    let cell = vec2(340.0, 270.0)
+    let f = fract(w / cell)
+    let sx = (f.x - step(0.5, f.x)) * cell.x
+    let sy = (f.y - step(0.5, f.y)) * cell.y
+    let ex = abs(sx)
+    let ey = abs(sy)
+    let es = min(ex, ey)
+    // Verdigris: blooms from the seams and in patches.
+    let vn = self.hw_noise(w * 0.03 + vec2(3.0, 9.0)) * 0.6 + self.hw_noise(w * 0.13) * 0.3 + self.hw_noise(w * 0.6) * 0.1
+    let pat = smoothstep(0.62, 0.9, vn + exp(-es / 14.0) * 0.36)
+    let verd = mix(vec3(0.20, 0.42, 0.35), vec3(0.46, 0.72, 0.60), self.hw_noise(w * 0.45))
+    col = mix(col, vec3(dot(col, vec3(0.3, 0.55, 0.15))), 0.18)
+    col = mix(col, verd, pat * 0.72)
+    // The lap: a dark gap and a lit edge on the overlapping sheet.
+    let gap = 1.0 - smoothstep(0.3, 1.2, es)
+    let edge = (1.0 - smoothstep(0.0, 1.2, abs(es - 1.8))) * 0.25
+    col = col * (1.0 - gap * 0.75) + vec3(1.0, 0.75, 0.5) * edge * (1.0 - pat * 0.6)
+    // A double row of rivets along every seam.
+    let nearh = step(ey, ex)
+    let qh = vec2((fract(w.x / 15.0) - 0.5) * 15.0, sy - sign(sy) * 6.5)
+    let qv = vec2(sx - sign(sx) * 6.5, (fract(w.y / 15.0) - 0.5) * 15.0)
+    let rq = mix(qv, qh, nearh)
+    let rd = length(rq)
+    let rr = 2.4
+    let rm = 1.0 - smoothstep(rr - 0.5, rr + 0.4, rd)
+    let hl = max(0.0, 1.0 - length(rq + vec2(0.8, 0.8)) / rr)
+    let rsh = (1.0 - smoothstep(rr - 0.2, rr + 2.2, length(rq - vec2(0.9, 1.0)))) * (1.0 - rm)
+    col = col * (1.0 - rsh * 0.55)
+    let rivet = vec3(0.72, 0.40, 0.22) * (0.55 + 0.45 * (1.0 - rd / rr)) + vec3(1.0, 0.85, 0.65) * hl * hl * 0.8
+    col = mix(col, rivet, rm)
+    return col
+}
+mod.widgets.Window.pass.clear_color = #x2a1309
+
+// Raised plates: antique brass escutcheons, engraved rules, a rivet row.
+mod.widgets.HwPlate.draw_bg.ground = #xa9843f
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 0.92, 0.70, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.14, 0.08, 0.02, 1.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(2.2, 0.9, 2.4, 0.55)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.7, 10.0, 1.0, 0.6)
+mod.widgets.HwPlate.draw_bg.sheen = vec4(0.10, 0.25, 0.28, 0.5)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(1.0, 0.62, 0.22, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(2.8, 0.6)
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    // Brass: faint polishing streaks, mottled wear.
+    let row = floor(w.y * 1.3)
+    let streak = self.hw_noise(vec2(w.x * 0.02 + row * 3.7, row * 0.31))
+    let n = self.hw_noise(w * 0.02) * 0.6 + self.hw_noise(w * 0.09) * 0.4
+    var col = base * (0.84 + 0.30 * n) * (1.0 + (streak - 0.5) * 0.10)
+    let s = self.rect_size
+    let cq = min(p, s - p) - vec2(self.inset, self.inset)
+    let e = min(cq.x, cq.y)
+    // Tarnish toward the edges, verdigris creeping from the corners.
+    let tn = self.hw_noise(w * 0.035 + vec2(5.0, 2.0))
+    col = mix(col, vec3(0.30, 0.19, 0.07), clamp(smoothstep(0.55, 0.9, tn) * 0.35 + exp(-e / 12.0) * 0.30, 0.0, 1.0))
+    let vg = smoothstep(0.66, 0.9, self.hw_noise(w * 0.06) * 0.7 + exp(-length(cq) / 26.0) * 0.55)
+    col = mix(col, vec3(0.30, 0.56, 0.46) * (0.8 + 0.4 * self.hw_noise(w * 0.5)), vg * 0.75)
+    // Engraved double rule inside the rivets.
+    let rule = (1.0 - smoothstep(0.25, 0.85, abs(e - 10.5))) + (1.0 - smoothstep(0.2, 0.6, abs(e - 12.5))) * 0.6
+    col = col * (1.0 - rule * 0.5)
+    // Engraved corner scrolls: a quarter ring in each corner.
+    let sc = length(cq - vec2(10.5, 10.5))
+    let scroll = (1.0 - smoothstep(0.3, 0.9, abs(sc - 7.0))) * step(10.5, cq.x) * step(10.5, cq.y)
+    col = col * (1.0 - scroll * 0.45)
+    // An engraved pair of gears in the empty foot of the right-hand wing.
+    let gm = step(540.0, s.y) * step(1.5, self.plate_id) * step(self.plate_id, 2.5)
+    if gm > 0.5 {
+        let g1 = p - vec2(s.x * 0.34, s.y - 66.0)
+        let g2 = p - vec2(s.x * 0.34 + 60.0, s.y - 46.0)
+        let a1 = atan2(g1.y, g1.x)
+        let a2 = atan2(g2.y, g2.x) + 0.2
+        let t1 = smoothstep(0.35, 0.5, abs(fract(a1 * 12.0 / 6.28318) - 0.5) * 2.0)
+        let t2 = smoothstep(0.35, 0.5, abs(fract(a2 * 8.0 / 6.28318) - 0.5) * 2.0)
+        let d1 = length(g1) - (34.0 + 5.0 * t1)
+        let d2 = length(g2) - (21.0 + 4.5 * t2)
+        let h1 = abs(length(g1) - 20.0) - 6.5
+        let h2 = abs(length(g2) - 12.0) - 3.5
+        let sp1 = abs(fract(a1 * 6.0 / 6.28318) - 0.5) * 2.0 * length(g1) * 0.5 - 2.5
+        let sp2 = abs(fract(a2 * 4.0 / 6.28318) - 0.5) * 2.0 * length(g2) * 0.5 - 2.0
+        let win1 = max(h1, -sp1)
+        let win2 = max(h2, -sp2)
+        let gd = min(max(d1, -win1), max(d2, -win2))
+        let groove = 1.0 - smoothstep(0.3, 1.0, abs(gd))
+        let raised = 1.0 - smoothstep(-0.5, 0.5, gd)
+        col = col * (1.0 + raised * 0.08) * (1.0 - groove * 0.5)
+        let axle = min(length(g1), length(g2))
+        col = mix(col, col * 0.5, 1.0 - smoothstep(3.0, 3.8, axle))
+    }
+    // Rivets round the edge.
+    let alongx = step(cq.y, cq.x)
+    let along = mix(p.y, p.x, alongx)
+    let rq = vec2((fract(along / 16.0) - 0.5) * 16.0, e - 5.0)
+    let rd = length(rq)
+    let rr = 2.3
+    let rm = 1.0 - smoothstep(rr - 0.5, rr + 0.4, rd)
+    let rsh = (1.0 - smoothstep(rr, rr + 2.0, rd)) * (1.0 - rm)
+    col = col * (1.0 - rsh * 0.45)
+    let rivet = base * (0.55 + 0.55 * (1.0 - rd / rr)) + vec3(1.0, 0.92, 0.7) * pow(max(0.0, 1.0 - rd / (rr * 0.6)), 2.0) * 0.5
+    col = mix(col, rivet, rm)
+    return col
+}
+
+// Recessed wells: oxblood leather, brass-stitched round the edge.
+mod.widgets.HwPanel.draw_bg.ground = #x340806
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.95, 0.55, 0.42, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.05, 0.01, 0.01, 1.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.9, 10.0, 0.0, 0.0)
+mod.widgets.HwPanel.draw_bg.finish = vec4(0.7, 0.3, 0.04, 0.95)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(1.0, 0.62, 0.22, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.1, 0.5)
+mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    // Pebbled grain and soft creases.
+    let g1 = self.hw_noise(w * 0.9)
+    let g2 = self.hw_noise(w * 0.3)
+    var col = base * (0.70 + 0.22 * g1 + 0.14 * g2)
+    col = mix(vec3(dot(col, vec3(0.3, 0.55, 0.15))), col, 1.25)
+    let cr = abs(self.hw_noise(w * vec2(0.018, 0.05)) - 0.5)
+    col = col * (0.82 + 0.18 * smoothstep(0.0, 0.06, cr))
+    col = col + vec3(0.16, 0.03, 0.02) * smoothstep(0.55, 0.9, self.hw_noise(w * 0.012)) * 0.4
+    // Brass saddle stitching round the edge.
+    let s = self.rect_size
+    let cq = min(p, s - p)
+    let e = min(cq.x, cq.y)
+    let along = mix(p.y, p.x, step(cq.y, cq.x))
+    let ph = fract(along / 6.0)
+    let dash = smoothstep(0.1, 0.2, ph) * (1.0 - smoothstep(0.7, 0.8, ph))
+    let line = 1.0 - smoothstep(0.45, 1.0, abs(e - 6.0))
+    let hole = (1.0 - smoothstep(0.0, 0.8, length(vec2((ph - 0.9) * 6.0, e - 6.0)))) * 0.6
+    col = col * (1.0 - hole) * (1.0 - (1.0 - smoothstep(0.0, 1.8, abs(e - 7.2))) * 0.25 * dash)
+    col = mix(col, vec3(0.86, 0.68, 0.38), line * dash * 0.9)
+    return col
+}
+
+// The porthole's seat: blackened bronze, hex bolts round it.
+mod.widgets.HwBezel.draw_bg.ground = #x2a1d12
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(1.0, 0.82, 0.55, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.95, 12.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.spill = vec2(2.0, 0.4)
+mod.widgets.HwBezel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    var col = base * (0.8 + 0.4 * self.hw_noise(w * 0.1)) * (1.0 + (self.hw_hash(floor(w * 1.5)) - 0.5) * 0.1)
+    let s = self.rect_size
+    let cq = min(p, s - p)
+    let e = min(cq.x, cq.y)
+    let alongx = step(cq.y, cq.x)
+    let along = mix(p.y, p.x, alongx)
+    let pitch = 34.0
+    let rq = vec2((fract(along / pitch) - 0.5) * pitch, e - 7.0)
+    // Hex bolt heads.
+    let a = abs(rq)
+    let hex = max(a.x * 0.866 + a.y * 0.5, a.y) - 3.6
+    let bm = 1.0 - smoothstep(-0.5, 0.5, hex)
+    let bsh = (1.0 - smoothstep(0.0, 2.5, hex)) * (1.0 - bm)
+    col = col * (1.0 - bsh * 0.5)
+    let bolt = vec3(0.62, 0.46, 0.22) * (0.65 + 0.35 * (1.0 - length(rq) / 4.5)) + vec3(1.0, 0.9, 0.7) * (1.0 - smoothstep(0.0, 1.6, length(rq + vec2(1.0, 1.0)))) * 0.35
+    col = mix(col, bolt, bm)
+    return col
+}
+
+// The glass: a brass porthole flange, the opening a stadium, a faint aether
+// haze creeping in from the rim and a warm reflection sheet.
+// No dark rim or bulge over the picture: it reads clean and bright.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.10, 0.0, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(1.0, 0.85, 0.60, 0.22)
+mod.widgets.HwGlass.draw_bg.radius = 58.0
+mod.widgets.HwGlass.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let fw = 11.0
+    let d = Material.sd_box(p, c, c - vec2(fw, fw), self.radius)
+    // The flange: a rolled brass ring out to the quad's edge.
+    let flange = smoothstep(-px, px, d)
+    let t = clamp(d / fw, 0.0, 1.0)
+    let prof = sin(t * 3.14159)
+    let top = 1.0 - self.pos.y
+    var brass = vec3(0.66, 0.48, 0.20) * (0.45 + 0.75 * prof * (0.55 + 0.45 * top))
+    brass = brass + vec3(1.0, 0.9, 0.65) * pow(prof, 8.0) * 0.35 * top
+    brass = brass * (1.0 - (1.0 - smoothstep(0.0, 1.2, d)) * 0.5)
+    // Corner bolts in the flange's spandrels.
+    let cq = min(p, self.rect_size - p)
+    let bq = cq - vec2(14.0, 14.0)
+    let bd = length(bq)
+    let a = abs(bq)
+    let hex = max(a.x * 0.866 + a.y * 0.5, a.y) - 5.0
+    let bm = (1.0 - smoothstep(-0.5, 0.5, hex)) * step(0.0, d)
+    brass = brass * (1.0 - (1.0 - smoothstep(4.5, 8.0, bd)) * (1.0 - bm) * 0.5)
+    let boltc = vec3(0.70, 0.52, 0.24) * (0.6 + 0.5 * (1.0 - bd / 6.0)) + vec3(1.0, 0.9, 0.7) * (1.0 - smoothstep(0.0, 2.2, length(bq + vec2(1.4, 1.4)))) * 0.4
+    let slot = (1.0 - smoothstep(0.3, 0.9, abs((bq.x - bq.y) * 0.707))) * step(bd, 3.2)
+    brass = mix(brass, boltc, bm)
+    brass = mix(brass, vec3(0.12, 0.08, 0.03), slot * bm)
+    // Rivets round the flange, on its crown.
+    let alongx = step(cq.y, cq.x)
+    let along = mix(p.y, p.x, alongx)
+    let rq = vec2((fract(along / 22.0) - 0.5) * 22.0, min(cq.x, cq.y) - fw * 0.5)
+    let straight = step(34.0, min(max(cq.x, cq.y), 1000.0)) * step(self.radius + fw + 6.0, max(cq.x, cq.y))
+    let rd = length(rq)
+    let rm = (1.0 - smoothstep(1.6, 2.4, rd)) * straight * flange
+    brass = mix(brass, vec3(0.80, 0.60, 0.28) * (0.7 + 0.5 * (1.0 - rd / 2.4)), rm)
+    // Inside: the lip's shadow on the picture, the aether haze, the reflection.
+    let lip = (1.0 - smoothstep(-9.0, 0.0, d)) * 0.0 + smoothstep(-9.0, 0.0, d) * 0.55
+    let haze = smoothstep(-70.0, 0.0, d) * (1.0 - flange)
+    let r = smoothstep(0.55, 0.0, self.pos.y + (self.pos.x - 0.5) * 0.3) * self.glass.y
+    let glow = vec3(0.30, 0.95, 0.75) * haze * 0.05 + vec3(1.0, 0.62, 0.22) * haze * haze * 0.06
+    let inner = vec4(self.tint.xyz * r + glow, clamp(r + lip * (1.0 - r), 0.0, 1.0))
+    return mix(inner, vec4(brass, 1.0), flange)
+}
+
+// The picture lights the metal: strong spill, a soft ceiling.
+mod.widgets.HwMilk.light = 2.4
+mod.widgets.HwMilk.light_knee = 1.0
+mod.widgets.HwSpectrum.light = 2.8
+
+// ---- the spectrum: glass gas tubes over an aether graticule ----
+// Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
+mod.widgets.HwSpectrum.draw_round.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let s = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let r = min(self.radius, min(s.x, s.y) * 0.5)
+    let c = s * 0.5
+    let d = Material.sd_box(p, c, c, r)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    if self.part > 0.5 && self.part < 1.5 {
+        // The well: aether glass, a teal bloom in the middle, a brass graticule.
+        let uv = self.pos - vec2(0.5, 0.45)
+        let bloom = exp(-dot(uv * vec2(1.4, 2.2), uv * vec2(1.4, 2.2)) * 3.0)
+        var col = vec3(0.018, 0.045, 0.040) + vec3(0.01, 0.05, 0.04) * bloom
+        let g = abs(fract((p - vec2(18.0, 16.0)) / 24.0 + vec2(0.5, 0.5)) - vec2(0.5, 0.5)) * 24.0
+        let grid = (1.0 - smoothstep(0.2, 0.7, min(g.x, g.y))) * 0.5
+        col = col * 0.8 + vec3(0.55, 0.40, 0.18) * grid * 0.06
+        return vec4(col * cov, cov)
+    }
+    if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
+        // A level rule: a dotted engraved line.
+        let dot = step(0.5, fract(p.x / 4.0))
+        let a = self.color.a * 0.9 * dot
+        return vec4(vec3(0.85, 0.66, 0.35) * a, a)
+    }
+    if self.part > 4.5 && self.part < 5.5 {
+        // A peak: a brass float riding the column.
+        let a = cov * 0.95
+        let col = vec3(0.95, 0.78, 0.45) * (0.7 + 0.5 * (1.0 - self.pos.y))
+        return vec4(col * a, a)
+    }
+    let u = self.pos.x * 2.0 - 1.0
+    let wall = smoothstep(0.55, 1.0, abs(u))
+    if self.part > 2.5 && self.part < 3.5 {
+        // An empty tube: glass walls, a glint down the left, brass cap and foot.
+        let glint = (1.0 - smoothstep(0.0, 0.16, abs(u + 0.5))) * 0.4
+        let foot = step(s.y - 5.0, p.y) + step(p.y, 3.0)
+        let a = cov * clamp(0.06 + wall * 0.35 + glint * 0.45 + foot, 0.0, 1.0)
+        let col = mix(vec3(0.50, 0.78, 0.68), vec3(0.70, 0.50, 0.22) * (1.0 - abs(u) * 0.5), clamp(foot, 0.0, 1.0))
+        return vec4(col * a, a)
+    }
+    // A lit column of gas: an orange glow, a hot filament core, a bright meniscus.
+    let core = 1.0 - u * u
+    let men = 1.0 - smoothstep(0.0, 4.0, p.y)
+    let gas = mix(vec3(0.95, 0.36, 0.06), vec3(1.0, 0.62, 0.16), core)
+    var col = gas * (0.45 + 0.75 * core) + vec3(1.0, 0.90, 0.65) * (pow(core, 6.0) * 0.45 + men * 0.55)
+    col = col * (0.75 + 0.35 * (1.0 - self.pos.y)) * (0.6 + 0.6 * self.color.a)
+    let tick = 1.0 - smoothstep(0.0, 0.14, fract((s.y - p.y) / 7.0))
+    col = col * (1.0 - tick * 0.35 * step(4.0, p.y))
+    col = mix(col, vec3(0.30, 0.45, 0.40), wall * 0.45)
+    return vec4(col * cov, cov)
+}
+// The waveform: a glowing filament.
+mod.widgets.HwSpectrum.draw_line.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let a = self.seg_a
+    let b = self.seg_b
+    let pa = p - a
+    let ba = b - a
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    let d = length(pa - ba * h)
+    let core = 1.0 - smoothstep(0.2, 0.9, d)
+    let halo = exp(-d / 1.3) * 0.55
+    let col = vec3(1.0, 0.93, 0.78) * core + self.color.rgb * halo
+    let al = clamp(core + halo, 0.0, 1.0) * self.color.a
+    return vec4(col * self.color.a, al)
+}
+
+// ---- keys: oxblood enamel caps in brass bezels; play wears verdigris ----
+mod.widgets.HwKey.radius = 7
+mod.widgets.HwKey.draw_bg.ground = #x5c1813
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 0.85, 0.65, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.06, 0.01, 0.0, 1.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(2.6, 0.9, 2.6, 0.75)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.65, 6.0, 1.0, 0.6)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.10, 0.22, 0.25, 0.3)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.62, 0.22, 1.0)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.2, 0.5)
+mod.widgets.HwKey.draw_bg.led = vec4(7.0, 7.0, 2.2, 1.0)
+mod.widgets.HwKey.draw_bg.led_off = vec4(0.25, 0.12, 0.05, 1.0)
+mod.widgets.HwKey.draw_bg.key_face = fn(p: vec2, base: vec3) -> vec3 {
+    var b = base
+    if self.critical > 0.5 {
+        b = vec3(0.12, 0.30, 0.24)
+    }
+    let w = self.world.xy
+    var col = b * (0.9 + 0.2 * self.hw_noise(w * 0.2))
+    // Enamel: a deep glossy gradient.
+    let uv = self.pos
+    col = col * (1.15 - 0.35 * uv.y)
+    // The brass bezel round the cap.
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    let ring = 1.0 - smoothstep(2.6, 3.4, e)
+    let rt = clamp(e / 3.0, 0.0, 1.0)
+    let brass = vec3(0.72, 0.53, 0.24) * (0.6 + 0.6 * sin(rt * 3.14159)) * (1.05 - 0.3 * uv.y)
+    col = mix(col, brass, ring)
+    return col
+}
+mod.widgets.HwKeyButton.draw_text.color = #xf0d49a
+mod.widgets.HwKeyButton.draw_text.color_hover = #xffe7b8
+mod.widgets.HwKeyButton.draw_text.color_down = #xffb24a
+mod.widgets.HwKeyButton.draw_text.color_focus = #xf0d49a
+mod.widgets.HwKeyText.draw_text.color = #xf0d49a
+mod.widgets.HwKeyText.draw_text.color_hover = #xffe7b8
+mod.widgets.HwKeyText.draw_text.color_down = #xffb24a
+mod.widgets.HwKeyText.draw_text.color_focus = #xf0d49a
+mod.widgets.HwKeyText.draw_text.text_style = theme.font_bold_italic{font_size: 9.5}
+
+// ---- lamps: gaslight mantles ----
+mod.widgets.HwDash.emissive = vec4(1.0, 0.58, 0.18, 6.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.64, 0.24, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x1e120a
+mod.widgets.HwLed.emissive = vec4(1.0, 0.58, 0.18, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.64, 0.24, 1.0)
+
+// ---- volume: a brass valve wheel over a dark socket ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x1e1610
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(1.0, 0.92, 0.72, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.78, 0.57, 0.25, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.66, 0.10, 0.06, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(11.0, 1.28, 2.6, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.28, 0.17, 0.08, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(1.0, 0.64, 0.24, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.8, 10.0, 1.0, 0.7)
+mod.widgets.HwKnobFace.emissive = vec4(1.0, 0.58, 0.18, 0.8)
+mod.widgets.HwKnobFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let q = p - c
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let r = min(c.x, c.y) - self.inset
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let rq = length(q)
+    let ang = atan2(q.x, -q.y)
+    let inside = 1.0 - smoothstep(-px, px, rq - r)
+    let lt = normalize(vec2(-0.6, -0.8))
+    let nd = q / max(rq, 0.001)
+    let brass = self.cap_ink.xyz
+    let spin = (self.value * 2.0 - 1.0) * self.ring.w
+    // The socket: dark, deeper at the centre, a verdigris stain.
+    var face = self.ground.xyz * (0.5 + 0.7 * (rq / max(r, 1.0)))
+    face = mix(face, vec3(0.14, 0.26, 0.21), smoothstep(0.55, 0.8, self.hw_noise(p * 0.15)) * 0.6)
+    // The spokes' shadow on the socket.
+    let r0 = r * 0.72
+    let seg = 6.28318 / 5.0
+    let qs = q - vec2(2.5, 3.0)
+    let angs = atan2(qs.x, -qs.y) - spin
+    let ks = angs - seg * floor(angs / seg + 0.5)
+    let shs = 1.0 - smoothstep(-2.0, 2.0, abs(ks) * length(qs) - r * 0.08)
+    face = face * (1.0 - shs * 0.6 * step(r * 0.2, length(qs)))
+    // The wheel's rim: a rolled tube with grips.
+    let tt = clamp((rq - (r0 + r) * 0.5) / ((r - r0) * 0.5), -1.0, 1.0)
+    let rimm = smoothstep(r0 - px, r0 + px, rq) * inside
+    let nz = sqrt(max(1.0 - tt * tt, 0.0))
+    let dif = clamp(dot(nd * tt, lt) * 0.9 + nz * 0.55, 0.0, 1.5)
+    let grip = 0.5 + 0.5 * cos((ang - spin) * 16.0)
+    var rimc = brass * (0.30 + 0.75 * dif) * (0.88 + 0.16 * grip)
+    rimc = rimc + self.light_ink.xyz * pow(max(dif - 0.85, 0.0) * 1.6, 2.0) * 0.8
+    // Five spokes; the one at the value is enamelled red.
+    let rel = ang - spin
+    let idx = floor(rel / seg + 0.5)
+    let k = rel - seg * idx
+    let hw = r * 0.08
+    let sdd = abs(k) * rq - hw
+    let spm = (1.0 - smoothstep(-px, px, sdd)) * (1.0 - smoothstep(r0 - 1.0, r0 + 1.0, rq)) * inside
+    let sw = clamp(k * rq / hw, -1.0, 1.0)
+    let sdif = 0.45 + 0.55 * sqrt(max(1.0 - sw * sw, 0.0)) + sw * dot(vec2(nd.y, -nd.x), lt) * 0.35
+    let idxw = idx - 5.0 * floor(idx / 5.0)
+    let isptr = 1.0 - step(0.5, idxw)
+    let spc = mix(brass * sdif, self.ptr_ink.xyz * (0.5 + 0.7 * sdif), isptr * step(r * 0.3, rq))
+    // The hub and its hex nut.
+    let hr = r * 0.26
+    let hm = 1.0 - smoothstep(hr - px, hr + px, rq)
+    let hubc = brass * (0.6 + 0.45 * dot(nd, lt) * (rq / hr)) + vec3(0.0, 0.0, 0.0)
+    let a = abs(q)
+    let hex = max(a.x * 0.866 + a.y * 0.5, a.y) - hr * 0.55
+    let nut = 1.0 - smoothstep(-px, px, hex)
+    let nutc = brass * 0.75 * (0.85 + 0.3 * dot(nd, lt) * step(hr * 0.2, rq))
+    face = mix(face, rimc, rimm)
+    face = mix(face, spc, spm)
+    face = mix(face, hubc, hm)
+    face = mix(face, nutc, nut)
+    face = face + self.env_spill(vec3(0.0, 0.0, 1.0)) * 0.6 * (rimm + spm + hm)
+    o = vec4(face * inside, inside) + o * (1.0 - inside)
+    // Gaslight jewels round the wheel.
+    let n = self.ring.x
+    if n > 0.5 {
+        let rr = r * self.ring.y
+        let a0 = -self.ring.w
+        let stepa = (self.ring.w * 2.0) / max(n - 1.0, 1.0)
+        let fi = clamp(floor((ang - a0) / stepa + 0.5), 0.0, n - 1.0)
+        let aa = a0 + fi * stepa
+        let dc = q - vec2(sin(aa), -cos(aa)) * rr
+        let dd = length(dc) - self.ring.z
+        let on = step((fi + 0.5) / n, self.value + 0.001)
+        let bez = 1.0 - smoothstep(-px, px, dd - 1.4)
+        let dot_a = 1.0 - smoothstep(-px, px, dd)
+        let jewel = mix(self.led_off.xyz, mix(self.glow_ink.xyz, vec3(1.0, 0.95, 0.8), 0.35), on) + vec3(1.0, 1.0, 1.0) * (1.0 - smoothstep(0.0, 1.2, length(dc + vec2(0.8, 0.8)))) * 0.3
+        o = vec4(brass * 0.7 * bez, bez) + o * (1.0 - bez)
+        o = vec4(jewel * dot_a, dot_a) + o * (1.0 - dot_a)
+        let halo = exp(-max(dd, 0.0) / 3.0) * 0.6 * on * (1.0 - bez)
+        o = o + vec4(self.glow_ink.xyz * halo, halo) * (1.0 - o.w)
+    }
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- levels: twin brass pressure gauges, left and right ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x8e6a30
+mod.widgets.HwMeterFace.draw_bg.light_ink = vec4(1.0, 0.9, 0.7, 1.0)
+mod.widgets.HwMeterFace.draw_bg.shadow_ink = vec4(0.1, 0.05, 0.02, 1.0)
+mod.widgets.HwMeterFace.draw_bg.dial_ink = vec4(0.93, 0.86, 0.68, 1.0)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(1.0, 0.62, 0.22, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(0.72, 0.10, 0.06, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(1.0, 0.58, 0.18, 0.9)
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let s = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let lane = step(s.x * 0.5, p.x)
+    let ro = min(s.y * 0.5 - 3.0, s.x * 0.24)
+    let cen = vec2(mix(s.x * 0.27, s.x * 0.73, lane), s.y * 0.5)
+    let lv = clamp(mix(self.level.x, self.level.y, lane), 0.0, 1.0)
+    let q = p - cen
+    let rq = length(q)
+    let nd = q / max(rq, 0.001)
+    let lt = normalize(vec2(-0.6, -0.8))
+    var col = o.xyz
+    // The plate between: a rivet in each corner, a shadow round each gauge.
+    let cq = min(p, s - p)
+    let rv = length(cq - vec2(7.0, 7.0))
+    col = mix(col, self.ground.xyz * (1.3 - rv * 0.15), 1.0 - smoothstep(1.8, 2.6, rv))
+    col = col * (1.0 - (1.0 - smoothstep(ro, ro + 5.0, length(q - vec2(1.5, 2.5)))) * 0.45 * step(ro, rq))
+    // A copper pipe joining the gauges, with a flange at each end.
+    let pl = s.x * 0.27 + ro
+    let pr = s.x * 0.73 - ro
+    let py = (p.y - s.y * 0.5) / 3.6
+    let inpipe = step(pl - 2.0, p.x) * step(p.x, pr + 2.0) * step(abs(py), 1.0)
+    let pcol = vec3(0.72, 0.36, 0.18) * (0.45 + 0.7 * sqrt(max(1.0 - py * py, 0.0)) - 0.25 * py)
+    let fl = step(abs(p.x - (pl + 5.0)), 2.0) + step(abs(p.x - (pr - 5.0)), 2.0)
+    let inflange = fl * step(abs(py), 1.6)
+    col = mix(col, col * 0.6, step(abs(py - 0.6), 1.2) * step(pl, p.x) * step(p.x, pr) * (1.0 - inpipe))
+    col = mix(col, pcol, inpipe)
+    col = mix(col, vec3(0.80, 0.60, 0.28) * (0.55 + 0.5 * (1.0 - abs(py) / 1.6)), clamp(inflange, 0.0, 1.0))
+    // The bezel: a rolled brass ring.
+    let rf = ro - 4.5
+    let bz = (1.0 - smoothstep(ro - px, ro + px, rq)) * smoothstep(rf - px, rf + px, rq)
+    let tt = clamp((rq - (rf + ro) * 0.5) / 2.25, -1.0, 1.0)
+    let dif = clamp(dot(nd * tt, lt) * 0.9 + sqrt(max(1.0 - tt * tt, 0.0)) * 0.55, 0.0, 1.5)
+    let bzc = vec3(0.80, 0.60, 0.28) * (0.3 + 0.8 * dif) + vec3(1.0, 0.92, 0.7) * pow(max(dif - 0.9, 0.0) * 1.7, 2.0)
+    col = mix(col, bzc, bz)
+    // The dial: aged enamel, warmed by the lamp as the pressure rises.
+    let fm = 1.0 - smoothstep(rf - px, rf + px, rq)
+    let fox = smoothstep(0.6, 0.9, self.hw_noise(p * 0.25 + vec2(lane * 17.0, 3.0)))
+    var dial = self.dial_ink.xyz * (0.78 + 0.22 * (1.0 - rq / rf)) * (1.0 - fox * 0.18)
+    dial = dial * (0.85 + 0.25 * lv) + vec3(1.0, 0.55, 0.15) * lv * 0.18
+    // The scale: 270 degrees, major and minor ticks, a red zone.
+    let ang = atan2(q.x, -q.y)
+    let sweep = 2.35619
+    let inarc = step(abs(ang), sweep + 0.02)
+    let fa = (ang + sweep) / (sweep * 2.0)
+    let mj = abs(fract(fa * 8.0 + 0.5) - 0.5) / 8.0 * sweep * 2.0 * rq
+    let mn = abs(fract(fa * 32.0 + 0.5) - 0.5) / 32.0 * sweep * 2.0 * rq
+    let major = (1.0 - smoothstep(0.35, 0.35 + px, mj)) * step(rf * 0.62, rq) * step(rq, rf * 0.9)
+    let minor = (1.0 - smoothstep(0.2, 0.2 + px, mn)) * step(rf * 0.76, rq) * step(rq, rf * 0.9)
+    let arcl = 1.0 - smoothstep(0.2, 0.2 + px, abs(rq - rf * 0.9))
+    let red = step(0.75, fa) * step(rf * 0.78, rq) * step(rq, rf * 0.9)
+    dial = mix(dial, vec3(0.16, 0.08, 0.04), clamp(major + minor * 0.8 + arcl, 0.0, 1.0) * inarc)
+    dial = mix(dial, self.hot_ink.xyz, red * inarc * 0.85)
+    // The telltale: a thin red hand left at the held peak.
+    let pa = (clamp(self.level.z, 0.0, 1.0) * 2.0 - 1.0) * sweep
+    let pdir = vec2(sin(pa), -cos(pa))
+    let tp = clamp(dot(q, pdir), 0.0, rf * 0.88)
+    let dp = length(q - pdir * tp) - 0.35
+    dial = mix(dial, vec3(0.78, 0.12, 0.06), (1.0 - smoothstep(-px, px, dp)) * step(0.02, self.level.z))
+    // The needle: blued steel, a counterweight tail, a brass pivot.
+    let na = (lv * 2.0 - 1.0) * sweep
+    let dir = vec2(sin(na), -cos(na))
+    let perp = vec2(-dir.y, dir.x)
+    let qsh = q - vec2(1.2, 1.6)
+    let tsh = clamp(dot(qsh, dir), -rf * 0.25, rf * 0.85)
+    let dsh = abs(dot(qsh, perp)) - mix(1.2, 0.3, clamp(tsh / (rf * 0.85), 0.0, 1.0))
+    dial = dial * (1.0 - (1.0 - smoothstep(-0.5, 1.8, dsh)) * 0.3 * step(dot(qsh, dir), rf * 0.9) * step(-rf * 0.3, dot(qsh, dir)))
+    let tn = clamp(dot(q, dir), -rf * 0.25, rf * 0.85)
+    let dn = length(q - dir * tn) - mix(1.5, 0.45, clamp(tn / (rf * 0.85), 0.0, 1.0))
+    dial = mix(dial, mix(vec3(0.06, 0.05, 0.08), vec3(0.75, 0.10, 0.05), step(rf * 0.55, tn)), 1.0 - smoothstep(-px, px, dn))
+    let pv = 1.0 - smoothstep(2.4 - px, 2.4 + px, rq)
+    dial = mix(dial, vec3(0.85, 0.65, 0.30) * (0.8 + 0.5 * dot(nd, lt) * rq / 2.4), pv)
+    // The glass: a crescent glint top-left, a darker rim.
+    let gl = (1.0 - smoothstep(0.0, 2.0, abs(length(q + vec2(rf * 0.18, rf * 0.22)) - rf * 0.72))) * step(q.y, -rf * 0.2) * step(q.x, rf * 0.2)
+    dial = dial * (0.72 + 0.28 * smoothstep(rf, rf * 0.75, rq)) + vec3(1.0, 1.0, 0.95) * gl * 0.35
+    col = mix(col, dial, fm)
+    o = vec4(col, o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- the record in the empty art well: a shellac disc, a copper label ----
+mod.widgets.HwArtBlank.draw_bg.label_ink = vec4(0.62, 0.30, 0.14, 1.0)
+
+// ---- type: engraved dark on the metal, brass on the leather ----
+mod.widgets.HwCaption.draw_text.color = #x2a1407
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold_italic{font_size: 9.0}
+mod.widgets.HwTitle.draw_text.color = #x1e0d04
+mod.widgets.HwTitle.draw_text.text_style = theme.font_bold_italic{font_size: 13.5}
+mod.widgets.HwText.draw_text.color = #x2e1709
+mod.widgets.HwText.draw_text.text_style = theme.font_italic{font_size: 10.0}
+mod.widgets.HwPanelTitle.draw_text.color = #xf2d79c
+mod.widgets.HwPanelTitle.draw_text.text_style = theme.font_bold_italic{font_size: 13.5}
+mod.widgets.HwPanelText.draw_text.color = #xcfae78
+mod.widgets.HwNavButton.draw_text.color = #xf0d49a
+mod.widgets.HwNavButton.draw_text.color_hover = #xffe7b8
+mod.widgets.HwNavButton.draw_bg.plate = vec4(0.72, 0.53, 0.24, 0.16)
+mod.widgets.HwNavButton.draw_bg.plate_hover = vec4(0.95, 0.72, 0.35, 0.28)
+mod.widgets.HwNavButton.draw_bg.rim = vec4(0.95, 0.75, 0.40, 0.35)
+mod.widgets.HwDisplayText.draw_text.color = #xffc46e
+mod.widgets.HwDisplay.draw_bg.ground = #x0e1614
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(1.0, 0.82, 0.55, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.95, 10.0, 0.0, 0.55)
+mod.widgets.HwDisplay.draw_bg.spill = vec2(1.6, 0.4)
+mod.widgets.HwDisplay.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    return base * (0.85 + 0.3 * self.hw_noise(self.world.xy * 0.2))
+}
+mod.widgets.HwSegmented.draw_bg.well = vec4(0.16, 0.06, 0.04, 1.0)
+mod.widgets.HwSegmented.draw_bg.rim = vec4(0.95, 0.72, 0.35, 0.55)
+mod.widgets.HwSegmented.draw_pill.cap = vec4(0.72, 0.53, 0.24, 1.0)
+mod.widgets.HwSegmented.draw_pill.glow = vec4(1.0, 0.64, 0.24, 1.0)
+mod.widgets.HwSegmented.draw_text.color = #xd8b67c
+mod.widgets.HwSegmented.draw_text_selected.color = #x1e0d04
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.10, 0.04, 0.03, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.95, 0.72, 0.35, 0.45)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(1.0, 0.72, 0.30, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xf2d79c
+mod.widgets.HwDropDown.draw_text.color_hover = #xffe7b8
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.10, 0.04, 0.03, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.95, 0.72, 0.35, 0.40)
+mod.widgets.HwTextInput.draw_text.color = #xf2e2bc
+mod.widgets.HwMenuLayer.draw_bg.border_color = #x8a6a30
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.05, 0.01, 0.0, 0.5)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 0.8, 0.5, 0.3)
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x0c1210
+mod.widgets.hw_palette.map1 = #x2f6b5c
+mod.widgets.hw_palette.map2 = #xb8862e
+mod.widgets.hw_palette.map3 = #xffe3a0
+mod.widgets.hw_palette.map_strength = 0.75
+mod.widgets.hw_palette.map_default = 1.0
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(4.0, 0.66, 18.0, 3.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.80, 0.58, 0.30, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.04, 0.03, 0.02, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(3.0, 2.2, 6.0, 0.10)
+mod.widgets.HwEqGraph.draw_curve.curve_ink = vec4(0.95, 0.70, 0.35, 1.0)
+mod.widgets.HwEqGraph.draw_curve.lip_ink = vec4(1.0, 0.88, 0.62, 0.5)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(2.0, 0.30, 0.40, 0.0)
+mod.widgets.HwEqGraph.draw_grid.grid_ink = vec4(0.95, 0.80, 0.55, 1.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.14, 1.0, 0.0, 0.0)
+mod.widgets.HwEqGraph.label_ink = vec4(0.95, 0.83, 0.58, 1.0)
+true

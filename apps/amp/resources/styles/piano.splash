@@ -1,0 +1,159 @@
+// Piano Black — a high-end AV front: deep glossy black lacquer with sharp
+// specular reflection bands, a smoked-glass bezel round the screen, flush
+// minimal keys, thin chrome edges and an ice-blue glow.
+//
+// A style is assignments only, over the base templates in `src/hw.rs`
+// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+use mod.prelude.widgets_internal.*
+
+// ---- palette: the lists, the spectrum, the bars ----
+mod.widgets.hw_palette.screen_bg = #x07090c
+mod.widgets.hw_palette.screen_text = #xe8eef4
+mod.widgets.hw_palette.screen_muted = #x7f8b99
+mod.widgets.hw_palette.accent = #x74d2ff
+
+// ---- the front: piano-black lacquer ----
+mod.widgets.HwChassis.draw_bg.ground = #x0a0b0d
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(0.80, 0.88, 0.96, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwChassis.draw_bg.pattern = vec4(3.0, 2.2, 0.14, 0.0)
+mod.widgets.HwChassis.draw_bg.sheen = vec4(0.05, 0.30, 0.25, 0.4)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(0.55, 0.85, 1.0, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(1.5, 0.6)
+mod.widgets.Window.pass.clear_color = #x0a0b0d
+
+// Raised plates: lacquer slabs with a chrome hairline and a sharp band.
+mod.widgets.HwPlate.draw_bg.ground = #x0c0d10
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(0.88, 0.94, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern = vec4(3.0, 1.6, 0.16, 0.0)
+mod.widgets.HwPlate.draw_bg.sheen = vec4(0.045, 0.16, 0.30, 0.6)
+mod.widgets.HwPlate.draw_bg.relief = vec4(1.2, 0.95, 2.0, 0.95)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.6, 0.9, 1.0, 0.08)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.70, 10.0, 1.0, 0.6)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(0.55, 0.85, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(1.35, 0.6)
+
+// Recessed panels: smoked glass set into the lacquer.
+mod.widgets.HwPanel.draw_bg.ground = #x0c0f13
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.70, 0.82, 0.94, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwPanel.draw_bg.pattern = vec4(0.0, 1.0, 0.0, 0.0)
+mod.widgets.HwPanel.draw_bg.sheen = vec4(0.035, 0.22, 0.15, 0.8)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.85, 10.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(0.55, 0.85, 1.0, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.4, 0.5)
+
+// The screen's surround: smoked glass with a chrome lip.
+mod.widgets.HwBezel.draw_bg.ground = #x030406
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.85, 0.92, 1.0, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.pattern = vec4(3.0, 1.2, 0.08, 0.0)
+mod.widgets.HwBezel.draw_bg.sheen = vec4(0.06, 0.20, 0.20, 0.5)
+mod.widgets.HwBezel.draw_bg.relief = vec4(1.0, 1.0, 2.0, 1.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.95, 14.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.05, 0.4)
+
+// The glass over the picture: a clear sheet reflection, ice-tinted.
+// No dark rim or bulge over the picture: it reads clean and bright.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.10, 0.0, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(0.80, 0.92, 1.0, 0.0)
+
+// ---- keys: flush black glass caps, pale glyphs ----
+mod.widgets.HwKey.depth = 1.5
+mod.widgets.HwKey.press = -1.5
+mod.widgets.HwKey.draw_bg.ground = #x08090b
+mod.widgets.HwKey.draw_bg.light_ink = vec4(0.88, 0.94, 1.0, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKey.draw_bg.pattern = vec4(3.0, 1.6, 0.14, 0.0)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.05, 0.22, 0.25, 0.3)
+mod.widgets.HwKey.draw_bg.relief = vec4(1.0, 0.95, 1.5, 1.0)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.50, 5.0, 1.0, 0.5)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.0, 0.45)
+mod.widgets.HwKeyButton.draw_text.color = #xb4c0cc
+mod.widgets.HwKeyButton.draw_text.color_hover = #xd8f2ff
+mod.widgets.HwKeyButton.draw_text.color_down = #x9fe2ff
+mod.widgets.HwKeyText.draw_text.color = #xb4c0cc
+mod.widgets.HwKeyText.draw_text.color_hover = #xd8f2ff
+mod.widgets.HwKeyText.draw_text.color_down = #x9fe2ff
+
+// ---- lights: ice blue ----
+mod.widgets.HwDash.emissive = vec4(0.45, 0.82, 1.0, 8.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(0.55, 0.88, 1.0, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x1a1e24
+mod.widgets.HwLed.emissive = vec4(0.45, 0.82, 1.0, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(0.55, 0.88, 1.0, 1.0)
+
+// ---- knob: a black lacquer dome, chrome pointer, blue ring ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x121418
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(0.90, 0.95, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(0.0, 0.70, 0.0, 0.0)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.07, 0.08, 0.09, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.60, 0.90, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(21.0, 1.28, 1.6, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.10, 0.12, 0.15, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.55, 0.88, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.7, 10.0, 1.0, 0.6)
+mod.widgets.HwKnobFace.emissive = vec4(0.45, 0.82, 1.0, 0.45)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(0.5, 0.5)
+
+// ---- meter: a thin ice-blue ladder behind smoked glass ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x05070a
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 24.0, 0.3, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.55, 0.88, 1.0, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(0.95, 0.97, 1.0, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.06, 0.08, 0.10, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(0.45, 0.82, 1.0, 0.3)
+
+// ---- the picture's light ----
+mod.widgets.HwMilk.light = 1.8
+mod.widgets.HwMilk.light_knee = 1.0
+mod.widgets.HwSpectrum.light = 4.5
+
+// ---- type printed on the front: pale silver ----
+mod.widgets.HwCaption.draw_text.color = #x9aa6b3
+mod.widgets.HwTitle.draw_text.color = #xdfe8f0
+mod.widgets.HwText.draw_text.color = #xa9b4c0
+mod.widgets.HwPanelTitle.draw_text.color = #xdfe8f0
+mod.widgets.HwPanelText.draw_text.color = #x94a0ad
+mod.widgets.HwNavButton.draw_text.color = #xc4d0dc
+mod.widgets.HwDisplayText.draw_text.color = #xa8dcf5
+mod.widgets.HwDisplay.draw_bg.ground = #x04060a
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.80, 0.90, 1.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.95, 9.0, 0.0, 0.55)
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.03, 0.04, 0.05, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.75, 0.88, 1.0, 0.22)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(0.56, 0.86, 1.0, 1.0)
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.03, 0.04, 0.05, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.75, 0.88, 1.0, 0.22)
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.6)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(0.80, 0.90, 1.0, 0.25)
+
+// The sidebar's navigation: flush smoked-glass strips, an ice edge on hover.
+mod.widgets.HwNavButton.draw_bg.color = vec4(1.0, 1.0, 1.0, 0.035)
+mod.widgets.HwNavButton.draw_bg.color_hover = vec4(0.55, 0.85, 1.0, 0.10)
+mod.widgets.HwNavButton.draw_bg.color_down = vec4(0.55, 0.85, 1.0, 0.18)
+mod.widgets.HwNavButton.draw_bg.border_color = vec4(0.80, 0.90, 1.0, 0.08)
+mod.widgets.HwNavButton.draw_bg.border_color_hover = vec4(0.60, 0.88, 1.0, 0.35)
+mod.widgets.HwNavButton.draw_text.color_hover = #xd8f2ff
+
+// Chrome trim: a bright hairline round the plates, the bezel and the panels.
+mod.widgets.HwPlate.draw_bg.tune = vec4(0.14, 1.0, 1.10, 3.0)
+mod.widgets.HwBezel.draw_bg.tune = vec4(0.10, 0.9, 1.10, 3.0)
+mod.widgets.HwPanel.draw_bg.tune = vec4(0.10, 0.45, 1.10, 3.0)
+
+// A key that holds focus (the PRESETS key while its drawer is open) stays lit.
+mod.widgets.HwKeyButton.draw_text.color_focus = #xc8ecff
+mod.widgets.HwKeyText.draw_text.color_focus = #xc8ecff
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(0.0, 0.58, 16.0, 4.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.16, 0.17, 0.19, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.01, 0.01, 0.015, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(0.0, 1.5, 8.0, 0.08)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(0.0, 0.07, 0.24, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.16, 1.0, 0.0, 0.0)
+true

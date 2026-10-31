@@ -16,7 +16,6 @@ use makepad_widgets::makepad_platform::script::timer::script_local_utc_offset_se
 use makepad_widgets::makepad_platform::storage::{
     StorageHandle, StorageOp, StorageRequestId, StorageResponse, StorageResult,
 };
-use makepad_widgets::makepad_platform::trap::NoTrap;
 use makepad_widgets::*;
 
 // Apply partial runtime values in the root's VM. The animation apply mode
@@ -29,8 +28,7 @@ macro_rules! apply_owned {
                     use mod.prelude.widgets.*
                     $body
                 };
-                script.line = line!() as usize;
-                script.column = column!() as usize;
+                script.set_line_column(line!() as usize, column!() as usize);
                 let value = vm.eval(script);
                 $target.script_apply(vm, &Apply::Animate, &mut Scope::empty(), value);
             });
@@ -1162,7 +1160,7 @@ impl RemindersView {
         cx.with_script_vm_id(vm_id, |vm| {
             let theme = vm.module(id!(theme));
             let mut read = |key: LiveId, fallback: Vec4| {
-                let value = vm.bx.heap.value(theme, key.into(), NoTrap);
+                let value = vm.value(theme, key);
                 if value.is_nil() || value.is_err() {
                     fallback
                 } else {

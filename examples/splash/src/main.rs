@@ -2130,8 +2130,7 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // Load a test image into the Image widget
-        let image_path =
-            Path::new("tools/open_harmony/deveco/AppScope/resources/base/media/app_icon.png");
+        let image_path = Path::new("examples/splash/resources/app_icon.png");
         if let Err(e) = self
             .ui
             .image(cx, ids!(test_image))
@@ -2567,6 +2566,8 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
         makepad_code_editor::script_mod(vm);
         self::script_mod(vm)
@@ -2864,8 +2865,8 @@ impl Widget for SelectionTestList {
                         2 => format!("[{}] Error occurred at line 42: unexpected token 'foo' in expression.", item_id),
                         3 => format!("[{}] Successfully completed operation in 0.42ms", item_id),
                         4 => format!("[{}] Loading resources from disk... Processing file batch #{}", item_id, item_id * 7),
-                        5 => format!("[{}] Connection established to server at 192.168.1.100:8080", item_id),
-                        6 => format!("[{}] User 'admin' logged in from IP 10.0.0.1 at timestamp {}", item_id, item_id * 1000),
+                        5 => format!("[{}] Connection established to server at 192.0.2.100:8080", item_id),
+                        6 => format!("[{}] User 'admin' logged in from IP 192.0.2.1 at timestamp {}", item_id, item_id * 1000),
                         7 => format!("[{}] Memory usage: {}MB / 1024MB ({}%)", item_id, item_id * 5 % 800, (item_id * 5 % 800) * 100 / 1024),
                         8 => format!("[{}] Compiling module 'core' - {} dependencies resolved", item_id, item_id % 20 + 1),
                         _ => format!("[{}] Debug: variable x = {}, y = {}, z = {}", item_id, item_id * 3, item_id * 7, item_id * 11),

@@ -2,7 +2,7 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_calendar::{ai, view::CalendarView};
+use makepad_app_calendar::{ai, view::CalendarView};
 use makepad_strict_json::Value;
 use makepad_widgets::*;
 
@@ -122,9 +122,10 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
-        makepad_calendar::script_mod(vm);
+        makepad_app_calendar::script_mod(vm);
         self::script_mod(vm)
     }
 

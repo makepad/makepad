@@ -212,7 +212,7 @@ mod tests {
         let story = story();
         cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+            let value = vm.value(stories, LiveId::from_str(story.dsl));
             assert!(value.as_object().is_some(), "no template {}", story.dsl);
             WidgetRef::script_from_value(vm, value)
         })
@@ -319,7 +319,7 @@ mod tests {
     /// The width the canvas has when the catalogue opens (`app.rs`): the
     /// 1400-point window less the navigator's 260, the bar beside it, the
     /// side panels' 380 and the canvas holder's padding on either side.
-    /// `/snap` measures the canvas at exactly this.
+    /// `ui find` measures the canvas at exactly this.
     const OPENING_CANVAS_WIDTH: f64 = 1400.0 - 260.0 - 6.0 - 380.0 - 2.0 * 6.0;
 
     fn collect_images(widget: &WidgetRef, out: &mut Vec<WidgetRef>) {

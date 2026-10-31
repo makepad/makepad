@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn maps_root_uses_checkout_found_from_executable() {
-        let executable = Path::new("/checkout/target/release/route");
+        let executable = Path::new("/checkout/target/release/makepad-app-route");
         let root = resolve_maps_root_with(executable, Path::new("/home/.makepad"), None, |path| {
             path == Path::new("/checkout/Cargo.toml")
         });
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn maps_root_for_a_binary_copy_uses_makepad_home() {
         let root = resolve_maps_root_with(
-            Path::new("/Applications/Makepad/route"),
+            Path::new("/Applications/Makepad/makepad-app-route"),
             Path::new("/home/.makepad"),
             None,
             |_| false,
@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn explicit_maps_root_wins_over_checkout() {
         let root = resolve_maps_root_with(
-            Path::new("/checkout/target/release/route"),
+            Path::new("/checkout/target/release/makepad-app-route"),
             Path::new("/home/.makepad"),
             Some(Path::new("/data/maps")),
             |_| true,

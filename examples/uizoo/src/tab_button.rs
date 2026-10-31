@@ -14,17 +14,17 @@ script_mod! {
                 Button{}
                 Button{
                     draw_bg +: {
-                        color_2: uniform(#f00)
-                        color_2_hover: uniform(#f00)
-                        color_2_down: uniform(#f00)
-                        color_2_focus: uniform(#f00)
-                        color_2_disabled: uniform(#f00)
+                        color_2: #f00
+                        color_2_hover: #f00
+                        color_2_down: #f00
+                        color_2_focus: #f00
+                        color_2_disabled: #f00
 
-                        border_color_2: uniform(#f00)
-                        border_color_2_hover: uniform(#f00)
-                        border_color_2_down: uniform(#f00)
-                        border_color_2_focus: uniform(#f00)
-                        border_color_2_disabled: uniform(#f00)
+                        border_color_2: #f00
+                        border_color_2_hover: #f00
+                        border_color_2_down: #f00
+                        border_color_2_focus: #f00
+                        border_color_2_disabled: #f00
                     }
                 }
 
@@ -73,23 +73,23 @@ script_mod! {
                 ButtonGradientX{text: "ButtonGradientX"}
                 ButtonGradientX{
                     draw_bg +: {
-                        border_radius: uniform(4.0)
+                        border_radius: 4.0
 
-                        color: uniform(#xC00)
-                        color_hover: uniform(#xF0F)
-                        color_down: uniform(#800)
+                        color: #xC00
+                        color_hover: #xF0F
+                        color_down: #800
 
-                        color_2: uniform(#x0CC)
-                        color_2_hover: uniform(#x0FF)
-                        color_2_down: uniform(#088)
+                        color_2: #x0CC
+                        color_2_hover: #x0FF
+                        color_2_down: #088
 
-                        border_color: uniform(#xC)
-                        border_color_hover: uniform(#xF)
-                        border_color_down: uniform(#0)
+                        border_color: #xC
+                        border_color_hover: #xF
+                        border_color_down: #0
 
-                        border_color_2: uniform(#3)
-                        border_color_2_hover: uniform(#6)
-                        border_color_2_down: uniform(#8)
+                        border_color_2: #3
+                        border_color_2_hover: #6
+                        border_color_2_down: #8
                     }
                     text: "ButtonGradientX"
                 }
@@ -112,23 +112,23 @@ script_mod! {
                 ButtonGradientY{text: "ButtonGradientY"}
                 ButtonGradientY{
                     draw_bg +: {
-                        border_radius: uniform(4.0)
+                        border_radius: 4.0
 
-                        color: uniform(#xC00)
-                        color_hover: uniform(#xF0F)
-                        color_down: uniform(#800)
+                        color: #xC00
+                        color_hover: #xF0F
+                        color_down: #800
 
-                        color_2: uniform(#x0CC)
-                        color_2_hover: uniform(#x0FF)
-                        color_2_down: uniform(#088)
+                        color_2: #x0CC
+                        color_2_hover: #x0FF
+                        color_2_down: #088
 
-                        border_color: uniform(#xC)
-                        border_color_hover: uniform(#xF)
-                        border_color_down: uniform(#0)
+                        border_color: #xC
+                        border_color_hover: #xF
+                        border_color_down: #0
 
-                        border_color_2: uniform(#3)
-                        border_color_2_hover: uniform(#6)
-                        border_color_2_down: uniform(#8)
+                        border_color_2: #3
+                        border_color_2_hover: #6
+                        border_color_2_down: #8
                     }
                     text: "ButtonGradientY"
                 }

@@ -1,0 +1,18 @@
+use mod.flow.*
+
+let lines = Input{ type: "flow.text.lines"  many: 4  value: []  at: vec2(40, 80) }
+let count = Fn{
+    in: {lines: ordered("flow.text.lines", 4, [conn(1, lines.out("flow.text.lines"))])}
+    out: [@text]
+    run: |i| { {text: "" + i.lines.len()} }
+    at: vec2(340, 80)
+}
+let collections = Output{
+    type: "flow.text.lines"
+    many: 4
+    value: [conn(1, lines.out("flow.text.lines"))]
+    at: vec2(650, 80)
+}
+let total = Output{ value: count.text()  at: vec2(650, 320) }
+
+Component{ label: "Group collections"  lines, count, collections, total }

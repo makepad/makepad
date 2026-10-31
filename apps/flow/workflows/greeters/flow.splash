@@ -1,0 +1,36 @@
+use mod.flow.*
+use mod.components.*
+
+/** Name for the first greeter. */
+let first = Input{
+    value: "Rik"
+    at: vec2(40, 60)
+}
+
+let a = Greeter{
+    in: {name: first.text()}
+    at: vec2(320, 60)
+}
+
+let b = Greeter{
+    in: {name: "Ada"}
+    at: vec2(320, 320)
+}
+
+let both = Fn{
+    in: {a: a.out(@greeting)  b: b.out(@greeting)}
+    out: [@text]
+    run: |i| { {text: i.a + " " + i.b} }
+    at: vec2(640, 190)
+}
+
+let result = Output{
+    value: both.text()
+    at: vec2(960, 190)
+}
+
+Flow{
+    label: "Two greeters"
+    brief: "Two nested greeters, each with its own exclaim."
+    first, a, b, both, result
+}

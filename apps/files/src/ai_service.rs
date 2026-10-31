@@ -177,7 +177,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn call(id: &str, tool: &str, args: &str) -> ServiceCall {
-        ServiceCall { call_id: id.into(), tool: tool.into(), args: args.into() }
+        ServiceCall { call_id: id.into(), tool: tool.into(), args: args.into(), caller: None }
     }
 
     fn wait_for(runner: &mut ServiceRunner, n: usize) -> Vec<ToolResult> {

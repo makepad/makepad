@@ -325,6 +325,8 @@ enum TerrainInput {
 /// mutex is exclusively acquired by those serialized jobs, never by the UI.
 pub struct TerrainLayer {
     enabled: bool,
+    /// Offline: the hosted elevation archive reads only its disk cache.
+    cache_only: bool,
     input: Option<TerrainInput>,
     tile_cache: HashMap<TileKey, Option<TileBlob>>,
     pending: Option<PendingTerrainFetch>,
@@ -342,6 +344,7 @@ impl Default for TerrainLayer {
     fn default() -> Self {
         Self {
             enabled: false,
+            cache_only: false,
             input: None,
             tile_cache: HashMap::new(),
             pending: None,
@@ -358,6 +361,14 @@ impl Default for TerrainLayer {
 }
 
 impl TerrainLayer {
+    /// See `MapView::set_cache_only`.
+    pub fn set_cache_only(&mut self, on: bool) {
+        self.cache_only = on;
+        if let Some(TerrainInput::Archive { archive, .. }) = &mut self.input {
+            archive.set_cache_only(on);
+        }
+    }
+
     pub fn set_enabled(
         &mut self,
         cx: &mut Cx,
@@ -416,10 +427,11 @@ impl TerrainLayer {
                 identity: mbtiles_path.clone(),
                 archive: MapTileArchive::file(mbtiles_path, workers),
             },
-            TileSourceConfig::HttpArchive { root_url, .. } => TerrainInput::Archive {
-                identity: root_url.clone(),
-                archive: MapTileArchive::http(root_url, workers),
-            },
+            TileSourceConfig::HttpArchive { root_url, .. } => {
+                let mut archive = MapTileArchive::http(root_url.clone(), workers);
+                archive.set_cache_only(self.cache_only);
+                TerrainInput::Archive { identity: root_url, archive }
+            }
         });
     }
 

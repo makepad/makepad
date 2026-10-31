@@ -1,0 +1,10 @@
+[package]
+name = "makepad-example-splash-live"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Splash, live: the code typed on the left is the UI (and the shader) on the right, evaluated as it is typed"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }

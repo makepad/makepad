@@ -1,0 +1,10 @@
+use mod.flow.*
+
+// This ordinary comment makes the hand-written file custom.
+let prompt = Text{ default: "hello" at: vec2(40, 120) }
+
+Flow{
+    label: "Commented"
+    brief: "Not canonical."
+    prompt
+}

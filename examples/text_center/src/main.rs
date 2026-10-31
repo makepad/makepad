@@ -141,6 +141,7 @@ script_mod! {
                             drop_10 := FlatDropDown{}
                             drop_14 := FlatDropDown{draw_text.text_style.font_size: 14}
                             label_box := SolidView{
+                                a11y: {role: "group" label: "Boxed label specimen"}
                                 width: 120
                                 height: 48
                                 align: Center
@@ -156,6 +157,9 @@ script_mod! {
                             width: Fill
                             height: Fill
                             margin: Inset{left: 24, top: 12, right: 24, bottom: 24}
+                            // Measure a whole tab: semantic bounds describe its visible part.
+                            // Leave room for the default tab's top margin as well as its height.
+                            tab_bar +: {height: max(theme.tab_height, 25.) + theme.space_1}
 
                             root := DockTabs{
                                 tabs: [@tab_one, @tab_two]
@@ -186,6 +190,8 @@ impl MatchEvent for App {}
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         // The light and dark desktop themes share every number that decides
         // vertical placement (space factor, font sizes, tab height, line
         // spacing); they differ only in color. The suite still renders both,

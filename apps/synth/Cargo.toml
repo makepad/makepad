@@ -1,0 +1,75 @@
+# synth (Makepad Synth): live-coded music. One score is its code, its own
+# editor panel, its arrangement and a batch of songs written at once; it plays
+# through the score engine (libs/score_live) on the app's own clock, rendered
+# from the audio output callback. The song library and the downloads it plays
+# with (the General MIDI SoundFont, the MIDI datasets) are installed on request.
+
+[package]
+name = "makepad-app-synth"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Makepad Synth: live-coded music with an editor panel, an arrangement view, batches of songs and a MIDI song library"
+default-run = "makepad-app-synth"
+
+[[bin]]
+name = "makepad-app-synth"
+path = "src/main.rs"
+
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
+
+[dev-dependencies]
+makepad-test = { path = "../../libs/makepad_test" }
+# The chat test's remote commands.
+makepad-remote = { path = "../../libs/remote" }
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["fab", "pickers"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
+makepad-code-editor = { path = "../../code_editor" }
+makepad-code-values = { path = "../../libs/code_values" }
+makepad-look = { path = "../../libs/look" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+# The score engine: the document, the composer, the player and its slot.
+makepad-score-live = { path = "../../libs/score_live" }
+makepad-score-player = { path = "../../libs/score_player" }
+# The app's audio root (its transport and the score's node) is built as data
+# on the audio engine.
+makepad-audio-engine = { path = "../../libs/audio_engine" }
+makepad-flow = { path = "../../libs/flow", default-features = false, features = ["live"] }
+# The score engine's audio kernels run on the script compute VM; `makepad run`
+# provides that crate from its own build, which has the `vm` feature, so the
+# app's graph takes it with the same features.
+makepad-script-compute = { path = "../../platform/script/compute", features = ["vm"] }
+makepad-audio-synth = { path = "../../libs/audio_synth" }
+# Samples a score plays by name, decoded from the samples folder.
+makepad-audio-decode = { path = "../../libs/audio_decode" }
+# The score's editor panel (an AI-written Splash UI run beside the code) over
+# the panel kit, with the synth widgets.
+makepad-editor-panel = { path = "../../libs/editor_panel" }
+makepad-edit-values = { path = "../../libs/edit_values" }
+makepad-value-pickers = { path = "../../libs/value_pickers" }
+makepad-synth-panel = { path = "../../libs/synth_panel" }
+# Batches of songs written at once, rendered, scored, rated and learned from.
+makepad-music-iter = { path = "../../libs/music_iter" }
+# The song library (MIDI, chip and tracker music: import, index, arranger)
+# and the installer of the downloads (the GM SoundFont, the datasets).
+makepad-midi-library = { path = "../../libs/midi_library" }
+makepad-model-install = { path = "../../libs/model_install" }
+# The hybrid patch library's archives: unpacked (zip / tar.gz) and hashed into a manifest.
+makepad-zip-file = { path = "../../libs/zip_file" }
+makepad-fast-inflate = { path = "../../libs/fast_inflate" }
+makepad-core-util = { path = "../../libs/core_util" }
+# The AI: the chat panel (the model the person picks) and the service its
+# tools ride on.
+makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine"] }
+makepad-ai-services = { path = "../../libs/ai/services", features = ["engine"] }
+
+[package.metadata.makepad.desktop]
+name = "Makepad Synth"
+identifier = "nl.makepad.synth"
+icon = "resources/synth-icon.png"

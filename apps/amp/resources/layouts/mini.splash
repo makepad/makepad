@@ -1,0 +1,119 @@
+// title: Mini
+// class: small
+// order: 30
+// min: 260x180
+// pref: 400x560
+//
+// A classic desktop player, stacked in bands: the main window (the time
+// over a small spectrum; the title scrolling, the volume and the EQ / PL
+// keys; the seek line; the keys), the visualizer band when VIS is on,
+// then, as the window grows taller, the playlist band (a chooser and search over one numbered list), and
+// from taller still the equalizer band between them. The bands are fixed
+// except the playlist's, which takes what is left; each has a title strip
+// whose key folds it.
+use mod.prelude.widgets_internal.*
+use mod.widgets.*
+
+let Strip = View{
+    width: Fill
+    height: 18
+    flow: Right
+    spacing: 6
+    align: Align{y: 0.5}
+    padding: Inset{left: 6 right: 2 top: 2}
+}
+
+mod.widgets.HwLayout = View{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: 4
+    // The main window.
+    main_band := View{
+        width: Fill
+        height: 156
+        flow: Down
+        spacing: 4
+        View{
+            width: Fill
+            height: 94
+            flow: Right
+            // 94: the volume slot under the title and info is 44 pt, a finger's target.
+            spacing: 6
+            View{
+                width: 116
+                height: Fill
+                flow: Down
+                spacing: 3
+                mod.widgets.HwSlot{component: "clock" width: Fill height: 44}
+                mod.widgets.HwSlot{component: "spectrum" width: Fill height: Fill}
+            }
+            View{
+                width: Fill
+                height: Fill
+                flow: Down
+                spacing: 4
+                mod.widgets.HwSlot{component: "marquee" width: Fill height: 24}
+                mod.widgets.HwSlot{component: "info" width: Fill height: 18}
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Right
+                    spacing: 6
+                    mod.widgets.HwSlot{component: "volume" width: Fill height: Fill}
+                    mod.widgets.HwSlot{component: "toggles" width: 118 height: Fill}
+                }
+            }
+        }
+        mod.widgets.HwSlot{component: "progress" width: Fill height: 14}
+        mod.widgets.HwSlot{component: "transport" width: Fill height: 36}
+    }
+    // The visualizer band (the VIS key): the picture, sharing the room
+    // under the main window with the playlist. A tap on the picture shows
+    // it alone (the other bands and its title strip fold away), a sideways
+    // swipe changes the preset.
+    vis_band := View{
+        visible: false
+        width: Fill
+        height: Fill
+        flow: Down
+        vis_strip := Strip{
+            mod.widgets.HwCaption{text: "VISUALIZER"}
+            View{width: Fill height: 1}
+            vis_fold := mod.widgets.HwCaptionButton{text: "\u{f077}" height: 16 padding: Inset{left: 6 right: 6} draw_text +: {text_style: theme.font_icons{font_size: 7.0}}}
+        }
+        mod.widgets.HwSlot{component: "screen" width: Fill height: Fill}
+    }
+    // The equalizer band (fixed).
+    eq_band := View{
+        width: Fill
+        height: 158
+        flow: Down
+        Strip{
+            mod.widgets.HwCaption{text: "EQUALIZER"}
+            View{width: Fill height: 1}
+            eq_fold := mod.widgets.HwCaptionButton{text: "\u{f077}" height: 16 padding: Inset{left: 6 right: 6} draw_text +: {text_style: theme.font_icons{font_size: 7.0}}}
+        }
+        mod.widgets.HwSlot{component: "eq:open" width: Fill height: Fill}
+    }
+    // The playlist band (takes the rest).
+    pl_band := View{
+        width: Fill
+        height: Fill
+        flow: Down
+        spacing: 4
+        Strip{
+            mod.widgets.HwCaption{text: "PLAYLIST"}
+            View{width: Fill height: 1}
+            pl_fold := mod.widgets.HwCaptionButton{text: "\u{f077}" height: 16 padding: Inset{left: 6 right: 6} draw_text +: {text_style: theme.font_icons{font_size: 7.0}}}
+        }
+        mod.widgets.HwSlot{component: "plhead" width: Fill height: 28}
+        View{
+            width: Fill
+            height: Fill
+            flow: Overlay
+            mod.widgets.HwSlot{component: "plist" width: Fill height: Fill}
+        }
+    }
+}
+true

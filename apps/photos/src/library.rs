@@ -76,7 +76,7 @@ pub fn candidate_roots() -> Vec<PathBuf> {
     // read that checkout's full set (the symlinked pictures the bundle
     // leaves out), while on a device or another machine the path is simply
     // absent. Then the checkout found by walking up from the executable
-    // (target/release/photos → the repo root with `Cargo.toml` + `local/`).
+    // (target/release/makepad-app-photos → the repo root with `Cargo.toml` + `local/`).
     let built_in = Path::new(env!("CARGO_MANIFEST_DIR"));
     if let Some(repo) = built_in.parent().and_then(Path::parent) {
         if repo.join("Cargo.toml").exists() && repo.join("local").is_dir() {
@@ -139,7 +139,7 @@ pub fn bundled_root() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let packaged = Path::new("makepad").join("makepad_photos").join("resources").join("image-tiles");
+            let packaged = Path::new("makepad").join("makepad_app_photos").join("resources").join("image-tiles");
             candidates.push(dir.join(&packaged));
             candidates.push(dir.join("..").join("Resources").join(&packaged));
         }
@@ -153,6 +153,12 @@ pub fn bundled_root() -> Option<PathBuf> {
 pub fn where_a_library_goes(collection: Option<&str>) -> String {
     let name = collection.filter(|c| is_collection_name(c)).unwrap_or(DEFAULT_COLLECTION);
     format!("Put a baked library in photos/image-tiles/{name} under the makepad home.")
+}
+
+/// The status line of an empty wall: the camera's shots land here, and
+/// where a baked library would go.
+pub fn nothing_yet() -> String {
+    format!("No pictures yet. Shots you take with Camera show up here. {}", how_to_bake())
 }
 
 /// The one line the status shows when nothing is baked.
@@ -203,7 +209,7 @@ mod tests {
     fn the_checkout_wins_over_the_home_and_the_home_over_the_bundle() {
         let checkout = PathBuf::from("/checkout/local/image-tiles");
         let home = PathBuf::from("/home/.makepad/photos/image-tiles");
-        let bundled = PathBuf::from("/app/makepad/makepad_photos/resources/image-tiles");
+        let bundled = PathBuf::from("/app/makepad/makepad_app_photos/resources/image-tiles");
         assert_eq!(
             roots_in_order(vec![checkout.clone()], home.clone(), Some(bundled.clone())),
             vec![checkout.clone(), home.clone(), bundled.clone()]

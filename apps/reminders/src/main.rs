@@ -2,7 +2,7 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_reminders::{ai, view::RemindersView};
+use makepad_app_reminders::{ai, view::RemindersView};
 use makepad_widgets::*;
 
 app_main!(App);
@@ -109,9 +109,10 @@ fn is_close_requested(json: &str) -> bool {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
-        makepad_reminders::view::script_mod(vm);
+        makepad_app_reminders::view::script_mod(vm);
         self::script_mod(vm)
     }
 

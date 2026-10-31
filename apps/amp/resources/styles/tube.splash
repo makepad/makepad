@@ -1,0 +1,489 @@
+// title: Tube Radio
+// Tube Radio — a 1950s valve radio: a glossy chocolate bakelite cabinet
+// round a woven gold-thread speaker cloth, ivory bakelite control mouldings
+// and push keys, an ivory knob with a gold ring over a printed dial scale,
+// a backlit glass tuning dial with a red needle printed over the picture,
+// two green magic-eye tubes for the level, an oscilloscope-green trace, and
+// the orange glow of the valves bleeding through the cloth from behind.
+use mod.prelude.widgets_internal.*
+
+// ---- palette: the dial at night, and the magic eye's green ----
+mod.widgets.hw_palette.screen_bg = #x120a05
+mod.widgets.hw_palette.screen_text = #xf2dcb0
+mod.widgets.hw_palette.screen_muted = #xb8915c
+mod.widgets.hw_palette.accent = #x5cf08a
+mod.widgets.hw_palette.panel_text = #xf0dcb4
+mod.widgets.hw_palette.panel_muted = #xb89a70
+mod.widgets.hw_palette.menu_bg = #x2a160b
+mod.widgets.hw_palette.spill_color = #xff8a3a
+mod.widgets.hw_palette.spill_mono = 0.35
+mod.widgets.hw_palette.spill_knee = 1.2
+mod.widgets.hw_palette.caption_bg = #x1e0e06
+mod.widgets.hw_palette.caption_text = #xe8cf9c
+
+// ---- the front: speaker cloth in a glossy bakelite cabinet ----
+mod.widgets.HwChassis.draw_bg.ground = #x93662f
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 0.9, 0.75, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.12, 0.05, 0.02, 1.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(1.0, 0.55, 0.18, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(2.6, 0.6)
+mod.widgets.HwChassis.draw_bg.vignette = vec4(0.5, 0.25, 0.30, 1.05)
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    // Grille cloth: a basket weave, tan with dark-brown stripes and a gold
+    // lurex thread every stripe.
+    let u = w / 2.4
+    let cell = floor(u)
+    let f = fract(u)
+    let chk = step(0.5, fract((cell.x + cell.y) * 0.5))
+    let th = sin(f.y * 3.14159)
+    let tv = sin(f.x * 3.14159)
+    let thread = mix(tv, th, chk)
+    let slub = self.hw_noise(vec2(w.x * 0.05, cell.y * 0.7)) * 0.5 + self.hw_noise(vec2(cell.x * 0.7, w.y * 0.05)) * 0.5
+    let sx = fract(w.x / 56.0)
+    let dark_band = (1.0 - smoothstep(0.0, 0.02, abs(sx - 0.62) - 0.035)) + (1.0 - smoothstep(0.0, 0.02, abs(sx - 0.78) - 0.035))
+    let lurex = (1.0 - smoothstep(0.0, 0.05, abs(sx - 0.25) + 0.01)) * (1.0 - chk)
+    var cloth = mix(base, vec3(0.30, 0.17, 0.08), dark_band * 0.35)
+    cloth = cloth * (0.58 + 0.52 * pow(max(thread, 0.0), 0.7)) * (0.93 + 0.14 * slub)
+    let spark = step(0.6, self.hw_hash(cell)) * 0.6 + 0.4
+    cloth = mix(cloth, vec3(0.95, 0.75, 0.36) * (0.6 + 0.6 * thread) * spark, lurex * 0.6)
+    // The valves behind the cloth: a warm orange glow round the screen.
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    let g = (uv - vec2(0.5, 0.24)) * vec2(1.5, 2.4)
+    let valve = exp(-dot(g, g) * 2.2)
+    let h1 = (uv - vec2(0.30, 0.42)) * vec2(5.0, 7.0)
+    let h2 = (uv - vec2(0.70, 0.42)) * vec2(5.0, 7.0)
+    let hot = exp(-dot(h1, h1)) + exp(-dot(h2, h2))
+    cloth = cloth + vec3(1.0, 0.42, 0.08) * (valve * 0.30 + hot * 0.22) * (0.5 + 0.5 * thread)
+    // The cabinet: glossy mottled chocolate bakelite with a rolled edge.
+    let n1 = self.hw_noise(w * 0.006)
+    let n2 = self.hw_noise(w * 0.018 + vec2(n1 * 5.0, n1 * 3.0))
+    var bak = mix(vec3(0.16, 0.07, 0.03), vec3(0.34, 0.14, 0.06), smoothstep(0.25, 0.8, n2))
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
+    let fw = 14.0
+    let inb = 1.0 - smoothstep(fw - 0.7, fw + 0.7, e)
+    let roll = sin(clamp(e / fw, 0.0, 1.0) * 3.14159)
+    bak = bak * (0.7 + 0.45 * roll) + vec3(1.0, 0.85, 0.7) * pow(roll, 8.0) * 0.18
+    let reveal = (1.0 - smoothstep(0.0, 2.0, abs(e - fw - 1.2))) * 0.7
+    var col = mix(cloth, bak, inb)
+    col = col * (1.0 - reveal * (1.0 - inb))
+    return col
+}
+mod.widgets.Window.pass.clear_color = #x1e0e06
+
+// Raised plates: ivory bakelite mouldings, glossy.
+mod.widgets.HwPlate.draw_bg.ground = #xe6d5ae
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 0.98, 0.9, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.22, 0.12, 0.05, 1.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(4.0, 1.0, 2.5, 0.85)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.5, 0.35, 0.6, 0.25)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.65, 10.0, 1.0, 0.6)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(1.0, 0.55, 0.18, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(4.0, 0.55)
+mod.widgets.HwPlate.radius = 16
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    // Ivory: faint cloudy mottling, yellowing toward the lower edge.
+    let m = self.hw_noise(w * 0.02) * 0.6 + self.hw_noise(w * 0.07) * 0.4
+    var col = base * (0.96 + m * 0.07)
+    col = mix(col, col * vec3(0.95, 0.88, 0.74), uv.y * 0.35)
+    // A glossy window reflection.
+    let t = uv.x + (uv.y - 0.5) * 0.5 - 0.28
+    col = col + vec3(1.0, 0.98, 0.92) * exp(-(t * t) / 0.006) * 0.12
+    col = col + vec3(1.0, 0.98, 0.92) * exp(-(t - 0.07) * (t - 0.07) / 0.0015) * 0.08
+    // A gold pinstripe inlaid round the moulding.
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    let pin = 1.0 - smoothstep(0.0, 0.6, abs(e - 7.0) - 0.55)
+    col = mix(col, vec3(0.80, 0.58, 0.22) * (1.1 - uv.y * 0.3), pin * 0.9)
+    return col
+}
+
+// Recessed wells: glossy chocolate bakelite.
+mod.widgets.HwPanel.draw_bg.ground = #x3a1a0b
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(1.0, 0.86, 0.66, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.04, 0.015, 0.0, 1.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.85, 10.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(1.0, 0.55, 0.18, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.8, 0.5)
+mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let n1 = self.hw_noise(w * 0.006 + vec2(13.0, 7.0))
+    let n2 = self.hw_noise(w * 0.02 + vec2(n1 * 5.0, n1 * 3.0))
+    var col = mix(base * 0.7, base * vec3(1.35, 1.2, 1.05), smoothstep(0.25, 0.8, n2))
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    let t = uv.x + (uv.y - 0.5) * 0.4 - 0.3
+    return col + vec3(1.0, 0.85, 0.65) * exp(-(t * t) / 0.01) * 0.06
+}
+
+// The screen's surround: deep bakelite, a gold trim, valve glow inside.
+mod.widgets.HwBezel.draw_bg.ground = #x2a1208
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(1.0, 0.85, 0.6, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.95, 14.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.glow_ink = vec4(1.0, 0.5, 0.15, 1.0)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.6, 0.4)
+mod.widgets.HwBezel.radius = 18
+mod.widgets.HwBezel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    let n2 = self.hw_noise(w * 0.02 + vec2(self.hw_noise(w * 0.006) * 5.0, 0.0))
+    var col = base * (0.8 + 0.45 * n2)
+    // A gold trim ring, bevelled.
+    let tr = 1.0 - smoothstep(0.0, 0.8, abs(e - 5.0) - 2.2)
+    let tb = clamp((e - 2.8) / 4.4, 0.0, 1.0)
+    let gold = vec3(0.86, 0.64, 0.26) * (1.25 - tb * 0.7) + vec3(1.0, 0.92, 0.7) * exp(-(tb - 0.25) * (tb - 0.25) / 0.01) * 0.35
+    col = mix(col, gold, tr)
+    // The valves' glow, warming the surround toward the glass.
+    let g = smoothstep(8.0, 30.0, e)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    col = col + vec3(1.0, 0.40, 0.08) * g * (0.22 + 0.25 * uv.y)
+    return col
+}
+
+// The glass: a backlit tuning dial printed along the bottom, a red needle,
+// and the valves glowing orange through the corners.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.10, 0.50, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(1.0, 0.85, 0.6, 0.55)
+mod.widgets.HwGlass.draw_bg.radius = 12.0
+mod.widgets.HwGlass.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let c = sz * 0.5
+    let d = Material.sd_box(p, c, c, self.radius)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    // Rim darkening and a reflection sheet at the top left.
+    let edge = smoothstep(-40.0, 0.0, d) * self.glass.z
+    let r = smoothstep(0.55, 0.0, self.pos.y + (self.pos.x - 0.5) * 0.3) * self.glass.y
+    var o = vec4(0.0, 0.0, 0.0, edge)
+    o = vec4(self.tint.xyz * r, r) + o * (1.0 - r)
+    // The valves behind the glass: orange light from the lower corners.
+    let g1 = (self.pos - vec2(0.12, 1.02)) * vec2(2.6, 3.2)
+    let g2 = (self.pos - vec2(0.88, 1.02)) * vec2(2.6, 3.2)
+    let vg = (exp(-dot(g1, g1)) + exp(-dot(g2, g2))) * 0.5 + smoothstep(-26.0, 0.0, d) * 0.35
+    let glow = vg * self.tint.w * self.filter_on
+    o = vec4(o.xyz + vec3(1.0, 0.42, 0.08) * glow, clamp(o.w + glow * 0.25, 0.0, 1.0))
+    return o * cov
+}
+
+// The picture lights the cabinet: a strong warm spill with a soft ceiling.
+mod.widgets.HwMilk.light = 3.0
+mod.widgets.HwMilk.light_knee = 0.95
+mod.widgets.HwSpectrum.light = 4.0
+
+// ---- the spectrum: an oscilloscope in green phosphor ----
+// Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
+mod.widgets.HwSpectrum.draw_round.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let phos = vec3(0.22, 1.0, 0.38)
+    if self.part > 0.5 && self.part < 1.5 {
+        // The well: a phosphor tube above, a lit dial strip, a scope below.
+        let c = sz * 0.5
+        let d = Material.sd_box(p, c, c, 10.0)
+        let cov = 1.0 - smoothstep(-px, px, d)
+        let sh = floor((sz.y - 32.0) * 0.68 - 16.0)
+        let s0 = 16.0
+        let s1 = 16.0 + sh
+        let w0 = s1 + 24.0
+        let w1 = sz.y - 16.0
+        let x0 = 18.0
+        let x1 = sz.x - 18.0
+        let inx = step(x0, p.x) * step(p.x, x1)
+        let ins = inx * step(s0, p.y) * step(p.y, s1)
+        let inw = inx * step(w0, p.y) * step(p.y, w1)
+        var col = vec3(0.03, 0.018, 0.01)
+        // The tube faces: black-green with a faint phosphor haze.
+        let hs = (p - vec2(sz.x * 0.5, (s0 + s1) * 0.5)) / vec2(sz.x * 0.6, sh * 0.8)
+        let tube = vec3(0.012, 0.03, 0.02) + phos * exp(-dot(hs, hs) * 1.5) * 0.035
+        col = mix(col, tube, ins)
+        let hw = (p - vec2(sz.x * 0.5, (w0 + w1) * 0.5)) / vec2(sz.x * 0.6, max(w1 - w0, 1.0) * 0.8)
+        col = mix(col, vec3(0.012, 0.03, 0.02) + phos * exp(-dot(hw, hw) * 1.5) * 0.05, inw)
+        // Graticule: ten columns, dotted rows, a tick every fifth.
+        let gxs = (x1 - x0) / 10.0
+        let gx = abs(fract((p.x - x0) / gxs + 0.5) - 0.5) * gxs
+        let vline = (1.0 - smoothstep(0.0, px, gx - 0.4)) * step(0.5, fract(p.y / 3.0))
+        let gys = max(w1 - w0, 1.0) / 4.0
+        let gy = abs(fract((p.y - w0) / gys + 0.5) - 0.5) * gys
+        let hline = (1.0 - smoothstep(0.0, px, gy - 0.4)) * step(0.5, fract(p.x / 3.0))
+        col = col + phos * vline * 0.07 * (ins + inw) + phos * hline * 0.07 * inw
+        // A tube's own edge: darker toward its rim.
+        let es = min(min(p.x - x0, x1 - p.x), min(p.y - s0, s1 - p.y))
+        let ew = min(min(p.x - x0, x1 - p.x), min(p.y - w0, w1 - p.y))
+        col = col * (1.0 - (1.0 - smoothstep(0.0, 8.0, es)) * 0.5 * ins - (1.0 - smoothstep(0.0, 8.0, ew)) * 0.5 * inw)
+        // The dial strip between them: a warm backlit band, a gold scale.
+        let ind = inx * step(s1 + 2.0, p.y) * step(p.y, w0 - 3.0)
+        let dy = (p.y - s1 - 2.0) / max(w0 - s1 - 5.0, 1.0)
+        let band = vec3(0.13, 0.065, 0.025) + vec3(0.30, 0.13, 0.03) * exp(-(dy - 0.5) * (dy - 0.5) / 0.08)
+        col = mix(col, band, ind)
+        let tk = abs(fract((p.x - x0) / ((x1 - x0) / 60.0) + 0.5) - 0.5) * (x1 - x0) / 60.0
+        let tick = (1.0 - smoothstep(0.0, px, tk - 0.35)) * ind * (1.0 - smoothstep(0.0, px, p.y - s1 - 5.5))
+        col = mix(col, vec3(0.95, 0.72, 0.36), tick * 0.8)
+        return vec4(col * cov, cov)
+    }
+    if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
+        // Level rules and the scope's zero line: dotted phosphor.
+        let dot_on = step(0.45, fract(p.x / 4.0))
+        let a = 0.22 * dot_on
+        return vec4(phos * a, a)
+    }
+    let yb = sz.y - p.y
+    if self.part > 2.5 && self.part < 3.5 {
+        // An empty column: unlit phosphor cells.
+        let cellv = step(0.3, fract(yb / 4.0))
+        let a = cellv * 0.07
+        return vec4(phos * a, a)
+    }
+    if self.part > 4.5 && self.part < 5.5 {
+        // Peak marks: white-hot phosphor.
+        return vec4(0.85, 1.0, 0.88, 1.0)
+    }
+    // A lit column: stacked phosphor cells, white-hot at the top.
+    let cellv = step(0.28, fract(yb / 4.0))
+    let hot = 1.0 - smoothstep(0.0, 10.0, p.y)
+    let side = 1.0 - abs(self.pos.x - 0.5) * 0.7
+    let col = mix(phos * 0.95, vec3(0.85, 1.0, 0.8), hot * 0.6) * side
+    let a = mix(0.25, 1.0, cellv)
+    return vec4(col * a, a)
+}
+mod.widgets.HwSpectrum.draw_line.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let a = self.seg_a
+    let b = self.seg_b
+    let pa = p - a
+    let ba = b - a
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    let d = length(pa - ba * h)
+    let core = 1.0 - smoothstep(0.2, 1.0, d)
+    let glow = exp(-d * d / 3.0) * 0.5
+    let rgb = vec3(0.36, 1.0, 0.55) * glow + vec3(0.8, 1.0, 0.85) * core
+    let al = clamp(core + glow, 0.0, 1.0)
+    return vec4(rgb, al)
+}
+
+// ---- keys: ivory bakelite push keys, brown legends ----
+mod.widgets.HwKey.draw_bg.ground = #xeadcb8
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 0.98, 0.92, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.20, 0.10, 0.04, 1.0)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.55, 0.18, 1.0)
+mod.widgets.HwKey.draw_bg.pattern = vec4(5.0, 1.0, 0.03, 0.0)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.10, 0.10, 0.25, 0.5)
+mod.widgets.HwKey.draw_bg.relief = vec4(4.0, 1.0, 3.0, 0.9)
+mod.widgets.HwKey.draw_bg.finish = vec4(0.55, 0.4, 0.7, 0.2)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.70, 6.0, 1.0, 0.65)
+mod.widgets.HwKey.draw_bg.inner = vec4(0.72, 9.0, 0.0, 0.30)
+mod.widgets.HwKey.draw_bg.spill = vec2(3.4, 0.5)
+mod.widgets.HwKey.draw_bg.led = vec4(8.0, 8.0, 2.6, 1.0)
+mod.widgets.HwKey.draw_bg.led_off = vec4(0.35, 0.10, 0.05, 1.0)
+mod.widgets.HwKey.draw_bg.critical_ink = vec4(0.82, 0.60, 0.22, 1.0)
+mod.widgets.HwKey.draw_bg.critical_band = vec4(1.0, 2.5, 100000.0, 0.0)
+mod.widgets.HwKey.emissive = vec4(1.0, 0.5, 0.15, 1.5)
+mod.widgets.HwKey.radius = 9
+mod.widgets.HwKeyButton.draw_text.color = #x3a1c0c
+mod.widgets.HwKeyButton.draw_text.color_hover = #x1e0c04
+mod.widgets.HwKeyButton.draw_text.color_down = #x8a2a10
+mod.widgets.HwKeyButton.draw_text.color_focus = #x3a1c0c
+mod.widgets.HwKeyText.draw_text.color = #x3a1c0c
+mod.widgets.HwKeyText.draw_text.color_hover = #x1e0c04
+mod.widgets.HwKeyText.draw_text.color_down = #x8a2a10
+mod.widgets.HwKeyText.draw_text.color_focus = #x3a1c0c
+
+// ---- lamps: pilot-light orange ----
+mod.widgets.HwDash.emissive = vec4(1.0, 0.5, 0.12, 6.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.55, 0.16, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x2a1208
+mod.widgets.HwLed.emissive = vec4(1.0, 0.5, 0.12, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.55, 0.16, 1.0)
+
+// ---- knob: fluted ivory, a gold ring, a domed cap over a printed scale ----
+mod.widgets.HwKnobFace.draw_bg.ground = #xe8d8b2
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(1.0, 0.98, 0.92, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.18, 0.09, 0.03, 1.0)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.93, 0.86, 0.70, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.30, 0.12, 0.05, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(0.0, 1.3, 2.4, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.42, 0.28, 0.16, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(1.0, 0.55, 0.16, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.75, 10.0, 1.0, 0.7)
+mod.widgets.HwKnobFace.emissive = vec4(1.0, 0.5, 0.12, 0.6)
+mod.widgets.HwKnobFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let q = p - c
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let r = min(c.x, c.y) - self.inset
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let rq = length(q)
+    let ang = atan2(q.x, -q.y)
+    let inside = 1.0 - smoothstep(-px, px, rq - r)
+    let lt = normalize(self.light.xy + vec2(0.000001, 0.000001))
+    let nq = q / max(rq, 0.001)
+    var face = o.xyz
+    // Fluted skirt: thirty flutes catching the light on one flank.
+    let fl = smoothstep(r * 0.80 - px, r * 0.80 + px, rq)
+    let fa = ang * 30.0 / 6.28318
+    let ff = fract(fa)
+    let flank = sin(ff * 6.28318)
+    face = face * (1.0 - fl * (0.16 + 0.14 * flank))
+    // The gold ring, anisotropic, with dark grooves at its edges.
+    let gr = smoothstep(r * 0.66 - px, r * 0.66 + px, rq) * (1.0 - smoothstep(r * 0.80 - px, r * 0.80 + px, rq))
+    let aniso = 0.5 + 0.5 * cos((ang - atan2(lt.x, -lt.y)) * 2.0)
+    let gold = vec3(0.80, 0.58, 0.22) * (0.7 + 0.55 * aniso) + vec3(1.0, 0.92, 0.7) * pow(aniso, 12.0) * 0.4
+    face = mix(face, gold, gr)
+    let groove = (1.0 - smoothstep(0.0, 1.0, abs(rq - r * 0.66))) + (1.0 - smoothstep(0.0, 1.0, abs(rq - r * 0.80)))
+    face = face * (1.0 - groove * 0.45)
+    // The domed ivory cap with a window highlight.
+    let capm = 1.0 - smoothstep(r * 0.66 - px, r * 0.66 + px, rq)
+    let hl = q / max(r, 1.0) - lt * 0.30
+    let spec = exp(-dot(hl, hl) / 0.02) * 0.5
+    let capcol = self.cap_ink.xyz * (1.08 - rq / max(r, 1.0) * 0.35 + dot(nq, -lt) * 0.08 * rq / max(r, 1.0)) + vec3(spec, spec, spec)
+    face = mix(face, capcol, capm)
+    // The pointer: an inlaid brown line on the cap and a gold dot on the skirt.
+    let spin = (self.value * 2.0 - 1.0) * self.ring.w
+    let dir = vec2(sin(spin), -cos(spin))
+    let t = clamp(dot(q, dir), r * 0.16, r * 0.60)
+    let pd = length(q - dir * t) - max(r * 0.035, 1.0)
+    face = mix(face, self.ptr_ink.xyz, (1.0 - smoothstep(-px, px, pd)) * capm)
+    let dd = length(q - dir * r * 0.90) - max(r * 0.05, 1.5)
+    face = mix(face, vec3(0.95, 0.75, 0.32), (1.0 - smoothstep(-px, px, dd)))
+    o = vec4(face * inside, inside) + o * (1.0 - inside)
+    // The printed scale round it: ticks lit by the dial lamp up to the value.
+    let n = 11.0
+    let a0 = -self.ring.w
+    let stepa = (self.ring.w * 2.0) / (n - 1.0)
+    let fi = clamp(floor((ang - a0) / stepa + 0.5), 0.0, n - 1.0)
+    let ta = a0 + fi * stepa
+    let perp = abs(dot(q, vec2(cos(ta), sin(ta))))
+    let major = step(0.5, fract(fi * 0.5 + 0.25))
+    let r0 = r * 1.10
+    let r1 = r * (1.20 + 0.08 * major)
+    let tk = (1.0 - smoothstep(-px, px, perp - 0.9 - 0.4 * major)) * step(r0, rq) * step(rq, r1) * step(0.0, dot(q, vec2(sin(ta), -cos(ta))))
+    let on = step((fi + 0.5) / n, self.value + 0.02)
+    let tcol = mix(vec3(0.36, 0.20, 0.10), vec3(1.0, 0.62, 0.22), on)
+    o = vec4(tcol * tk, tk) + o * (1.0 - tk)
+    let halo = exp(-perp / 2.5) * step(r0 - 2.0, rq) * step(rq, r1 + 2.0) * on * 0.35 * (1.0 - tk)
+    o = o + vec4(vec3(1.0, 0.5, 0.12) * halo, halo) * (1.0 - o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- meter: two magic-eye tubes ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x160904
+mod.widgets.HwMeterFace.draw_bg.spill = vec2(0.7, 0.4)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.36, 1.0, 0.55, 1.0)
+mod.widgets.HwMeterFace.draw_bg.light_ink = vec4(1.0, 0.85, 0.6, 1.0)
+mod.widgets.HwMeterFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwMeterFace.radius = 12
+mod.widgets.HwMeterFace.emissive = vec4(0.36, 1.0, 0.55, 0.8)
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let rr = max(min(sz.y * 0.5 - 6.5, sz.x * 0.2), 6.0)
+    // Left eye or right eye: whichever is nearer.
+    let right = step(sz.x * 0.5, p.x)
+    let ce = vec2(mix(sz.x * 0.29, sz.x * 0.71, right), sz.y * 0.5)
+    let lv = clamp(mix(self.level.x, self.level.y, right), 0.0, 1.0)
+    let q = p - ce
+    let rq = length(q)
+    let ang = atan2(q.x, -q.y)
+    // A soft green glow on the bakelite round the tube.
+    let halo = exp(-max(rq - rr, 0.0) / 6.0) * 0.30 * step(rr, rq)
+    var col = o.xyz + vec3(0.36, 1.0, 0.55) * halo * o.w
+    // Chrome escutcheon ring.
+    let ring = smoothstep(rr - px, rr + px, rq) * (1.0 - smoothstep(rr + 3.2 - px, rr + 3.2 + px, rq))
+    let lt = vec2(-0.6, -0.8)
+    let chrome = vec3(0.55, 0.5, 0.45) + vec3(0.45, 0.42, 0.38) * dot(q / max(rq, 0.001), lt)
+    col = mix(col, chrome, ring)
+    // The glass: black-green, the fluorescent target round the cap.
+    let gl = 1.0 - smoothstep(rr - px, rr + px, rq)
+    var eye = vec3(0.01, 0.03, 0.018)
+    let tr = rq / rr
+    let target = smoothstep(0.30, 0.34, tr) * (1.0 - smoothstep(0.90, 0.95, tr))
+    let stri = 0.82 + 0.18 * cos(ang * 36.0)
+    var fluo = vec3(0.30, 0.95, 0.50) * (0.35 + 0.75 * tr) * stri
+    // The shadow wedge at the top closes as the signal rises.
+    let hw = mix(0.95, 0.04, lv)
+    let wd = (abs(ang) - hw) * rq
+    let lit = smoothstep(-px, px, wd)
+    let crest = exp(-max(wd, 0.0) / 1.8) * lit * 0.8
+    fluo = fluo * (lit * 0.94 + 0.06) + vec3(0.7, 1.0, 0.75) * crest * 0.6
+    eye = eye + fluo * target
+    // The cathode shield: a dark cap in the middle.
+    let cap = 1.0 - smoothstep(0.30 * rr - px, 0.30 * rr + px, rq)
+    eye = mix(eye, vec3(0.05, 0.05, 0.045) + vec3(0.2, 0.2, 0.18) * max(dot(q / max(rq, 0.001), lt), 0.0) * tr * 2.0, cap)
+    // A reflection on the dome.
+    let rh = (q / rr - vec2(-0.32, -0.38)) * vec2(1.0, 1.6)
+    eye = eye + vec3(0.9, 1.0, 0.95) * exp(-dot(rh, rh) / 0.03) * 0.22
+    col = mix(col, eye, gl)
+    o = vec4(col, max(o.w, max(gl, ring)))
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- the album well: a record with an oxblood label ----
+mod.widgets.HwArtBlank.draw_bg.ground = #x2a1208
+mod.widgets.HwArtBlank.draw_bg.label_ink = vec4(0.55, 0.10, 0.06, 1.0)
+
+// ---- type: brown on ivory, cream on bakelite ----
+mod.widgets.HwCaption.draw_text.color = #x4a2410
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold{font_size: 8.0}
+mod.widgets.HwTitle.draw_text.color = #x2a1206
+mod.widgets.HwText.draw_text.color = #x2e1608
+mod.widgets.HwPanelTitle.draw_text.color = #xf0dcb4
+mod.widgets.HwPanelText.draw_text.color = #xc8a878
+mod.widgets.HwNavButton.draw_text.color = #xf0dcb4
+mod.widgets.HwDisplayText.draw_text.color = #xffcf8a
+mod.widgets.HwDisplay.draw_bg.ground = #x1a0b04
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(1.0, 0.85, 0.6, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.95, 9.0, 0.0, 0.55)
+mod.widgets.HwDisplay.draw_bg.spill = vec2(1.2, 0.4)
+mod.widgets.HwDisplay.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    // Dark bakelite with a thin gold trim.
+    let tr = 1.0 - smoothstep(0.0, 0.7, abs(e - 2.2) - 1.0)
+    return mix(base, vec3(0.78, 0.56, 0.22), tr * 0.8)
+}
+mod.widgets.HwSegmented.draw_bg.well = vec4(0.16, 0.07, 0.03, 1.0)
+mod.widgets.HwSegmented.draw_bg.rim = vec4(0.9, 0.7, 0.35, 0.35)
+mod.widgets.HwSegmented.draw_pill.cap = vec4(0.92, 0.85, 0.68, 0.55)
+mod.widgets.HwSegmented.draw_pill.glow = vec4(1.0, 0.55, 0.16, 1.0)
+mod.widgets.HwSegmented.draw_text.color = #xc8a878
+mod.widgets.HwSegmented.draw_text_selected.color = #x2a1206
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.16, 0.07, 0.03, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.9, 0.7, 0.35, 0.35)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(0.95, 0.75, 0.40, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xf2dcb0
+mod.widgets.HwDropDown.draw_text.color_hover = #xfff0d0
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.10, 0.045, 0.02, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.9, 0.7, 0.35, 0.30)
+mod.widgets.HwTextInput.draw_text.color = #xf2dcb0
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.05, 0.02, 0.0, 0.45)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 0.85, 0.55, 0.25)
+mod.widgets.HwMenuLayer.draw_bg.border_color = #xc8963c
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x140a04
+mod.widgets.hw_palette.map1 = #x5a3010
+mod.widgets.hw_palette.map2 = #xc07a2c
+mod.widgets.hw_palette.map3 = #xffe2a8
+mod.widgets.hw_palette.map_strength = 0.8
+mod.widgets.hw_palette.map_default = 1.0
+// The screen filter with the THEME COLOURS key: CRT: a bulging tube, scanlines, an RGB mask, bloom.
+mod.widgets.hw_palette.screen_filter = 1.0
+mod.widgets.hw_palette.screen_filter_strength = 0.9
+mod.widgets.hw_palette.screen_cell = 3.0
+mod.widgets.hw_palette.screen_curve = 0.12
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(2.0, 0.58, 16.0, 4.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.27, 0.15, 0.08, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.03, 0.02, 0.01, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(1.0, 2.0, 9.0, 0.08)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(1.0, 0.20, 0.30, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.16, 1.0, 0.0, 0.0)
+mod.widgets.HwEqGraph.label_ink = vec4(0.95, 0.86, 0.69, 0.8)
+true

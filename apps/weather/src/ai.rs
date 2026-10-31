@@ -10,11 +10,11 @@ pub fn manifest() -> ServiceManifest {
     ServiceManifest::new(
         "weather",
         "Weather",
-        "The forecast on screen for the selected city: current conditions and the 5-day outlook, from Open-Meteo.",
+        "The forecast on screen for the selected city: current conditions and the 10-day outlook. Sample data generated on the device, not real weather.",
     )
     .with_tool(ToolDef::new(
         "current",
-        "Current conditions and the 5-day forecast for the city selected on screen.",
+        "Current conditions and the 10-day sample forecast for the city selected on screen.",
         r#"{"type":"object","properties":{}}"#,
         Risk::Read,
     ))

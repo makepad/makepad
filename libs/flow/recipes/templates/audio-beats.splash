@@ -1,0 +1,13 @@
+use mod.flow.*
+
+/** The song or rhythm recording to analyse. */
+let audio = Input{ type: @audio }
+let beats = Beats{ audio: audio.audio() model: "beat-this" }
+/** Publish the beat and downbeat analysis into the flow asset library. */
+let published = Publish{ value: beats.json() namespace: "flows" tags: ["flow", "beats"] }
+
+Flow{
+    label: "Detect beats"
+    brief: "Detects timed beats and downbeats in supplied audio."
+    audio, beats, published
+}

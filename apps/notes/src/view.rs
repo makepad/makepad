@@ -655,7 +655,7 @@ impl NotesView {
         if compact && shows_folders {
             let rows = self
                 .view
-                .widget(cx, ids!(compact.root_view.scroll.group.rows));
+                .widget(cx, ids!(compact.root_view.folder_scroll.group.rows));
             self.configure_folders(cx, rows, true, false);
         }
         let collection = self.ui.collection.label();
@@ -1321,7 +1321,7 @@ impl NotesView {
         let compact = self.layout.is_compact();
         let screen = engine::current_screen(&self.ui);
         if compact && screen == Screen::Folders {
-            if self.folder_actions(cx, actions, ids!(compact.root_view.scroll.group.rows)) {
+            if self.folder_actions(cx, actions, ids!(compact.root_view.folder_scroll.group.rows)) {
                 return;
             }
             if self.activated(cx, actions, ids!(compact.root_view.dock.compose)) {
@@ -1593,15 +1593,16 @@ impl Widget for NotesView {
             return;
         }
         // A swipe or back gesture's pop gets this Back instead, since the system's back gesture ends with one.
+        // Back is taken only when Notes has somewhere to go back to: at the folder list it stays
+        // unhandled, so the host (the phone WM, Android) goes home.
         if matches!(event, Event::BackPressed { .. })
             && !self.view.stack_navigation(cx, ids!(compact)).has_pending_interactive_pop()
-            && event.back_pressed()
         {
-            if self.overlay != OverlayKind::None {
+            if self.overlay != OverlayKind::None && event.back_pressed() {
                 self.dismiss_overlay(cx);
                 return;
             }
-            if self.layout.is_compact() && engine::current_screen(&self.ui) != Screen::Folders {
+            if self.layout.is_compact() && engine::current_screen(&self.ui) != Screen::Folders && event.back_pressed() {
                 self.go_back(cx);
                 self.apply_pending_nav(cx);
                 return;
@@ -1806,8 +1807,8 @@ mod tests {
             // StackNavigation itself does not expose visibility. The app's
             // wrapper must prevent the phone folder tree from drawing at all.
             assert!(!root.widget(&mut cx, ids!(compact_host)).visible());
-            assert!(!root.widget(&mut cx, ids!(compact.root_view.scroll.title)).area().is_valid(&cx));
-            assert!(!root.widget(&mut cx, ids!(compact.root_view.scroll.group.rows.all.tap.icon)).area().is_valid(&cx));
+            assert!(!root.widget(&mut cx, ids!(compact.root_view.folder_scroll.title)).area().is_valid(&cx));
+            assert!(!root.widget(&mut cx, ids!(compact.root_view.folder_scroll.group.rows.all.tap.icon)).area().is_valid(&cx));
             let presenter = view.list(&mut cx).as_portal_list();
             for (_, _, id) in &view.rendered_rows {
                 if Some(*id) == view.ui.selected { continue; }
@@ -1865,7 +1866,7 @@ mod tests {
         assert!(root.widget(&mut cx, ids!(compact_host)).visible());
         for id in [live_id!(all), live_id!(notes), live_id!(work), live_id!(personal)] {
             let item = root.widget(&mut cx, &[live_id!(compact), live_id!(root_view),
-                live_id!(scroll), live_id!(group), live_id!(rows), id]);
+                live_id!(folder_scroll), live_id!(group), live_id!(rows), id]);
             let row = item.area().rect(&cx);
             let rule = item.widget(&mut cx, ids!(rule)).area().rect(&cx);
             assert_eq!(row.size.y, 56.0);

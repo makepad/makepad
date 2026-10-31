@@ -2,7 +2,7 @@
 # image, video, task, sheets, route, mixer...).
 #
 # `pdf <path>` opens a document as one continuous scroll of pages on a
-# dark makepad_wm_theme background: PageDown/Space page through, Cmd +/- zoom,
+# system theme background: PageDown/Space page through, Cmd +/- zoom,
 # Cmd+0 fits the width, Cmd+1 shows 100%, Cmd+scroll zooms around the
 # cursor, Cmd+Shift+T shows a thumbnail strip, Escape/Q quits.
 # `--preview <path>` sizes the window as a popup — that is files' Quick
@@ -17,27 +17,28 @@
 # strip, and the chrome.
 
 [package]
-name = "makepad-pdf"
+name = "makepad-app-pdf"
 version = "0.1.0"
 edition = "2021"
-default-run = "pdf"
+license = "MIT OR Apache-2.0"
+default-run = "makepad-app-pdf"
 
 [lib]
-name = "makepad_pdf"
+name = "makepad_app_pdf"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pdf"
+name = "makepad-app-pdf"
 path = "src/main.rs"
 
 [features]
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["pdf"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-pdf-parse = { path = "../../libs/pdf_parse" }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }

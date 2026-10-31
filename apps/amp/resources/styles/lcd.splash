@@ -1,0 +1,739 @@
+// title: 90s LCD
+// order: 40
+// 90s LCD — a 1990s portable: a silver-grey moulded plastic body with
+// small rubbery keys, printed icons and tiny printed labels, and every
+// readout a reflective grey-green STN liquid-crystal panel. Crisp black
+// segments sit over their faint unlit ghosts (88:88 behind every number,
+// every bar faintly there), 7-segment digits, dot-matrix rows, a segmented
+// bar spectrum and bar-graph meters, and a blue-green EL backlight glowing
+// round the glass. The picture itself is a small colour LCD inset.
+use mod.prelude.widgets_internal.*
+
+// ---- palette: STN grey-green glass, black segments, blue ink ----
+mod.widgets.hw_palette.screen_bg = #x9dac92
+mod.widgets.hw_palette.screen_text = #x141b16
+mod.widgets.hw_palette.screen_muted = #x2f3d34
+mod.widgets.hw_palette.accent = #x1d3470
+mod.widgets.hw_palette.panel_text = #x141b16
+mod.widgets.hw_palette.panel_muted = #x4f5e4a
+mod.widgets.hw_palette.menu_bg = #x9dac92
+mod.widgets.hw_palette.spill_color = #x62f0cf
+mod.widgets.hw_palette.spill_mono = 0.55
+mod.widgets.hw_palette.spill_knee = 1.1
+mod.widgets.hw_palette.spill_dark = 0.7
+mod.widgets.hw_palette.caption_bg = #xaeb2b6
+mod.widgets.hw_palette.caption_text = #x2a2d31
+mod.widgets.hw_palette.legend_on = #x1d3470
+mod.widgets.hw_palette.legend_off = #x3a3e44
+mod.widgets.hw_palette.caps = 1
+// The picture as a passive-matrix colour LCD: a washed-out four-stop map.
+mod.widgets.hw_palette.map0 = #x141d2a
+mod.widgets.hw_palette.map1 = #x2a7680
+mod.widgets.hw_palette.map2 = #xa9c48c
+mod.widgets.hw_palette.map3 = #xf0e6c0
+mod.widgets.hw_palette.map_strength = 0.8
+mod.widgets.hw_palette.map_default = 1
+
+// ---- the body: silver-grey moulded plastic ----
+mod.widgets.Window.pass.clear_color = #x8c9197
+mod.widgets.HwChassis.draw_bg.ground = #x8e939a
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.30, 0.32, 0.34, 1.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(2.6, 0.6)
+mod.widgets.HwChassis.draw_bg.vignette = vec4(0.5, 0.25, 0.22, 1.02)
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    // Metallic-flake plastic: a fine sparkle in a satin moulding.
+    var col = base * (1.0 + (self.hw_noise(w * 0.05) - 0.5) * 0.03)
+    let fl = self.hw_hash(floor(w * 1.6))
+    col = col + vec3(0.07, 0.07, 0.075) * step(0.965, fl) - vec3(0.025, 0.025, 0.025) * step(fl, 0.04)
+    // Moulded ribbing: fine horizontal grip lines in a band along the foot.
+    let rib = step(0.5, fract(w.y / 3.0))
+    col = col * (1.0 - rib * 0.035 * smoothstep(0.0, 20.0, w.y - self.world.y + p.y - (self.rect_size.y - 36.0)))
+    return col
+}
+
+// ---- raised plates: the lighter silver lid mouldings, printed labels ----
+mod.widgets.HwPlate.radius = 12
+mod.widgets.HwPlate.depth = 2.4
+mod.widgets.HwPlate.draw_bg.ground = #xc9cdd1
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.28, 0.30, 0.32, 1.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(4.0, 0.95, 2.2, 0.25)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.5, 0.35, 0.25, 0.7)
+mod.widgets.HwPlate.draw_bg.tune = vec4(0.10, 0.25, 1.1, 3.0)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.45, 8.0, 1.0, 0.5)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(3.0, 0.55)
+mod.widgets.HwPlate.draw_bg.sheen = vec4(0.05, 0.25, 0.3, 0.4)
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    var col = base * (1.0 + (self.hw_noise(w * 0.05) - 0.5) * 0.025)
+    let fl = self.hw_hash(floor(w * 1.6))
+    col = col + vec3(0.06, 0.06, 0.065) * step(0.97, fl)
+    // A printed pinstripe 6 pt in, in the body's blue ink.
+    let lo = vec2(self.inset, self.inset)
+    let q = p - lo
+    let sz = self.rect_size - lo * 2.0
+    let e = min(min(q.x, q.y), min(sz.x - q.x, sz.y - q.y))
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let pin = 1.0 - smoothstep(0.3, 0.3 + px, abs(e - 6.0))
+    col = mix(col, vec3(0.26, 0.34, 0.52), pin * 0.55)
+    // The wings carry the model's tricolour flash along the foot: three
+    // hairlines, teal, magenta and blue, stepping in like a 90s decal.
+    if self.plate_id > 0.5 && self.plate_id < 2.5 {
+        let fy = sz.y - q.y
+        let x0 = 14.0
+        let l1 = (1.0 - smoothstep(0.35, 0.35 + px, abs(fy - 6.0))) * step(x0, q.x) * step(q.x, sz.x * 0.62)
+        let l2 = (1.0 - smoothstep(0.35, 0.35 + px, abs(fy - 8.6))) * step(x0 + 8.0, q.x) * step(q.x, sz.x * 0.62 + 8.0)
+        let l3 = (1.0 - smoothstep(0.35, 0.35 + px, abs(fy - 11.2))) * step(x0 + 16.0, q.x) * step(q.x, sz.x * 0.62 + 16.0)
+        col = mix(col, vec3(0.16, 0.66, 0.60), l1 * 0.9)
+        col = mix(col, vec3(0.72, 0.22, 0.52), l2 * 0.9)
+        col = mix(col, vec3(0.20, 0.30, 0.62), l3 * 0.9)
+    }
+    return col
+}
+
+// ---- recessed panels: the lists behind reflective STN glass ----
+mod.widgets.HwPanel.radius = 6
+mod.widgets.HwPanel.depth = -2.5
+mod.widgets.HwPanel.draw_bg.ground = #x9dac92
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.95, 1.0, 0.95, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.10, 0.14, 0.10, 1.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.85, 8.0, 0.0, 0.3)
+mod.widgets.HwPanel.draw_bg.tune = vec4(0.06, 0.2, 1.0, 3.0)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.4, 0.5)
+mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    // The reflector: a faint grain behind the glass, a gradient where
+    // the polariser catches the room light, and the ghost dot matrix.
+    let w = self.world.xy
+    var col = base * (1.0 + (self.hw_hash(floor(w * 1.3)) - 0.5) * 0.03)
+    col = col * (1.04 - 0.08 * self.pos.y)
+    let g = fract(w / 3.0)
+    let dotm = step(0.2, g.x) * step(g.x, 0.85) * step(0.2, g.y) * step(g.y, 0.85)
+    col = col * (1.0 - dotm * 0.035)
+    // A glare band where the polariser catches the room, top left.
+    let gl = self.pos.x * 0.6 + self.pos.y
+    col = col + vec3(0.05, 0.055, 0.05) * (1.0 - smoothstep(0.0, 0.35, gl))
+    // The printed mask's border, a dark hairline 5 pt in from the frame.
+    let lo = vec2(self.inset, self.inset)
+    let q = p - lo
+    let sz = self.rect_size - lo * 2.0
+    let e = min(min(q.x, q.y), min(sz.x - q.x, sz.y - q.y))
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    col = mix(col, vec3(0.20, 0.25, 0.20), (1.0 - smoothstep(0.35, 0.35 + px, abs(e - 5.0))) * 0.45)
+    return col
+}
+
+// ---- the screen's surround: a dark grey moulded frame, EL glow at the glass ----
+mod.widgets.HwBezel.radius = 10
+mod.widgets.HwBezel.depth = -3.5
+mod.widgets.HwBezel.draw_bg.ground = #x3a3e44
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.85, 0.88, 0.9, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.02, 0.02, 0.03, 1.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.9, 10.0, 0.0, 0.5)
+mod.widgets.HwBezel.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.6, 0.5)
+mod.widgets.HwBezel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    var col = base * (1.0 + (self.hw_hash(floor(w * 1.6)) - 0.5) * 0.05)
+    let lo = vec2(self.inset, self.inset)
+    let q = p - lo
+    let sz = self.rect_size - lo * 2.0
+    let e = min(min(q.x, q.y), min(sz.x - q.x, sz.y - q.y))
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    // A printed silver line round the window.
+    col = mix(col, vec3(0.70, 0.73, 0.76), (1.0 - smoothstep(0.3, 0.3 + px, abs(e - 4.0))) * 0.7)
+    // The EL backlight leaking out round the glass.
+    col = col + vec3(0.30, 0.85, 0.72) * exp(-max(e - 8.0, 0.0) / 5.0) * smoothstep(5.0, 9.0, e) * 0.35
+    return col
+}
+
+// ---- the glass over the picture: a colour LCD's pixel grid ----
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.08, 0.35, 0.0)
+mod.widgets.HwGlass.draw_bg.radius = 4.0
+mod.widgets.HwGlass.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let d = Material.sd_box(p, c, c, self.radius)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    let edge = smoothstep(-28.0, 0.0, d) * self.glass.z
+    let dark = clamp(edge, 0.0, 1.0)
+    // The polariser's cool reflection across the top, a hard glint line.
+    let rl = smoothstep(0.55, 0.0, self.pos.y + (self.pos.x - 0.5) * 0.3) * self.glass.y + (1.0 - smoothstep(0.0, 0.006, abs(self.pos.y - 0.06 + (self.pos.x - 0.5) * 0.04))) * 0.05
+    let tint = vec3(0.80, 0.92, 0.88)
+    return vec4(tint * rl, rl) * cov + vec4(0.0, 0.0, 0.0, dark * cov) * (1.0 - rl)
+}
+
+// ---- keys: small rubbery buttons in grey silicone, printed icons ----
+mod.widgets.HwKey.radius = 11
+mod.widgets.HwKey.depth = 2.6
+mod.widgets.HwKey.press = -2.2
+mod.widgets.HwKey.inset = 8
+mod.widgets.HwKey.draw_bg.ground = #x8a8f95
+mod.widgets.HwKey.draw_bg.light_ink = vec4(0.92, 0.94, 0.96, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.26, 0.28, 0.31, 1.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(4.5, 1.0, 2.0, 0.08)
+mod.widgets.HwKey.draw_bg.finish = vec4(0.6, 0.15, 0.10, 1.0)
+mod.widgets.HwKey.draw_bg.tune = vec4(0.10, 0.0, 1.0, 3.0)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.45, 6.0, 1.0, 0.5)
+mod.widgets.HwKey.draw_bg.inner = vec4(0.72, 9.0, 0.0, 0.0)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.4, 0.5)
+mod.widgets.HwKey.emissive = vec4(0.38, 0.94, 0.81, 0.3)
+mod.widgets.HwKey.draw_bg.led = vec4(5.0, 5.0, 1.5, 0.0)
+mod.widgets.HwKey.draw_bg.led_off = vec4(0.46, 0.49, 0.52, 1.0)
+mod.widgets.HwKey.draw_bg.critical_ink = vec4(0.16, 0.30, 0.62, 1.0)
+mod.widgets.HwKey.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    // Silicone rubber: a soft matte tooth.
+    let w = self.world.xy
+    return base * (1.0 + (self.hw_hash(floor(w * 2.2)) - 0.5) * 0.05)
+}
+mod.widgets.HwKey.draw_bg.key_face = fn(p: vec2, base: vec3) -> vec3 {
+    var c = self.surface(p, base)
+    // Play and PRESETS are moulded in the model's blue rubber.
+    c = mix(c, self.surface(p, self.critical_ink.xyz), self.critical * self.critical_ink.w)
+    // A soft pillow: lighter crown, darker toward the rim.
+    let u = (p - self.rect_size * 0.5) / max(self.rect_size * 0.5 - vec2(self.inset, self.inset), vec2(1.0, 1.0))
+    c = c * (1.06 - 0.12 * clamp(dot(u, u), 0.0, 1.0))
+    return c
+}
+mod.widgets.HwKey.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var o = self.layer(self.key_face(p, self.ground.xyz))
+    o = self.key_marks(o, p)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+mod.widgets.HwKeyButton.draw_text.color = #x1e2226
+mod.widgets.HwKeyButton.draw_text.color_hover = #x0c0e10
+mod.widgets.HwKeyButton.draw_text.color_down = #x1d3470
+mod.widgets.HwKeyText.draw_text.color = #x1e2226
+mod.widgets.HwKeyText.draw_text.color_hover = #x0c0e10
+mod.widgets.HwKeyText.draw_text.color_down = #x1d3470
+mod.widgets.HwKeyText.draw_text.text_style = theme.font_bold{font_size: 7.5}
+
+// ---- indicators: a tiny LCD window, a black segment when on ----
+mod.widgets.HwDash.radius = 2
+mod.widgets.HwDash.depth = -0.6
+mod.widgets.HwDash.emissive = vec4(0.38, 0.94, 0.81, 2.5)
+mod.widgets.HwDash.draw_bg.ground = #x9dac92
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwDash.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let lit = clamp(self.lit, 0.0, 1.0)
+    // The glass: grey-green, washed toward EL teal while on.
+    var g = mix(self.ground.xyz, vec3(0.50, 0.86, 0.76), lit * 0.55)
+    var o = self.layer(g)
+    // The segment: a pointed bar, a ghost when off.
+    let c = self.rect_size * 0.5
+    let q = abs(p - c)
+    let hw = c.x - self.inset - 3.0
+    let sd = max(q.x + q.y - hw, q.y - 1.6)
+    let m = 1.0 - smoothstep(-px, px, sd)
+    let segc = mix(vec3(0.52, 0.59, 0.49), vec3(0.06, 0.08, 0.07), lit)
+    o = vec4(mix(o.xyz, segc, m * o.w * mix(0.35, 1.0, lit)), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+mod.widgets.HwLed.emissive = vec4(0.38, 0.94, 0.81, 2.0)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+
+// ---- volume: a knurled silver thumbwheel inside an LCD arc bar-graph ----
+mod.widgets.HwKnobFace.depth = 5.0
+mod.widgets.HwKnobFace.draw_bg.ground = #xc3c7cb
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.20, 0.22, 0.24, 1.0)
+mod.widgets.HwKnobFace.draw_bg.relief = vec4(3.0, 0.95, 2.0, 0.35)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(1.0, 0.70, 60.0, 0.28)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.80, 0.82, 0.84, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.11, 0.20, 0.44, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(16.0, 1.34, 2.0, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.5, 7.0, 1.0, 0.55)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(0.8, 0.4)
+mod.widgets.HwKnobFace.emissive = vec4(0.38, 0.94, 0.81, 0.35)
+mod.widgets.HwKnobFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let q = p - c
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let r = min(c.x, c.y) - self.inset
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let rq = length(q)
+    let ang = atan2(q.x, -q.y)
+    let inside = 1.0 - smoothstep(-px, px, rq - r)
+    var face = o.xyz
+    // The knurled skirt and a satin cap with a printed blue index.
+    let cr = r * self.knob.y
+    let skirt = smoothstep(cr - px, cr + px, rq) * inside
+    let ridge = 0.5 + 0.5 * cos(ang * self.knob.z)
+    face = face * (1.0 - skirt * ridge * self.knob.w)
+    let capm = 1.0 - smoothstep(cr - px, cr + px, rq)
+    let lt = normalize(self.light.xy + vec2(0.000001, 0.000001))
+    let spun = 0.5 + 0.5 * sin(rq * 2.4)
+    let aniso = 0.5 + 0.5 * cos((ang - atan2(lt.x, -lt.y)) * 2.0)
+    let capcol = self.cap_ink.xyz * (0.94 + 0.05 * spun) + vec3(0.12, 0.12, 0.12) * aniso
+    face = mix(face, capcol, capm)
+    let spin = (self.value * 2.0 - 1.0) * self.ring.w
+    let dir = vec2(sin(spin), -cos(spin))
+    let t = clamp(dot(q, dir), cr * 0.45, cr * 0.88)
+    let pd = length(q - dir * t) - 1.4
+    face = mix(face, self.ptr_ink.xyz, (1.0 - smoothstep(-px, px, pd)) * capm)
+    o = vec4(face * inside, inside) + o * (1.0 - inside)
+    // The LCD ring: a recessed grey-green annulus of wedge segments.
+    let r0 = r * 1.12
+    let r1 = r * 1.42
+    let ring_m = smoothstep(r0 - px, r0 + px, rq) * (1.0 - smoothstep(r1 - px, r1 + px, rq))
+    let lcd = vec3(0.62, 0.68, 0.57) * (1.0 + 0.06 * (-q.y / max(r1, 1.0)))
+    let inner_sh = (1.0 - smoothstep(0.0, 3.0, rq - r0)) * 0.25 + (1.0 - smoothstep(0.0, 2.0, r1 - rq)) * 0.10
+    var ring = lcd * (1.0 - inner_sh)
+    let n = self.ring.x
+    let a0 = -self.ring.w
+    let stepa = (self.ring.w * 2.0) / n
+    let fi = floor((ang - a0) / stepa)
+    let fa = (ang - a0) / stepa - fi
+    let inseg = step(0.0, fi) * step(fi, n - 1.0) * step(0.14, fa) * step(fa, 0.86)
+    let rs0 = r0 + 3.0
+    let rs1 = mix(r0 + 6.0, r1 - 2.5, (fi + 1.0) / n)
+    let radial = smoothstep(rs0 - px, rs0 + px, rq) * (1.0 - smoothstep(rs1 - px, rs1 + px, rq))
+    let seg = inseg * radial
+    let on = step((fi + 0.5) / n, self.value + 0.001)
+    let segc = mix(vec3(0.54, 0.60, 0.50), vec3(0.07, 0.09, 0.08), on)
+    ring = mix(ring, segc, seg * mix(0.5, 1.0, on))
+    o = vec4(mix(o.xyz, ring, ring_m), max(o.w, ring_m))
+    // A dark frame lip round the LCD ring.
+    let lip = (1.0 - smoothstep(0.0, 1.2, abs(rq - r1 - 0.6))) * 0.8 + (1.0 - smoothstep(0.0, 1.0, abs(rq - r0))) * 0.5
+    o = vec4(mix(o.xyz, vec3(0.20, 0.22, 0.24), lip), max(o.w, lip))
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- level meter: an LCD bar graph with ghost bars and printed scale ----
+mod.widgets.HwMeterFace.radius = 4
+mod.widgets.HwMeterFace.depth = -2.0
+mod.widgets.HwMeterFace.draw_bg.ground = #x3a3e44
+mod.widgets.HwMeterFace.draw_bg.light_ink = vec4(0.85, 0.88, 0.9, 1.0)
+mod.widgets.HwMeterFace.draw_bg.shadow_ink = vec4(0.02, 0.02, 0.03, 1.0)
+mod.widgets.HwMeterFace.draw_bg.inner = vec4(0.8, 6.0, 0.0, 0.0)
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 20.0, 1.0, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwMeterFace.draw_bg.spill = vec2(0.6, 0.3)
+mod.widgets.HwMeterFace.emissive = vec4(0.38, 0.94, 0.81, 0.6)
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    // The glass, 4 pt in from the frame.
+    let a = vec2(4.0, 4.0)
+    let b = self.rect_size - a
+    let win = Material.sd_box(p, self.rect_size * 0.5, (b - a) * 0.5, 2.0)
+    let inside = 1.0 - smoothstep(-px, px, win)
+    let u = (p - a) / max(b - a, vec2(1.0, 1.0))
+    // EL backlight: bright teal in the middle, following the level.
+    let el = clamp(max(self.level.x, self.level.y) * 1.4, 0.0, 1.0)
+    var g = mix(vec3(0.60, 0.67, 0.56), vec3(0.46, 0.86, 0.76), el * 0.65)
+    g = g * (1.03 - 0.10 * u.y)
+    g = g * (1.0 - (1.0 - smoothstep(0.0, 4.0, -win)) * 0.22)
+    // Two bar rows: L on top, R below, from x = 18 pt.
+    let x0 = a.x + 16.0
+    let x1 = b.x - 5.0
+    let n = self.meter.y
+    let rowh = (b.y - a.y - 14.0) * 0.5
+    let y0 = a.y + 3.0
+    let lane = clamp(floor((p.y - y0) / max(rowh, 1.0)), 0.0, 1.0)
+    let fy = (p.y - y0 - lane * rowh) / max(rowh, 1.0)
+    let t = (p.x - x0) / max(x1 - x0, 1.0)
+    let seg = floor(t * n)
+    let fx = fract(t * n)
+    let cell = step(0.18, fx) * step(fx, 0.82) * step(0.14, fy) * step(fy, 0.86) * step(0.0, seg) * step(seg, n - 1.0) * step(y0, p.y) * step(p.y, y0 + rowh * 2.0)
+    let lv = mix(self.level.x, self.level.y, lane)
+    let on = step((seg + 0.5) / n, lv)
+    let pk = step(abs(seg - floor(self.level.z * n - 0.5)), 0.5) * step(0.02, self.level.z)
+    let lit = max(on, pk)
+    // The last quarter's segments are taller, printed with an OVER band.
+    let segc = mix(vec3(0.52, 0.59, 0.49), vec3(0.06, 0.08, 0.07), lit)
+    g = mix(g, segc, cell * mix(0.45, 1.0, lit))
+    // L and R: tiny 3x5 dot-matrix letters.
+    let gx = floor((p.x - (a.x + 5.0)) / 1.6)
+    let inx = step(0.0, gx) * step(gx, 2.0)
+    let gy_l = floor((p.y - (y0 + rowh * 0.5 - 4.0)) / 1.6)
+    let gy_r = floor((p.y - (y0 + rowh * 1.5 - 4.0)) / 1.6)
+    let l_on = inx * step(0.0, gy_l) * step(gy_l, 4.0) * max(step(gx, 0.0), step(4.0, gy_l))
+    let c0 = step(gx, 0.0)
+    let c1 = step(abs(gx - 1.0), 0.0)
+    let c2 = step(2.0, gx)
+    let even = step(abs(gy_r), 0.0) + step(abs(gy_r - 2.0), 0.0)
+    let r_on = inx * step(0.0, gy_r) * step(gy_r, 4.0) * clamp(c0 + c1 * even + c2 * (1.0 - even), 0.0, 1.0)
+    g = mix(g, vec3(0.08, 0.10, 0.09), clamp(l_on + r_on, 0.0, 1.0))
+    // The printed scale under the rows: a tick per 4 segments, OVER band.
+    let sy = y0 + rowh * 2.0 + 4.0
+    let tk = abs(fract(t * n / 4.0 + 0.5) - 0.5) * 4.0 / n * (x1 - x0)
+    let tick = (1.0 - smoothstep(0.3, 0.3 + px, tk)) * step(abs(p.y - sy), 2.0) * step(-0.01, t) * step(t, 1.01)
+    let over = step(0.75, t) * step(t, 1.0) * step(abs(p.y - sy), 1.0)
+    g = mix(g, vec3(0.10, 0.13, 0.11), tick * 0.8)
+    g = mix(g, vec3(0.12, 0.20, 0.44), over)
+    // The glass's glint.
+    g = g + vec3(1.0, 1.0, 1.0) * (1.0 - smoothstep(0.0, 0.25, u.y)) * 0.05
+    o = vec4(mix(o.xyz, g, inside), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- small displays: progress strip and EQ, STN with EL edge ----
+mod.widgets.HwDisplay.radius = 5
+mod.widgets.HwDisplay.depth = -2.2
+mod.widgets.HwDisplay.draw_bg.ground = #x9fae93
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.95, 1.0, 0.95, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.08, 0.10, 0.08, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.8, 7.0, 0.0, 0.2)
+mod.widgets.HwDisplay.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwDisplay.draw_bg.spill = vec2(1.2, 0.4)
+mod.widgets.HwDisplay.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    var col = base * (1.04 - 0.09 * self.pos.y)
+    let g = fract(w / 2.5)
+    let dotm = step(0.2, g.x) * step(g.x, 0.85) * step(0.2, g.y) * step(g.y, 0.85)
+    col = col * (1.0 - dotm * 0.04)
+    return col
+}
+mod.widgets.HwDisplayText.draw_text.color = #x141b16
+mod.widgets.HwDisplayText.draw_text.text_style = theme.font_code{font_size: 9.5}
+mod.widgets.HwReadout.draw_text.color = #x0f1411
+mod.widgets.HwReadout.draw_text.text_style = theme.font_code{font_size: 11.0}
+
+// ---- the spectrum: an LCD bar graph, every segment's ghost showing ----
+mod.widgets.HwSpectrum.light = 3.0
+mod.widgets.HwSpectrum.light_low = vec4(0.30, 0.80, 0.70, 0.6)
+mod.widgets.HwSpectrum.light_high = vec4(0.45, 1.0, 0.85, 1.4)
+mod.widgets.HwSpectrum.wave_thickness = 1.4
+mod.widgets.HwSpectrum.wave_fill = 0.0
+mod.widgets.HwSpectrum.draw_round.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let s = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let ink = vec3(0.035, 0.06, 0.06)
+    if self.part > 0.5 && self.part < 1.5 {
+        // The glass, EL backlit: blue-green, brightest in the middle where
+        // the panel sits over the lamp, falling off to the frame.
+        let sdf = Sdf2d.viewport(p)
+        sdf.box(0.0, 0.0, s.x, s.y, 4.0)
+        let w = self.rect_pos + p
+        let g = fract(w / 3.0)
+        let dotm = step(0.18, g.x) * step(g.x, 0.86) * step(0.18, g.y) * step(g.y, 0.86)
+        let v = (self.pos - vec2(0.5, 0.45)) * vec2(1.0, 1.6)
+        let lamp = 1.0 - clamp(dot(v, v), 0.0, 1.0)
+        var col = mix(vec3(0.33, 0.58, 0.53), vec3(0.58, 0.92, 0.80), lamp)
+        col = col * (1.0 - dotm * 0.045)
+        let e = min(min(p.x, p.y), min(s.x - p.x, s.y - p.y))
+        col = col * (1.0 - (1.0 - smoothstep(0.0, 14.0, e)) * 0.30)
+        sdf.fill(vec4(col, 1.0))
+        return sdf.result
+    }
+    if self.part > 1.5 && self.part < 2.5 {
+        // The baseline: a printed dotted rule.
+        let w = self.rect_pos.x + p.x
+        let dm = step(fract(w / 3.0), 0.5) * 0.6
+        return vec4(ink * dm, dm)
+    }
+    if self.part > 5.5 && self.part < 6.5 {
+        let w = self.rect_pos.x + p.x
+        let dm = step(fract(w / 6.0), 0.25) * 0.35
+        return vec4(ink * dm, dm)
+    }
+    if self.part > 6.5 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    // Segments: 4 pt pitch, a 2.6 pt bar, a hair gap each side.
+    let pitch = 4.0
+    let fb = s.y - p.y
+    let fy = fract(fb / pitch)
+    let cx = abs(p.x - s.x * 0.5) - (s.x * 0.5 - 1.0)
+    let segm = step(0.14, fy) * step(fy, 0.78) * (1.0 - smoothstep(-px, px, cx))
+    if self.part > 2.5 && self.part < 3.5 {
+        // The unlit column: a printed amber filter over its top fifth,
+        // and every segment's ghost faintly there.
+        let t = fb / max(s.y, 1.0)
+        let hot = smoothstep(0.70, 0.72, t)
+        let fa = hot * 0.42 * (1.0 - smoothstep(-px, px, abs(p.x - s.x * 0.5) - s.x * 0.5 - 0.5))
+        let ga = segm * 0.24
+        let col = mix(vec3(0.95, 0.62, 0.20), ink, ga / max(ga + fa, 0.001))
+        let a = clamp(fa + ga, 0.0, 1.0)
+        return vec4(col * a, a)
+    }
+    if self.part > 4.5 && self.part < 5.5 {
+        // The held peak: one hollow segment.
+        let a = step(1.0, p.x) * step(p.x, s.x - 1.0) * 0.95
+        return vec4(ink * a, a)
+    }
+    // A lit segment, and its shadow on the reflector just below.
+    let fy2 = fract((fb + 1.2) / pitch)
+    let shm = step(0.14, fy2) * step(fy2, 0.78) * (1.0 - segm) * 0.22
+    let a = segm * 0.96 + shm
+    return vec4(ink * a, a)
+}
+mod.widgets.HwSpectrum.draw_line.pixel = fn() {
+    // The waveform on a 3 pt dot matrix: every pixel near the trace is on.
+    let p = self.pos * self.rect_size
+    let w = self.rect_pos + p
+    let cell = floor(w / 3.0)
+    let cc = (cell + vec2(0.5, 0.5)) * 3.0 - self.rect_pos
+    let a = self.seg_a
+    let b = self.seg_b
+    let pa = cc - a
+    let ba = b - a
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    let d = length(pa - ba * h)
+    let on = step(d, 1.7)
+    let f = fract(w / 3.0)
+    let sq = step(0.12, f.x) * step(f.x, 0.88) * step(0.12, f.y) * step(f.y, 0.88)
+    let al = on * sq * 0.92
+    return vec4(vec3(0.035, 0.06, 0.06) * al, al)
+}
+mod.widgets.HwSpectrum.draw_label.text_style = theme.font_code{font_size: 7.5}
+
+// ---- the picture: a colour LCD, lighting the body in EL teal ----
+mod.widgets.HwMilk.light = 2.4
+mod.widgets.HwMilk.light_knee = 0.95
+
+// ---- the right wing's lower half: a car-stereo LCD, 7-segment digits ----
+mod.widgets.HwOrnament.visible = true
+mod.widgets.HwOrnamentFace.radius = 4
+mod.widgets.HwOrnamentFace.depth = -2.0
+mod.widgets.HwOrnamentFace.draw_bg.ground = #x3a3e44
+mod.widgets.HwOrnamentFace.draw_bg.light_ink = vec4(0.85, 0.88, 0.9, 1.0)
+mod.widgets.HwOrnamentFace.draw_bg.shadow_ink = vec4(0.02, 0.02, 0.03, 1.0)
+mod.widgets.HwOrnamentFace.draw_bg.inner = vec4(0.8, 6.0, 0.0, 0.0)
+mod.widgets.HwOrnamentFace.draw_bg.glow_ink = vec4(0.38, 0.94, 0.81, 1.0)
+mod.widgets.HwOrnamentFace.emissive = vec4(0.38, 0.94, 0.81, 0.8)
+mod.widgets.HwOrnamentFace.draw_bg.spill = vec2(0.6, 0.3)
+// A 7-segment digit, 12 x 22 pt with a slant: x = the lit segments, y =
+// every segment (the ghost). `code` bits: a b c d e f g.
+mod.widgets.HwOrnamentFace.draw_bg.seg_h = fn(q: vec2, c: vec2) -> float {
+    let d = abs(q - c)
+    return max(d.x + d.y - 4.2, d.y - 1.2)
+}
+mod.widgets.HwOrnamentFace.draw_bg.seg_v = fn(q: vec2, c: vec2) -> float {
+    let d = abs(q - c)
+    return max(d.y + d.x - 4.4, d.x - 1.2)
+}
+mod.widgets.HwOrnamentFace.draw_bg.bit = fn(code: float, k: float) -> float {
+    return step(0.5, fract(floor(code / pow(2.0, k)) * 0.5))
+}
+mod.widgets.HwOrnamentFace.draw_bg.digit_code = fn(d: float) -> float {
+    var c = 63.0
+    c = mix(c, 6.0, step(0.5, d))
+    c = mix(c, 91.0, step(1.5, d))
+    c = mix(c, 79.0, step(2.5, d))
+    c = mix(c, 102.0, step(3.5, d))
+    c = mix(c, 109.0, step(4.5, d))
+    c = mix(c, 125.0, step(5.5, d))
+    c = mix(c, 7.0, step(6.5, d))
+    c = mix(c, 127.0, step(7.5, d))
+    c = mix(c, 111.0, step(8.5, d))
+    return c
+}
+mod.widgets.HwOrnamentFace.draw_bg.seg7 = fn(q0: vec2, code: float) -> vec2 {
+    let px = 0.6
+    let q = vec2(q0.x + (q0.y - 11.0) * 0.12, q0.y)
+    let da = self.seg_h(q, vec2(6.0, 1.3))
+    let db = self.seg_v(q, vec2(11.0, 6.1))
+    let dc = self.seg_v(q, vec2(11.0, 15.9))
+    let dd = self.seg_h(q, vec2(6.0, 20.7))
+    let de = self.seg_v(q, vec2(1.0, 15.9))
+    let df = self.seg_v(q, vec2(1.0, 6.1))
+    let dg = self.seg_h(q, vec2(6.0, 11.0))
+    let ma = 1.0 - smoothstep(-px, px, da)
+    let mb = 1.0 - smoothstep(-px, px, db)
+    let mc = 1.0 - smoothstep(-px, px, dc)
+    let md = 1.0 - smoothstep(-px, px, dd)
+    let m_e = 1.0 - smoothstep(-px, px, de)
+    let mf = 1.0 - smoothstep(-px, px, df)
+    let mg = 1.0 - smoothstep(-px, px, dg)
+    let m_all = max(max(max(ma, mb), max(mc, md)), max(max(m_e, mf), mg))
+    var on = ma * self.bit(code, 0.0)
+    on = max(on, mb * self.bit(code, 1.0))
+    on = max(on, mc * self.bit(code, 2.0))
+    on = max(on, md * self.bit(code, 3.0))
+    on = max(on, m_e * self.bit(code, 4.0))
+    on = max(on, mf * self.bit(code, 5.0))
+    on = max(on, mg * self.bit(code, 6.0))
+    return vec2(on, m_all)
+}
+// A 3 x 5 dot-matrix glyph: `code` = the rows top to bottom, 3 bits each
+// (left bit first); `sz` = one dot's pitch.
+mod.widgets.HwOrnamentFace.draw_bg.dm = fn(q: vec2, code: float, sz: float) -> float {
+    let c = floor(q / sz)
+    let f = fract(q / sz)
+    let inb = step(0.0, c.x) * step(c.x, 2.0) * step(0.0, c.y) * step(c.y, 4.0)
+    let k = (4.0 - c.y) * 3.0 + (2.0 - c.x)
+    let on = step(0.5, fract(floor(code / pow(2.0, k)) * 0.5))
+    return inb * on * step(0.1, f.x) * step(f.x, 0.9) * step(0.1, f.y) * step(f.y, 0.9)
+}
+mod.widgets.HwOrnamentFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let s = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let a = vec2(5.0, 5.0)
+    let b = s - a
+    let win = Material.sd_box(p, s * 0.5, (b - a) * 0.5, 3.0)
+    let inside = 1.0 - smoothstep(-px, px, win)
+    let u = (p - a) / max(b - a, vec2(1.0, 1.0))
+    let lv = clamp(self.level.w, 0.0, 1.0)
+    // EL backlit glass: teal, brighter with the music.
+    // The EL lamp is on while music plays; at rest the glass is reflective.
+    let lamp = clamp((self.level.x + self.level.y) * 8.0, 0.0, 1.0)
+    var g = mix(vec3(0.60, 0.67, 0.56), mix(vec3(0.56, 0.80, 0.72), vec3(0.50, 0.95, 0.82), lv), lamp)
+    g = g * (1.05 - 0.12 * u.y)
+    g = g * (1.0 - (1.0 - smoothstep(0.0, 6.0, -win)) * 0.25)
+    let ink = vec3(0.05, 0.08, 0.08)
+    let ghost = mix(vec3(0.50, 0.56, 0.47), vec3(0.40, 0.62, 0.56), lamp)
+    // Three big digits: the needle level as 0..99, then a unit.
+    let sc = clamp(min((b.x - a.x) / 70.0, (b.y - a.y) / 48.0), 0.8, 2.6)
+    let dw = 16.0 * sc
+    let o0 = vec2(s.x * 0.5 - dw * 1.5, a.y + 10.0)
+    let val = floor(lv * 99.0 + 0.5)
+    let d1 = floor(val / 10.0)
+    let d2 = val - d1 * 10.0
+    let g1 = self.seg7((p - o0 - vec2(dw, 0.0)) / sc, self.digit_code(d1))
+    let g2 = self.seg7((p - o0 - vec2(dw * 2.0, 0.0)) / sc, self.digit_code(d2))
+    // The first digit: only a minus sign, the "-dB".
+    let gm = self.seg7((p - o0) / sc, 64.0)
+    let ghost_m = max(max(gm.y, g1.y), g2.y)
+    let on_m = max(max(gm.x, g1.x), g2.x)
+    g = mix(g, ghost, ghost_m * 0.45)
+    // Each lit segment casts a faint shadow on the reflector behind.
+    let sh = self.seg7((p - o0 - vec2(dw, 0.0) - vec2(1.2, 1.2)) / sc, self.digit_code(d1)).x
+    let sh2 = self.seg7((p - o0 - vec2(dw * 2.0, 0.0) - vec2(1.2, 1.2)) / sc, self.digit_code(d2)).x
+    g = g * (1.0 - max(sh, sh2) * 0.12)
+    g = mix(g, ink, on_m)
+    // A segmented bar row under the digits: left and right.
+    let by = o0.y + 22.0 * sc + 8.0
+    let n = 24.0
+    let t = (p.x - (a.x + 8.0)) / max(b.x - a.x - 16.0, 1.0)
+    let seg = floor(t * n)
+    let fx = fract(t * n)
+    let inb = step(0.0, t) * step(t, 1.0) * step(0.2, fx) * step(fx, 0.8)
+    let rowl = step(by, p.y) * step(p.y, by + 4.0)
+    let rowr = step(by + 6.0, p.y) * step(p.y, by + 10.0)
+    let onl = step((seg + 0.5) / n, self.level.x)
+    let onr = step((seg + 0.5) / n, self.level.y)
+    g = mix(g, ghost, inb * (rowl + rowr) * 0.45)
+    g = mix(g, ink, inb * (rowl * onl + rowr * onr))
+    // "dB" in the dot matrix beside the digits.
+    let ds = 1.3 * sc
+    let dbx = o0 + vec2(dw * 3.0 + 3.0, 22.0 * sc - 5.0 * ds)
+    let dbm = max(self.dm(p - dbx, 5103.0, ds), self.dm(p - dbx - vec2(ds * 4.0, 0.0), 27566.0, ds))
+    let dbg = max(self.dm(p - dbx, 32767.0, ds), self.dm(p - dbx - vec2(ds * 4.0, 0.0), 32767.0, ds))
+    g = mix(g, ghost, dbg * 0.30)
+    g = mix(g, ink, dbm)
+    // Annunciators along the top: a disc that shows while music plays,
+    // ST for stereo, and a three-bar battery.
+    let ty = a.y + 7.0
+    let playing = step(0.001, self.level.x + self.level.y)
+    let cdc = vec2(a.x + 12.0, ty)
+    let cr = length(p - cdc)
+    let disc = (1.0 - smoothstep(4.0 - px, 4.0 + px, cr)) * smoothstep(1.2 - px, 1.2 + px, cr)
+    g = mix(g, ghost, disc * 0.45)
+    g = mix(g, ink, disc * playing)
+    let stx = vec2(a.x + 21.0, ty - 3.5)
+    let stm = max(self.dm(p - stx, 31183.0, 1.4), self.dm(p - stx - vec2(5.6, 0.0), 29842.0, 1.4))
+    g = mix(g, ghost, max(self.dm(p - stx, 32767.0, 1.4), self.dm(p - stx - vec2(5.6, 0.0), 32767.0, 1.4)) * 0.3)
+    g = mix(g, ink, stm * playing)
+    let bc = vec2(b.x - 16.0, ty)
+    let bq = abs(p - bc)
+    let shell = step(max(bq.x - 8.0, bq.y - 3.6), 0.0) * (1.0 - step(max(bq.x - 7.0, bq.y - 2.6), 0.0))
+    let nub = step(abs(p.x - (bc.x + 9.0)), 1.0) * step(abs(p.y - bc.y), 1.6)
+    let cellx = fract((p.x - (bc.x - 6.2)) / 4.3)
+    let cells = step(abs(p.x - bc.x), 6.2) * step(bq.y, 1.8) * step(cellx, 0.75)
+    g = mix(g, ink, clamp(shell + nub + cells, 0.0, 1.0))
+    g = g + vec3(1.0, 1.0, 1.0) * (1.0 - smoothstep(0.0, 0.2, u.y)) * 0.05
+    o = vec4(mix(o.xyz, g, inside), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- printed type on the silver ----
+mod.widgets.HwCaption.draw_text.color = #x2c3a5c
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold{font_size: 7.5}
+mod.widgets.HwTitle.draw_text.color = #x1a1d21
+mod.widgets.HwTitle.draw_text.text_style = theme.font_bold{font_size: 13.0}
+mod.widgets.HwText.draw_text.color = #x3a3e44
+mod.widgets.HwPanelTitle.draw_text.color = #x141b16
+mod.widgets.HwPanelText.draw_text.color = #x3f4d3b
+mod.widgets.HwNavButton.draw_text.color = #x141b16
+mod.widgets.HwNavButton.draw_text.color_hover = #x1d3470
+mod.widgets.HwNavButton.draw_text.text_style = theme.font_code{font_size: 9.5}
+mod.widgets.HwNavButton.draw_bg.plate = vec4(0.05, 0.08, 0.06, 0.06)
+mod.widgets.HwNavButton.draw_bg.plate_hover = vec4(0.05, 0.08, 0.06, 0.14)
+mod.widgets.HwNavButton.draw_bg.rim = vec4(0.05, 0.08, 0.06, 0.18)
+
+// ---- switches and choosers: grey rubber slides, LCD wells ----
+mod.widgets.HwSegmented.draw_bg.well = vec4(0.30, 0.32, 0.35, 1.0)
+mod.widgets.HwSegmented.draw_bg.rim = vec4(0.0, 0.0, 0.0, 0.25)
+mod.widgets.HwSegmented.draw_pill.cap = vec4(0.80, 0.82, 0.85, 0.85)
+mod.widgets.HwSegmented.draw_pill.glow = vec4(0.16, 0.30, 0.62, 1.0)
+mod.widgets.HwSegmented.draw_text.color = #xc8ccd0
+mod.widgets.HwSegmented.draw_text_selected.color = #x141618
+mod.widgets.HwDropDown.draw_bg.well = vec4(1.20, 1.32, 1.12, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.1, 0.12, 0.14, 0.5)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(0.08, 0.10, 0.09, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #x141b16
+mod.widgets.HwDropDown.draw_text.color_hover = #x1d3470
+mod.widgets.HwDropDown.draw_text.color_focus = #x1d3470
+mod.widgets.HwDropDown.draw_text.color_down = #x1d3470
+mod.widgets.HwTextInput.draw_bg.well = vec4(1.20, 1.32, 1.12, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.1, 0.12, 0.14, 0.5)
+mod.widgets.HwTextInput.draw_text.color = #x141b16
+mod.widgets.HwTextInput.draw_text.color_hover = #x141b16
+mod.widgets.HwTextInput.draw_text.color_focus = #x0a0e0b
+mod.widgets.HwTextInput.draw_text.color_empty = #x55654f
+mod.widgets.HwTextInput.draw_text.color_empty_hover = #x45553f
+mod.widgets.HwTextInput.draw_text.color_empty_focus = #x45553f
+mod.widgets.HwBrowserCheck.draw_text.color = #x141b16
+mod.widgets.HwMenuLayer.draw_bg.color = #x9dac92
+mod.widgets.HwMenuLayer.draw_bg.border_color = #x2a2d31
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.25)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 1.0, 1.0, 0.5)
+mod.widgets.HwArtBlank.draw_bg.vinyl = vec4(0.72, 0.74, 0.76, 1.0)
+mod.widgets.HwArtBlank.draw_bg.label_ink = vec4(0.16, 0.30, 0.62, 1.0)
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(2.0, 0.54, 14.0, 4.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.30, 0.33, 0.31, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.20, 0.25, 0.21, 1.0)
+mod.widgets.HwEqGraph.draw_fader.glow_ink = vec4(0.72, 0.82, 0.66, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(2.0, 1.0, 3.5, 0.10)
+mod.widgets.HwEqGraph.draw_curve.curve_ink = vec4(0.72, 0.82, 0.66, 1.0)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(1.0, 0.25, 0.35, 0.0)
+mod.widgets.HwEqGraph.draw_grid.grid_ink = vec4(0.72, 0.82, 0.66, 1.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.30, 2.0, 0.0, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spec_ink = vec4(0.62, 0.72, 0.58, 1.0)
+mod.widgets.HwEqGraph.label_ink = vec4(0.72, 0.82, 0.66, 0.9)
+mod.widgets.HwEqGraph.scale_ink = vec4(0.72, 0.82, 0.66, 0.9)
+true
+
+// ---- the meter's bar form: two LCD segment rows over their ghosts ----
+mod.widgets.HwMeterBarFace.draw_bg.ground = #x9dac92
+mod.widgets.HwMeterBarFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let pad = vec2(5.0, 3.0)
+    let w = max(self.rect_size.x - pad.x * 2.0, 1.0)
+    let h = max(self.rect_size.y - pad.y * 2.0, 1.0)
+    let u = (p.x - pad.x) / w
+    let v = (p.y - pad.y) / h
+    let n = max(floor(w / 5.0), 8.0)
+    let seg = floor(u * n)
+    let fx = fract(u * n)
+    let lane = step(0.5, v)
+    let fy = fract(v * 2.0)
+    let cell = step(0.18, fx) * step(fx, 0.82) * step(0.18, fy) * step(fy, 0.82) * step(0.0, u) * step(u, 1.0) * step(0.0, v) * step(v, 1.0)
+    let lv = mix(self.level.x, self.level.y, lane)
+    let on = step((seg + 0.5) / n, lv)
+    let segc = mix(vec3(0.52, 0.59, 0.49), vec3(0.06, 0.08, 0.07), on)
+    o = vec4(mix(o.xyz, segc, cell * mix(0.35, 1.0, on)), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+true

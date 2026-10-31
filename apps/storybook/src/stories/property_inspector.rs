@@ -2,7 +2,9 @@
 //! how a row decides what kind of editor it is, and the row controls the
 //! panel is built from.
 use crate::makepad_widgets::property_inspector::{Prop, PropertyInspectorWidgetRefExt};
-use crate::makepad_widgets::fab_controls::{FabColorPickWidgetRefExt, FabValueInputWidgetRefExt};
+use crate::makepad_widgets::fab_controls::{
+    FabColorPickWidgetRefExt, FabKnobWidgetRefExt, FabValueInputWidgetRefExt,
+};
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -19,6 +21,53 @@ script_mod! {
         padding: theme.mspace_2
         show_bg: true
         draw_bg +: {color: theme.color_surface_container_low}
+    }
+
+    // The ground the dev panel itself stands on, read off the panel's own
+    // table rather than off the app's theme: the knob is drawn to be read
+    // against this and against nothing else, and it is the one ground on this
+    // page that does not change when the page's theme does. A SolidView and
+    // not a View with show_bg: a bare View's draw_bg paints nothing.
+    let KnobGround = SolidView{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: 6.
+        padding: 8.
+        align: Align{y: 1.0}
+        draw_bg +: {color: mod.fab.color_area}
+    }
+
+    // The ground a header row and its matrix stand on. Nothing inside it
+    // clips: the names are MEANT to cross their neighbours' boxes, and the
+    // padding is the room the overflow wants at the end it leans over --
+    // about three quarters of the longest name, both sides here because the
+    // page shows both leans.
+    let DiagGround = SolidView{
+        width: Fit
+        height: Fit
+        flow: Down
+        spacing: 0.
+        padding: Inset{left: 44 right: 44 top: 8 bottom: 8}
+        clip_x: false
+        clip_y: false
+        draw_bg +: {color: mod.fab.color_area}
+    }
+
+    let DiagRow = View{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: 0.
+        clip_x: false
+        clip_y: false
+    }
+
+    let KnobRow = View{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: 0.
     }
 
     mod.stories.PropertyInspectorOverview = StoryPage{
@@ -80,6 +129,121 @@ script_mod! {
                 }
             }
             picked := Label{text: "no colour chosen"}
+        }
+
+        StoryHeading{text: "The knob"}
+        StoryNote{text: "A number on a dial, for where a row is too much room: a cell of a matrix. Press it and pull up for more or down for less. The whole range is a hundred and fifty points of travel whatever size the knob is drawn at, Shift slows the drag to a tenth, and sideways counts for nothing. A double click takes it back to nought. Once it has been pressed it has the keyboard, and then the arrows and the wheel step it; a knob that is merely under the pointer lets the wheel go by, so a panel full of them still scrolls. Here at nought, at half and at full, and one with a name over it."}
+        StoryRow{
+            KnobGround{
+                knob_off := FabKnob{value: 0.0}
+                knob_half := FabKnob{value: 50.0}
+                knob_full := FabKnob{value: 100.0}
+                knob_named := FabKnob{label: "mix" value: 35.0}
+            }
+            View{
+                width: Fit height: Fit flow: Down spacing: theme.space_1
+                turned := Label{text: "nothing turned yet"}
+                settled := Label{text: "nothing settled yet" draw_text +: {color: theme.color_text_meta}}
+            }
+        }
+
+        StoryHeading{text: "Nought is off"}
+        StoryNote{text: "Most cells of a matrix stand at nought, so nought has to read as off from across the panel: the arc is out, the tick and the number go down to the muted ink, and the first part above nought lights a lamp on the stop. The knob is drawn from the panel's own table and never from the app's theme, so switching this page's theme changes the page and leaves the knobs exactly as they were."}
+
+        StoryHeading{text: "Down to a matrix cell"}
+        StoryNote{text: "The face is the biggest circle the box holds once the words have had their rows, so a knob takes the size of the cell it is put in. These are 28 points across, the narrowest column an eight-column matrix comes down to in the panel: first with the number under them, then square and bare, the way a cell looks when the headers carry the names and a tooltip carries the number."}
+        StoryRow{
+            KnobGround{
+                FabKnob{width: 28 value: 0.0}
+                FabKnob{width: 28 value: 50.0}
+                FabKnob{width: 28 value: 100.0}
+            }
+            KnobGround{
+                FabKnob{width: 28 height: 28 show_readout: false value: 0.0}
+                FabKnob{width: 28 height: 28 show_readout: false value: 50.0}
+                FabKnob{width: 28 height: 28 show_readout: false value: 100.0}
+            }
+            KnobGround{
+                FabKnob{width: 28 height: 28 show_readout: false value: 50.0 enabled: false}
+            }
+        }
+
+        StoryHeading{text: "Naming the columns"}
+        StoryNote{text: "A column 26 points across cannot hold the word Omarchy, let alone Windows 2000, so the name is turned on its side and let out over its neighbours. That is safe because the names are parallel: at 45 degrees a pitch of 26 leaves 18 points between one name and the next across the line, and a line of the panel's small face is ten, so however long they get they never touch. Each name stands on the middle of its own column's bottom edge, right above the knob it names."}
+        StoryNote{text: "Fall hangs the name over the LEFT and is the default: over a matrix that is the empty corner above the row names, so the last column is never cut in half by the panel's edge. Rise is the spreadsheet convention and hangs over the right instead, which a host has to leave room for. The ink is meant to leave its own box, so nothing between the label and the panel's own frame may clip."}
+        StoryRow{
+            DiagGround{
+                DiagRow{
+                    FabDiagonalLabel{width: 26 text: "Dark"}
+                    FabDiagonalLabel{width: 26 text: "Omarchy"}
+                    FabDiagonalLabel{width: 26 text: "macOS dark"}
+                    FabDiagonalLabel{width: 26 text: "Windows 2000"}
+                    FabDiagonalLabel{width: 26 text: "Android dark"}
+                    FabDiagonalLabel{width: 26 text: "Black orange"}
+                    FabDiagonalLabel{width: 26 text: "NeXTSTEP"}
+                    FabDiagonalLabel{width: 26 text: "Skeleton"}
+                }
+                KnobRow{
+                    FabKnob{width: 26 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 20.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 40.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 60.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 80.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 100.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 50.0}
+                }
+            }
+        }
+        StoryRow{
+            DiagGround{
+                DiagRow{
+                    FabDiagonalLabel{width: 26 text: "Dark" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Omarchy" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "macOS dark" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Windows 2000" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Android dark" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Black orange" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "NeXTSTEP" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Skeleton" lean: DiagonalLean.Rise}
+                }
+                KnobRow{
+                    FabKnob{width: 26 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 20.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 40.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 60.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 80.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 100.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 50.0}
+                }
+            }
+        }
+
+        StoryNote{text: "The same names over a roomier column. At a pitch of 44 the names stand 31 points apart across the line against a line of ten, so they are much further apart than they need to be — this is what a panel that has the width looks like, and about where a plain horizontal label starts to be the better answer."}
+        StoryRow{
+            DiagGround{
+                DiagRow{
+                    FabDiagonalLabel{width: 44 text: "Dark"}
+                    FabDiagonalLabel{width: 44 text: "Omarchy"}
+                    FabDiagonalLabel{width: 44 text: "macOS dark"}
+                    FabDiagonalLabel{width: 44 text: "Windows 2000"}
+                    FabDiagonalLabel{width: 44 text: "Android dark"}
+                    FabDiagonalLabel{width: 44 text: "Black orange"}
+                    FabDiagonalLabel{width: 44 text: "NeXTSTEP"}
+                    FabDiagonalLabel{width: 44 text: "Skeleton"}
+                }
+                KnobRow{
+                    FabKnob{width: 44 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 20.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 40.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 60.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 80.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 100.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 50.0}
+                }
+            }
         }
 
         StoryHeading{text: "Row labels"}
@@ -181,6 +345,27 @@ fn fab_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             &format!("r {:.2}  g {:.2}  b {:.2}  a {:.2}", c.x, c.y, c.z, c.w),
         );
     }
+
+    for (name, id) in [
+        ("the first knob", ids!(knob_off)),
+        ("the second knob", ids!(knob_half)),
+        ("the third knob", ids!(knob_full)),
+        ("mix", ids!(knob_named)),
+    ] {
+        let knob = root.fab_knob(cx, id);
+        if let Some(v) = knob.changed(actions) {
+            root.label(cx, ids!(turned))
+                .set_text(cx, &format!("{name} is at {v:.0}"));
+        }
+        // The same two reports as the field above, and a third: a double
+        // click says it was a reset as well as where it landed, for a host
+        // that keeps a ledger of which cells count for anything.
+        if let Some(v) = knob.ended(actions) {
+            let how = if knob.was_reset(actions) { "reset" } else { "settled" };
+            root.label(cx, ids!(settled))
+                .set_text(cx, &format!("{name} {how} at {v:.0}"));
+        }
+    }
 }
 
 /// The page's one handler: the inspector panels, then the row controls.
@@ -195,7 +380,7 @@ pub const STORIES: &[Story] = &[Story {
     component: "PropertyInspector",
     also: &[
         "FabColorPick", "FabColorWheel", "FabLabel", "FabPaletteStrip", "FabValueInput", "Panel",
-        "FabSection", "FabPropRow", "FabSearch",
+        "FabSection", "FabPropRow", "FabSearch", "FabKnob", "FabDiagonalLabel",
     ],
     name: "Overview",
     dsl: "PropertyInspectorOverview",
@@ -267,6 +452,32 @@ The controls the rows are made of, each usable on its own. They are shaped for a
 ### The swatch
 
 `FabColorPick` is a colour that opens its own picker over the page: a wheel, a strip of recent choices, and hex entry, which is what `FabColorWheel` and `FabPaletteStrip` are for. It reports the same way: live while you move inside it, and again when it closes.
+
+### The knob
+
+`FabKnob` is a number on a dial, for where a row is too much room: a cell of a matrix. It is 44 by 64 unless told otherwise and takes whatever box it is given, fixed or `Fill`; the face is the biggest circle that box holds once the two text rows are taken off its height, and it is drawn to stay legible 28 points across. `label` is the name over the face, and an empty one takes its row away too. `show_readout` is the number under it. `min`, `max`, `step`, `big_step`, `precision`, `unit`, `value` and `enabled` mean what they mean on the panel's slider, so a host treats the two alike.
+
+**Pull up for more.** A press takes the pointer and keeps it until the release; the value is how far the pointer has come since, not where it is, because a dial 28 points across has no room for the other law. `drag_travel` is the travel that covers the whole range, 150 points, and it is the same at every size. Shift is a tenth of the speed, sideways counts for nothing, and three points of travel pass before a press becomes a drag, so a click that was only meant to select a knob does not nudge it.
+
+**A double click is the reset.** It goes to nought, as the slider's name does when it is clicked; a knob in a matrix has no name to click.
+
+**The wheel is for the knob that has the keyboard.** A press gives a knob the keyboard, and then the arrows step it, Shift takes `big_step`, Home and End go to the stops, and the wheel steps it a notch at a time. A knob that is merely under the pointer lets the wheel go by: the panel these sit in scrolls and is a wall of them. `wheel_on_hover: true` is for a host whose knobs stand somewhere that does not.
+
+**It reports the way the rest of the kit does.** `Changed` follows a gesture live and `Ended` fires once when it is over: at the release of a drag, at the release of a held arrow, when the wheel has been still for a third of a second, and at once for a double click, which also says `Reset`. A press that turned nothing commits nothing. `set_value` and `set_value_and_readout` say nothing at all, so a host can fill a matrix without hearing its own numbers back.
+
+**Nought reads as off.** The arc is out and the tick and the number are dimmed, because most cells of a matrix stand at nought. Every colour comes from the panel's own table, so the knob looks the same under every theme the app can wear.
+
+### The diagonal header
+
+`FabDiagonalLabel` is a name written across the corner of the box it names, for a column too narrow to hold it flat. A matrix of knobs comes down to about 26 points a column and a theme's name runs to two and a half times that, so the name is turned — `angle`, 45 degrees by default — and let out over its neighbours. Parallel names never collide: at 45 degrees a pitch of 26 puts 18 points between one and the next across the line, and a line of the panel's small face is ten.
+
+**One end always stands on its own column.** The anchor is the box's bottom centre in both leans, so the name is over the thing it names whatever length it is. `lean: Fall` — the default — *ends* there, having begun up and to the left, and hangs over the LEFT; over a matrix that is the empty corner above the row names, so the last column is never cut in half by the panel's edge. `lean: Rise` *starts* there and rises to the upper right, the spreadsheet convention, and the host owes its last column that much room.
+
+**Nothing may clip it.** The ink leaves the widget's own box on purpose, which is why the widget opens no turtle of its own; the row it stands in needs `clip_x: false`, and the ground the overflow lands on has to be inside whatever does clip. A header row that looks like it is losing letters is a clip somewhere above it, not the label.
+
+**How tall the row has to be.** `text_width x sin(angle) + line_height x cos(angle)` — the name along the hypotenuse plus its line across it. `diagonal_row_height` in Rust is that sum, and `FabDiagonalLabel::row_height_for(cx, longest)` shapes a name and applies it, so a host fixes its header once at the longest name it will ever write. At 45 degrees with the panel's small face the longest theme name the library ships wants 56.5 points, which is where the template's default of 60 comes from.
+
+**It is a label.** No hit, no focus, no actions. `set_text` holds the name and asks for a frame, and says nothing when the name has not changed, because a matrix writes every header into a fixed slot on every draw.
 
 ### The labels
 

@@ -1,0 +1,27 @@
+use mod.flow.*
+
+let query = Text{ default: "today" }
+let feed = Http{
+    method: @get
+    url: "https://example.org/today.json"
+    headers: {accept: "application/json"}
+    out: @json
+    accept: ["application/json"]
+}
+let which = Ask{
+    question: "Which result?"
+    type: @text
+    options: ["first", "second"]
+    default: "first"
+    timeout: 30
+}
+let result = Output{ type: @json value: feed.value() }
+
+Flow{
+    label: "HTTP and Ask"
+    brief: "Fetches JSON and can ask a question."
+    trigger: @input
+    concurrency: 2
+    autostart: true
+    query, feed, which, result
+}

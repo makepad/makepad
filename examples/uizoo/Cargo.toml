@@ -10,8 +10,9 @@ license = "MIT OR Apache-2.0"
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["data", "dock", "rich_text", "glass"] }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["data", "dock", "rich_text", "glass", "media", "pickers"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0", optional = true }
 makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }

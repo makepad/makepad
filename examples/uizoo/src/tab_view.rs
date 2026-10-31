@@ -96,14 +96,16 @@ script_mod! {
                     padding: theme.mspace_2
                     align: Align{x: 0. y: 0.}
                     show_bg: true
+                    // A plain View's pixel is transparent and never reads `color`: paint it here.
                     draw_bg +: {
                         color: uniform(theme.color_inset)
+                        pixel: fn() {return Pal.premul(self.color)}
                     }
                     View{
                         width: 400. height: 400.
                         flow: Down
                         show_bg: true
-                        draw_bg +: {color: uniform(theme.color_inset)}
+                        draw_bg +: {color: uniform(theme.color_inset) pixel: fn() {return Pal.premul(self.color)}}
                         Label{text: "ScrollXYView ScrollXYView ScrollXYView"}
                         Label{text: "ScrollXYView ScrollXYView ScrollXYView"}
                         Label{text: "ScrollXYView ScrollXYView ScrollXYView"}
@@ -127,12 +129,13 @@ script_mod! {
                     show_bg: true
                     draw_bg +: {
                         color: uniform(theme.color_inset)
+                        pixel: fn() {return Pal.premul(self.color)}
                     }
                     View{
                         width: 400. height: 400.
                         flow: Down
                         show_bg: true
-                        draw_bg +: {color: uniform(theme.color_inset)}
+                        draw_bg +: {color: uniform(theme.color_inset) pixel: fn() {return Pal.premul(self.color)}}
                         Label{text: "ScrollYView ScrollYView ScrollYView"}
                         Label{text: "ScrollYView ScrollYView ScrollYView"}
                         Label{text: "ScrollYView ScrollYView ScrollYView"}
@@ -160,7 +163,7 @@ script_mod! {
                     View{
                         width: Fit height: Fit
                         show_bg: true
-                        draw_bg +: {color: uniform(theme.color_inset)}
+                        draw_bg +: {color: uniform(theme.color_inset) pixel: fn() {return Pal.premul(self.color)}}
                         Label{text: "CachedView"}
                     }
                 }

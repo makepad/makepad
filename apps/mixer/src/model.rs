@@ -391,12 +391,12 @@ mod tests {
     fn xinfo_parses_community_order() {
         // community clients: [ip, name, model, firmware]
         let info = DeviceInfo::from_args(&[
-            S("192.168.1.71".into()),
+            S("192.0.2.71".into()),
             S("MainRack".into()),
             S("XR18".into()),
             S("1.18".into()),
         ]);
-        assert_eq!(info.ip.as_deref(), Some("192.168.1.71"));
+        assert_eq!(info.ip.as_deref(), Some("192.0.2.71"));
         assert_eq!(info.name.as_deref(), Some("MainRack"));
         assert_eq!(info.model.as_deref(), Some("XR18"));
         assert_eq!(info.firmware.as_deref(), Some("1.18"));

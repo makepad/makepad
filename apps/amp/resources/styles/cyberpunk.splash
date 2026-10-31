@@ -1,0 +1,665 @@
+// title: Cyberpunk
+// Cyberpunk — night-city street tech: a carbon-fibre front over dark
+// gunmetal, plates cut with hard chamfers and edge-lit by cyan and magenta
+// neon, warning tape wrapped round the cut corners, keys with a holographic
+// foil sheen, a HUD over the screen with a static chroma split and glitch
+// slices, a wedge-ladder signal meter and a segmented, chroma-fringed
+// spectrum. Wet metal: the front takes the screen's light in streaks.
+//
+// Assignments only, over the base templates in `src/hw.rs`
+// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+use mod.prelude.widgets_internal.*
+
+// ---- palette: black glass, electric cyan, hot magenta, warning yellow ----
+mod.widgets.hw_palette.screen_bg = #x07080c
+mod.widgets.hw_palette.screen_text = #xe6fbff
+mod.widgets.hw_palette.screen_muted = #x6b8499
+mod.widgets.hw_palette.accent = #x14f0ff
+mod.widgets.hw_palette.panel_text = #xe6fbff
+mod.widgets.hw_palette.panel_muted = #x7390a6
+mod.widgets.hw_palette.menu_bg = #x0b0d12
+mod.widgets.hw_palette.spill_mono = 0.0
+mod.widgets.hw_palette.spill_knee = 1.3
+mod.widgets.hw_palette.caption_bg = #x06070a
+mod.widgets.hw_palette.caption_text = #x14f0ff
+
+// ---- the front: carbon-fibre twill, wet ----
+mod.widgets.HwChassis.draw_bg.ground = #x1b1d22
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(0.80, 0.92, 1.0, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.01, 1.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(0.08, 0.94, 1.0, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(1.7, 0.7)
+mod.widgets.HwChassis.draw_bg.vignette = vec4(0.5, 0.30, 0.30, 1.10)
+mod.widgets.Window.pass.clear_color = #x121317
+// 2/2 twill: tows 5 pt wide, alternating direction in diagonal steps, each
+// tow a rounded strand that catches the light across its width.
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let q = w / 5.0
+    let c = floor(q)
+    let f = fract(q)
+    let orient = step(1.5, fract((c.x + c.y) / 4.0) * 4.0)
+    let across = mix(f.y, f.x, orient)
+    let along = mix(f.x, f.y, orient)
+    let tow = sin(across * 3.14159)
+    let shade = 0.50 + 0.55 * sqrt(max(tow, 0.0))
+    let bright = mix(1.18, 0.78, orient)
+    let fibre = 0.94 + 0.10 * self.hw_hash(vec2(floor(across * 7.0) + c.x * 13.0, c.y * 7.0 + orient))
+    let gap = smoothstep(0.0, 0.08, along) * smoothstep(0.0, 0.08, 1.0 - along)
+    return base * shade * bright * fibre * (0.75 + 0.25 * gap)
+}
+mod.widgets.HwChassis.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let w = self.world.xy
+    var col = self.surface(p, self.ground.xyz)
+    let v = length((self.pos - self.vignette.xy) * vec2(0.9, 1.3))
+    col = col * (self.vignette.w - self.vignette.z * v * v)
+    // Wet streaks: long vertical runs where the metal is glossy, which
+    // mirror the neighbour light far more than the dry weave.
+    let streak = self.hw_noise(vec2(w.x * 0.045, w.y * 0.004)) * 0.7 + self.hw_noise(vec2(w.x * 0.2, w.y * 0.01)) * 0.3
+    let wet = smoothstep(0.40, 0.80, streak)
+    let sp = self.env_spill(vec3(0.0, 0.0, 1.0))
+    col = col * (1.0 - self.env_ao(0.0)) + sp * (0.55 + 1.6 * wet)
+    col = col + self.light_ink.xyz * wet * 0.012
+    return vec4(col + self.dither(), 1.0)
+}
+
+// ---- raised plates: dark gunmetal, hard chamfers, neon edge light ----
+mod.widgets.HwPlate.radius = 18
+mod.widgets.HwPlate.draw_bg.ground = #x25282e
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(0.78, 0.90, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.01, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern = vec4(1.0, 1.4, 0.10, 0.6)
+mod.widgets.HwPlate.draw_bg.pattern_ink = vec4(0.98, 0.84, 0.05, 1.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(1.4, 0.2, 2.5, 0.45)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.6, 0.45, 0.30, 0.35)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.80, 10.0, 1.0, 0.75)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(0.08, 0.94, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(2.4, 0.6)
+mod.widgets.HwPlate.draw_bg.grain = 0.02
+// Chamfered: the top-left and bottom-right corners cut hard, the others clipped.
+mod.widgets.HwPlate.draw_bg.sd = fn(p: vec2) -> float {
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(0.5, 0.5))
+    let s = p - c
+    let q = abs(s) - h
+    let box = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0)
+    let k = mix(self.radius * 0.3, self.radius, step(0.0, s.x * s.y))
+    return max(box, (q.x + q.y + min(k, min(h.x, h.y))) * 0.7071)
+}
+// The finish, plus warning tape wrapped across the bottom-right cut and a
+// row of vent slots along the top.
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let row = floor(w.y * 1.4)
+    let streak = self.hw_noise(vec2(w.x * 0.01 + row * 7.13, row * 0.37))
+    var col = base * (1.0 + (streak - 0.5) * 0.12)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    col = col * (1.06 - uv.y * 0.12)
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(0.5, 0.5))
+    let s = p - c
+    let q = abs(s) - h
+    let k = min(self.radius, min(h.x, h.y))
+    let cd = (q.x + q.y + k) * 0.7071
+    let br = step(0.0, s.x) * step(0.0, s.y)
+    let tape = smoothstep(-13.0, -12.0, cd) * (1.0 - smoothstep(-6.0, -5.0, cd)) * br
+    let st = smoothstep(0.46, 0.54, fract(w.x / 7.0)) * (1.0 - smoothstep(0.94, 1.0, fract(w.x / 7.0)))
+    let chip = smoothstep(0.72, 0.8, self.hw_noise(w * 0.3))
+    let tcol = mix(self.pattern_ink.xyz * (0.92 + 0.1 * self.hw_hash(floor(w * 2.0))), vec3(0.04, 0.04, 0.045), st)
+    col = mix(col, tcol, tape * (1.0 - chip * 0.75))
+    // Vent slots near the top-right: short dark bars.
+    let vx = p.x - (self.rect_size.x - self.inset - 64.0)
+    let vy = p.y - (self.inset + 7.0)
+    let slot = step(0.0, vx) * step(vx, 44.0) * step(0.2, fract(vx / 5.0)) * step(fract(vx / 5.0), 0.62) * step(0.0, vy) * step(vy, 5.0)
+    col = mix(col, vec3(0.01, 0.01, 0.015), slot * 0.9)
+    return col
+}
+mod.widgets.HwPlate.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let d = self.sd(p)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    // Neon edge light: a tube just inside the lip, cyan at the top fading
+    // into magenta at the foot, broken in a few places.
+    let t = smoothstep(0.15, 0.85, uv.y * 0.8 + uv.x * 0.2)
+    let ink = mix(vec3(0.08, 0.94, 1.0), vec3(1.0, 0.12, 0.72), t)
+    let gate = step(0.10, fract((p.x + p.y * 1.3) / 170.0))
+    let line = (1.0 - smoothstep(0.25, 0.85, abs(d + 3.2))) * gate
+    let halo = exp(-abs(d + 3.2) / 2.8) * 0.35 * gate
+    let a = o.w * step(d, 0.0)
+    o = vec4(o.xyz + (mix(ink, vec3(1.0, 1.0, 1.0), line * 0.45) * line * 0.95 + ink * halo) * a, o.w)
+    return o
+}
+
+// ---- recessed panels: black wells with a faint HUD grid ----
+mod.widgets.HwPanel.radius = 14
+mod.widgets.HwPanel.draw_bg.ground = #x0d0f14
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.70, 0.90, 1.0, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.90, 10.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.finish = vec4(0.6, 0.4, 0.10, 0.6)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(0.08, 0.94, 1.0, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.5, 0.6)
+mod.widgets.HwPanel.draw_bg.sd = fn(p: vec2) -> float {
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(0.5, 0.5))
+    let s = p - c
+    let q = abs(s) - h
+    let box = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0)
+    let k = mix(self.radius * 0.3, self.radius, step(0.0, s.x * s.y))
+    return max(box, (q.x + q.y + min(k, min(h.x, h.y))) * 0.7071)
+}
+mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let f = fract(p / vec2(16.0, 16.0))
+    let g = max(1.0 - smoothstep(0.0, 0.07, f.x), 1.0 - smoothstep(0.0, 0.07, f.y))
+    return base + vec3(0.02, 0.07, 0.09) * g * 0.35
+}
+mod.widgets.HwPanel.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let d = self.sd(p)
+    // A hairline of cyan round the well's floor.
+    let line = (1.0 - smoothstep(0.2, 0.8, abs(d + 1.6))) * step(d, 0.0)
+    o = vec4(o.xyz + vec3(0.08, 0.94, 1.0) * line * 0.28 * o.w, o.w)
+    return o
+}
+
+// ---- the screen's surround: black, deep, a magenta-to-cyan neon tube ----
+mod.widgets.HwBezel.radius = 22
+mod.widgets.HwBezel.draw_bg.ground = #x0a0b0e
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.70, 0.88, 1.0, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.pattern = vec4(5.0, 1.0, 0.10, 0.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(1.0, 14.0, 0.0, 0.6)
+mod.widgets.HwBezel.draw_bg.relief = vec4(2.0, 0.3, 3.0, 0.55)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.2, 0.5)
+mod.widgets.HwBezel.draw_bg.sd = fn(p: vec2) -> float {
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(0.5, 0.5))
+    let s = p - c
+    let q = abs(s) - h
+    let box = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0)
+    let k = mix(self.radius * 0.3, self.radius, step(0.0, s.x * s.y))
+    return max(box, (q.x + q.y + min(k, min(h.x, h.y))) * 0.7071)
+}
+mod.widgets.HwBezel.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let d = self.sd(p)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    let ink = mix(vec3(1.0, 0.12, 0.72), vec3(0.08, 0.94, 1.0), smoothstep(0.1, 0.9, uv.x))
+    let line = 1.0 - smoothstep(0.35, 1.1, abs(d + 2.0))
+    let halo = exp(-abs(d + 2.0) / 3.5) * 0.45
+    let a = o.w * step(d, 0.0)
+    o = vec4(o.xyz + (mix(ink, vec3(1.0, 1.0, 1.0), line * 0.5) * line + ink * halo) * a, o.w)
+    return o
+}
+
+// ---- the glass: chamfered like the bezel, a chroma split round the rim.
+// Nothing is drawn over the picture itself. ----
+// No dark rim or bulge over the picture: it reads clean and bright.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.05, 0.0, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(0.60, 0.90, 1.0, 0.0)
+mod.widgets.HwGlass.draw_bg.radius = 16.0
+mod.widgets.HwGlass.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let s = p - c
+    let q = abs(s) - c
+    let k = mix(self.radius * 0.3, self.radius, step(0.0, s.x * s.y))
+    let d = max(max(q.x, q.y), (q.x + q.y + k) * 0.7071)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    // A darker rim (the picture itself is left clean).
+    let edge = smoothstep(-30.0, 0.0, d) * self.glass.z
+    let dark = edge
+    // Chroma split round the rim: a magenta outline shifted left, cyan right.
+    let km = mix(self.radius * 0.3, self.radius, step(0.0, (s.x + 1.6) * s.y))
+    let qm = abs(s + vec2(1.6, 0.0)) - c
+    let dm = max(max(qm.x, qm.y), (qm.x + qm.y + km) * 0.7071)
+    let qc = abs(s - vec2(1.6, 0.0)) - c
+    let kc = mix(self.radius * 0.3, self.radius, step(0.0, (s.x - 1.6) * s.y))
+    let dc = max(max(qc.x, qc.y), (qc.x + qc.y + kc) * 0.7071)
+    let rm = 1.0 - smoothstep(0.2, 0.9, abs(dm + 5.0))
+    let rc = 1.0 - smoothstep(0.2, 0.9, abs(dc + 5.0))
+    // A soft reflection sheet.
+    let r = smoothstep(0.6, 0.0, self.pos.y + (self.pos.x - 0.5) * 0.3) * self.glass.y
+    var add = vec3(1.0, 0.12, 0.72) * rm * 0.55 + vec3(0.08, 0.94, 1.0) * rc * 0.55
+    add = add + self.tint.xyz * r
+    let inside = vec4(add * cov, dark * cov)
+    return inside + vec4(0.02, 0.02, 0.025, 1.0) * (1.0 - cov)
+}
+
+// ---- keys: chamfered gunmetal caps with holographic foil ----
+mod.widgets.HwKey.radius = 11
+mod.widgets.HwKey.depth = 2.6
+mod.widgets.HwKey.press = -3.0
+mod.widgets.HwKey.draw_bg.ground = #x2a2d34
+mod.widgets.HwKey.draw_bg.light_ink = vec4(0.85, 0.95, 1.0, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.01, 1.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(2.2, 0.2, 2.6, 0.5)
+mod.widgets.HwKey.draw_bg.finish = vec4(0.6, 0.45, 0.35, 0.3)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.85, 6.0, 1.0, 0.8)
+mod.widgets.HwKey.draw_bg.inner = vec4(0.72, 9.0, 0.0, 0.07)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.12, 0.72, 1.0)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.2, 0.55)
+mod.widgets.HwKey.draw_bg.led = vec4(6.0, 6.0, 1.8, 1.0)
+mod.widgets.HwKey.draw_bg.led_off = vec4(0.10, 0.06, 0.10, 1.0)
+mod.widgets.HwKey.draw_bg.critical_ink = vec4(0.98, 0.84, 0.05, 1.0)
+mod.widgets.HwKey.draw_bg.critical_band = vec4(1.0, 3.0, 6.0, 0.0)
+mod.widgets.HwKey.draw_bg.sd = fn(p: vec2) -> float {
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(0.5, 0.5))
+    let s = p - c
+    let q = abs(s) - h
+    let box = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0)
+    let k = mix(self.radius * 0.25, self.radius, step(0.0, s.x * s.y))
+    return max(box, (q.x + q.y + min(k, min(h.x, h.y))) * 0.7071)
+}
+// Foil: thin-film colours that shift with the window position, strongest
+// in a diagonal band, over faint brushing.
+mod.widgets.HwKey.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let row = floor(w.y * 1.6)
+    let br = self.hw_noise(vec2(w.x * 0.02 + row * 7.13, row * 0.37))
+    var col = base * (1.0 + (br - 0.5) * 0.10)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    let t = (w.x * 0.8 + w.y) * 0.006 + self.hw_noise(w * 0.04) * 0.5 + uv.x * 0.35
+    let ha = 0.5 + 0.5 * sin(t * 6.2832)
+    let hb = pow(0.5 + 0.5 * sin(t * 10.7 + 1.3), 6.0)
+    var film = mix(vec3(0.05, 0.85, 1.0), vec3(0.95, 0.15, 0.85), ha)
+    film = mix(film, vec3(1.0, 0.85, 0.35), hb * 0.7)
+    let b = uv.x + uv.y * 0.6 - 0.75
+    let band = exp(-(b * b) / 0.03) * 0.55 + 0.07
+    let grating = 0.5 + 0.5 * sin((w.x - w.y) * 2.4)
+    col = col * (1.0 - band * 0.45) + film * band * (0.45 + 0.40 * grating)
+    return col
+}
+mod.widgets.HwKey.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var o = self.layer(self.key_face(p, self.ground.xyz))
+    // A neon pipe just inside the edge: dim cyan, hot magenta when lit.
+    let d = self.sd(p)
+    let lit = clamp(self.lit, 0.0, 1.0)
+    let ink = mix(vec3(0.08, 0.94, 1.0), vec3(1.0, 0.12, 0.72), lit)
+    let line = (1.0 - smoothstep(0.2, 0.8, abs(d + 1.2))) * step(d, 0.0)
+    let rim_glow = exp(min(d, 0.0) / 5.0) * step(d, 0.0) * lit * 0.45
+    o = vec4(o.xyz * (1.0 - lit * 0.25) + ink * (line * (0.55 + 0.5 * lit) + rim_glow) * o.w, o.w)
+    o = self.key_marks(o, p)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+mod.widgets.HwKeyButton.draw_text.color = #xc8faff
+mod.widgets.HwKeyButton.draw_text.color_hover = #xffffff
+mod.widgets.HwKeyButton.draw_text.color_down = #xff4fd0
+mod.widgets.HwKeyText.draw_text.color = #xc8faff
+mod.widgets.HwKeyText.draw_text.color_hover = #xffffff
+mod.widgets.HwKeyText.draw_text.color_down = #xff4fd0
+
+// ---- lights: slanted cyan bars ----
+mod.widgets.HwDash.radius = 1
+mod.widgets.HwDash.emissive = vec4(0.08, 0.94, 1.0, 9.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(0.10, 0.95, 1.0, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x0b0d12
+mod.widgets.HwDash.draw_bg.light_ink = vec4(0.25, 0.35, 0.40, 1.0)
+mod.widgets.HwDash.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDash.draw_bg.spill = vec2(0.4, 0.3)
+mod.widgets.HwDash.draw_bg.sd = fn(p: vec2) -> float {
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(0.5, 0.5))
+    if self.disc > 0.5 {
+        return length(p - c) - min(h.x, h.y)
+    }
+    let s = p - c
+    let sk = vec2(s.x + s.y * 0.9, s.y)
+    let q = abs(sk) - h + vec2(2.0, 0.0)
+    return length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0)
+}
+mod.widgets.HwLed.emissive = vec4(1.0, 0.12, 0.72, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.14, 0.74, 1.0)
+
+// ---- knob: a knurled black skirt, a foil cap, a magenta pointer, a cyan ring ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x16181d
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(0.85, 0.95, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(1.0, 0.64, 40.0, 0.55)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.20, 0.215, 0.25, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(1.0, 0.16, 0.74, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(21.0, 1.30, 2.0, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.06, 0.10, 0.12, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.10, 0.95, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.9, 10.0, 1.0, 0.8)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(0.9, 0.5)
+mod.widgets.HwKnobFace.emissive = vec4(0.08, 0.94, 1.0, 0.8)
+mod.widgets.HwKnobFace.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let lum = dot(base, vec3(0.3, 0.59, 0.11))
+    if lum < 0.15 {
+        return base
+    }
+    // The cap: foil rings, colours turning with the angle.
+    let c = self.rect_size * 0.5
+    let q = p - c
+    let a = atan2(q.y, q.x)
+    let rq = length(q)
+    let t = a * 0.3183 + rq * 0.02
+    let film = vec3(0.5, 0.5, 0.5) + vec3(0.5, 0.5, 0.5) * cos(vec3(6.2832, 6.2832, 6.2832) * (vec3(t, t, t) + vec3(0.0, 0.33, 0.67)))
+    let spun = 0.85 + 0.15 * sin(rq * 2.4)
+    return mix(base * spun, film * 0.55, 0.35)
+}
+
+// ---- meter: two wedge ladders of slanted cells, cyan to magenta to yellow ----
+mod.widgets.HwMeterFace.radius = 8
+mod.widgets.HwMeterFace.draw_bg.ground = #x06070a
+mod.widgets.HwMeterFace.draw_bg.light_ink = vec4(0.6, 0.85, 1.0, 1.0)
+mod.widgets.HwMeterFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 22.0, 1.0, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.08, 0.94, 1.0, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.12, 0.72, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.05, 0.10, 0.13, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(0.08, 0.94, 1.0, 0.45)
+mod.widgets.HwMeterFace.draw_bg.spill = vec2(0.25, 0.4)
+mod.widgets.HwMeterFace.draw_bg.sd = fn(p: vec2) -> float {
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(0.5, 0.5))
+    let s = p - c
+    let q = abs(s) - h
+    let box = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0)
+    let k = mix(2.5, 9.0, step(0.0, s.x * s.y))
+    return max(box, (q.x + q.y + min(k, min(h.x, h.y))) * 0.7071)
+}
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let a = vec2(12.0, 7.0)
+    let b = self.rect_size - vec2(10.0, 7.0)
+    let size = max(b - a, vec2(1.0, 1.0))
+    let n = max(self.meter.y, 2.0)
+    let cw = size.x / n
+    let lh = size.y * 0.5 - 2.0
+    var add = vec3(0.0, 0.0, 0.0)
+    var cover = 0.0
+    var cell_col = vec3(0.0, 0.0, 0.0)
+    let fl_l = 0.0
+    let bottom_l = a.y + lh + fl_l * (lh + 4.0)
+    let lv_l = mix(self.level.x, self.level.y, fl_l)
+    let yb_l = bottom_l - p.y
+    let xs_l = p.x - a.x - yb_l * 0.45
+    let seg_l = floor(xs_l / cw)
+    let fx_l = fract(xs_l / cw)
+    let tt_l = (seg_l + 0.5) / n
+    let hf_l = mix(0.35, 1.0, tt_l)
+    let e_l = px / cw
+    let cx_l = smoothstep(0.10 - e_l, 0.10 + e_l, fx_l) * (1.0 - smoothstep(0.78 - e_l, 0.78 + e_l, fx_l))
+    let cy_l = smoothstep(-px, px, yb_l) * (1.0 - smoothstep(lh * hf_l - px, lh * hf_l + px, yb_l))
+    let valid_l = step(0.0, seg_l) * step(seg_l, n - 1.0)
+    let m_l = cx_l * cy_l * valid_l
+    let on_l = step(tt_l, lv_l)
+    var lit_l = mix(self.glow_ink.xyz, self.hot_ink.xyz, smoothstep(0.45, 0.80, tt_l))
+    lit_l = mix(lit_l, vec3(1.0, 0.86, 0.10), smoothstep(0.84, 0.95, tt_l))
+    // Off cells: dim outlines only, a HUD's ghost of the scale.
+    let ol_l = (1.0 - cx_l * cy_l * (smoothstep(0.16, 0.2, fx_l) * (1.0 - smoothstep(0.68, 0.72, fx_l)) * smoothstep(1.0, 1.6, yb_l) * (1.0 - smoothstep(lh * hf_l - 1.6, lh * hf_l - 1.0, yb_l)))) * m_l
+    let col_l = mix(lit_l * 0.16 * ol_l, lit_l * (1.0 + 0.25 * smoothstep(0.1, 0.0, fx_l)), on_l)
+    cell_col = cell_col + col_l * m_l
+    cover = max(cover, m_l * max(on_l, ol_l))
+    // A glow under the lit_l cells.
+    add = add + lit_l * on_l * valid_l * exp(-abs(yb_l - lh * hf_l * 0.5) / (lh * 0.8)) * 0.06
+    // Baseline tick_l under each lane.
+    let tick_l = (1.0 - smoothstep(0.3, 0.9, abs(yb_l + 1.6))) * step(0.0, p.x - a.x) * step(p.x, b.x) * step(0.5, fract((p.x - a.x) / (cw * 2.0)))
+    add = add + self.glow_ink.xyz * tick_l * 0.30
+    let fl_r = 1.0
+    let bottom_r = a.y + lh + fl_r * (lh + 4.0)
+    let lv_r = mix(self.level.x, self.level.y, fl_r)
+    let yb_r = bottom_r - p.y
+    let xs_r = p.x - a.x - yb_r * 0.45
+    let seg_r = floor(xs_r / cw)
+    let fx_r = fract(xs_r / cw)
+    let tt_r = (seg_r + 0.5) / n
+    let hf_r = mix(0.35, 1.0, tt_r)
+    let e_r = px / cw
+    let cx_r = smoothstep(0.10 - e_r, 0.10 + e_r, fx_r) * (1.0 - smoothstep(0.78 - e_r, 0.78 + e_r, fx_r))
+    let cy_r = smoothstep(-px, px, yb_r) * (1.0 - smoothstep(lh * hf_r - px, lh * hf_r + px, yb_r))
+    let valid_r = step(0.0, seg_r) * step(seg_r, n - 1.0)
+    let m_r = cx_r * cy_r * valid_r
+    let on_r = step(tt_r, lv_r)
+    var lit_r = mix(self.glow_ink.xyz, self.hot_ink.xyz, smoothstep(0.45, 0.80, tt_r))
+    lit_r = mix(lit_r, vec3(1.0, 0.86, 0.10), smoothstep(0.84, 0.95, tt_r))
+    // Off cells: dim outlines only, a HUD's ghost of the scale.
+    let ol_r = (1.0 - cx_r * cy_r * (smoothstep(0.16, 0.2, fx_r) * (1.0 - smoothstep(0.68, 0.72, fx_r)) * smoothstep(1.0, 1.6, yb_r) * (1.0 - smoothstep(lh * hf_r - 1.6, lh * hf_r - 1.0, yb_r)))) * m_r
+    let col_r = mix(lit_r * 0.16 * ol_r, lit_r * (1.0 + 0.25 * smoothstep(0.1, 0.0, fx_r)), on_r)
+    cell_col = cell_col + col_r * m_r
+    cover = max(cover, m_r * max(on_r, ol_r))
+    // A glow under the lit_r cells.
+    add = add + lit_r * on_r * valid_r * exp(-abs(yb_r - lh * hf_r * 0.5) / (lh * 0.8)) * 0.06
+    // Baseline tick_r under each lane.
+    let tick_r = (1.0 - smoothstep(0.3, 0.9, abs(yb_r + 1.6))) * step(0.0, p.x - a.x) * step(p.x, b.x) * step(0.5, fract((p.x - a.x) / (cw * 2.0)))
+    add = add + self.glow_ink.xyz * tick_r * 0.30
+    // Scanlines over the cells.
+    let sl = 0.82 + 0.18 * (0.5 + 0.5 * sin(p.y * 3.14159 * self.draw_pass.dpi_factor))
+    let inner = step(0.0, -self.sd(p) - 1.0)
+    let face = mix(o.xyz, cell_col * sl, cover) + add
+    o = vec4(mix(o.xyz, face, inner * o.w), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- the spectrum: segmented, chroma-fringed bars on a HUD grid ----
+mod.widgets.HwSpectrum.light = 9.0
+mod.widgets.HwSpectrum.draw_label.text_style = theme.font_code{font_size: 7.5}
+// Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
+mod.widgets.HwSpectrum.draw_round.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    if self.part > 0.5 && self.part < 1.5 {
+        // The well: black, a fine cyan grid.
+        let f = fract(p / vec2(20.0, 20.0))
+        let g = max(1.0 - smoothstep(0.0, 0.03, f.x), 1.0 - smoothstep(0.0, 0.03, f.y))
+        let col = vec3(0.015, 0.02, 0.03) + vec3(0.08, 0.94, 1.0) * g * 0.05
+        return vec4(col, 1.0)
+    }
+    if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
+        // Level rules: dashed cyan.
+        let a = step(0.5, fract(p.x / 6.0)) * 0.22
+        return vec4(vec3(0.08, 0.94, 1.0) * a, a)
+    }
+    if self.part > 2.5 && self.part < 3.5 {
+        // The empty slot: ghost cells.
+        let cell = step(1.0, fract((sz.y - p.y) / 4.0) * 4.0)
+        let a = 0.07 * cell
+        return vec4(vec3(0.08, 0.94, 1.0) * a, a)
+    }
+    if self.part > 4.5 && self.part < 5.5 {
+        // The peak mark: hot magenta.
+        return vec4(1.0, 0.25, 0.80, 1.0)
+    }
+    // A lit bar: stacked cells, cyan at the floor to magenta to yellow at
+    // the top of the scale, a magenta fringe on its left and cyan on its right.
+    let yb = sz.y - p.y
+    let cell = smoothstep(0.9, 1.0 + px, fract(yb / 4.0) * 4.0)
+    let t = clamp(yb / 150.0, 0.0, 1.0)
+    var col = mix(vec3(0.06, 0.90, 1.0), vec3(1.0, 0.14, 0.72), smoothstep(0.22, 0.55, t))
+    col = mix(col, vec3(1.0, 0.88, 0.14), smoothstep(0.68, 0.85, t))
+    let lx = 1.0 - smoothstep(0.0, 1.0, p.x)
+    let rx = smoothstep(sz.x - 1.0, sz.x, p.x)
+    col = mix(col, vec3(1.0, 0.1, 0.6), lx * 0.8)
+    col = mix(col, vec3(0.7, 1.0, 1.0), rx * 0.8)
+    let top = 1.0 - smoothstep(0.0, 3.0, p.y)
+    col = col + vec3(0.5, 0.5, 0.5) * top
+    return vec4(col * cell, cell)
+}
+// The waveform: a white-hot trace with a magenta ghost above-left and a
+// cyan one below-right.
+mod.widgets.HwSpectrum.draw_line.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let a = self.seg_a
+    let b = self.seg_b
+    let ba = b - a
+    let bb = max(dot(ba, ba), 0.0001)
+    let pa = p - a
+    let d = length(pa - ba * clamp(dot(pa, ba) / bb, 0.0, 1.0))
+    let pm = p - a + vec2(1.4, 1.0)
+    let dm = length(pm - ba * clamp(dot(pm, ba) / bb, 0.0, 1.0))
+    let pc = p - a - vec2(1.4, 1.0)
+    let dc = length(pc - ba * clamp(dot(pc, ba) / bb, 0.0, 1.0))
+    let core = 1.0 - smoothstep(0.2, 0.9, d)
+    let gm = (1.0 - smoothstep(0.3, 1.1, dm)) * 0.75
+    let gc = (1.0 - smoothstep(0.3, 1.1, dc)) * 0.75
+    let rgb = vec3(1.0, 0.14, 0.72) * gm + vec3(0.08, 0.94, 1.0) * gc + vec3(0.9, 1.0, 1.0) * core
+    let al = clamp(max(core, max(gm, gc)), 0.0, 1.0)
+    return vec4(rgb * min(al, 1.0), al * 0.9)
+}
+
+// ---- MilkDrop's light on the wet metal ----
+mod.widgets.HwMilk.light = 3.2
+mod.widgets.HwMilk.light_knee = 1.0
+
+// ---- type: cyan HUD print, white titles ----
+mod.widgets.HwCaption.draw_text.color = #x14f0ff
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold{font_size: 8.0}
+mod.widgets.HwTitle.draw_text.color = #xf2fbff
+mod.widgets.HwText.draw_text.color = #x9fb4c8
+mod.widgets.HwPanelTitle.draw_text.color = #xf2fbff
+mod.widgets.HwPanelText.draw_text.color = #x7f97ab
+mod.widgets.HwNavButton.draw_text.color = #xc8e8f5
+mod.widgets.HwNavButton.draw_text.color_hover = #xffffff
+mod.widgets.HwNavButton.draw_bg.plate = vec4(0.08, 0.94, 1.0, 0.04)
+mod.widgets.HwNavButton.draw_bg.plate_hover = vec4(1.0, 0.12, 0.72, 0.14)
+mod.widgets.HwNavButton.draw_bg.rim = vec4(0.08, 0.94, 1.0, 0.18)
+mod.widgets.HwDisplayText.draw_text.color = #x14f0ff
+mod.widgets.HwDisplayText.draw_text.text_style = theme.font_code{font_size: 10.0}
+
+// Small displays: the progress strip, the equalizer. Black, a dot matrix.
+mod.widgets.HwDisplay.radius = 10
+mod.widgets.HwDisplay.draw_bg.ground = #x05060a
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.6, 0.85, 1.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(1.0, 10.0, 0.0, 0.6)
+mod.widgets.HwDisplay.draw_bg.spill = vec2(0.8, 0.4)
+mod.widgets.HwDisplay.draw_bg.sd = fn(p: vec2) -> float {
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(0.5, 0.5))
+    let s = p - c
+    let q = abs(s) - h
+    let box = length(max(q, vec2(0.0, 0.0))) + min(max(q.x, q.y), 0.0)
+    let k = mix(self.radius * 0.3, self.radius, step(0.0, s.x * s.y))
+    return max(box, (q.x + q.y + min(k, min(h.x, h.y))) * 0.7071)
+}
+mod.widgets.HwDisplay.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let f = fract(p / vec2(3.0, 3.0)) - vec2(0.5, 0.5)
+    let dotm = 1.0 - smoothstep(0.18, 0.32, length(f))
+    return base + vec3(0.0, 0.035, 0.045) * dotm
+}
+
+// Choosers and fields: black glass, cyan rim, magenta arrow.
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.02, 0.025, 0.035, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.08, 0.94, 1.0, 0.45)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(1.0, 0.16, 0.74, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xc8faff
+mod.widgets.HwDropDown.draw_text.color_hover = #xffffff
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.02, 0.025, 0.035, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.08, 0.94, 1.0, 0.45)
+mod.widgets.HwTextInput.draw_text.color = #xe6fbff
+
+// The switches: a black slot, a magenta cap with a cyan light.
+mod.widgets.HwSegmented.draw_bg.well = vec4(0.02, 0.025, 0.035, 1.0)
+mod.widgets.HwSegmented.draw_bg.rim = vec4(0.08, 0.94, 1.0, 0.40)
+mod.widgets.HwSegmented.draw_pill.cap = vec4(1.0, 0.12, 0.72, 0.30)
+mod.widgets.HwSegmented.draw_pill.glow = vec4(0.10, 0.95, 1.0, 1.0)
+mod.widgets.HwSegmented.draw_text.color = #x7f97ab
+mod.widgets.HwSegmented.draw_text_selected.color = #xffffff
+
+// Chamfered fields: the same cut as the plates, a magenta tick at the left.
+mod.widgets.HwDropDown.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let s = p - sz * 0.5
+    let q = abs(s) - (sz * 0.5 - vec2(0.5, 0.5))
+    let k = mix(2.5, 8.0, step(0.0, s.x * s.y))
+    let d = max(max(q.x, q.y), (q.x + q.y + k) * 0.7071)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    let top = 1.0 - smoothstep(0.0, 6.0, p.y) * 0.5
+    var col = self.well.xyz * top
+    let rim = 1.0 - smoothstep(0.3, 1.0, abs(d + 0.6))
+    col = mix(col, self.rim.xyz, rim * self.rim.w)
+    let x = sz.x - 13.0
+    let y = sz.y * 0.5
+    let a1 = vec2(x - 3.5, y - 1.8)
+    let b1 = vec2(x, y + 1.8)
+    let a2 = vec2(x + 3.5, y - 1.8)
+    let pa = p - a1
+    let ba = b1 - a1
+    let d1 = length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0))
+    let pb = p - a2
+    let bb = b1 - a2
+    let d2 = length(pb - bb * clamp(dot(pb, bb) / dot(bb, bb), 0.0, 1.0))
+    let ar = 1.0 - smoothstep(0.35, 0.35 + px * 1.5, min(d1, d2))
+    col = mix(col, self.arrow.xyz, ar * self.arrow.w)
+    return vec4(col * cov, cov * self.well.w)
+}
+mod.widgets.HwTextInput.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let s = p - sz * 0.5
+    let q = abs(s) - (sz * 0.5 - vec2(0.5, 0.5))
+    let k = mix(2.5, 9.0, step(0.0, s.x * s.y))
+    let d = max(max(q.x, q.y), (q.x + q.y + k) * 0.7071)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    let top = 1.0 - smoothstep(0.0, 7.0, p.y) * 0.5
+    var col = self.well.xyz * top
+    let rim = 1.0 - smoothstep(0.3, 1.0, abs(d + 0.6))
+    col = mix(col, self.rim.xyz, rim * self.rim.w)
+    return vec4(col * cov, cov * self.well.w)
+}
+mod.widgets.HwSegmented.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let s = p - sz * 0.5
+    let q = abs(s) - (sz * 0.5 - vec2(0.5, 0.5))
+    let k = mix(2.5, 9.0, step(0.0, s.x * s.y))
+    let d = max(max(q.x, q.y), (q.x + q.y + k) * 0.7071)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    let top = 1.0 - smoothstep(0.0, 7.0, p.y) * 0.5
+    var col = self.well.xyz * top
+    let rim = 1.0 - smoothstep(0.3, 1.0, abs(d + 0.6))
+    col = mix(col, self.rim.xyz, rim * self.rim.w)
+    return vec4(col * cov, cov * self.well.w)
+}
+mod.widgets.HwSegmented.draw_pill.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let s = p - sz * 0.5
+    let q = abs(s) - (sz * 0.5 - vec2(2.5, 2.5))
+    let k = mix(2.0, 7.0, step(0.0, s.x * s.y))
+    let d = max(max(q.x, q.y), (q.x + q.y + k) * 0.7071)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    let shade = mix(1.25, 0.75, self.pos.y)
+    let rim = 1.0 - smoothstep(0.3, 1.0, abs(d + 0.6))
+    var col = self.cap.xyz * shade * 0.8
+    col = mix(col, self.cap.xyz * 1.2, rim)
+    let dash = (1.0 - smoothstep(0.0, 1.2, abs(p.y - (sz.y - 5.0)))) * step(8.0, p.x) * step(p.x, sz.x - 8.0)
+    let a = cov * clamp(self.cap.w * 1.6 + rim * 0.6, 0.0, 1.0)
+    return vec4(col * a, a) * (1.0 - dash) + vec4(self.glow.xyz * dash, dash)
+}
+mod.widgets.HwMenuLayer.draw_bg.border_color = vec4(0.08, 0.94, 1.0, 0.5)
+
+mod.widgets.HwArtBlank.draw_bg.vinyl = vec4(0.03, 0.035, 0.045, 1.0)
+mod.widgets.HwArtBlank.draw_bg.label_ink = vec4(1.0, 0.12, 0.72, 1.0)
+
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.5)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(0.08, 0.94, 1.0, 0.35)
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(3.0, 0.52, 8.0, 3.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.10, 0.05, 0.14, 1.0)
+mod.widgets.HwEqGraph.draw_fader.glow_ink = vec4(1.0, 0.18, 0.66, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(0.0, 1.8, 11.0, 0.10)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(0.0, 0.12, 0.32, 0.0)
+mod.widgets.HwEqGraph.draw_grid.grid_ink = vec4(0.08, 0.94, 1.0, 0.8)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.20, 0.0, 0.35, 0.0)
+mod.widgets.HwEqGraph.light = 1.6
+true

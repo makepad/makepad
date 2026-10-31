@@ -1,0 +1,24 @@
+use mod.flow.*
+
+// Restored from the ComfyUI workflow
+// examples/comfyui/flux_dev_full_text_to_image.json (removed from Makepad in
+// 1d5770fd5): FLUX.1 dev, 1024 square, twenty steps.
+
+/** What to paint. */
+let prompt = Input{ type: @text  default: "a brass orrery on a velvet table, studio light, macro detail"  at: vec2(40, 120) }
+
+let image = Image{
+    prompt: prompt.text()
+    width: 1024  height: 1024  steps: 20
+    model: "flux1-dev"
+    at: vec2(360, 120)
+}
+
+/** The picture, into the library's IMAGE lane. */
+let published = Publish{ value: image.image()  namespace: "flows"  tags: ["flow", "image"]  at: vec2(680, 120) }
+
+Flow{
+    label: "Flux dev"
+    brief: "FLUX.1 dev at twenty steps for a detailed 1024-square picture."
+    prompt, image, published
+}

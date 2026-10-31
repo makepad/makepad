@@ -1,0 +1,17 @@
+use mod.flow.*
+
+/** Multiplex subject query such as `person:1` or `cat:2`. */
+let prompt = Input{ type: @text default: "person:1" }
+/** The image to segment. */
+let image = Input{ type: @image }
+let segment = Segment{ prompt: prompt.text() image: image.image() model: "sam3-1-multiplex" }
+/** Publish the predicted mask into the flow asset library. */
+let mask = Publish{ value: segment.mask() namespace: "flows" tags: ["flow", "segment", "mask"] }
+/** Publish the RGBA cutout into the flow asset library. */
+let cutout = Publish{ value: segment.cutout() namespace: "flows" tags: ["flow", "segment", "cutout"] }
+
+Flow{
+    label: "Segment image"
+    brief: "Segments prompted subjects and publishes both the soft mask and RGBA cutout."
+    prompt, image, segment, mask, cutout
+}

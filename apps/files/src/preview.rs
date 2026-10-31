@@ -28,21 +28,10 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::process::{Child, Command};
 
-/// Resolve a sibling binary of the running executable, the way wm resolves
-/// its clients.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn sibling_bin(bin: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let mut path = exe.parent()?.join(bin);
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-    path.exists().then_some(path)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn sibling_bin(_bin: &str) -> Option<PathBuf> {
-    None
+/// Resolve the app `id`'s binary beside the running executable
+/// (`makepad_wm_api::sibling_app`, the registry's `makepad-app-<id>`).
+pub fn sibling_bin(id: &str) -> Option<PathBuf> {
+    makepad_wm_api::sibling_app(id)
 }
 
 /// What came of a Quick Look request.

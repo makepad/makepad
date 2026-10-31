@@ -1,0 +1,163 @@
+// Brushed Aluminium — a Braun-era hi-fi: a satin brushed-aluminium front,
+// light aluminium key caps with dark printed glyphs, black anodised screen
+// surround, dark display glass for the lists, orange indicator light.
+//
+// A style is assignments only, over the base templates in `src/hw.rs`
+// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md). Save the file and
+// a pinned instance (`--style brushed`) restyles within half a second.
+use mod.prelude.widgets_internal.*
+
+// ---- palette: the lists, the spectrum, the bars ----
+mod.widgets.hw_palette.screen_bg = #x15171a
+mod.widgets.hw_palette.screen_text = #xe4e6e8
+mod.widgets.hw_palette.screen_muted = #x8b9098
+mod.widgets.hw_palette.accent = #xff8a2b
+
+// ---- the front ----
+mod.widgets.HwChassis.draw_bg.ground = #xc9cbcd
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.30, 0.31, 0.33, 1.0)
+mod.widgets.HwChassis.draw_bg.pattern = vec4(1.0, 1.0, 0.16, 1.0)
+mod.widgets.HwChassis.draw_bg.sheen = vec4(0.10, 0.28, 0.30, 0.35)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(1.0, 0.54, 0.17, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(1.0, 0.55)
+mod.widgets.Window.pass.clear_color = #xc9cbcd
+
+// Raised plates: the same metal, a touch brighter, a crisp edge.
+mod.widgets.HwPlate.draw_bg.ground = #xd3d5d7
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.24, 0.25, 0.27, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern = vec4(1.0, 1.0, 0.14, 1.0)
+mod.widgets.HwPlate.draw_bg.sheen = vec4(0.12, 0.22, 0.40, 0.30)
+mod.widgets.HwPlate.draw_bg.relief = vec4(1.6, 0.85, 2.0, 0.45)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.45, 8.0, 1.0, 0.45)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(1.0, 0.54, 0.17, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(1.1, 0.5)
+
+// Recessed panels: milled into the front, darker at the floor.
+mod.widgets.HwPanel.draw_bg.ground = #x9fa2a6
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.96, 0.97, 0.98, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.20, 0.21, 0.23, 1.0)
+mod.widgets.HwPanel.draw_bg.pattern = vec4(1.0, 1.0, 0.10, 1.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.70, 8.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(1.0, 0.54, 0.17, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.2, 0.5)
+
+// The screen's surround: black anodised, a deep bevel.
+mod.widgets.HwBezel.draw_bg.ground = #x1d1f22
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.62, 0.64, 0.67, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.pattern = vec4(1.0, 0.7, 0.10, 1.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.95, 12.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.spill = vec2(0.8, 0.4)
+
+// The glass over the picture: a faint reflection, a darker rim.
+// No dark rim or bulge over the picture: it reads clean and bright.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.07, 0.0, 0.0)
+
+// ---- keys: light aluminium caps, dark glyphs ----
+mod.widgets.HwKey.draw_bg.ground = #xdcdee0
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.22, 0.23, 0.25, 1.0)
+mod.widgets.HwKey.draw_bg.pattern = vec4(1.0, 0.8, 0.10, 1.0)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.10, 0.35, 0.30, 0.2)
+mod.widgets.HwKey.draw_bg.relief = vec4(2.2, 0.80, 2.5, 0.50)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.55, 6.0, 1.0, 0.55)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.2, 0.45)
+mod.widgets.HwKeyButton.draw_text.color = #x33363b
+mod.widgets.HwKeyButton.draw_text.color_hover = #x1a1c1f
+mod.widgets.HwKeyButton.draw_text.color_down = #x1a1c1f
+mod.widgets.HwKeyText.draw_text.color = #x33363b
+mod.widgets.HwKeyText.draw_text.color_hover = #x1a1c1f
+mod.widgets.HwKeyText.draw_text.color_down = #x1a1c1f
+
+// ---- lights: orange ----
+mod.widgets.HwDash.emissive = vec4(1.0, 0.50, 0.14, 8.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.52, 0.16, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x3a3c40
+mod.widgets.HwLed.emissive = vec4(1.0, 0.50, 0.14, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.52, 0.16, 1.0)
+
+// ---- knob: an aluminium skirt with fine knurling, a spun cap ----
+mod.widgets.HwKnobFace.draw_bg.ground = #xcfd1d4
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.18, 0.19, 0.21, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(3.0, 0.70, 60.0, 0.22)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.80, 0.81, 0.83, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(1.0, 0.45, 0.10, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(11.0, 1.30, 2.4, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.42, 0.43, 0.45, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(1.0, 0.52, 0.16, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.6, 9.0, 1.0, 0.6)
+mod.widgets.HwKnobFace.emissive = vec4(1.0, 0.50, 0.14, 0.6)
+
+// ---- meter: an orange LED ladder behind dark glass ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x17191b
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 16.0, 0.8, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(1.0, 0.55, 0.16, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.22, 0.12, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.12, 0.10, 0.09, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(1.0, 0.50, 0.14, 0.45)
+
+// ---- type printed on the front ----
+mod.widgets.HwCaption.draw_text.color = #x55595f
+mod.widgets.HwTitle.draw_text.color = #x2b2e33
+mod.widgets.HwText.draw_text.color = #x44484e
+mod.widgets.HwPanelTitle.draw_text.color = #x2b2e33
+mod.widgets.HwPanelText.draw_text.color = #x4a4e55
+mod.widgets.HwNavButton.draw_text.color = #x2f3237
+mod.widgets.HwDisplayText.draw_text.color = #xc9cdd3
+mod.widgets.HwDisplay.draw_bg.ground = #x1b1d20
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.62, 0.64, 0.67, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.95, 9.0, 0.0, 0.55)
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.22)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 1.0, 1.0, 0.35)
+
+// ---- transport: a tape deck's piano keys ----
+// Each key drops into its slot when pressed and stays down while its
+// function is on (play while playing, shuffle and repeat while on): the
+// top with its spun dimple moves down, the front face shortens, a dark gap
+// opens behind. The legend sits in a label window on the key's top.
+mod.widgets.HwTransportKey.travel = 6.0
+mod.widgets.HwTransportKey.latch = 1.0
+mod.widgets.HwTransportKey.press_secs = 0.07
+mod.widgets.HwTransportKey.draw_bg.spill = vec2(0.9, 0.45)
+mod.widgets.HwTransportKey.inset = 3.0
+mod.widgets.HwTransportKey.height = 70.0
+mod.widgets.HwTransportKey.draw_bg.mech = vec4(1.0, 0.74, 1.0, 12.0)
+mod.widgets.HwTransportKey.draw_bg.housing_ink = vec4(0.045, 0.045, 0.05, 1.0)
+mod.widgets.HwTransportKey.draw_bg.front_ink = vec4(0.66, 0.67, 0.69, 1.0)
+mod.widgets.HwTransportKey.draw_bg.window_ink = vec4(0.09, 0.09, 0.10, 1.0)
+mod.widgets.HwTransportKey.draw_bg.dimple = vec4(1.0, 3.2, 0.42, 0.16)
+mod.widgets.HwTransportKey.draw_bg.led = vec4(8.0, 8.0, 2.0, 0.0)
+mod.widgets.HwTransportLegend.align = Align{x: 0.5 y: 0.0}
+mod.widgets.HwTransportLegend.padding = Inset{top: 3.0}
+mod.widgets.HwTransportLegend.draw_text.text_style = theme.font_icons{font_size: 7.0}
+mod.widgets.HwTransportLegend.draw_text.color = #xd2d5d9
+mod.widgets.HwTransportLegend.draw_text.color_hover = #xffffff
+mod.widgets.HwTransportLegend.draw_text.color_down = #xffffff
+mod.widgets.HwPlayLegend.align = Align{x: 0.5 y: 0.0}
+mod.widgets.HwPlayLegend.padding = Inset{top: 3.0}
+mod.widgets.HwPlayLegend.draw_text.text_style = theme.font_icons{font_size: 7.0}
+mod.widgets.HwPlayLegend.draw_text.color = #xd2d5d9
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x0a0a0c
+mod.widgets.hw_palette.map1 = #x5a5e66
+mod.widgets.hw_palette.map2 = #xff8a2b
+mod.widgets.hw_palette.map3 = #xfff0e0
+mod.widgets.hw_palette.map_strength = 0.5
+mod.widgets.hw_palette.map_default = 1.0
+// The transport keys keep their legends in the label windows.
+mod.widgets.hw_palette.legend_transport = 0.0
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(0.0, 0.60, 16.0, 4.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.84, 0.85, 0.87, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.04, 0.045, 0.05, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(0.0, 1.6, 6.0, 0.08)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(0.0, 0.08, 0.26, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.18, 0.0, 0.3, 0.0)
+true

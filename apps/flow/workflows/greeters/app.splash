@@ -1,0 +1,13 @@
+use mod.app.*
+
+App{
+    id: "flow.greeters"
+    name: "Two greeters"
+    entry: "flow.splash"
+    surface: "ui.splash"
+    modules: [
+        {path: "components/greeter.splash" as: "Greeter" hash: "462eda06e03dc5f6a8d4c556d233fec6f7718a4bd2c35086cb2271df9c94c856"}
+        {path: "components/exclaim.splash" as: "Exclaim" hash: "233cff7d60dba8fbe9327263fc3590fba3ff50ea2f17ef2b001db2baae273a56"}
+    ]
+    defaults: {first: "Rik"}
+}

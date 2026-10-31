@@ -259,7 +259,7 @@ mod tests {
     fn build(cx: &mut Cx, dsl: &str) -> WidgetRef {
         cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            let value = vm.bx.heap.value(stories, LiveId::from_str(dsl).into(), NoTrap);
+            let value = vm.value(stories, LiveId::from_str(dsl));
             assert!(value.as_object().is_some(), "no template {dsl}");
             WidgetRef::script_from_value(vm, value)
         })

@@ -170,6 +170,51 @@ script_mod! {
             cell_note := Label{text: "nothing opened yet"}
         }
     }
+
+    mod.stories.TableDiagonalHeaders = StoryPage{
+        StoryNote{text: "A column of two-digit counts needs about thirty points. The name over it does not fit in that, and a flat heading row has only two answers: widen the column to its name, which turns a sheet of counts into white space, or cut the name short. With `header_angle` set, a heading whose name does not fit its column is written on the diagonal instead, standing on the middle of its own column. A heading that fits stays flat — so an angle on a table of wide columns changes nothing at all."}
+
+        StoryHeading{text: "Narrow counts under long names"}
+        StoryNote{text: "Six counts in 34-point columns beside a wide `Site` column. The six names cannot lie flat in 34 points, so they turn and rise to the right, the default lean; `Site` fits its own column and stays flat on the bottom line beside them. The band is as tall as the longest turned name needs. Pressing a heading still sorts the column the name stands on."}
+        StoryRow{
+            subject := TableBordered{
+                width: Fit height: Fit
+                sortable: true
+                cell_pad: 6.
+                header_angle: 45.
+                columns: ["Site" "Readings taken|34|end" "Missed readings|34|end" "Alarms raised|34|end" "Alarms cleared|34|end" "Visits by staff|34|end" "Days without a reading|34|end"]
+                rows: [
+                    "North gate|12|2|4|4|3|0"
+                    "South gate|9|5|1|1|2|4"
+                    "River bend|11|1|7|6|5|1"
+                    "Reservoir|14|0|2|2|1|0"
+                    "Old quarry|6|8|3|0|0|6"
+                ]
+            }
+        }
+        StoryRow{
+            angle_note := Label{text: "nothing pressed yet"}
+        }
+
+        StoryHeading{text: "Falling"}
+        StoryNote{text: "`header_lean: Fall` ends each turned name on its own column, having begun up and to the left, so the names hang back over the wide column instead of past the last one. Pick it when the room is on that side."}
+        StoryRow{
+            falling := TableBordered{
+                width: Fit height: Fit
+                cell_pad: 6.
+                header_angle: 45.
+                header_lean: DiagonalLean.Fall
+                columns: ["Site" "Readings taken|34|end" "Missed readings|34|end" "Alarms raised|34|end" "Alarms cleared|34|end" "Visits by staff|34|end" "Days without a reading|34|end"]
+                rows: [
+                    "North gate|12|2|4|4|3|0"
+                    "South gate|9|5|1|1|2|4"
+                    "River bend|11|1|7|6|5|1"
+                    "Reservoir|14|0|2|2|1|0"
+                    "Old quarry|6|8|3|0|0|6"
+                ]
+            }
+        }
+    }
 }
 
 /// The rows in the order they arrived in. The sort demo works from this and
@@ -232,6 +277,54 @@ fn table_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     }
 }
 
+/// The diagonal page's own listener: which column a press on a turned
+/// heading asked for, written under the table. The point of it is that the
+/// answer is the column the name stands on and not one its ink crosses.
+fn diagonal_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let subject = root.table(cx, ids!(subject));
+    if let Some((col, ascending)) = subject.sort_changed(actions) {
+        let lines = match ascending {
+            Some(up) => ordered_counts(col, up),
+            None => COUNTS.iter().map(|line| line.to_string()).collect(),
+        };
+        subject.set_row_lines(cx, &lines);
+        let note = match ascending {
+            Some(true) => format!("asked for column {col} up"),
+            Some(false) => format!("asked for column {col} down"),
+            None => "asked for the order it arrived in".to_string(),
+        };
+        root.label(cx, ids!(angle_note)).set_text(cx, &note);
+    }
+}
+
+/// The counts in the order they arrived in, for the page above.
+const COUNTS: &[&str] = &[
+    "North gate|12|2|4|4|3|0",
+    "South gate|9|5|1|1|2|4",
+    "River bend|11|1|7|6|5|1",
+    "Reservoir|14|0|2|2|1|0",
+    "Old quarry|6|8|3|0|0|6",
+];
+
+/// The same ordering the overview page does, over these rows: numbers as
+/// numbers, everything else as words.
+fn ordered_counts(col: usize, ascending: bool) -> Vec<String> {
+    let mut lines: Vec<String> = COUNTS.iter().map(|line| line.to_string()).collect();
+    lines.sort_by(|left, right| {
+        let (left, right) = (cell_of(left, col), cell_of(right, col));
+        match (left.parse::<f64>(), right.parse::<f64>()) {
+            (Ok(left), Ok(right)) => {
+                left.partial_cmp(&right).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            _ => left.to_lowercase().cmp(&right.to_lowercase()),
+        }
+    });
+    if !ascending {
+        lines.reverse();
+    }
+    lines
+}
+
 pub const STORIES: &[Story] = &[Story {
     key: "collections/table/overview",
     category: "Collections",
@@ -287,4 +380,38 @@ No virtualisation — every row is held and the ones in view are drawn, which is
         Control { label: "Sortable", target: "subject", kind: ControlKind::Bool { prop: "sortable", default: false } },
     ],
     on_actions: Some(table_actions),
+}, Story {
+    key: "collections/table/diagonal-headings",
+    category: "Collections",
+    component: "Table",
+    also: &["DataGrid"],
+    name: "Diagonal headings",
+    dsl: "TableDiagonalHeaders",
+    added: "2026-09-21",
+    tags: &["new", "data", "columns", "header", "diagonal", "angle"],
+    doc: "# Diagonal headings
+
+`header_angle` lets a table write a heading on the diagonal when — and only when — its name does not fit its column. It is nought by default, which turns nothing.
+
+## Only where it earns its place
+
+A column of two-digit counts needs about thirty points; the name over it needs four or five times that. Flat, the table has to widen the column to the name, which makes a sheet of counts mostly white space, or cut the name short. Turned, the name stands on the middle of its own column and runs over its neighbours, and the column keeps the width of its values.
+
+A heading whose name fits its column gains nothing from being turned, so it is not: the fit is measured, name plus the cell padding against the column's width, column by column, and a heading that fits stays flat on the bottom line of the band. A table of wide columns with an angle set is exactly the table without one. The band is as tall as the longest turned name needs, and no taller than the stated `header_height` when nothing turns.
+
+## Which way it leans
+
+`header_lean: Rise`, the default, starts each turned name on its column and takes it up to the right; the table keeps the room beyond its last column that the ink needs. `header_lean: Fall` ends each name on its column, so the ink hangs back over the columns to the left — over a wide first column, as on this page, it needs no extra room at all.
+
+## What still works
+
+Sorting, the hover wash and the press belong to the column, not to the ink: the column a name names is the upright strip under it, and that is what a press lands on. The sort mark rides the end of a turned name, and sorting never tips a heading from flat to turned. `DataGrid` takes the same two properties and decides the same way, per column, again whenever a column is resized.",
+    subject: "subject",
+    feature: None,
+    controls: &[
+        Control { label: "Angle", target: "subject", kind: ControlKind::Number { prop: "header_angle", min: 0., max: 80., step: 5., default: 45. } },
+        Control { label: "Striped", target: "subject", kind: ControlKind::Bool { prop: "striped", default: false } },
+        Control { label: "Column lines", target: "subject", kind: ControlKind::Bool { prop: "column_lines", default: true } },
+    ],
+    on_actions: Some(diagonal_actions),
 }];

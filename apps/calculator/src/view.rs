@@ -934,7 +934,14 @@ impl CalculatorView {
         // Each display fits on its own allocation: in landscape the portrait
         // `result` is hidden and has none, which must not skip `short_result`.
         self.fit_short_result(cx, metrics, &text);
-        let width = self.widget(cx, ids!(result)).area().rect(cx).size.x;
+        let area = self.widget(cx, ids!(result)).area();
+        // Web fonts load asynchronously: until glyphs have been drawn the
+        // label can have an instance area with no instances. Fit on a later
+        // redraw, once the resource loader has supplied the font.
+        if !area.is_valid(cx) {
+            return;
+        }
+        let width = area.rect(cx).size.x;
         if width < 8.0 {
             return;
         }
@@ -1086,10 +1093,12 @@ impl CalculatorView {
         if n == 0 {
             return;
         }
+        // Only rows the list holds can have been clicked: `item` would build
+        // (or reload from the pool) a row for every hidden entry on each event.
         let mut hit = None;
-        if let Some(mut list) = self.portal_list(cx, list_id).borrow_mut() {
+        if let Some(list) = self.portal_list(cx, list_id).borrow() {
             for index in 0..n {
-                let item = list.item(cx, index, live_id!(Item));
+                let Some((_, item)) = list.get_item(index) else { continue };
                 if item.button(cx, ids!(recall)).clicked(actions) {
                     hit = self.doc.history.get(index).map(|e| e.id);
                     break;
@@ -1740,6 +1749,7 @@ mod tests {
             call_id: "test".into(),
             tool: "eval".into(),
             args: r#"{"expression":"sin(pi/2)"}"#.into(),
+            caller: None,
         };
         let result = crate::ai::answer(a.doc(), &call);
         assert_eq!(result.outcome, ToolOutcome::Ok);
@@ -1808,4 +1818,42 @@ mod tests {
         assert!(view.save_id.is_none());
     }
 
+    /// The generic UI checks over the main view, headless at a phone, a
+    /// split-half and a desktop pane. The keypad's own text is small by
+    /// design, so the floor for text is 0.5% of the pane height.
+    #[test]
+    fn main_view_holds_to_the_ui_checks() {
+        use makepad_widgets::ui_checks::{draw_and_check, UiCheckOptions};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let root = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::script_mod(vm);
+            let value = makepad_widgets::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                CalculatorView{}
+            });
+            assert!(vm.take_errors().is_empty());
+            WidgetRef::script_from_value(vm, value)
+        });
+        {
+            let storage = cx.storage("");
+            let mut view = root.borrow_mut::<CalculatorView>().unwrap();
+            view.set_storage(storage);
+            view.ensure_started(&mut cx);
+            let id = view.load_id.unwrap();
+            let doc = seed::initial().to_bytes();
+            view.on_storage(&mut cx, &[response(id, StorageOp::Get, Ok(StorageResult::Value(Some(doc))))]);
+        }
+        let mut findings = Vec::new();
+        for size in [dvec2(402.0, 780.0), dvec2(960.0, 1080.0), dvec2(1920.0, 1080.0)] {
+            let mut opts = UiCheckOptions::for_pane(size);
+            opts.tiny = 0.005;
+            for issue in draw_and_check(&mut cx, &root, size, &opts) {
+                findings.push(format!("{}x{}: {issue}", size.x, size.y));
+            }
+        }
+        assert!(findings.is_empty(), "{}", findings.join("\n"));
+    }
 }

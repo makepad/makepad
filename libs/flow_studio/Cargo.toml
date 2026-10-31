@@ -1,0 +1,23 @@
+# Flow's generation studio: the job API every app that generates calls (run a
+# preset, follow its job, pick from a Choose gate, save a preset) and the page
+# that shows it (the preset library, the run canvas, the inspector). Results
+# go to the host's flow ResultStore: a results folder by default, an app's
+# library when the app installs one (`host::install`).
+
+[package]
+name = "makepad-flow-studio"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Flow's generation studio: the preset job API and its page over the AI Hub"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-flow = { path = "../flow" }
+makepad-flowgraph = { path = "../flowgraph" }
+makepad-flow-ui = { path = "../flow_ui" }
+makepad-live-frame = { path = "../live_frame" }
+makepad-look = { path = "../look" }
+makepad-gen = { path = "../gen" }
+makepad-ai-hub = { path = "../ai/hub", default-features = false }
+makepad-strict-json = { path = "../strict_json" }

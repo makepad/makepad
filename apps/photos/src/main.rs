@@ -9,7 +9,7 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_photos::{ai, view, PhotosView};
+use makepad_app_photos::{ai, view, PhotosView};
 use makepad_widgets::*;
 
 app_main!(App);
@@ -92,6 +92,13 @@ impl MatchEvent for App {
             }));
         }
         self.late_replies = Some(rx);
+        // A picture to show from the start: the path the app was opened on
+        // (the WM's `Open`, or a desk's `makepad-app-photos <file>`).
+        if let Some(path) = std::env::args().skip(1).find(|a| !a.starts_with('-') && std::path::Path::new(a).is_file()) {
+            if let Some(mut view) = self.ui.widget(cx, ids!(photos)).borrow_mut::<PhotosView>() {
+                view.show_path(cx, &path);
+            }
+        }
     }
 
     fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
@@ -99,13 +106,14 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
         // Retint the stock widgets from the WM palette so the wall's chrome
         // matches the desk it sits in.
-        makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
-        makepad_aichat::script_mod(vm);
+        makepad_app_aichat::script_mod(vm);
         makepad_image_tiles::script_mod(vm);
         view::script_mod(vm);
         self::script_mod(vm)
@@ -114,9 +122,19 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // The window manager asked politely (SUPER+W): go now.
         if let Event::Custom(json) = event {
-            if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
-                cx.quit();
-                return;
+            match makepad_wm_api::WmEvent::parse(json) {
+                Some(makepad_wm_api::WmEvent::CloseRequested) => {
+                    cx.quit();
+                    return;
+                }
+                // The WM brought the running wall up on a picture (Camera's
+                // last shot): show it.
+                Some(makepad_wm_api::WmEvent::Open { path }) => {
+                    if let Some(mut view) = self.ui.widget(cx, ids!(photos)).borrow_mut::<PhotosView>() {
+                        view.show_path(cx, &path);
+                    }
+                }
+                _ => {}
             }
         }
         self.drain_ai_port(cx, event);

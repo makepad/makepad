@@ -20,9 +20,10 @@
 use makepad_draw::*;
 use makepad_render::{
     preview_scene_state, set_pass_camera, DrawSceneAlpha, DrawSceneCube, DrawSceneScreen,
-    DrawSceneSky, DrawSceneTexture, DrawSceneTerrain, PreviewLook, PreviewStage, Renderer,
+    DrawSceneSky, DrawSceneTerrain, PreviewLook, PreviewStage, Renderer,
     SceneDraws, ScreenInstance,
 };
+use makepad_render_graph::DrawSceneTexture;
 use makepad_widgets::*;
 
 app_main!(App);
@@ -50,6 +51,8 @@ script_mod! {
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         makepad_render::script_mod(vm);
         App::from_script_mod(vm, self::script_mod)

@@ -9,6 +9,7 @@
 pub use makepad_widgets;
 
 pub mod ai;
+pub mod camera_roll;
 pub mod library;
 pub mod module;
 pub mod view;
