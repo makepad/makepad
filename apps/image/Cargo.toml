@@ -1,32 +1,33 @@
 # image — a dumb picture viewer, part of the Makepad app family (terminal,
 # wm, files, task, sheets, route, mixer...).
 #
-# Opens one image fit-to-window, centered on a dark makepad_wm_theme background.
+# Opens one image fit-to-window, centered on a system theme background.
 # Left/Right walks the sorted sibling images in the same folder, +/-/wheel
 # zoom around the cursor, 0 fits, 1 shows 100%, drag pans when zoomed,
 # Escape/Q/Space quits. `--preview <path>` sizes the window as a popup.
 
 [package]
-name = "makepad-image"
+name = "makepad-app-image"
 version = "0.1.0"
 edition = "2021"
-default-run = "image"
+license = "MIT OR Apache-2.0"
+default-run = "makepad-app-image"
 
 [lib]
-name = "makepad_image"
+name = "makepad_app_image"
 path = "src/lib.rs"
 
 [[bin]]
-name = "image"
+name = "makepad-app-image"
 path = "src/main.rs"
 
 [features]
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-wm-api = { path = "../../libs/wm_api" }

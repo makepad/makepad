@@ -97,7 +97,7 @@ script_mod! {
         // The title on the card's 16 pt edge, the section caption on the
         // rows' text inset. The insets live on wrapping Views: a Label
         // applies its own padding twice.
-        scroll := ScrollYView{
+        folder_scroll := ScrollYView{
             width: Fill height: Fill flow: Down
             Plain{height: 36 padding: Inset{left: 16} align: Align{y: 0.5}
                 title := Ink{width: Fill text: "Folders" draw_text.text_style: theme.font_bold{font_size: 21}}

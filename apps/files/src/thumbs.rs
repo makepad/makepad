@@ -253,21 +253,27 @@ impl ThumbSource for NativeThumbSource<'_> {
 struct DemoThumbSource;
 
 impl DemoThumbSource {
-    const IMAGES: [&'static [u8]; 8] = [
-        include_bytes!("../demos/rubber-duck-illustration.png"),
-        include_bytes!("../demos/amusement-ride.jpg"),
-        include_bytes!("../demos/royal-esplanade-panorama.jpg"),
-        include_bytes!(concat!(env!("OUT_DIR"), "/aurora-vignette.png")),
-        include_bytes!(concat!(env!("OUT_DIR"), "/canyon-vignette.png")),
-        include_bytes!(concat!(env!("OUT_DIR"), "/lagoon-vignette.png")),
-        include_bytes!(concat!(env!("OUT_DIR"), "/meadow-vignette.png")),
-        include_bytes!(concat!(env!("OUT_DIR"), "/twilight-vignette.png")),
-    ];
-    const VIDEO_STILL: &'static [u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cinema-still.png"));
+    fn images() -> [&'static [u8]; 8] {
+        let [aurora, canyon, lagoon, meadow, twilight] = crate::vignettes::vignettes();
+        [
+            include_bytes!("../demos/rubber-duck-illustration.png"),
+            include_bytes!("../demos/amusement-ride.jpg"),
+            include_bytes!("../demos/royal-esplanade-panorama.jpg"),
+            aurora,
+            canyon,
+            lagoon,
+            meadow,
+            twilight,
+        ]
+    }
+
+    fn video_still() -> &'static [u8] {
+        crate::vignettes::video_still()
+    }
 
     fn bytes(path: &Path) -> &'static [u8] {
         if crate::model::is_playable_video(path) {
-            return Self::VIDEO_STILL;
+            return Self::video_still();
         }
         let hash = path
             .as_os_str()
@@ -276,7 +282,8 @@ impl DemoThumbSource {
             .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
                 (hash ^ byte as u64).wrapping_mul(0x1000_0000_01b3)
             });
-        Self::IMAGES[hash as usize % Self::IMAGES.len()]
+        let images = Self::images();
+        images[hash as usize % images.len()]
     }
 }
 
@@ -496,22 +503,22 @@ mod tests {
     fn demo_source_pool_is_distinct_decodable_and_uses_one_video_still() {
         let mut seen = std::collections::HashSet::new();
         let mut decoded = std::collections::HashSet::new();
-        assert_eq!(DemoThumbSource::IMAGES.len() + 1, 9);
-        for (slot, bytes) in DemoThumbSource::IMAGES.iter().copied().enumerate() {
+        assert_eq!(DemoThumbSource::images().len() + 1, 9);
+        for (slot, bytes) in DemoThumbSource::images().iter().copied().enumerate() {
             assert!(seen.insert(bytes), "demo picture slots contain duplicate bytes at slot {slot}");
             let image = decode_image_from_data(bytes).unwrap_or_else(|_| panic!("demo picture slot {slot} did not decode"));
             assert!(decoded.insert(image.data), "demo picture slots decode to duplicate pixels at slot {slot}");
         }
-        assert!(seen.insert(DemoThumbSource::VIDEO_STILL), "the designated video still duplicates a picture slot");
-        let video = decode_image_from_data(DemoThumbSource::VIDEO_STILL).expect("the designated video still did not decode");
+        assert!(seen.insert(DemoThumbSource::video_still()), "the designated video still duplicates a picture slot");
+        let video = decode_image_from_data(DemoThumbSource::video_still()).expect("the designated video still did not decode");
         assert!(decoded.insert(video.data), "the designated video still decodes to duplicate picture pixels");
 
         for path in [Path::new("/Demo/Videos/clip-0001.mp4"), Path::new("/Demo/Videos/camera-0003.mkv")] {
-            assert_eq!(DemoThumbSource::bytes(path), DemoThumbSource::VIDEO_STILL);
+            assert_eq!(DemoThumbSource::bytes(path), DemoThumbSource::video_still());
             assert!(DemoThumbSource.decode(path).is_some());
         }
-        let total_bytes = DemoThumbSource::IMAGES.iter().map(|bytes| bytes.len()).sum::<usize>()
-            + DemoThumbSource::VIDEO_STILL.len();
+        let total_bytes = DemoThumbSource::images().iter().map(|bytes| bytes.len()).sum::<usize>()
+            + DemoThumbSource::video_still().len();
         assert!(total_bytes < 1_500_000, "embedded demo picture pool is {total_bytes} bytes");
     }
 }

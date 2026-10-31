@@ -1,72 +1,179 @@
-//! The weather model: the selectable cities, the Open-Meteo forecast shape
-//! (current conditions, 24 hourly steps, ten daily rows, solar events),
-//! WMO weather-code wording, the sky's inputs (condition class, solar phase,
-//! cloud cover, precipitation intensity), the ten-day range domain and its
-//! temperature palette, and the fetch state machine (loading, failed,
-//! stale-but-kept) that both faces render from.
+//! The weather model: the city catalogue (every city the app knows, with
+//! the position, wall clock and climate its sample forecast is generated
+//! from), the forecast shape (current conditions, 24 hourly steps, ten
+//! daily rows, solar events), WMO weather-code wording, the sky's inputs
+//! (condition class, solar phase, cloud cover, precipitation intensity),
+//! and the ten-day range domain and its temperature palette that both
+//! faces render from.
 //!
-//! Timestamps are Open-Meteo's ISO strings in the CITY'S zone (`timezone=
-//! auto`): every stamp is already the local wall time at that instant, DST
-//! included, so the labels read straight off the string and no offset is
-//! ever applied twice. Arrays are matched by index against `time` and
-//! tolerate nulls and unequal lengths.
+//! The app is offline: the forecast is sample data generated on the
+//! device (`sample.rs`), never fetched. Timestamps are ISO strings in the
+//! CITY'S wall time: every stamp is already the local time at that
+//! instant, daylight saving included, so the labels read straight off the
+//! string and no offset is ever applied twice. Arrays are matched by index
+//! against `time` and tolerate gaps and unequal lengths.
+use crate::sample::sample_forecast;
 use makepad_widgets::*;
-use makepad_widgets::makepad_micro_serde::*;
-use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+/// A city the app knows: its place, its wall clock and the climate its
+/// sample forecast is drawn from. Every city comes from the catalogue
+/// below, so the persisted list only needs names (`serialize_cities`).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct City {
     pub name: &'static str,
     pub country: &'static str,
     pub lat: f64,
     pub lon: f64,
+    /// Standard time's offset from UTC, in minutes.
+    pub utc_offset_min: i32,
+    pub dst: Dst,
+    pub climate: Climate,
 }
 
-pub const CITIES: [City; 4] = [
-    City { name: "Amsterdam", country: "Netherlands", lat: 52.37, lon: 4.90 },
-    City { name: "London", country: "United Kingdom", lat: 51.51, lon: -0.13 },
-    City { name: "New York", country: "United States", lat: 40.71, lon: -74.01 },
-    City { name: "Tokyo", country: "Japan", lat: 35.68, lon: 139.65 },
+/// When a city's clocks go forward an hour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dst {
+    None,
+    /// The last Sunday of March to the last Sunday of October.
+    Eu,
+    /// The second Sunday of March to the first Sunday of November.
+    Us,
+    /// The southern summer: the first Sunday of October to the first of April.
+    South,
+}
+
+/// The few numbers a city's sample weather is drawn from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Climate {
+    /// Annual mean temperature, °C.
+    pub mean: f64,
+    /// Half the gap between the warmest and the coldest month, °C.
+    pub swing: f64,
+    /// 0 = desert dry, 1 = rain most days.
+    pub wet: f64,
+    /// Typical wind speed, km/h.
+    pub wind: f64,
+}
+
+const fn city(name: &'static str, country: &'static str, lat: f64, lon: f64, utc_offset_min: i32, dst: Dst, mean: f64, swing: f64, wet: f64, wind: f64) -> City {
+    City { name, country, lat, lon, utc_offset_min, dst, climate: Climate { mean, swing, wet, wind } }
+}
+
+/// Every city the Locations search can find; the first four are the list
+/// a fresh install starts from.
+const CATALOGUE: &[City] = &[
+    // name, country, lat, lon, standard UTC offset (min), DST rule,
+    // annual mean °C, seasonal swing °C, wetness 0..1, typical wind km/h.
+    city("Amsterdam", "Netherlands", 52.37, 4.90, 60, Dst::Eu, 10.5, 7.5, 0.65, 18.0),
+    city("London", "United Kingdom", 51.51, -0.13, 0, Dst::Eu, 11.5, 7.0, 0.55, 15.0),
+    city("New York", "United States", 40.71, -74.01, -300, Dst::Us, 13.0, 12.0, 0.5, 16.0),
+    city("Tokyo", "Japan", 35.68, 139.65, 540, Dst::None, 16.0, 10.5, 0.55, 12.0),
+    city("Paris", "France", 48.86, 2.35, 60, Dst::Eu, 12.5, 8.0, 0.45, 13.0),
+    city("Berlin", "Germany", 52.52, 13.40, 60, Dst::Eu, 10.0, 9.5, 0.45, 14.0),
+    city("Zurich", "Switzerland", 47.37, 8.54, 60, Dst::Eu, 9.5, 9.0, 0.6, 9.0),
+    city("Madrid", "Spain", 40.42, -3.70, 60, Dst::Eu, 15.0, 10.5, 0.25, 11.0),
+    city("Lisbon", "Portugal", 38.72, -9.14, 0, Dst::Eu, 17.5, 6.0, 0.35, 15.0),
+    city("Rome", "Italy", 41.90, 12.50, 60, Dst::Eu, 16.0, 8.5, 0.35, 10.0),
+    city("Athens", "Greece", 37.98, 23.73, 120, Dst::Eu, 18.5, 9.5, 0.2, 14.0),
+    city("Edinburgh", "United Kingdom", 55.95, -3.19, 0, Dst::Eu, 9.5, 5.5, 0.6, 20.0),
+    city("Oslo", "Norway", 59.91, 10.75, 60, Dst::Eu, 6.5, 10.5, 0.5, 11.0),
+    city("Helsinki", "Finland", 60.17, 24.94, 120, Dst::Eu, 6.5, 11.5, 0.5, 16.0),
+    city("Reykjavik", "Iceland", 64.15, -21.94, 0, Dst::None, 5.0, 5.5, 0.7, 25.0),
+    city("Istanbul", "Türkiye", 41.01, 28.98, 180, Dst::None, 15.0, 9.5, 0.45, 17.0),
+    city("Cairo", "Egypt", 30.04, 31.24, 120, Dst::None, 22.5, 7.5, 0.02, 13.0),
+    city("Nairobi", "Kenya", -1.29, 36.82, 180, Dst::None, 18.5, 1.5, 0.45, 12.0),
+    city("Cape Town", "South Africa", -33.92, 18.42, 120, Dst::None, 17.0, 4.5, 0.35, 22.0),
+    city("Dubai", "United Arab Emirates", 25.20, 55.27, 240, Dst::None, 28.0, 7.5, 0.03, 14.0),
+    city("Mumbai", "India", 19.08, 72.88, 330, Dst::None, 27.5, 2.5, 0.5, 12.0),
+    city("Singapore", "Singapore", 1.35, 103.82, 480, Dst::None, 27.5, 0.8, 0.8, 9.0),
+    city("Hong Kong", "China", 22.32, 114.17, 480, Dst::None, 23.5, 6.0, 0.6, 14.0),
+    city("Beijing", "China", 39.90, 116.40, 480, Dst::None, 13.0, 15.5, 0.25, 11.0),
+    city("Seoul", "South Korea", 37.57, 126.98, 540, Dst::None, 12.5, 14.0, 0.45, 10.0),
+    city("Sydney", "Australia", -33.87, 151.21, 600, Dst::South, 18.5, 5.0, 0.5, 16.0),
+    city("Melbourne", "Australia", -37.81, 144.96, 600, Dst::South, 15.5, 5.5, 0.5, 18.0),
+    city("Auckland", "New Zealand", -36.85, 174.76, 720, Dst::South, 15.5, 4.5, 0.6, 20.0),
+    city("Anchorage", "United States", 61.22, -149.90, -540, Dst::Us, 3.0, 11.5, 0.45, 12.0),
+    city("Vancouver", "Canada", 49.28, -123.12, -480, Dst::Us, 11.0, 7.0, 0.7, 12.0),
+    city("San Francisco", "United States", 37.77, -122.42, -480, Dst::Us, 14.5, 3.0, 0.3, 18.0),
+    city("Los Angeles", "United States", 34.05, -118.24, -480, Dst::Us, 18.5, 4.5, 0.1, 10.0),
+    city("Chicago", "United States", 41.88, -87.63, -360, Dst::Us, 10.5, 14.5, 0.5, 18.0),
+    city("Toronto", "Canada", 43.65, -79.38, -300, Dst::Us, 9.0, 13.5, 0.5, 16.0),
+    city("Mexico City", "Mexico", 19.43, -99.13, -360, Dst::None, 17.0, 3.0, 0.4, 9.0),
+    city("São Paulo", "Brazil", -23.55, -46.63, -180, Dst::None, 20.5, 3.5, 0.6, 10.0),
+    city("Buenos Aires", "Argentina", -34.60, -58.38, -180, Dst::None, 18.0, 6.0, 0.45, 15.0),
 ];
 
+pub fn city_catalogue() -> &'static [City] {
+    CATALOGUE
+}
+
+/// The list a fresh install (or a wiped one) starts from.
+pub fn default_cities() -> Vec<City> {
+    CATALOGUE[..4].to_vec()
+}
+
+/// The Locations search: catalogue cities whose name (or, failing that,
+/// country) starts a word with the query, names first.
+pub fn search_cities(query: &str) -> Vec<City> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let starts_a_word = |text: &str| text.to_lowercase().split([' ', '-']).any(|w| w.starts_with(&q)) || text.to_lowercase().starts_with(&q);
+    let mut out: Vec<City> = CATALOGUE.iter().filter(|c| starts_a_word(c.name)).copied().collect();
+    out.extend(CATALOGUE.iter().filter(|c| !starts_a_word(c.name) && starts_a_word(c.country)).copied());
+    out.truncate(MAX_CITIES);
+    out
+}
+
 pub const DEFAULT_CITY: usize = 0;
-pub const REFRESH_EVERY: Duration = Duration::from_secs(15 * 60);
-/// After this the tile shows when the data was last good instead of H/L.
-pub const STALE_AFTER: Duration = Duration::from_secs(30 * 60);
-/// A ten-day forecast with 240 hourly rows is ~60 KB; anything past this
-/// is not one.
-pub const MAX_BODY_BYTES: usize = 512 * 1024;
-pub const ATTRIBUTION: &str = "Weather data by Open-Meteo.com (CC BY 4.0)";
+/// A generous personal list, not a hard platform limit: the sheet's row
+/// slots are declared up to this count (view.rs).
+pub const MAX_CITIES: usize = 12;
+/// Said wherever the forecast's source would be credited: none of it is
+/// real weather.
+pub const SAMPLE_NOTE: &str = "Sample forecast, generated on this device. Not real weather data.";
 /// How many hourly cells the strip shows, "Now" first.
 pub const HOURLY_CELLS: usize = 24;
 pub const DAILY_ROWS: usize = 10;
 
-pub fn forecast_url(city: &City) -> String {
-    format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={:.2}&longitude={:.2}\
-         &current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,\
-         weather_code,cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m\
-         &hourly=temperature_2m,weather_code,is_day,precipitation_probability,precipitation,\
-         rain,snowfall,cloud_cover,uv_index\
-         &daily=temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset,uv_index_max,\
-         precipitation_probability_max,precipitation_sum\
-         &timezone=auto&forecast_days=10",
-        city.lat, city.lon
-    )
+/// `name\tcountry` per line: the catalogue holds everything else.
+pub fn serialize_cities(cities: &[City]) -> Vec<u8> {
+    let mut out = String::new();
+    for city in cities {
+        out.push_str(city.name);
+        out.push('\t');
+        out.push_str(city.country);
+        out.push('\n');
+    }
+    out.into_bytes()
 }
 
-#[derive(Clone, Debug, Default, DeJson)]
+/// The persisted list, each line looked up in the catalogue; a line that
+/// names no catalogue city is dropped.
+pub fn parse_cities(bytes: &[u8]) -> Vec<City> {
+    let Ok(text) = std::str::from_utf8(bytes) else { return Vec::new() };
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let (name, country) = (parts.next()?, parts.next()?);
+            CATALOGUE.iter().find(|c| c.name == name && c.country == country).copied()
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct Forecast {
-    pub timezone: Option<String>,
     pub utc_offset_seconds: Option<f64>,
     pub current: Current,
     pub hourly: Hourly,
     pub daily: Daily,
 }
 
-#[derive(Clone, Debug, Default, DeJson)]
+#[derive(Clone, Debug, Default)]
 pub struct Current {
     pub time: Option<String>,
-    pub interval: Option<f64>,
     pub temperature_2m: Option<f64>,
     pub relative_humidity_2m: Option<f64>,
     pub apparent_temperature: Option<f64>,
@@ -79,7 +186,7 @@ pub struct Current {
     pub wind_gusts_10m: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, DeJson)]
+#[derive(Clone, Debug, Default)]
 pub struct Hourly {
     pub time: Vec<String>,
     pub temperature_2m: Vec<Option<f64>>,
@@ -93,7 +200,7 @@ pub struct Hourly {
     pub uv_index: Vec<Option<f64>>,
 }
 
-#[derive(Clone, Debug, Default, DeJson)]
+#[derive(Clone, Debug, Default)]
 pub struct Daily {
     pub time: Vec<String>,
     pub temperature_2m_max: Vec<Option<f64>>,
@@ -105,6 +212,7 @@ pub struct Daily {
     pub precipitation_probability_max: Vec<Option<f64>>,
     pub precipitation_sum: Vec<Option<f64>>,
 }
+
 
 /// One forecast day, already checked for array-length agreement.
 #[derive(Clone, Debug, PartialEq)]
@@ -139,17 +247,7 @@ impl HourCell {
 }
 
 impl Forecast {
-    pub fn parse(json: &str) -> Result<Self, String> {
-        // Lenient: Open-Meteo sends fields we do not model (units, elevation,
-        // generation time); strict decoding would reject the whole body.
-        let f: Forecast = DeJson::deserialize_json_lenient(json).map_err(|e| format!("{e:?}"))?;
-        if f.current.temperature_2m.is_none() || f.current.weather_code.is_none() {
-            return Err("response has no current weather".into());
-        }
-        Ok(f)
-    }
-
-    /// The ten daily rows, in order; fewer when the service sent fewer.
+    /// The ten daily rows, in order; fewer when the arrays are shorter.
     pub fn days(&self) -> Vec<Day> {
         let d = &self.daily;
         d.time
@@ -321,7 +419,7 @@ pub enum SkyKind {
     Unknown = 7,
 }
 
-/// WMO weather interpretation codes as Open-Meteo documents them.
+/// WMO weather interpretation codes.
 pub fn describe(code: u32) -> &'static str {
     match code {
         0 => "Clear",
@@ -396,9 +494,58 @@ pub fn glyph(code: u32, is_day: bool) -> Glyph {
     }
 }
 
-pub fn temp(v: Option<f64>) -> String {
+/// The display unit for a temperature. Every value the model holds (the
+/// forecast, the range domain, the fixed Celsius palette below) stays in
+/// Celsius regardless; only `temp()`'s formatted text ever converts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TempUnit {
+    #[default]
+    Celsius,
+    Fahrenheit,
+}
+
+impl TempUnit {
+    pub fn toggle(self) -> Self {
+        match self {
+            TempUnit::Celsius => TempUnit::Fahrenheit,
+            TempUnit::Fahrenheit => TempUnit::Celsius,
+        }
+    }
+
+    /// The toggle's own label: the unit shown is the one currently active.
+    pub fn label(self) -> &'static str {
+        match self {
+            TempUnit::Celsius => "°C",
+            TempUnit::Fahrenheit => "°F",
+        }
+    }
+
+    fn convert(self, celsius: f64) -> f64 {
+        match self {
+            TempUnit::Celsius => celsius,
+            TempUnit::Fahrenheit => celsius * 9.0 / 5.0 + 32.0,
+        }
+    }
+
+    pub fn storage_byte(self) -> u8 {
+        match self {
+            TempUnit::Celsius => b'C',
+            TempUnit::Fahrenheit => b'F',
+        }
+    }
+
+    pub fn from_storage(bytes: &[u8]) -> Option<Self> {
+        match bytes.first() {
+            Some(b'F') => Some(TempUnit::Fahrenheit),
+            Some(b'C') => Some(TempUnit::Celsius),
+            _ => None,
+        }
+    }
+}
+
+pub fn temp(v: Option<f64>, unit: TempUnit) -> String {
     match v {
-        Some(t) => format!("{}°", t.round() as i64),
+        Some(t) => format!("{}°", unit.convert(t).round() as i64),
         None => "—°".into(),
     }
 }
@@ -498,6 +645,15 @@ pub fn hhmm_of(stamp: &str) -> String {
     stamp.split('T').nth(1).map(|t| t.chars().take(5).collect()).unwrap_or_else(|| stamp.to_string())
 }
 
+/// The wall clock right now at a city, from the forecast's own
+/// `utc_offset_seconds` (daylight saving included): it keeps ticking
+/// instead of freezing at the minute the forecast was generated.
+pub fn local_hhmm(utc_offset_seconds: Option<f64>) -> String {
+    let utc_now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let secs_of_day = (utc_now + utc_offset_seconds.unwrap_or(0.0) as i64).rem_euclid(86_400);
+    format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
+}
+
 fn minute_of_day(stamp: &str) -> Option<f64> {
     let time = stamp.split('T').nth(1)?;
     let mut parts = time.split(':');
@@ -527,116 +683,58 @@ fn weekday_of(date: &str) -> &'static str {
     NAMES[((days + 4).rem_euclid(7)) as usize]
 }
 
+
 /// What the faces show, independent of how it is laid out.
 pub struct WeatherState {
+    /// A person's own list: the defaults, plus anything added from the
+    /// Locations sheet's search (capped at `MAX_CITIES`, persisted under
+    /// storage's "cities" key).
+    pub cities: Vec<City>,
     pub city: usize,
-    /// The good forecast most recently received, tagged with its city.
-    pub data: Option<(usize, Forecast, Instant)>,
-    /// A request in flight: its id and the city it was sent for.
-    pub pending: Option<(LiveId, usize)>,
-    pub last_error: Option<String>,
-    seq: u64,
+    pub unit: TempUnit,
 }
 
 impl Default for WeatherState {
     fn default() -> Self {
-        Self { city: DEFAULT_CITY, data: None, pending: None, last_error: None, seq: 0 }
+        Self { cities: default_cities(), city: DEFAULT_CITY, unit: TempUnit::default() }
     }
 }
 
 impl WeatherState {
-    pub fn city(&self) -> &'static City {
-        &CITIES[self.city.min(CITIES.len() - 1)]
+    pub fn city(&self) -> &City {
+        &self.cities[self.city.min(self.cities.len() - 1)]
     }
 
-    pub fn loading(&self) -> bool {
-        self.pending.is_some()
-    }
-
-    /// A fresh request id; any earlier in-flight reply is now superseded.
-    pub fn begin_fetch(&mut self) -> (LiveId, String) {
-        self.seq += 1;
-        let id = LiveId::from_str(&format!("weather_forecast_{}", self.seq));
-        self.pending = Some((id, self.city));
-        (id, forecast_url(self.city()))
+    /// The selected city's sample forecast as of right now: generated,
+    /// never fetched, so it is there from the first frame.
+    pub fn forecast(&self) -> Forecast {
+        let utc_now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        sample_forecast(self.city(), utc_now)
     }
 
     pub fn select_city(&mut self, city: usize) -> bool {
-        let city = city.min(CITIES.len() - 1);
+        let city = city.min(self.cities.len() - 1);
         if city == self.city {
             return false;
         }
         self.city = city;
-        // Whatever was in flight answers for the old city: drop it.
-        self.pending = None;
         true
     }
 
-    /// True when the id matches the request we are waiting for.
-    pub fn owns(&self, id: LiveId) -> bool {
-        self.pending.is_some_and(|(p, _)| p == id)
-    }
-
-    pub fn complete(&mut self, id: LiveId, result: Result<Forecast, String>) -> bool {
-        if !self.owns(id) {
-            return false;
+    /// Add a city from a search result and return its index — the
+    /// existing one's, unchanged, if it is already on the list, so
+    /// searching for a city already added just selects it rather than
+    /// duplicating it. `None` only when the list is full of cities that
+    /// are not this one.
+    pub fn add_city(&mut self, city: City) -> Option<usize> {
+        if let Some(i) = self.cities.iter().position(|c| c.name == city.name && c.country == city.country) {
+            return Some(i);
         }
-        let (_, city) = self.pending.take().unwrap();
-        match result {
-            Ok(f) => {
-                self.data = Some((city, f, Instant::now()));
-                self.last_error = None;
-            }
-            Err(e) => self.last_error = Some(e),
-        }
-        true
-    }
-
-    /// The good data to show: only if it belongs to the selected city.
-    pub fn current(&self) -> Option<(&Forecast, Instant)> {
-        self.data.as_ref().filter(|(c, _, _)| *c == self.city).map(|(_, f, t)| (f, *t))
-    }
-
-    pub fn due_for_refresh(&self) -> bool {
-        if self.loading() {
-            return false;
-        }
-        match self.current() {
-            Some((_, at)) => at.elapsed() >= REFRESH_EVERY,
-            None => true,
-        }
-    }
-
-    pub fn is_stale(&self) -> bool {
-        self.current().is_some_and(|(_, at)| at.elapsed() >= REFRESH_EVERY)
-            || (self.current().is_some() && self.last_error.is_some())
-    }
-
-    /// The tile swaps its H/L line for this after a failed refresh or
-    /// thirty minutes of age: when the data was last good.
-    pub fn tile_freshness(&self) -> Option<String> {
-        let (forecast, at) = self.current()?;
-        if at.elapsed() < STALE_AFTER && self.last_error.is_none() {
+        if self.cities.len() >= MAX_CITIES {
             return None;
         }
-        Some(format!("Updated {}", forecast.current.time.as_deref().map(hhmm_of).unwrap_or_else(|| "earlier".into())))
-    }
-
-    /// One line of status for either face.
-    pub fn status_text(&self) -> String {
-        let age = |at: Instant| {
-            let mins = at.elapsed().as_secs() / 60;
-            if mins == 0 { "just now".to_string() } else { format!("{} min ago", mins) }
-        };
-        match (self.loading(), self.current(), &self.last_error) {
-            (true, None, _) => "Loading".into(),
-            (true, Some((_, at)), _) => format!("Refreshing · updated {}", age(at)),
-            (false, None, Some(_)) => "Unavailable".into(),
-            (false, None, None) => "No data yet".into(),
-            (false, Some((_, at)), Some(_)) => format!("Offline · showing data from {}", age(at)),
-            (false, Some((_, at)), None) if self.is_stale() => format!("Stale · updated {}", age(at)),
-            (false, Some((_, at)), None) => format!("Updated {}", age(at)),
-        }
+        self.cities.push(city);
+        Some(self.cities.len() - 1)
     }
 }
 
@@ -644,27 +742,57 @@ impl WeatherState {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"{"latitude":52.38,"longitude":4.9,"timezone":"Europe/Amsterdam","utc_offset_seconds":7200,
-        "current":{"time":"2026-09-06T12:10","interval":900,"temperature_2m":18.4,"relative_humidity_2m":61,
-        "apparent_temperature":17.1,"is_day":1,"precipitation":0.0,"weather_code":2,"cloud_cover":40,
-        "wind_speed_10m":14.7,"wind_direction_10m":247,"wind_gusts_10m":31.0},
-        "hourly":{"time":["2026-09-06T11:00","2026-09-06T12:00","2026-09-06T13:00","2026-09-06T14:00","2026-09-06T19:00","2026-09-06T20:00"],
-        "temperature_2m":[17.0,18.0,19.2,null,15.0,14.0],"weather_code":[2,2,3,61,0,0],"is_day":[1,1,1,1,1,0],
-        "precipitation_probability":[0,5,20,60,0,0],"precipitation":[0,0,0.2,1.4,0,0],"rain":[0,0,0.2,1.4,0,0],
-        "snowfall":[0,0,0,0,0,0],"cloud_cover":[30,40,80,100,10,5],"uv_index":[3.1,4.4,4.0,1.2,0.3,0]},
-        "daily":{"time":["2026-09-06","2026-09-07","2026-09-08","2026-09-09","2026-09-10","2026-09-11","2026-09-12","2026-09-13","2026-09-14","2026-09-15"],
-        "temperature_2m_max":[20.1,21.3,null,19.0,18.2,22.0,24.5,23.1,20.0,18.0],
-        "temperature_2m_min":[12.0,11.5,10.9,12.2,11.0,12.5,13.0,14.0,11.0,9.5],
-        "weather_code":[2,3,61,80,0,1,0,2,3,61],
-        "sunrise":["2026-09-06T07:02","2026-09-07T07:04",null,"2026-09-09T07:07","2026-09-10T07:09","2026-09-11T07:10","2026-09-12T07:12","2026-09-13T07:14","2026-09-14T07:15","2026-09-15T07:17"],
-        "sunset":["2026-09-06T19:35","2026-09-07T19:33",null,"2026-09-09T19:28","2026-09-10T19:26","2026-09-11T19:24","2026-09-12T19:21","2026-09-13T19:19","2026-09-14T19:17","2026-09-15T19:14"],
-        "uv_index_max":[4.4,5.0,2.1,3.0,4.0,5.5,6.0,5.8,3.2,2.0],
-        "precipitation_probability_max":[5,20,80,60,0,0,0,10,30,70],
-        "precipitation_sum":[0.0,0.4,6.2,2.1,0,0,0,0.1,1.0,4.4]}}"#;
+    /// A hand-written forecast with gaps (`NAN` = missing), the shape the
+    /// views must tolerate.
+    fn fixture() -> Forecast {
+        let o = |v: &[f64]| v.iter().map(|x| if x.is_nan() { None } else { Some(*x) }).collect::<Vec<_>>();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let so = |v: &[&str]| v.iter().map(|x| if x.is_empty() { None } else { Some(x.to_string()) }).collect::<Vec<_>>();
+        const NAN: f64 = f64::NAN;
+        Forecast {
+            utc_offset_seconds: Some(7200.0),
+            current: Current {
+                time: Some("2026-09-06T12:10".into()),
+                temperature_2m: Some(18.4),
+                relative_humidity_2m: Some(61.0),
+                apparent_temperature: Some(17.1),
+                is_day: Some(1.0),
+                precipitation: Some(0.0),
+                weather_code: Some(2.0),
+                cloud_cover: Some(40.0),
+                wind_speed_10m: Some(14.7),
+                wind_direction_10m: Some(247.0),
+                wind_gusts_10m: Some(31.0),
+            },
+            hourly: Hourly {
+                time: s(&["2026-09-06T11:00", "2026-09-06T12:00", "2026-09-06T13:00", "2026-09-06T14:00", "2026-09-06T19:00", "2026-09-06T20:00"]),
+                temperature_2m: o(&[17.0, 18.0, 19.2, NAN, 15.0, 14.0]),
+                weather_code: o(&[2.0, 2.0, 3.0, 61.0, 0.0, 0.0]),
+                is_day: o(&[1.0, 1.0, 1.0, 1.0, 1.0, 0.0]),
+                precipitation_probability: o(&[0.0, 5.0, 20.0, 60.0, 0.0, 0.0]),
+                precipitation: o(&[0.0, 0.0, 0.2, 1.4, 0.0, 0.0]),
+                rain: o(&[0.0, 0.0, 0.2, 1.4, 0.0, 0.0]),
+                snowfall: o(&[0.0; 6]),
+                cloud_cover: o(&[30.0, 40.0, 80.0, 100.0, 10.0, 5.0]),
+                uv_index: o(&[3.1, 4.4, 4.0, 1.2, 0.3, 0.0]),
+            },
+            daily: Daily {
+                time: s(&["2026-09-06", "2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15"]),
+                temperature_2m_max: o(&[20.1, 21.3, NAN, 19.0, 18.2, 22.0, 24.5, 23.1, 20.0, 18.0]),
+                temperature_2m_min: o(&[12.0, 11.5, 10.9, 12.2, 11.0, 12.5, 13.0, 14.0, 11.0, 9.5]),
+                weather_code: o(&[2.0, 3.0, 61.0, 80.0, 0.0, 1.0, 0.0, 2.0, 3.0, 61.0]),
+                sunrise: so(&["2026-09-06T07:02", "2026-09-07T07:04", "", "2026-09-09T07:07", "2026-09-10T07:09", "2026-09-11T07:10", "2026-09-12T07:12", "2026-09-13T07:14", "2026-09-14T07:15", "2026-09-15T07:17"]),
+                sunset: so(&["2026-09-06T19:35", "2026-09-07T19:33", "", "2026-09-09T19:28", "2026-09-10T19:26", "2026-09-11T19:24", "2026-09-12T19:21", "2026-09-13T19:19", "2026-09-14T19:17", "2026-09-15T19:14"]),
+                uv_index_max: o(&[4.4, 5.0, 2.1, 3.0, 4.0, 5.5, 6.0, 5.8, 3.2, 2.0]),
+                precipitation_probability_max: o(&[5.0, 20.0, 80.0, 60.0, 0.0, 0.0, 0.0, 10.0, 30.0, 70.0]),
+                precipitation_sum: o(&[0.0, 0.4, 6.2, 2.1, 0.0, 0.0, 0.0, 0.1, 1.0, 4.4]),
+            },
+        }
+    }
 
     #[test]
-    fn parses_ten_days_and_hourly_and_tolerates_nulls() {
-        let f = Forecast::parse(SAMPLE).unwrap();
+    fn ten_days_and_hourly_tolerate_gaps() {
+        let f = fixture();
         assert_eq!(f.code(), 2);
         assert!(f.is_day());
         let days = f.days();
@@ -673,17 +801,15 @@ mod tests {
         assert_eq!(days[2].high, None);
         assert_eq!(days[2].sunrise, None);
         assert_eq!(days[1].sunset.as_deref(), Some("2026-09-07T19:33"));
-        assert_eq!(temp(days[1].high), "21°");
+        assert_eq!(temp(days[1].high, TempUnit::Celsius), "21°");
         assert_eq!(days[0].uv_max, Some(4.4));
         assert_eq!(days[0].precip_sum, Some(0.0));
-        assert_eq!(f.current.apparent_temperature, Some(17.1));
-        assert_eq!(f.current.wind_direction_10m, Some(247.0));
         assert_eq!(compass(247.0), "WSW");
     }
 
     #[test]
     fn the_strip_starts_now_and_inserts_solar_events() {
-        let f = Forecast::parse(SAMPLE).unwrap();
+        let f = fixture();
         assert_eq!(f.now_index(), 1, "12:10 falls in the 12:00 row");
         let cells = f.hour_cells();
         assert!(matches!(&cells[0], HourCell::Hour { label, is_now: true, temp: Some(t), .. } if label == "Now" && *t == 18.0));
@@ -699,7 +825,7 @@ mod tests {
 
     #[test]
     fn the_sky_keys_on_city_time_solar_phase_and_class() {
-        let f = Forecast::parse(SAMPLE).unwrap();
+        let f = fixture();
         let sky = f.sky_inputs();
         assert_eq!(sky.kind, SkyKind::Partly);
         assert_eq!(sky.phase, 1.0, "noon is full day");
@@ -719,8 +845,7 @@ mod tests {
 
     #[test]
     fn the_range_domain_is_shared_and_the_palette_blends() {
-        let f = Forecast::parse(SAMPLE).unwrap();
-        let days = f.days();
+        let days = fixture().days();
         let domain = range_domain(&days, Some(18.4));
         assert_eq!(domain, (9.5, 24.5));
         assert_eq!(range_fraction(9.5, domain), 0.0);
@@ -739,39 +864,40 @@ mod tests {
     }
 
     #[test]
-    fn malformed_bodies_are_errors_not_panics() {
-        assert!(Forecast::parse("").is_err());
-        assert!(Forecast::parse("<html>").is_err());
-        assert!(Forecast::parse(r#"{"error":true,"reason":"nope"}"#).is_err());
-        assert!(Forecast::parse(r#"{"current":{},"daily":{}}"#).is_err());
+    fn the_city_list_round_trips_through_the_catalogue() {
+        let mut cities = default_cities();
+        cities.push(search_cities("Paulo")[0]);
+        cities.push(search_cities("Cape")[0]);
+        let back = parse_cities(&serialize_cities(&cities));
+        assert_eq!(back, cities);
+        assert!(parse_cities(b"Atlantis\tNowhere\n").is_empty(), "a city the catalogue lacks is dropped");
     }
 
     #[test]
-    fn superseded_replies_are_ignored_and_good_data_survives_failure() {
+    fn the_search_finds_catalogue_cities_by_name_then_country() {
+        let names = |q: &str| search_cities(q).iter().map(|c| c.name).collect::<Vec<_>>();
+        assert_eq!(names("tok"), ["Tokyo"]);
+        assert_eq!(names("york"), ["New York"], "any word of the name");
+        assert_eq!(names("Austral"), ["Sydney", "Melbourne"], "a country finds its cities");
+        assert!(names("  ").is_empty());
+        assert!(names("zzz").is_empty());
+    }
+
+    #[test]
+    fn the_state_has_a_forecast_from_the_start_and_adds_without_duplicates() {
         let mut s = WeatherState::default();
-        let (first, _) = s.begin_fetch();
-        assert!(s.complete(first, Forecast::parse(SAMPLE)));
-        assert!(s.current().is_some());
-        assert_eq!(s.tile_freshness(), None, "fresh data keeps the H/L line");
-        let (second, _) = s.begin_fetch();
-        assert!(s.select_city(3));
-        assert!(!s.complete(second, Err("late".into())), "old city's reply is dropped");
-        assert!(s.current().is_none(), "Amsterdam data is not shown as Tokyo");
-        let (third, _) = s.begin_fetch();
-        assert!(s.complete(third, Err("offline".into())));
-        assert_eq!(s.status_text(), "Unavailable");
-        s.select_city(0);
-        assert!(s.current().is_some(), "last good Amsterdam data is still there");
-        assert!(s.status_text().starts_with("Offline"));
-        assert_eq!(s.tile_freshness().as_deref(), Some("Updated 12:10"), "a failed refresh shows when the data was good");
+        assert_eq!(s.forecast().days().len(), DAILY_ROWS, "no fetch, no wait");
+        let tokyo = *s.city_by_name("Tokyo");
+        assert_eq!(s.add_city(tokyo), Some(3), "already on the list: selected, not added");
+        let paris = search_cities("Paris")[0];
+        assert_eq!(s.add_city(paris), Some(4));
+        assert!(s.select_city(4));
+        assert_eq!(s.city().name, "Paris");
     }
 
-    #[test]
-    fn url_is_the_documented_query() {
-        let url = forecast_url(&CITIES[0]);
-        assert!(url.starts_with("https://api.open-meteo.com/v1/forecast?latitude=52.37&longitude=4.90&current="));
-        assert!(url.contains("&hourly=temperature_2m,weather_code,is_day,precipitation_probability"));
-        assert!(url.contains("&daily=temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset,uv_index_max"));
-        assert!(url.ends_with("&timezone=auto&forecast_days=10"));
+    impl WeatherState {
+        fn city_by_name(&self, name: &str) -> &City {
+            self.cities.iter().find(|c| c.name == name).unwrap()
+        }
     }
 }

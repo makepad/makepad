@@ -1,0 +1,26 @@
+[package]
+name = "makepad-example-fractal-zoom"
+version = "1.0.0"
+edition = "2021"
+description = "Makepad fractal zoom: tiled parallel SIMD rendering with a palette and fractal type panel"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0", optional = true }
+# Network rendering (src/remote.rs): the AI hub's kernel client and the
+# fractal Splash kernels, featureless (no models, no local kernel runtime).
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+# Fleet credentials (makepad_network::fleet).
+makepad-network = { path = "../../platform/network" }
+
+[dev-dependencies]
+# src/parity.rs: the node's Splash kernels run here, against the local tiles
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["kernel"] }
+makepad-script-compute = { path = "../../platform/script/compute" }

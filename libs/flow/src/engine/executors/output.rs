@@ -1,0 +1,104 @@
+#[cfg(feature = "media")]
+use super::publish::PublishExecutor;
+#[cfg(feature = "media")]
+use super::one_input;
+#[cfg(feature = "media")]
+use crate::engine::results::ResultStore;
+#[cfg(feature = "media")]
+use std::sync::Arc;
+use super::{Executor, Poll};
+#[cfg(feature = "media")]
+use crate::Literal;
+use crate::{Node, PortValue, Value};
+
+#[derive(Default)]
+pub struct OutputExecutor {
+    result: Option<Poll>,
+    value: Option<Value>,
+    #[cfg(feature = "media")]
+    publisher: Option<PublishExecutor>,
+}
+
+#[cfg(feature = "media")]
+impl OutputExecutor {
+    /// Publish a one result to the result store while completing it; an ordered
+    /// result never comes here (it returns its values and publishes none).
+    pub fn start_with_publish(
+        &mut self,
+        node: &Node,
+        inputs: &[(String, PortValue)],
+        store: Arc<dyn ResultStore>,
+        flow: String,
+        instance: String,
+    ) -> Result<(), String> {
+        let value = one_input(inputs, "value")
+            .cloned()
+            .ok_or_else(|| format!("Output node `{}` has no one value to publish", node.id))?;
+        let mut publish = node.clone();
+        publish.kind = "publish".to_string();
+        publish.params.retain(|(key, _)| key != "namespace" && key != "title" && key != "tags");
+        publish.params.push(("namespace".to_string(), Literal::Str("flows".to_string())));
+        publish.params.push((
+            "title".to_string(),
+            Literal::Str(format!("{flow} · {}", node.id)),
+        ));
+        publish.params.push((
+            "tags".to_string(),
+            Literal::Arr(vec![Literal::Str("flow".to_string()), Literal::Str(flow.clone())]),
+        ));
+        let mut publisher = PublishExecutor::new(Some(store), super::publish::PublishRun { flow, instance, ..Default::default() });
+        publisher.start(&publish, inputs)?;
+        self.value = Some(value);
+        self.publisher = Some(publisher);
+        Ok(())
+    }
+}
+
+impl Executor for OutputExecutor {
+    /// The result completes in its shape: one value, or an ordered
+    /// result's whole sequence (which is never published element by
+    /// element).
+    fn start(&mut self, node: &Node, inputs: &[(String, PortValue)]) -> Result<(), String> {
+        let value = inputs
+            .iter()
+            .find_map(|(port, value)| (port == "value").then_some(value.clone()))
+            .ok_or_else(|| format!("Output node `{}` has no value", node.id))?;
+        self.value = value.one().cloned();
+        self.result = Some(Poll::Done(vec![("value".to_string(), value)]));
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Poll {
+        #[cfg(feature = "media")]
+        if let Some(publisher) = &mut self.publisher {
+            return match publisher.poll() {
+                Poll::Pending => Poll::Pending,
+                Poll::Progress { permille, stage } => Poll::Progress { permille, stage },
+                Poll::Stage { stage, permille } => Poll::Stage { stage, permille },
+                Poll::Done(_) => {
+                    self.publisher = None;
+                    Poll::Done(vec![("value".to_string(), PortValue::One(self.value.take().unwrap()))])
+                }
+                Poll::Failed(error) => {
+                    self.publisher = None;
+                    self.value = None;
+                    Poll::Failed(format!("Output publish failed: {error}"))
+                }
+                Poll::Delta { port, text } => Poll::Delta { port, text },
+            };
+        }
+        self.result.take().unwrap_or(Poll::Pending)
+    }
+
+    fn cancel(&mut self) {
+        #[cfg(feature = "media")]
+        {
+            if let Some(publisher) = &mut self.publisher {
+                publisher.cancel();
+            }
+            self.publisher = None;
+        }
+        self.result = None;
+        self.value = None;
+    }
+}

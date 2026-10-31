@@ -1,0 +1,29 @@
+use mod.flow.*
+
+/** The shot idea to expand, paint several ways, pick from, and animate. */
+let prompt = Input{ type: @text default: "a paper airship crossing a sunrise cloud bank" }
+/** One seed per candidate keyframe; the fleet spreads the jobs over its boxes. */
+let seeds = Input{ type: @list default: [11, 23, 37, 41] }
+let expand = Llm{
+    system: "Rewrite the prompt as one continuous cinematic shot with a clear first frame, steady motion, camera, and light. No cuts or lists."
+    prompt: prompt.text()
+}
+/** The keyframe job, run once per seed by `candidates`. */
+let image = Image{ prompt: expand.text() width: 512 height: 512 }
+let candidates = Map{ type: @image many: 8 body: image.image() over: seeds.list() bind: @seed concurrency: 4 }
+let pick = Choose{ type: @image many: 8 from: candidates.items() question: "Which keyframe should move?" }
+let video = Video{
+    prompt: expand.text()
+    image: pick.image()
+    frames: 39
+    steps: 30
+    audio: true
+}
+/** Publish the animated keyframe into the flow asset library. */
+let published = Publish{ value: video.video() namespace: "flows" tags: ["flow", "video"] }
+
+Flow{
+    label: "Expanded prompt, fleet images, choose, video"
+    brief: "Expands a shot idea, paints one keyframe per seed across the fleet, waits for you to pick one, and animates it."
+    prompt, seeds, expand, image, candidates, pick, video, published
+}

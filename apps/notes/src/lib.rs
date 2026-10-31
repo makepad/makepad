@@ -24,7 +24,6 @@ use makepad_widgets::*;
 /// Apply the WM theme and register this crate's recipes. The host (or the
 /// standalone binary) registers widgets first; this function does not.
 pub fn script_mod(vm: &mut ScriptVm) {
-    makepad_wm_theme::apply(vm);
     controls::script_mod(vm);
     text_surface::script_mod(vm);
     ui::script_mod(vm);

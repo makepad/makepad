@@ -1,0 +1,12 @@
+use mod.app.*
+
+App{
+    id: "flow.layers"
+    name: "Layer stack"
+    entry: "flow.splash"
+    surface: "ui.splash"
+    modules: [
+        {path: "components/stack.splash" as: "Stack" hash: "c87907a3fb264a11e2c46307bae19eded061a7706d7bed39e27022044a90e2d7"}
+    ]
+    defaults: {first: "sky"  second: "sea"}
+}

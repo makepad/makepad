@@ -1,0 +1,20 @@
+use mod.flow.*
+
+/** The shot to generate. */
+let prompt = Input{ type: @text default: "rain sliding across a neon train window" }
+let video = Video{
+    prompt: prompt.text()
+    width: 640
+    height: 352
+    frames: 39
+    steps: 30
+    audio: true
+}
+/** Publish the generated clip into the flow asset library. */
+let published = Publish{ value: video.video() namespace: "flows" tags: ["flow", "video"] }
+
+Flow{
+    label: "Prompt to video"
+    brief: "Generates a small audible clip directly from a shot description."
+    prompt, video, published
+}

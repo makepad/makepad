@@ -2,7 +2,7 @@
 //! low, the temperature range on one shared domain, and high; today alone
 //! carries the current-temperature dot. The range bar is a small shader
 //! (track, palette-coloured segment, the dot with its contrast outline).
-use crate::model::{glyph, range_color, range_domain, range_fraction, temp, Day, Glyph};
+use crate::model::{glyph, range_color, range_domain, range_fraction, temp, Day, Glyph, TempUnit};
 use makepad_widgets::*;
 
 pub const ROW_H: f64 = 44.0;
@@ -134,13 +134,16 @@ pub struct ForecastDays {
     days: Vec<Day>,
     #[rust]
     observed: Option<f64>,
+    #[rust]
+    unit: TempUnit,
 }
 
 impl ForecastDays {
-    pub fn set_days(&mut self, cx: &mut Cx, days: Vec<Day>, observed: Option<f64>) {
-        if days != self.days || observed != self.observed {
+    pub fn set_days(&mut self, cx: &mut Cx, days: Vec<Day>, observed: Option<f64>, unit: TempUnit) {
+        if days != self.days || observed != self.observed || unit != self.unit {
             self.days = days;
             self.observed = observed;
+            self.unit = unit;
             self.redraw(cx);
         }
     }
@@ -202,8 +205,8 @@ impl Widget for ForecastDays {
                     }
                 }
             }
-            draw_text_at(&mut self.low_text, cx, 0.0, y, ROW_H, Some(r.pos.x + 144.0), &temp(day.low));
-            draw_text_at(&mut self.high_text, cx, 0.0, y, ROW_H, Some(r.pos.x + w), &temp(day.high));
+            draw_text_at(&mut self.low_text, cx, 0.0, y, ROW_H, Some(r.pos.x + 144.0), &temp(day.low, self.unit));
+            draw_text_at(&mut self.high_text, cx, 0.0, y, ROW_H, Some(r.pos.x + w), &temp(day.high, self.unit));
             // The range bar: only the coloured segment needs both ends.
             let (lo, hi) = (day.low, day.high);
             let (lo_f, hi_f) = match (lo, hi) {

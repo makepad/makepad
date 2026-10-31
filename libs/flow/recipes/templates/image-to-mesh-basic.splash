@@ -1,0 +1,23 @@
+use mod.flow.*
+
+/** The isolated object image to reconstruct. */
+let image = Input{ type: @image }
+/** Optional trace text for the reconstruction. */
+let prompt = Input{ type: @text default: "reconstruct the isolated object" }
+let mesh = Mesh{
+    prompt: prompt.text()
+    image: image.image()
+    remesh_resolution: 512
+    texture: true
+    decimation_target: 12000
+    texture_size: 1024
+    model: "trellis-2"
+}
+/** Publish the reconstructed GLB into the flow asset library. */
+let published = Publish{ value: mesh.mesh() namespace: "flows" tags: ["flow", "mesh"] }
+
+Flow{
+    label: "Image to basic mesh"
+    brief: "Reconstructs a supplied object image as a textured TRELLIS mesh without a separate paint stage."
+    prompt, image, mesh, published
+}

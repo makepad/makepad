@@ -5,7 +5,7 @@
 //! low-frequency fog — from the numbers in [`SkyInputs`]. No textures, any
 //! size. `time` drifts the clouds; the view advances it only while the
 //! full face is on screen (the tile stays still between data updates).
-use crate::model::{SkyInputs, SkyKind};
+use crate::model::SkyInputs;
 use makepad_widgets::*;
 
 script_mod! {
@@ -309,11 +309,6 @@ impl SkyView {
             [d.zone0, d.zone1, d.zone2, d.zone3, d.zone4, d.zone5, d.zone6] = next;
             d.redraw(cx);
         }
-    }
-
-    /// The loading/unknown sky before any data: the unknown class by day.
-    pub fn set_unknown(&mut self, cx: &mut Cx) {
-        self.set_conditions(cx, SkyInputs { kind: SkyKind::Unknown, phase: 1.0, cover: 0.6, precip: 0.0 });
     }
 
     /// Advance the drift clock (seconds); the view calls this at 30 Hz

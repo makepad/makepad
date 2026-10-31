@@ -157,37 +157,31 @@ impl StoryCoverage {
             .collect();
         cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let top: Vec<(String, ScriptValue)> = vm.map_mut_with(widgets, |_vm, map| {
-                map.iter()
-                    .filter_map(|(k, v)| k.as_id().map(|id| (id_name(id), v.value)))
-                    .collect()
-            });
+            let top: Vec<(String, ScriptValue)> = vm.heap().map_entries(widgets).into_iter()
+                .filter_map(|e| e.key.as_id().map(|id| (id_name(id), e.value)))
+                .collect();
             let mut entries: Vec<(String, ScriptValue)> = Vec::new();
             for (name, value) in top {
                 // A namespace is an object with no Rust type of its own whose
                 // members are typed objects: `mod.widgets.glass`, for one.
                 let namespace = match value.as_object() {
-                    Some(obj) if vm.bx.heap.object_type_id(obj).is_none() => {
-                        vm.map_mut_with(obj, |vm, map| {
-                            map.iter().any(|(_, v)| {
-                                v.value
-                                    .as_object()
-                                    .and_then(|o| vm.bx.heap.object_type_id(o))
-                                    .is_some()
-                            })
+                    Some(obj) if vm.heap().object_type_id(obj).is_none() => {
+                        vm.heap().map_entries(obj).into_iter().any(|e| {
+                            e.value
+                                .as_object()
+                                .and_then(|o| vm.heap().object_type_id(o))
+                                .is_some()
                         })
                     }
                     _ => false,
                 };
                 if namespace {
                     let obj = value.as_object().unwrap();
-                    let inner: Vec<(String, ScriptValue)> = vm.map_mut_with(obj, |_vm, map| {
-                        map.iter()
-                            .filter_map(|(k, v)| {
-                                k.as_id().map(|id| (format!("{}.{}", name, id_name(id)), v.value))
-                            })
-                            .collect()
-                    });
+                    let inner: Vec<(String, ScriptValue)> = vm.heap().map_entries(obj).into_iter()
+                        .filter_map(|e| {
+                            e.key.as_id().map(|id| (format!("{}.{}", name, id_name(id)), e.value))
+                        })
+                        .collect();
                     entries.extend(inner);
                 } else {
                     entries.push((name, value));
@@ -208,20 +202,18 @@ impl StoryCoverage {
                 let mut cur = Some(obj);
                 let mut depth = 0;
                 while let Some(o) = cur {
-                    if let Some(t) = vm.bx.heap.object_type_id(o) {
-                        kind = vm.bx.heap.type_name_by_id(t).map(id_name);
+                    if let Some(t) = vm.heap().object_type_id(o) {
+                        kind = vm.heap().type_name_by_id(t).map(id_name);
                         break;
                     }
                     depth += 1;
                     if depth > 32 {
                         break;
                     }
-                    cur = vm.bx.heap.proto(o).as_object();
+                    cur = vm.heap().proto(o).as_object();
                 }
                 let kind = kind.unwrap_or_else(|| "template".to_string());
-                let base = vm
-                    .bx
-                    .heap
+                let base = vm.heap()
                     .proto(obj)
                     .as_object()
                     .and_then(|p| objects.iter().find(|(n, o)| *o == p && n != name))

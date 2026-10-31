@@ -312,7 +312,7 @@ script_mod! {
                                 }
                             }
                         }
-                        // Like Robrix's event source modal: a pinned title over one page that
+                        // A chat app's event source modal: a pinned title over one page that
                         // scrolls, holding code that only ever scrolls sideways.
                         code_modal := Modal{
                             content +: {

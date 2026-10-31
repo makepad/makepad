@@ -1,0 +1,466 @@
+// title: Y2K Aqua
+// order: 20
+// Y2K Aqua: a circa-2000 translucent candy-plastic machine. An iMac G3
+// "Snow" front with Aqua pinstripes and drifting soap bubbles, Bondi-blue
+// translucent wings you can see into (ribs, a board, the thick glowing
+// edge of the moulding), lickable gel pill keys with a hard top highlight
+// and a caustic glow underneath, a Tangerine play key, a gel-dome knob,
+// candy-gel level tubes and a spectrum that rises as bubbles.
+use mod.prelude.widgets_internal.*
+
+// ---- palette ----
+mod.widgets.hw_palette.screen_bg = #x06243d
+mod.widgets.hw_palette.screen_text = #xe8f7ff
+mod.widgets.hw_palette.screen_muted = #xc4e4f4
+mod.widgets.hw_palette.accent = #x2ed3ff
+mod.widgets.hw_palette.panel_text = #x06304d
+mod.widgets.hw_palette.panel_muted = #x3f6f8c
+mod.widgets.hw_palette.menu_bg = #x0a2e4a
+mod.widgets.hw_palette.spill_knee = 1.3
+mod.widgets.hw_palette.caption_bg = #xdce9f0
+mod.widgets.hw_palette.caption_text = #x2c526b
+
+// ---- the front: Snow white plastic, Aqua pinstripes, bubbles ----
+mod.widgets.HwChassis.draw_bg.ground = #xe9f3f8
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.10, 0.25, 0.38, 1.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(0.18, 0.82, 1.0, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(3.6, 0.6)
+mod.widgets.HwChassis.draw_bg.vignette = vec4(0.5, 0.30, 0.16, 1.04)
+mod.widgets.Window.pass.clear_color = #xe9f3f8
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    // A sky wash: pale aqua at the top, snow at the foot.
+    var col = mix(vec3(0.80, 0.92, 0.98), base, smoothstep(0.0, 0.8, uv.y))
+    // Aqua pinstripes: a light and a shaded line every 4 pt.
+    let s = fract(w.y / 4.0)
+    col = col * (1.0 - 0.045 * smoothstep(0.35, 0.5, s) * (1.0 - smoothstep(0.75, 0.9, s)))
+    // Frutiger swooshes: two soft aqua ribbons sweeping across the front.
+    let sw1 = w.y - (478.0 + 46.0 * sin(w.x * 0.0042 + 0.6))
+    let sw2 = w.y - (492.0 + 38.0 * sin(w.x * 0.0036 + 1.9))
+    let rib1 = exp(-(sw1 * sw1) / 1600.0)
+    let rib2 = exp(-(sw2 * sw2) / 500.0)
+    col = mix(col, vec3(0.55, 0.86, 0.97), rib1 * 0.30)
+    col = mix(col, vec3(1.0, 1.0, 1.0), rib2 * 0.55)
+    col = col + vec3(0.20, 0.25, 0.25) * (1.0 - smoothstep(0.0, 1.2, abs(sw2 + 8.0))) * 0.5
+    // Soap bubbles drifting in the moulding.
+    let cell = vec2(150.0, 130.0)
+    let id = floor(w / cell)
+    let h1 = self.hw_hash(id + vec2(7.0, 3.0))
+    let h2 = self.hw_hash(id + vec2(1.0, 9.0))
+    let h3 = self.hw_hash(id + vec2(5.0, 2.0))
+    let rad = 10.0 + h3 * 26.0
+    let ctr = (id + vec2(0.25 + h1 * 0.5, 0.25 + h2 * 0.5)) * cell
+    let q = w - ctr
+    let r = length(q)
+    let on = step(0.35, h3)
+    let rim = (1.0 - smoothstep(0.0, 1.6, abs(r - rad))) * on
+    let body = (1.0 - smoothstep(rad - 1.0, rad, r)) * on
+    let edge = smoothstep(rad * 0.55, rad, r) * body
+    let hl = (1.0 - smoothstep(0.0, rad * 0.22, length(q + vec2(rad * 0.38, rad * 0.42)))) * on
+    let irid = vec3(0.55 + 0.45 * sin(r * 0.35 + 1.0), 0.80 + 0.2 * sin(r * 0.35 + 2.5), 1.0)
+    col = mix(col, col * vec3(0.86, 0.95, 1.0), edge * 0.45)
+    col = mix(col, irid * 0.92, rim * 0.35)
+    col = mix(col, vec3(1.0, 1.0, 1.0), hl * 0.85)
+    return col
+}
+
+// ---- wings: translucent Bondi-blue shells with visible insides ----
+mod.widgets.HwPlate.draw_bg.ground = #x5fd0ec
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.0, 0.22, 0.36, 1.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(9.0, 1.0, 3.0, 0.8)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.45, 0.8, 0.9, 0.25)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.45, 14.0, 1.0, 0.35)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(0.18, 0.82, 1.0, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(3.0, 0.5)
+mod.widgets.HwPlate.radius = 22
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    // Thick plastic at the edge: deep saturated Bondi, clearing inward.
+    let deep = vec3(0.0, 0.50, 0.70)
+    var col = mix(deep, base, smoothstep(0.0, 26.0, e))
+    // The insides seen through the shell: an inner tray, blurred by the
+    // plastic, its rim catching light, and the moulded ribs behind it.
+    let tray = smoothstep(14.0, 30.0, e)
+    col = col * (1.0 - tray * 0.10)
+    col = col + vec3(0.30, 0.45, 0.45) * exp(-abs(e - 15.0) / 2.5) * 0.35
+    let rib = smoothstep(0.86, 1.0, 0.5 + 0.5 * sin(w.x * 0.19))
+    col = col * (1.0 - rib * 0.10 * tray)
+    col = col + vec3(0.10, 0.16, 0.16) * smoothstep(0.86, 1.0, 0.5 + 0.5 * sin(w.x * 0.19 - 0.5)) * tray
+    // Pinstripes moulded in, every 3 pt.
+    let s = fract(w.y / 3.0)
+    col = col + vec3(0.06, 0.08, 0.08) * (1.0 - smoothstep(0.0, 0.35, abs(s - 0.5)))
+    // Light caught in the thick bottom edge: a caustic glow.
+    col = col + vec3(0.25, 0.55, 0.60) * smoothstep(0.7, 1.0, uv.y) * (1.0 - smoothstep(0.0, 18.0, e)) * 0.6
+    // A hard gloss highlight along the top lip.
+    let top = smoothstep(2.0, 4.0, e) * (1.0 - smoothstep(9.0, 14.0, e)) * (1.0 - smoothstep(0.08, 0.25, uv.y))
+    col = mix(col, vec3(1.0, 1.0, 1.0), top * 0.65)
+    return col
+}
+
+// ---- recessed panels: frosted Snow ice ----
+mod.widgets.HwPanel.draw_bg.ground = #xcfe8f3
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.05, 0.22, 0.36, 1.0)
+mod.widgets.HwPanel.draw_bg.relief = vec4(5.0, 1.0, 2.0, 0.4)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.70, 10.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(0.18, 0.82, 1.0, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(2.2, 0.5)
+mod.widgets.HwPanel.radius = 16
+mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let s = fract(w.y / 4.0)
+    var col = base * (1.0 - 0.05 * smoothstep(0.35, 0.5, s) * (1.0 - smoothstep(0.75, 0.9, s)))
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    return col * (0.97 + 0.05 * uv.y)
+}
+
+// ---- the screen's surround: a clear-over-Bondi gel frame ----
+mod.widgets.HwBezel.draw_bg.ground = #x0c6f95
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.08, 0.16, 1.0)
+mod.widgets.HwBezel.draw_bg.relief = vec4(8.0, 1.0, 3.0, 0.9)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.85, 12.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.7, 0.4)
+mod.widgets.HwBezel.radius = 20
+mod.widgets.HwBezel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    let v = p.y / max(self.rect_size.y, 1.0)
+    // Deep Bondi toward the glass, bright aqua gel at the lip.
+    var col = mix(vec3(0.35, 0.85, 0.98), base, smoothstep(0.0, 9.0, e))
+    col = col + vec3(0.9, 0.95, 1.0) * (1.0 - smoothstep(0.5, 3.0, abs(e - 2.5))) * (1.0 - v) * 0.5
+    return col
+}
+
+// ---- the glass: a big Aqua gloss dome over the picture ----
+mod.widgets.HwGlass.draw_bg.radius = 14.0
+mod.widgets.HwGlass.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let d = Material.sd_box(p, c, c, self.radius)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    // The gloss: an inset rounded sheet over the top 40%, bright at its
+    // top edge, fading to nothing at its crisp lower edge.
+    let hc = vec2(c.x, self.rect_size.y * 0.21)
+    let hh = vec2(c.x - 12.0, self.rect_size.y * 0.19)
+    let hd = Material.sd_box(p, hc, hh, min(hh.y, 60.0))
+    let inhl = 1.0 - smoothstep(-px, px, hd)
+    let t = clamp(p.y / max(self.rect_size.y * 0.40, 1.0), 0.0, 1.0)
+    let hl = inhl * mix(0.17, 0.0, t)
+    // A darker rim, and a caustic of blue light along the foot.
+    let rim = smoothstep(-22.0, 0.0, d) * 0.0
+    let foot = smoothstep(0.82, 1.0, self.pos.y) * 0.10
+    let a = clamp(hl + rim * (1.0 - hl), 0.0, 1.0)
+    let rgb = vec3(1.0, 1.0, 1.0) * hl + vec3(0.2, 0.7, 1.0) * foot
+    return vec4(rgb * cov, (a + foot) * cov)
+}
+
+// ---- keys: lickable Aqua gel pills ----
+mod.widgets.HwKey.draw_bg.ground = #x1b8fe0
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.0, 0.16, 0.34, 1.0)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.62, 0.10, 1.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(6.0, 1.0, 3.0, 0.9)
+mod.widgets.HwKey.draw_bg.finish = vec4(0.45, 0.8, 0.9, 0.12)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.55, 8.0, 1.0, 0.55)
+mod.widgets.HwKey.draw_bg.inner = vec4(0.72, 9.0, 0.0, 0.35)
+mod.widgets.HwKey.draw_bg.spill = vec2(3.0, 0.5)
+mod.widgets.HwKey.draw_bg.critical_ink = vec4(1.0, 0.55, 0.05, 0.0)
+mod.widgets.HwKey.draw_bg.led = vec4(8.0, 8.0, 2.0, 0.0)
+mod.widgets.HwKey.radius = 20
+mod.widgets.HwKey.depth = 3.5
+mod.widgets.HwKey.press = -3.0
+mod.widgets.HwKey.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(1.0, 1.0))
+    let v = clamp((p.y - (c.y - h.y)) / (2.0 * h.y), 0.0, 1.0)
+    // Play and PRESETS are Tangerine gel, the rest Bondi Aqua.
+    let top = mix(vec3(0.01, 0.30, 0.72), vec3(0.80, 0.26, 0.0), self.critical)
+    let low = mix(vec3(0.10, 0.62, 0.98), vec3(1.0, 0.60, 0.08), self.critical)
+    return mix(top, low, smoothstep(0.25, 1.0, v))
+}
+mod.widgets.HwKey.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var o = self.layer(self.key_face(p, self.ground.xyz))
+    let c = self.rect_size * 0.5
+    let h = max(c - vec2(self.inset, self.inset), vec2(1.0, 1.0))
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let inside = 1.0 - smoothstep(-px, px, self.sd(p))
+    // The lick: a white gel highlight inset over the top half.
+    let hc = vec2(c.x, c.y - h.y * 0.64)
+    let hh = vec2(h.x - 5.0, h.y * 0.28)
+    let hd = Material.sd_box(p, hc, hh, min(hh.y, min(self.radius, hh.x)))
+    let inhl = 1.0 - smoothstep(-px, px, hd)
+    let t = clamp((p.y - (hc.y - hh.y)) / max(2.0 * hh.y, 1.0), 0.0, 1.0)
+    let hl = inhl * mix(0.80, 0.06, t) * inside
+    o = vec4(mix(o.xyz, vec3(1.0, 1.0, 1.0) * o.w, hl), o.w)
+    // Inner glow: the gel lights up from below.
+    let v = clamp((p.y - (c.y - h.y)) / (2.0 * h.y), 0.0, 1.0)
+    let glow = smoothstep(0.72, 1.0, v) * smoothstep(0.0, 6.0, -self.sd(p)) * inside
+    let gcol = mix(vec3(0.55, 0.95, 1.0), vec3(1.0, 0.92, 0.55), self.critical)
+    o = vec4(o.xyz + gcol * glow * 0.35 * o.w, o.w)
+    o = self.key_marks(o, p)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+mod.widgets.HwKeyButton.draw_text.color = #xffffff
+mod.widgets.HwKeyButton.draw_text.color_hover = #xf2fdff
+mod.widgets.HwKeyButton.draw_text.color_down = #xd8f4ff
+mod.widgets.HwKeyText.draw_text.color = #xffffff
+mod.widgets.HwKeyText.draw_text.color_hover = #xf2fdff
+mod.widgets.HwKeyText.draw_text.color_down = #xd8f4ff
+mod.widgets.HwKeyButton.draw_text.text_style = theme.font_icons{font_size: 14.0}
+mod.widgets.HwKeyText.draw_text.text_style = theme.font_bold{font_size: 9.5}
+
+// ---- lights: Tangerine gel capsules ----
+mod.widgets.HwDash.radius = 6
+mod.widgets.HwDash.emissive = vec4(1.0, 0.55, 0.08, 8.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.58, 0.10, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x9fcfe0
+mod.widgets.HwLed.emissive = vec4(1.0, 0.55, 0.08, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.58, 0.10, 1.0)
+
+// ---- knob: a clear Bondi gel dome with an Aqua ring ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x1a9fd6
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.18, 0.34, 1.0)
+mod.widgets.HwKnobFace.draw_bg.relief = vec4(14.0, 1.0, 9.0, 0.9)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(0.0, 0.62, 24.0, 0.3)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(1.0, 0.55, 0.05, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(15.0, 1.28, 3.0, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.62, 0.80, 0.88, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.10, 0.85, 1.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.55, 12.0, 1.0, 0.5)
+mod.widgets.HwKnobFace.emissive = vec4(0.10, 0.85, 1.0, 0.8)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(0.4, 0.5)
+mod.widgets.HwKnobFace.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let c = self.rect_size * 0.5
+    let q = p - c
+    let r = max(min(c.x, c.y) - self.inset, 1.0)
+    let rq = length(q) / r
+    // Clear gel: deep at the rim, luminous in the core, a caustic below.
+    var col = mix(base * 1.25, base * 0.55, smoothstep(0.3, 1.0, rq))
+    col = col + vec3(0.5, 0.95, 1.0) * (1.0 - smoothstep(0.0, 0.45, length(q / r - vec2(0.0, 0.45)))) * 0.45
+    // The lick: an elliptical white highlight at the top.
+    let hq = (q / r - vec2(0.0, -0.48)) / vec2(0.62, 0.34)
+    let hl = (1.0 - smoothstep(0.85, 1.0, length(hq))) * (0.25 + 0.55 * (1.0 - clamp(hq.y * 0.5 + 0.5, 0.0, 1.0)))
+    col = mix(col, vec3(1.0, 1.0, 1.0), hl)
+    return col
+}
+
+// ---- meter: two candy-gel tubes filling with liquid ----
+mod.widgets.HwMeterFace.draw_bg.ground = #xd6ecf5
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.10, 0.80, 1.0, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.50, 0.05, 1.0)
+mod.widgets.HwMeterFace.draw_bg.shadow_ink = vec4(0.0, 0.2, 0.34, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(0.10, 0.80, 1.0, 0.7)
+mod.widgets.HwMeterFace.radius = 12
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    var col = o.xyz
+    let x0 = 12.0
+    let x1 = self.rect_size.x - 12.0
+    let span = max(x1 - x0, 1.0)
+    let hgt = self.rect_size.y
+    let tr = min(hgt * 0.19, 13.0)
+    // Two tubes: left channel above, right below.
+    let yA = hgt * 0.30
+    let yB = hgt * 0.70
+    let lane = step(hgt * 0.5, p.y)
+    let cy = mix(yA, yB, lane)
+    let lv = clamp(mix(self.level.x, self.level.y, lane), 0.0, 1.0)
+    // The tube: a capsule from x0 + tr to x1 - tr.
+    let ax = clamp(p.x, x0 + tr, x1 - tr)
+    let q = vec2(p.x - ax, p.y - cy)
+    let d = length(q) - tr
+    let tube = 1.0 - smoothstep(-px, px, d)
+    // A drop shadow under each tube on the frosted floor.
+    let ds = length(vec2(p.x - ax, p.y - cy - 3.0)) - tr
+    col = col * (1.0 - (1.0 - smoothstep(-2.0, 5.0, ds)) * 0.22 * (1.0 - tube))
+    // The glass: clear and pale, darker at its walls.
+    let v = clamp((p.y - cy) / tr, -1.0, 1.0)
+    var g = mix(vec3(0.93, 0.98, 1.0), vec3(0.62, 0.80, 0.90), abs(v) * abs(v))
+    // The liquid: candy gel running Aqua, lime, Tangerine along the tube.
+    let ux = clamp((p.x - x0) / span, 0.0, 1.0)
+    let fill_x = x0 + lv * span
+    let wet = (1.0 - smoothstep(fill_x - 1.0, fill_x + 1.0, p.x)) * step(0.004, lv)
+    var liq = mix(self.glow_ink.xyz, vec3(0.55, 0.95, 0.25), smoothstep(0.45, 0.72, ux))
+    liq = mix(liq, self.hot_ink.xyz, smoothstep(0.72, 0.92, ux))
+    // Round body: dark under, luminous core, a caustic along the belly.
+    liq = liq * (0.62 + 0.55 * (1.0 - abs(v))) + vec3(0.8, 1.0, 1.0) * smoothstep(0.35, 0.95, v) * 0.30
+    // The meniscus: a bright rounded front.
+    let men = exp(-abs(p.x - fill_x + 1.5) / 1.6) * wet
+    liq = liq + vec3(1.0, 1.0, 1.0) * men * 0.6
+    // Bubbles held in the gel.
+    let cell = tr * 1.1
+    let bid = floor(p.x / cell)
+    let bh = self.hw_hash(vec2(bid, lane * 7.0 + 1.0))
+    let bc = vec2((bid + 0.5) * cell, cy + (bh - 0.5) * tr * 0.9)
+    let br = tr * (0.14 + 0.24 * self.hw_hash(vec2(bid, lane + 5.0)))
+    let bd = length(p - bc)
+    let bub = step(0.35, bh) * (1.0 - smoothstep(br - 0.7, br + 0.3, bd))
+    let bring = bub * smoothstep(br * 0.45, br, bd)
+    let bhl = bub * (1.0 - smoothstep(0.0, br * 0.4, length(p - bc + vec2(br * 0.35, br * 0.35))))
+    liq = mix(liq, liq * 1.3 + vec3(0.1, 0.1, 0.1), bub * 0.35)
+    liq = mix(liq, vec3(1.0, 1.0, 1.0), clamp(bring * 0.55 + bhl * 0.9, 0.0, 1.0))
+    g = mix(g, liq, wet)
+    // Graduations printed on the glass.
+    let tk = abs(fract((p.x - x0) / (span / 10.0) + 0.5) - 0.5) * (span / 10.0)
+    let tick = (1.0 - smoothstep(0.4, 0.4 + px, tk)) * step(0.55, v) * (1.0 - wet)
+    g = mix(g, vec3(0.20, 0.45, 0.60), tick * 0.6)
+    // The glass gloss: a hard white streak along the top, a rim line.
+    let streak = (1.0 - smoothstep(0.0, 0.18, abs(v + 0.55))) * smoothstep(tr * 0.3, tr * 1.3, min(p.x - x0, x1 - p.x))
+    g = mix(g, vec3(1.0, 1.0, 1.0), streak * 0.75)
+    g = g * (1.0 - (1.0 - smoothstep(0.0, 1.4, -d)) * 0.35)
+    col = mix(col, g, tube)
+    o = vec4(col * o.w, o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- the spectrum: bars rise as columns of soap bubbles ----
+// Each band is a column of soap bubbles: lit ones rise to the level and
+// warm from Aqua through lime to Tangerine as they climb; the rest stay
+// as faint empty bubbles, and the falling peak is a Tangerine ring.
+mod.widgets.HwSpectrum.custom_bars = true
+mod.widgets.HwSpectrum.draw_bar.pixel = fn() {
+    let sz = self.rect_size
+    let p = self.pos * sz
+    let d = max(sz.x, 2.0)
+    let y = sz.y - p.y
+    let k = floor(y / d)
+    let n = floor(sz.y / d)
+    let ctr = vec2(sz.x * 0.5, sz.y - (k + 0.5) * d)
+    let q = p - ctr
+    let rr = d * 0.5 - 0.5
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let dist = length(q)
+    let cov = (1.0 - smoothstep(rr - px, rr + px, dist)) * step(k, n - 1.0)
+    let rn = dist / max(rr, 0.5)
+    let f = (k + 0.5) * d / max(sz.y, 1.0)
+    let lit = step((k + 0.5) * d, sz.y * self.level + d * 0.5) * step(0.004, self.level)
+    let pk = step(abs((k + 0.5) * d - sz.y * self.peak), d * 0.5) * step(0.004, self.peak) * (1.0 - lit)
+    var tint = mix(vec3(0.15, 0.82, 1.0), vec3(0.55, 1.0, 0.35), smoothstep(0.40, 0.62, f))
+    tint = mix(tint, vec3(1.0, 0.56, 0.10), smoothstep(0.62, 0.85, f))
+    let rim = smoothstep(0.50, 0.97, rn)
+    let hl = 1.0 - smoothstep(0.0, 0.30, length(q / max(rr, 0.5) - vec2(-0.30, -0.36)))
+    // A lit bubble: tinted gel with a bright rim and a white lick.
+    let c1 = tint * (0.55 + 0.9 * rim) + vec3(1.0, 1.0, 1.0) * (hl * 0.95 + rim * rim * 0.25)
+    let a1 = cov * (0.58 + 0.42 * rim + hl * 0.6)
+    // The peak: a Tangerine ring. The empties: a ghost rim.
+    let ring = cov * smoothstep(0.62, 0.9, rn)
+    let c2 = vec3(1.0, 0.62, 0.15) + vec3(1.0, 1.0, 1.0) * hl * 0.6
+    let a2 = ring * 0.95 + cov * hl * 0.5
+    let a3 = cov * (rim * 0.10 + hl * 0.06)
+    var o = vec4(vec3(0.6, 0.85, 1.0) * a3, a3)
+    o = mix(o, vec4(c2 * a2, a2), pk)
+    o = mix(o, vec4(c1 * min(a1, 1.0), min(a1, 1.0)), lit)
+    return o
+}
+// The waveform: a lit gel filament over a liquid fill to the centre line.
+mod.widgets.HwSpectrum.custom_scope = true
+mod.widgets.HwSpectrum.draw_scope.pixel = fn() {
+    let strip = (self.pos.y - self.split) / max(1.0 - self.split, 0.001)
+    if strip < 0.0 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let hpx = self.rect_size.y * (1.0 - self.split)
+    let wpx = self.rect_size.x
+    let yp = strip * hpx
+    let xp = self.pos.x * wpx
+    let dx = 1.0 / 512.0
+    let x0 = (floor(self.pos.x / dx) + 0.5) * dx
+    let s0 = self.samples.sample_nearest(vec2(x0 - dx * 2.0, 0.5)).x
+    let s1 = self.samples.sample_nearest(vec2(x0 - dx, 0.5)).x
+    let s2 = self.samples.sample_nearest(vec2(x0, 0.5)).x
+    let s3 = self.samples.sample_nearest(vec2(x0 + dx, 0.5)).x
+    let s4 = self.samples.sample_nearest(vec2(x0 + dx * 2.0, 0.5)).x
+    let a0 = vec2((x0 - dx * 2.0) * wpx, (0.5 - s0 * 0.45) * hpx)
+    let a1 = vec2((x0 - dx) * wpx, (0.5 - s1 * 0.45) * hpx)
+    let a2 = vec2(x0 * wpx, (0.5 - s2 * 0.45) * hpx)
+    let a3 = vec2((x0 + dx) * wpx, (0.5 - s3 * 0.45) * hpx)
+    let a4 = vec2((x0 + dx * 2.0) * wpx, (0.5 - s4 * 0.45) * hpx)
+    let p = vec2(xp, yp)
+    let b01 = a1 - a0
+    let d01 = length(p - a0 - b01 * clamp(dot(p - a0, b01) / max(dot(b01, b01), 0.0001), 0.0, 1.0))
+    let b12 = a2 - a1
+    let d12 = length(p - a1 - b12 * clamp(dot(p - a1, b12) / max(dot(b12, b12), 0.0001), 0.0, 1.0))
+    let b23 = a3 - a2
+    let d23 = length(p - a2 - b23 * clamp(dot(p - a2, b23) / max(dot(b23, b23), 0.0001), 0.0, 1.0))
+    let b34 = a4 - a3
+    let d34 = length(p - a3 - b34 * clamp(dot(p - a3, b34) / max(dot(b34, b34), 0.0001), 0.0, 1.0))
+    let d = min(min(d01, d12), min(d23, d34))
+    // The liquid between the wave and the centre line.
+    let mid = hpx * 0.5
+    let wy = a2.y
+    let inside = step(min(wy, mid), yp) * step(yp, max(wy, mid))
+    let depth = abs(yp - wy) / max(abs(mid - wy), 1.0)
+    let fill = inside * (0.30 - 0.18 * depth)
+    let core = 1.0 - smoothstep(0.5, 1.4, d)
+    let glow = exp(-d * 0.9) * 0.6
+    let c = vec3(0.10, 0.70, 1.0) * fill + vec3(0.85, 1.0, 1.0) * core + vec3(0.15, 0.80, 1.0) * glow * (1.0 - core)
+    let al = clamp(fill + core + glow * (1.0 - core), 0.0, 1.0)
+    return vec4(c, al)
+}
+mod.widgets.HwSpectrum.light = 6.0
+mod.widgets.HwMilk.light = 2.1
+mod.widgets.HwMilk.light_knee = 1.0
+
+// ---- the record in the empty art well: a Bondi vinyl ----
+mod.widgets.HwArtBlank.draw_bg.label_ink = vec4(1.0, 0.55, 0.08, 1.0)
+mod.widgets.HwArtBlank.draw_bg.ground = #x0b3a5c
+mod.widgets.HwArtBlank.draw_bg.vinyl = vec4(0.02, 0.36, 0.58, 1.0)
+
+// ---- type ----
+mod.widgets.HwCaption.draw_text.color = #x05324f
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold{font_size: 8.5}
+mod.widgets.HwTitle.draw_text.color = #x032740
+mod.widgets.HwText.draw_text.color = #x1d4d6b
+mod.widgets.HwPanelTitle.draw_text.color = #x06304d
+mod.widgets.HwPanelText.draw_text.color = #x2d5f7e
+mod.widgets.HwNavButton.draw_text.color = #x06304d
+mod.widgets.HwNavButton.draw_bg.plate = vec4(1.88, 1.97, 2.0, 0.9)
+mod.widgets.HwNavButton.draw_bg.plate_hover = vec4(1.5, 1.9, 2.0, 1.0)
+mod.widgets.HwNavButton.draw_bg.rim = vec4(0.25, 0.65, 0.85, 0.45)
+mod.widgets.HwDisplayText.draw_text.color = #x9ff0ff
+mod.widgets.HwDisplay.draw_bg.ground = #x06243d
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.8, 0.95, 1.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.06, 0.12, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.90, 9.0, 0.0, 0.55)
+mod.widgets.HwDisplay.radius = 14
+
+// Choosers and search: deep-blue gel wells with an aqua rim.
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.03, 0.17, 0.30, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.55, 0.92, 1.0, 0.45)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(1.0, 0.62, 0.15, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xe8f7ff
+mod.widgets.HwDropDown.draw_text.color_hover = #xffffff
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.03, 0.17, 0.30, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.55, 0.92, 1.0, 0.45)
+mod.widgets.HwTextInput.draw_text.color = #xe8f7ff
+mod.widgets.HwTextInput.draw_text.color_empty = #x86b4cf
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.2, 0.35, 0.30)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 1.0, 1.0, 0.6)
+
+// (The nav plate shader halves its fill below the top 3 pt, so the fill is set at 2x.)
+// The switch: an Aqua gel pill in a frosted track.
+mod.widgets.HwSegmented.draw_bg.well = vec4(0.72, 0.86, 0.93, 1.0)
+mod.widgets.HwSegmented.draw_pill.cap = vec4(0.10, 0.55, 0.92, 1.0)
+mod.widgets.HwSegmented.draw_pill.glow = vec4(0.30, 0.90, 1.0, 1.0)
+mod.widgets.HwSegmented.draw_text.color = #x1d4d6b
+mod.widgets.HwSegmented.draw_text_selected.color = #xffffff
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(2.0, 0.60, 16.0, 5.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.60, 0.86, 0.98, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.02, 0.10, 0.18, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(0.0, 2.0, 9.0, 0.14)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(0.0, 0.10, 0.30, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.20, 1.0, 0.0, 0.0)
+true

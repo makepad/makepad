@@ -172,6 +172,7 @@ impl Agent for ClaudeAgent {
                     out.push(AgentEvent::TextDelta { prompt_id, text });
                 }
                 ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => {}
+                ProviderEvent::FunctionCallPartial { .. } => {}
                 ProviderEvent::FunctionCall { call_id, name, arguments } => {
                     out.push(AgentEvent::ToolRequest {
                         prompt_id,

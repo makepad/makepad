@@ -17,13 +17,13 @@ use std::collections::HashMap;
 
 pub(crate) fn secondary_text_color(vm: &mut ScriptVm) -> ScriptValue {
     let theme = vm.module(id!(theme));
-    let muted = vm.bx.heap.value(theme, id!(color_text_muted).into(), NoTrap);
+    let muted = vm.value(theme, id!(color_text_muted));
     if !muted.is_nil() && !muted.is_err() {
         muted
     } else {
         // Stock themes without a WM palette predate color_text_muted. Resolve
         // their secondary role once; never override a host's explicit muted role.
-        vm.bx.heap.value(theme, id!(color_text_meta).into(), NoTrap)
+        vm.value(theme, id!(color_text_meta))
     }
 }
 
@@ -1931,7 +1931,6 @@ mod tests {
         cx.init_cx_os();
         let root = cx.with_vm(|vm| {
             makepad_widgets::script_mod(vm);
-            makepad_wm_theme::apply(vm);
             crate::script_mod(vm);
             let value = script_eval!(vm, {use mod.widgets.* MailView{}});
             let root = WidgetRef::script_from_value(vm, value);
@@ -2451,7 +2450,6 @@ mod tests {
             cx.init_cx_os();
             let root = cx.with_vm(|vm| {
                 makepad_widgets::script_mod(vm);
-                makepad_wm_theme::apply(vm);
                 script_eval!(vm, {
                     mod.theme.color_text_muted = #(muted)
                     mod.theme.color_text_meta = #ff00ff

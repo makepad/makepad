@@ -1,0 +1,36 @@
+use mod.flow.*
+
+/** The character identity and design to make playable. */
+let prompt = Input{ type: @text default: "a nimble forest ranger with a green cloak" }
+let expand = Llm{
+    system: "Rewrite the prompt as a single full-body character sheet brief: canonical identity, relaxed wide A-pose, separated limbs, plain background, even light."
+    prompt: prompt.text()
+    model: "qwen3.5-9b"
+    temperature: 0
+}
+let image = Image{ prompt: expand.text() width: 512 height: 512 model: "flux1-dev" }
+let matte = Matte{ image: image.image() model: "birefnet-hr" }
+let mesh = Mesh{
+    prompt: expand.text()
+    image: matte.out(@image)
+    remesh_resolution: 512
+    texture: true
+    decimation_target: 20000
+    texture_size: 1024
+    model: "trellis-2"
+}
+let rig = Rig{ prompt: expand.text() mesh: mesh.mesh() model: "skintokens" }
+let motion = Motion{
+    prompt: expand.text()
+    mesh: rig.out(@mesh)
+    motion_mode: "playable"
+    model: "hy-motion"
+}
+/** Publish the playable animated GLB into the flow asset library. */
+let published = Publish{ value: motion.out(@mesh) namespace: "flows" tags: ["flow", "character", "playable"] }
+
+Flow{
+    label: "Playable character"
+    brief: "Expands, paints, mattes, reconstructs, rigs, and animates a playable character."
+    prompt, expand, image, matte, mesh, rig, motion, published
+}

@@ -1,0 +1,13 @@
+// A calculator, written in Splash
+View{width: Fill height: Fit align: Align{x: 0.5}
+    calc := RoundedView{width: 560 height: Fit flow: Down spacing: 16 padding: 28
+        show_bg: true new_batch: true
+        draw_bg.color: #x14161b
+        display := View{width: Fill height: 190 flow: Down spacing: 6 align: Align{x: 1.0 y: 1.0}
+            expr := Label{text: ""}
+            value := Label{text: "0"}
+        }
+        keys := View{width: Fill height: Fit flow: Down spacing: 14
+        }
+    }
+}

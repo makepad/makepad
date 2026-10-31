@@ -1,0 +1,19 @@
+use mod.flow.*
+
+/** The walkable scene to build. */
+let prompt = Input{ type: @text  default: "a mossy ruined observatory above a cloud sea"  at: vec2(40, 120) }
+
+let world = World{
+    prompt: prompt.text()
+    model: "flashworld"
+    at: vec2(360, 120)
+}
+
+/** The generated world-splat PLY. */
+let scene = Output{ type: @mesh  value: world.mesh()  at: vec2(680, 120) }
+
+Flow{
+    label: "World"
+    brief: "Generates a walkable Gaussian-splat world from a scene description."
+    prompt, world, scene
+}

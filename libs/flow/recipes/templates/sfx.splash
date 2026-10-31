@@ -1,0 +1,19 @@
+use mod.flow.*
+
+/** The sound to synthesize. */
+let prompt = Input{ type: @text  default: "a heavy steel hatch slams shut in a concrete tunnel"  at: vec2(40, 120) }
+
+let sfx = Sfx{
+    prompt: prompt.text()
+    seconds: 4.0
+    at: vec2(360, 120)
+}
+
+/** The generated sound effect. */
+let sound = Output{ type: @audio  value: sfx.audio()  at: vec2(680, 120) }
+
+Flow{
+    label: "Sound effect"
+    brief: "Synthesizes a four-second sound effect from a concise description."
+    prompt, sfx, sound
+}

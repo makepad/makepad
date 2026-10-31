@@ -37,7 +37,7 @@ script_mod! {
             width: Fill
             height: Fill
             flow: Down
-            draw_bg +: { color: mod.mpp.bg_dark }
+            draw_bg +: { color: mod.theme.color_bg_container }
 
             strip := PortalList{
                 width: Fill
@@ -58,7 +58,7 @@ script_mod! {
                         width: Fit
                         height: Fit
                         padding: 2
-                        draw_bg +: { color: mod.mpp.bg_dark }
+                        draw_bg +: { color: mod.theme.color_bg_container }
                         page_view := mod.widgets.PdfPageView{
                             width: 118
                             height: 152
@@ -68,7 +68,7 @@ script_mod! {
                     num := Label{
                         text: ""
                         draw_text +: {
-                            color: mod.mpp.dim
+                            color: mod.theme.color_text_disabled
                             text_style: theme.font_regular{font_size: 8}
                         }
                     }

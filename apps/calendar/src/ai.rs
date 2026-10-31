@@ -237,6 +237,7 @@ mod tests {
             call_id: "c1".into(),
             tool: tool.into(),
             args: args.into(),
+            caller: None,
         }
     }
 

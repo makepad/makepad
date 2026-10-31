@@ -12,33 +12,33 @@
 //! [365, 269, 49, 22] — whose centre lands on `outside_button` — so clicking
 //! the row the tree pointed at pressed Outside instead.
 
-use makepad_test::{makepad_test, Selector, TestApp, WidgetSnapshot};
+use makepad_test::{makepad_test, Selector, TestApp, NodeMatch};
 
 /// Every row button the tree reports must lie inside the list's own viewport.
 /// This is the invariant the bug broke: a row drawn past the bottom edge was
 /// reported at full size in the band below the list, on top of a different
 /// widget that really is drawn there.
 fn assert_rows_inside_list(app: &TestApp) {
-    let widgets = app.widget_snapshot();
+    let widgets = app.widget_snapshot().nodes();
     let list = widgets
         .iter()
-        .find(|w| w.id == "list" && w.width > 0 && w.height > 0)
+        .find(|w| w.role == makepad_test::Role::List && w.path.rsplit('.').next() == Some("list") && w.width() > 0 && w.height() > 0)
         .cloned()
         .expect("list is drawn");
-    let rows: Vec<&WidgetSnapshot> = widgets
+    let rows: Vec<&NodeMatch> = widgets
         .iter()
-        .filter(|w| w.id == "play_button" && w.visible && w.width > 0 && w.height > 0)
+        .filter(|w| w.path.rsplit('.').next() == Some("play_button" )&& w.visible() && w.width() > 0 && w.height() > 0)
         .collect();
     assert!(!rows.is_empty(), "no visible rows reported");
     for row in rows {
         assert!(
-            row.y >= list.y && row.y + row.height <= list.y + list.height,
+            row.y() >= list.y() && row.y() + row.height() <= list.y() + list.height(),
             "row {:?} reported at y {}..{}, outside the list viewport y {}..{}",
-            row.text,
-            row.y,
-            row.y + row.height,
-            list.y,
-            list.y + list.height,
+            row.name,
+            row.y(),
+            row.y() + row.height(),
+            list.y(),
+            list.y() + list.height(),
         );
     }
 }
@@ -49,19 +49,19 @@ fn assert_rows_inside_list(app: &TestApp) {
 /// drawn full height, so its *unclipped* rect has its centre below the list —
 /// on `outside_button` or on nothing.
 fn click_bottom_reported_row(app: &TestApp) {
-    let widgets = app.widget_snapshot();
+    let widgets = app.widget_snapshot().nodes();
     let bottom = widgets
         .iter()
-        .filter(|w| w.id == "play_button" && w.visible && w.width > 0 && w.height > 0)
-        .max_by_key(|w| w.y)
+        .filter(|w| w.path.rsplit('.').next() == Some("play_button" )&& w.visible() && w.width() > 0 && w.height() > 0)
+        .max_by_key(|w| w.y())
         .cloned()
         .expect("a row is reported");
-    let label = bottom.text.clone().expect("row button carries its text");
+    let label = bottom.name.clone();
     let index = label
         .strip_prefix("Play ")
         .expect("row button reads 'Play N'")
         .to_string();
-    app.locator(Selector::all().text_exact(label.as_str())).click();
+    app.locator(Selector::all().text_exact(label.as_str())).click_at_center();
     app.locator(Selector::id("last_played"))
         .wait_text(format!("Row {index}"));
 }
@@ -84,35 +84,35 @@ fn portallist_hides_rows_clipped_past_the_viewport(app: TestApp) {
 fn portallist_rows_click_where_the_tree_reports_them(app: TestApp) {
     app.locator(Selector::all().text_exact("Play 0"))
         .wait_visible()
-        .click();
+        .click_at_center();
     app.locator(Selector::id("last_played")).wait_text("Row 0");
 
     // The last row inside the viewport: its reported rect must be the visible
     // one, not the unclipped rect whose centre sits below the list.
     app.locator(Selector::all().text_exact("Play 4"))
         .wait_visible()
-        .click();
+        .click_at_center();
     app.locator(Selector::id("last_played")).wait_text("Row 4");
 
-    app.locator(Selector::id("outside_button")).click();
+    app.locator(Selector::id("outside_button")).click_at_center();
     app.locator(Selector::id("last_played")).wait_text("outside");
 }
 
 #[makepad_test]
 fn portallist_rows_stay_addressable_after_scrolling(app: TestApp) {
     app.locator(Selector::all().text_exact("Play 0")).wait_visible();
-    app.locator(Selector::id("list")).scroll(0.0, 160.0);
+    app.locator(Selector::raw("path=list role=list")).wheel(0.0, 160.0);
 
     // After a scroll the list keeps over-drawing rows past both edges. Every
     // row the tree still reports must be the row a click there actually hits.
     app.locator(Selector::all().text_exact("Play 6"))
         .wait_visible()
-        .click();
+        .click_at_center();
     app.locator(Selector::id("last_played")).wait_text("Row 6");
 
     assert_rows_inside_list(&app);
 
-    app.locator(Selector::id("outside_button")).click();
+    app.locator(Selector::id("outside_button")).click_at_center();
     app.locator(Selector::id("last_played")).wait_text("outside");
 }
 
@@ -130,13 +130,13 @@ fn wheel_over_a_scrollviews_clipped_away_part_does_not_scroll_it(app: TestApp) {
     app.locator(Selector::id("under_crop_button")).wait_visible();
 
     // Wheel in the clipped-away band: the view must not move.
-    app.locator(Selector::id("under_crop_button")).scroll(0.0, 80.0);
+    app.locator(Selector::id("under_crop_button")).wheel(0.0, 80.0);
     app.locator(Selector::all().text_exact("CropRow 0")).wait_visible();
 
     // Positive control — the same wheel over the VISIBLE part scrolls it.
     // (If the band wheel above wrongly scrolled the view, "CropRow 0" is
     // already gone and this locator's resolution is the failure.)
-    app.locator(Selector::all().text_exact("CropRow 0")).scroll(0.0, 80.0);
+    app.locator(Selector::all().text_exact("CropRow 0")).wheel(0.0, 80.0);
     app.locator(Selector::all().text_exact("CropRow 0")).wait_count(0);
 }
 
@@ -149,13 +149,13 @@ fn portallist_partially_clipped_row_is_still_clickable(app: TestApp) {
     // in the band `outside_button` occupies, with only a sliver on screen: its
     // unclipped rect's centre is outside the list, its clipped rect's centre
     // is on the sliver.
-    app.locator(Selector::id("list")).scroll(0.0, 20.0);
+    app.locator(Selector::raw("path=list role=list")).wheel(0.0, 20.0);
     app.locator(Selector::all().text_exact("Play 5")).wait_visible();
 
     assert_rows_inside_list(&app);
     click_bottom_reported_row(&app);
 
-    app.locator(Selector::id("outside_button")).click();
+    app.locator(Selector::id("outside_button")).click_at_center();
     app.locator(Selector::id("last_played")).wait_text("outside");
 }
 
@@ -168,13 +168,13 @@ fn portallist_partially_clipped_row_is_still_clickable(app: TestApp) {
 #[makepad_test]
 fn one_big_wheel_delta_jumps_instead_of_walking_every_row(app: TestApp) {
     app.locator(Selector::all().text_exact("Play 0")).wait_visible();
-    app.locator(Selector::id("list")).scroll(0.0, 4000.0);
+    app.locator(Selector::raw("path=list role=list")).wheel(0.0, 4000.0);
     app.locator(Selector::all().text_exact("Play 100")).wait_visible();
 
     let total = app
-        .widget_snapshot()
+        .widget_snapshot().nodes()
         .iter()
-        .filter(|w| w.id == "play_button")
+        .filter(|w| w.path.rsplit('.').next() == Some("play_button"))
         .count();
     assert!(
         total <= 24,

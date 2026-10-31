@@ -1,12 +1,16 @@
-//! image: a dumb picture viewer. `image <path>` opens fit-to-window,
-//! centered on a dark makepad_wm_theme background. `image --preview <path>` sizes
+//! image: a dumb picture viewer. `image <path>` opens fit-to-window (a
+//! second `image <path>` shows the picture in the running viewer),
+//! centered on a system theme background. `image --preview <path>` sizes
 //! the window as a small popup instead.
 
 pub use makepad_widgets;
 use makepad_widgets::*;
-use makepad_image::preview::{PreviewAction, PreviewState};
-use makepad_image::widget::{MpImageAction, MpImageView};
-use std::path::PathBuf;
+use makepad_app_image::preview::{PreviewAction, PreviewState};
+use makepad_app_image::widget::{MpImageAction, MpImageView, PICTURE_EXTENSIONS};
+use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
+use std::path::Path;
+
+const PICK_PICTURE: LiveId = live_id!(pick_picture);
 
 app_main!(App);
 
@@ -28,9 +32,33 @@ script_mod! {
                         spacing: 0
                         padding: 0
 
-                        viewer := MpImageView{
+                        picture := View{
                             width: Fill
                             height: Fill
+                            flow: Overlay
+
+                            viewer := MpImageView{
+                                width: Fill
+                                height: Fill
+                            }
+
+                            // What a window with no picture shows.
+                            empty := View{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                spacing: 12
+                                align: Align{x: 0.5 y: 0.5}
+
+                                Label{
+                                    text: "No picture open"
+                                    draw_text +: {
+                                        color: theme.color_text
+                                        text_style: theme.font_regular{font_size: 14}
+                                    }
+                                }
+                                open_picture := ButtonFlat{text: "Open a Picture"}
+                            }
                         }
 
                         status_row := RectView{
@@ -70,40 +98,24 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        let mut preview = false;
-        let mut path: Option<PathBuf> = None;
-        for arg in std::env::args().skip(1) {
-            if arg == "--preview" {
-                preview = true;
-            } else if arg.starts_with("--") {
-                // --remote, --stdin-loop, or any other flag every Makepad app
-                // already understands elsewhere: not ours to parse, ignore.
-            } else if path.is_none() {
-                path = Some(PathBuf::from(arg));
-            }
+        // The picture itself arrives as the launch's `Event::AppOpen`.
+        let preview = is_preview_launch();
+
+        // The pass uses the same system theme ground as the viewer.
+        if let Some(color) = cx.with_vm(|vm| theme_tokens::color(vm, "color_bg_app")) {
+            let mut window = self.ui.window(cx, ids!(main_window));
+            script_apply_eval!(cx, window, {
+                pass +: { clear_color: #(color) }
+            });
         }
 
-        // A theme.splash background (makepad_wm_theme::apply already retinted
-        // theme.color_bg_app from it, if MAKEPAD_WM_THEME_SPLASH is set); patch the
-        // pass clear color explicitly too so the dark letterbox is right even
-        // if the stock theme default ever drifts.
-        if let Some(bg_hex) = cx.with_vm(makepad_wm_theme::current_for_vm).map(|p| p.hex("background", "#1a1b26")) {
-            if let Some(color) = parse_hex_color(&bg_hex) {
-                let mut window = self.ui.window(cx, ids!(main_window));
-                script_apply_eval!(cx, window, {
-                    pass +: { clear_color: #(color) }
-                });
-            }
-        }
-
-        self.preview = PreviewState::new(preview, path.as_deref());
+        self.preview = PreviewState::new(preview, None);
 
         if let Some(mut viewer) = self.ui.widget(cx, ids!(viewer)).borrow_mut::<MpImageView>() {
             viewer.set_preview(preview);
-            if let Some(path) = &path {
-                viewer.open(cx, path);
-            }
         }
+        // A preview panel is never without its picture for long: no prompt in it.
+        self.ui.view(cx, ids!(empty)).set_visible(cx, !preview);
 
         self.set_title(cx);
         // A --stdin-loop child is tiled by the compositor, which owns the
@@ -116,7 +128,20 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(open_picture)).clicked(actions) {
+            let dialog = FileDialog::new()
+                .set_id(PICK_PICTURE)
+                .set_title("Open a Picture".to_string())
+                .add_filter("Picture".to_string(), PICTURE_EXTENSIONS.iter().map(|e| e.to_string()).collect())
+                .add_filter("All Files".to_string(), vec!["*".to_string()]);
+            cx.open_select_file_dialog(dialog);
+        }
         for action in actions {
+            if let Some(picked) = action.downcast_ref::<FileDialogAction>().filter(|p| p.id() == PICK_PICTURE) {
+                if let Some(path) = picked.path() {
+                    self.show(cx, path);
+                }
+            }
             let Some(widget_action) = action.as_widget_action() else {
                 continue;
             };
@@ -130,12 +155,30 @@ impl MatchEvent for App {
                     format!("{}    loading\u{2026}", name)
                 };
                 self.ui.label(cx, ids!(status)).set_text(cx, &text);
+                self.ui.view(cx, ids!(empty)).set_visible(cx, name.is_empty());
             }
         }
     }
 }
 
 impl App {
+    /// `image <path>`, Finder's "Open With", or a later `image <path>` while
+    /// this one runs: show the first file.
+    fn open(&mut self, cx: &mut Cx, event: &AppOpenEvent) {
+        let Some(path) = event.paths().next() else {
+            return;
+        };
+        self.show(cx, path);
+    }
+
+    fn show(&mut self, cx: &mut Cx, path: &Path) {
+        self.preview.show(path);
+        if let Some(mut viewer) = self.ui.widget(cx, ids!(viewer)).borrow_mut::<MpImageView>() {
+            viewer.open(cx, path);
+        }
+        self.set_title(cx);
+    }
+
     /// Quick Look v2: `StudioToApp::Custom` from wm reaches a hosted app
     /// as `Event::Custom(json)`; this is what the viewer half of the
     /// protocol does with it. `PreviewUnload` never ends the process.
@@ -172,13 +215,23 @@ impl App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
-        makepad_image::widget::script_mod(vm);
+        makepad_app_image::widget::script_mod(vm);
         self::script_mod(vm)
     }
 
+    /// One viewer window per user: opening another picture shows it there.
+    /// A `--preview` viewer belongs to its requester and runs on its own.
+    fn single_instance() -> bool {
+        !is_preview_launch()
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::AppOpen(open) = event {
+            self.open(cx, open);
+        }
         if let Event::Custom(json) = event {
             if let Some(wm) = makepad_wm_api::WmEvent::parse(json) {
                 self.handle_wm_event(cx, &wm);
@@ -189,22 +242,7 @@ impl AppMain for App {
     }
 }
 
-/// Parses a `#rrggbb` (or `#rgb`) hex string into a `Vec4f`, alpha 1.0.
-fn parse_hex_color(value: &str) -> Option<Vec4f> {
-    let digits = value.strip_prefix('#').unwrap_or(value);
-    let rgba = match digits.len() {
-        3 => {
-            let mut expanded = String::with_capacity(8);
-            for c in digits.chars() {
-                expanded.push(c);
-                expanded.push(c);
-            }
-            expanded.push_str("ff");
-            u32::from_str_radix(&expanded, 16).ok()?
-        }
-        6 => u32::from_str_radix(digits, 16).ok()?.checked_shl(8)? | 0xff,
-        8 => u32::from_str_radix(digits, 16).ok()?,
-        _ => return None,
-    };
-    Some(Vec4f::from_u32(rgba))
+/// `image --preview <path>`: a Quick Look viewer, sized as a popup.
+fn is_preview_launch() -> bool {
+    std::env::args().skip(1).any(|arg| arg == "--preview")
 }

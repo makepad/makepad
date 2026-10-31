@@ -1,0 +1,43 @@
+use mod.flow.*
+
+/** The character identity and design to make playable with PBR materials. */
+let prompt = Input{ type: @text default: "a nimble forest ranger with a green cloak" }
+let expand = Llm{
+    system: "Rewrite the prompt as a single full-body character sheet brief: canonical identity, relaxed wide A-pose, separated limbs, plain background, even light."
+    prompt: prompt.text()
+    model: "qwen3.5-9b"
+    temperature: 0
+}
+let image = Image{ prompt: expand.text() width: 512 height: 512 model: "flux1-dev" }
+let matte = Matte{ image: image.image() model: "birefnet-hr" }
+let mesh = Mesh{
+    prompt: expand.text()
+    image: matte.out(@image)
+    remesh_resolution: 512
+    texture: false
+    decimation_target: 20000
+    texture_size: 1024
+    model: "trellis-2"
+}
+let paint = Paint{
+    prompt: expand.text()
+    mesh: mesh.mesh()
+    reference_image: matte.out(@image)
+    texture_size: 1024
+    model: "hunyuan3d-paint-2.1"
+}
+let rig = Rig{ prompt: expand.text() mesh: paint.out(@mesh) model: "skintokens" }
+let motion = Motion{
+    prompt: expand.text()
+    mesh: rig.out(@mesh)
+    motion_mode: "playable"
+    model: "hy-motion"
+}
+/** Publish the playable PBR animated GLB into the flow asset library. */
+let published = Publish{ value: motion.out(@mesh) namespace: "flows" tags: ["flow", "character", "playable", "pbr"] }
+
+Flow{
+    label: "Playable character with PBR"
+    brief: "Builds a playable character and inserts Hunyuan PBR painting before rigging."
+    prompt, expand, image, matte, mesh, paint, rig, motion, published
+}

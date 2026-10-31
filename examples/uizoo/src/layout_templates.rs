@@ -14,7 +14,7 @@ script_mod! {
             show_bg: true
             draw_bg +: {
                 color: theme.color_inset
-                border_radius: uniform(theme.corner_radius)
+                border_radius: theme.corner_radius
             }
             padding: theme.mspace_3{top: 0. right: theme.space_2}
             margin: theme.mspace_v_2

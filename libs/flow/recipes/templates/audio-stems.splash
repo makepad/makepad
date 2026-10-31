@@ -1,0 +1,18 @@
+use mod.flow.*
+
+/** The 44.1 kHz stereo song to separate. */
+let audio = Input{ type: @audio }
+let separate = Stems{ audio: audio.audio() model: "bs-roformer-4stem" }
+/** Each stem lands in the library as its own audio asset. */
+let drums = Publish{ value: separate.drums() namespace: "flows" tags: ["flow", "stem", "drums"] }
+let bass = Publish{ value: separate.bass() namespace: "flows" tags: ["flow", "stem", "bass"] }
+let other = Publish{ value: separate.other() namespace: "flows" tags: ["flow", "stem", "other"] }
+let vocals = Publish{ value: separate.vocals() namespace: "flows" tags: ["flow", "stem", "vocals"] }
+/** The packed drums, bass, other, and vocals stem bundle. */
+let stems = Output{ type: @bytes value: separate.stems() }
+
+Flow{
+    label: "Separate stems"
+    brief: "Separates supplied stereo music into drums, bass, other and vocals, each published to the library, plus the packed four-stem bundle."
+    audio, separate, drums, bass, other, vocals, stems
+}

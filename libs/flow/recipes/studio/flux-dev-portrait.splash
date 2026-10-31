@@ -1,0 +1,23 @@
+use mod.flow.*
+
+// Restored from the ComfyUI workflow examples/comfyui/flux_dev.json (removed
+// from Makepad in 1d5770fd5): FLUX.1 dev at 1088x1920 portrait, 25 steps.
+
+/** What to paint, in portrait. */
+let prompt = Input{ type: @text  default: "a dancer mid-turn in a column of light, long exposure trails"  at: vec2(40, 120) }
+
+let image = Image{
+    prompt: prompt.text()
+    width: 1088  height: 1920  steps: 25
+    model: "flux1-dev"
+    at: vec2(360, 120)
+}
+
+/** The portrait, into the library's IMAGE lane. */
+let published = Publish{ value: image.image()  namespace: "flows"  tags: ["flow", "image", "portrait"]  at: vec2(680, 120) }
+
+Flow{
+    label: "Flux dev · 9:16 portrait"
+    brief: "FLUX.1 dev in a 1088x1920 portrait frame, 25 steps."
+    prompt, image, published
+}

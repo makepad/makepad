@@ -1,0 +1,70 @@
+use mod.flow.*
+
+// Layer stack's app surface: two named layers (the first is stacked twice),
+// the joined result, the counts of the full and the empty stack, and how
+// many pictures crossed the ordered picture input.
+
+// The themed title and hint of the face prelude: their colours follow
+// the theme; the sizes are the prelude's, the same this surface had.
+let Title = mod.flow.ui.Title
+
+let Hint = mod.flow.ui.Hint
+
+View{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: theme.space_3
+    padding: Inset{left: 18 right: 18 top: 16 bottom: 16}
+
+    Title{text: "Layer stack"}
+    Hint{text: "Two layers, the first stacked twice; then stack."}
+
+    first := TextInput{
+        width: Fill
+        height: 34
+        empty_text: "First layer"
+        bind := "first.text"
+    }
+
+    second := TextInput{
+        width: Fill
+        height: 34
+        empty_text: "Second layer"
+        bind := "second.text"
+    }
+
+    run_button := Button{
+        width: Fit
+        height: 32
+        text: "Stack"
+    }
+
+    Hint{text: "Joined"}
+    result := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := "result.value"
+    }
+
+    Hint{text: "Layers"}
+    total := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := "total.value"
+    }
+
+    Hint{text: "Empty stack"}
+    empty_total := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := "empty_total.value"
+    }
+
+    Hint{text: "Pictures"}
+    pic_count := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := "pic_count.value"
+    }
+}

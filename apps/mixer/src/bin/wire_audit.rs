@@ -1,11 +1,11 @@
-//! `cargo run -p makepad-mixer --bin wire_audit`
+//! `cargo run -p makepad-app-mixer --bin wire_audit`
 //!
 //! Prints the complete wire audit for the mixer app, GENERATED FROM THE
 //! WHITELIST ITSELF (safety::Param) so it cannot drift from the code. This
 //! is the document to read before pointing the app at real hardware. It
 //! opens no socket and sends nothing.
 
-use makepad_mixer::safety::{deny_term, MeterBank, Param, SafeMsg, ValueSpec, DENY_TERMS};
+use makepad_app_mixer::safety::{deny_term, MeterBank, Param, SafeMsg, ValueSpec, DENY_TERMS};
 use std::collections::BTreeMap;
 
 fn mask(addr: &str) -> String {

@@ -1,0 +1,73 @@
+// title: Theatre
+// class: large
+// order: 30
+// min: 820x560
+// pref: 1360x900
+//
+// A cinema: the picture is the hero and nothing is drawn over it. Under it
+// one slim deck: the position line across the width, then what plays, the
+// keys, the volume with its level, the picture's mode and name, and the
+// keys for the presets and the equalizer. The playlists, the list
+// (the tracks, the equalizer) and Up Next open as a drawer beside
+// the picture (the queue key, or drag its rail): the picture narrows to
+// make room, never covered.
+use mod.prelude.widgets_internal.*
+use mod.widgets.*
+
+mod.widgets.HwLayout = View{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: 10
+    split := mod.widgets.HwSplitter{
+        width: Fill
+        height: Fill
+        axis: SplitterAxis.Horizontal
+        align: SplitterAlign.FromB(400.0)
+        min_vertical: 420.0
+        max_vertical: 320.0
+        a: mod.widgets.HwSlot{component: "screen" width: Fill height: Fill}
+        b: View{
+            width: Fill
+            height: Fill
+            side_split := mod.widgets.HwDeckSplitter{
+                width: Fill
+                height: Fill
+                axis: SplitterAxis.Vertical
+                align: SplitterAlign.FromA(200.0)
+                min_horizontal: 120.0
+                max_horizontal: 260.0
+                a: mod.widgets.HwSlot{component: "library" width: Fill height: Fill}
+                b: View{
+                    width: Fill
+                    height: Fill
+                    queue_split := mod.widgets.HwDeckSplitter{
+                        width: Fill
+                        height: Fill
+                        axis: SplitterAxis.Vertical
+                        align: SplitterAlign.FromB(170.0)
+                        min_horizontal: 200.0
+                        max_horizontal: 90.0
+                        a: mod.widgets.HwSlot{component: "tracks" width: Fill height: Fill}
+                        b: mod.widgets.HwSlot{component: "upnext" width: Fill height: Fill}
+                    }
+                }
+            }
+        }
+    }
+    // The deck.
+    mod.widgets.HwSlot{component: "progress" width: Fill height: 34}
+    View{
+        width: Fill
+        height: 66
+        flow: Right
+        spacing: 10
+        align: Align{y: 0.5}
+        mod.widgets.HwSlot{component: "now" width: Fill{weight: 0.0 basis: 200.0 shrink: 1.0 min: 120.0} height: Fill}
+        mod.widgets.HwSlot{component: "transport" width: Fill{weight: 0.0 basis: 262.0 shrink: 1.0 min: 190.0} height: Fill}
+        mod.widgets.HwSlot{component: "volume" width: Fill{weight: 0.0 basis: 130.0 shrink: 1.0 min: 90.0} height: Fill}
+        mod.widgets.HwSlot{component: "deck" width: Fill{weight: 100.0 basis: 300.0 shrink: 1.0 min: 280.0} height: Fill}
+        mod.widgets.HwSlot{component: "queue" width: 56 height: Fill}
+    }
+}
+true

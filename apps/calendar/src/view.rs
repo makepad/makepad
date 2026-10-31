@@ -2388,7 +2388,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         let root=cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);makepad_wm_theme::apply(vm);crate::script_mod(vm);
+            makepad_widgets::script_mod(vm);crate::script_mod(vm);
             let v=script_eval!(vm,{use mod.prelude.widgets_internal.* use mod.widgets.* CalendarView{}});
             WidgetRef::script_from_value(vm,v)
         });
@@ -2422,7 +2422,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         let root=cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);makepad_wm_theme::apply(vm);crate::script_mod(vm);
+            makepad_widgets::script_mod(vm);crate::script_mod(vm);
             let v=script_eval!(vm,{use mod.prelude.widgets_internal.* use mod.widgets.* CalendarView{}});
             WidgetRef::script_from_value(vm,v)
         });
@@ -2586,7 +2586,6 @@ mod tests {
         cx.init_cx_os();
         let root = cx.with_vm(|vm| {
             makepad_widgets::script_mod(vm);
-            makepad_wm_theme::apply(vm);
             crate::script_mod(vm);
             let value = script_eval!(vm,{use mod.prelude.widgets_internal.* use mod.widgets.* CalendarView{}});
             let root = WidgetRef::script_from_value(vm, value);
@@ -2697,7 +2696,7 @@ mod tests {
         let mut cx=Cx::new(Box::new(|_,_|{}));
         cx.init_cx_os();
         let root=cx.with_vm(|vm|{
-            makepad_widgets::script_mod(vm);makepad_wm_theme::apply(vm);crate::script_mod(vm);
+            makepad_widgets::script_mod(vm);crate::script_mod(vm);
             let v=script_eval!(vm,{use mod.prelude.widgets_internal.* use mod.widgets.* CalendarView{}});
             WidgetRef::script_from_value(vm,v)
         });

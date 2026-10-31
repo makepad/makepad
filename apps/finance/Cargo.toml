@@ -6,28 +6,27 @@
 # the phone window manager seats in-process, one instance per isolate.
 
 [package]
-name = "makepad-finance"
+name = "makepad-app-finance"
 version = "0.1.0"
 edition = "2021"
 description = "Personal finance: ledger, budgets, reports and CSV import"
 license = "MIT OR Apache-2.0"
-default-run = "finance"
+default-run = "makepad-app-finance"
 
 [lib]
-name = "makepad_finance"
+name = "makepad_app_finance"
 path = "src/lib.rs"
 
 [[bin]]
-name = "finance"
+name = "makepad-app-finance"
 path = "src/main.rs"
 required-features = ["standalone"]
 
 [features]
-dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 demo = []
 # The standalone window (src/main.rs). A host that links the module leaves
 # this off and gets the lib only. Nothing today is exclusively the
@@ -38,8 +37,8 @@ standalone = []
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-civil-time = { path = "../../libs/civil_time" }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-ai-services = { path = "../../libs/ai/services" }
 # The module contract: what a host seats in-process (src/module.rs).
 makepad-app-module = { path = "../../libs/app_module" }

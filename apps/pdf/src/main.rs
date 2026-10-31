@@ -1,13 +1,13 @@
 //! pdf: a PDF viewer. `pdf <path>` opens a document as one continuous
-//! scroll of pages on a dark makepad_wm_theme background. `pdf --preview <path>`
+//! scroll of pages on a system theme background. `pdf --preview <path>`
 //! sizes the window as a small popup instead — that is files' Quick Look.
 
 pub use makepad_widgets;
 use makepad_widgets::*;
-use makepad_pdf::preview::{PreviewAction, PreviewState};
-use makepad_pdf::theme::Palette;
-use makepad_pdf::widget::{FitMode, MpPdfAction, MpPdfView, PdfStatus};
-use makepad_pdf::Args;
+use makepad_app_pdf::preview::{PreviewAction, PreviewState};
+use makepad_app_pdf::theme::Palette;
+use makepad_app_pdf::widget::{FitMode, MpPdfAction, MpPdfView, PdfStatus};
+use makepad_app_pdf::Args;
 
 app_main!(App);
 
@@ -25,7 +25,7 @@ script_mod! {
             visible: false
             width: Fill
             height: Fill
-            draw_bg +: {color: mod.mpp.accent}
+            draw_bg +: {color: mod.theme.color_focus}
         }
     }
 
@@ -38,7 +38,7 @@ script_mod! {
         height: Fill
         align: Align{x: 0.5 y: 0.5}
         draw_text +: {
-            color: mod.mpp.fg
+            color: mod.theme.color_text
             text_style: theme.font_regular{font_size: 9.0}
         }
     }
@@ -48,7 +48,7 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(1000, 800)
                 window.title: "pdf"
-                pass +: { clear_color: mod.mpp.bg }
+                pass +: { clear_color: mod.theme.color_bg_app }
                 body +: {
                     root := View{
                         width: Fill
@@ -66,14 +66,14 @@ script_mod! {
                             spacing: 2
                             align: Align{y: 0.5}
                             padding: Inset{left: 6 right: 6}
-                            draw_bg +: {color: mod.mpp.bg}
+                            draw_bg +: {color: mod.theme.color_bg_app}
 
                             thumbs_button := ToolButton{
                                 Icon{
                                     icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/thumbnails.svg")
-                                        color: mod.mpp.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -85,7 +85,7 @@ script_mod! {
                                     icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/page-up.svg")
-                                        color: mod.mpp.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -94,63 +94,52 @@ script_mod! {
                                     icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/page-down.svg")
-                                        color: mod.mpp.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
 
-                            page_box := RectView{
+                            page_box := FieldWell{
                                 width: 44
                                 height: 22
                                 margin: Inset{left: 4 right: 4}
+                                padding: Inset{left: 4 right: 4 top: 3 bottom: 3}
+                                spacing: 0.0
                                 draw_bg +: {
-                                    color: mod.mpp.bg_light
-                                    border_color: mod.mpp.dim
                                     border_size: 1.0
                                     border_radius: 0.0
+                                    color: mod.theme.color_fg_app
+                                    color_hover: mod.theme.color_fg_app
+                                    color_focus: mod.theme.color_fg_app
+                                    color_disabled: mod.theme.color_fg_app
+                                    border_color: mod.theme.color_text_disabled
+                                    border_color_hover: mod.theme.color_text
+                                    // The box could not say it held the caret, while the
+                                    // document's own keys were switched off underneath it.
+                                    border_color_focus: mod.theme.color_focus
+                                    border_color_disabled: mod.theme.color_text_disabled
                                 }
-                                page_field := TextInput{
-                                    width: Fill
+                                input: WellInput{
                                     height: Fill
-                                    margin: 0.0
-                                    padding: Inset{left: 4 right: 4 top: 3 bottom: 3}
                                     empty_text: "1"
-                                    draw_bg +: {
-                                        border_radius: uniform(0.0)
-                                        border_size: uniform(0.0)
-                                        color: mod.mpp.bg_light
-                                        color_hover: uniform(mod.mpp.bg_light)
-                                        color_focus: uniform(mod.mpp.bg_light)
-                                        color_down: uniform(mod.mpp.bg_light)
-                                        color_empty: uniform(mod.mpp.bg_light)
-                                        color_disabled: uniform(mod.mpp.bg_light)
-                                        color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
-                                        border_color: uniform(mod.mpp.bg_light)
-                                        border_color_hover: uniform(mod.mpp.bg_light)
-                                        border_color_focus: uniform(mod.mpp.bg_light)
-                                        border_color_down: uniform(mod.mpp.bg_light)
-                                        border_color_empty: uniform(mod.mpp.bg_light)
-                                        border_color_disabled: uniform(mod.mpp.bg_light)
-                                        border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
-                                    }
                                     draw_text +: {
-                                        color: mod.mpp.fg
-                                        color_hover: uniform(mod.mpp.fg)
-                                        color_focus: uniform(mod.mpp.fg)
-                                        color_down: uniform(mod.mpp.fg)
-                                        color_disabled: uniform(mod.mpp.dim)
-                                        color_empty: uniform(mod.mpp.dim)
-                                        color_empty_hover: uniform(mod.mpp.dim)
-                                        color_empty_focus: uniform(mod.mpp.dim)
+                                        color: mod.theme.color_text
+                                        color_hover: uniform(mod.theme.color_text)
+                                        color_focus: uniform(mod.theme.color_text)
+                                        color_down: uniform(mod.theme.color_text)
+                                        color_disabled: uniform(mod.theme.color_text_disabled)
+                                        color_empty: uniform(mod.theme.color_text_disabled)
+                                        color_empty_hover: uniform(mod.theme.color_text_disabled)
+                                        color_empty_focus: uniform(mod.theme.color_text_disabled)
                                         text_style: theme.font_regular{font_size: 9.0}
                                     }
-                                    draw_cursor +: {color: uniform(mod.mpp.accent)}
+                                    draw_cursor +: {color: uniform(mod.theme.color_focus)}
                                     draw_selection +: {
                                         border_radius: uniform(0.0)
-                                        color: uniform(mod.mpp.accent)
-                                        color_hover: uniform(mod.mpp.accent)
-                                        color_focus: uniform(mod.mpp.accent)
-                                        color_down: uniform(mod.mpp.accent)
+                                        color: uniform(mod.theme.color_focus)
+                                        color_hover: uniform(mod.theme.color_focus)
+                                        color_focus: uniform(mod.theme.color_focus)
+                                        color_down: uniform(mod.theme.color_focus)
                                     }
                                 }
                             }
@@ -159,7 +148,7 @@ script_mod! {
                                 width: 46
                                 align: Align{x: 0.0 y: 0.5}
                                 text: "/ 0"
-                                draw_text +: {color: mod.mpp.dim}
+                                draw_text +: {color: mod.theme.color_text_disabled}
                             }
 
                             Filler{}
@@ -169,7 +158,7 @@ script_mod! {
                                     icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/zoom-out.svg")
-                                        color: mod.mpp.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -182,7 +171,7 @@ script_mod! {
                                     icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/zoom-in.svg")
-                                        color: mod.mpp.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -194,7 +183,7 @@ script_mod! {
                                     icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/fit-width.svg")
-                                        color: mod.mpp.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -203,7 +192,7 @@ script_mod! {
                                     icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/fit-page.svg")
-                                        color: mod.mpp.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -219,7 +208,7 @@ script_mod! {
                             height: 22
                             align: Align{y: 0.5}
                             padding: Inset{left: 10 right: 10 top: 0 bottom: 0}
-                            draw_bg +: {color: mod.mpp.bg}
+                            draw_bg +: {color: mod.theme.color_bg_app}
 
                             status := Label{
                                 width: Fill
@@ -227,7 +216,7 @@ script_mod! {
                                 text_overflow: TextOverflow.Ellipsis
                                 text: ""
                                 draw_text +: {
-                                    color: mod.mpp.dim
+                                    color: mod.theme.color_text_disabled
                                     text_style: theme.font_regular{font_size: 9}
                                 }
                             }
@@ -258,14 +247,10 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        let args: Args = makepad_pdf::parse_args(std::env::args().skip(1));
+        let args: Args = makepad_app_pdf::parse_args(std::env::args().skip(1));
 
-        // makepad_wm_theme::apply already retinted theme.color_bg_app and
-        // mod.widgets.Window.pass.clear_color from a theme.splash when one
-        // is exported; patch the pass clear color explicitly too so the
-        // ground behind the toolbar is right either way.
-        {
-            let color = Palette::for_cx(cx).bg_vec4();
+        // Keep the pass clear colour in sync with the installed system theme.
+        if let Some(color) = cx.with_vm(|vm| theme_tokens::color(vm, "color_bg_app")) {
             let mut window = self.ui.window(cx, ids!(main_window));
             script_apply_eval!(cx, window, {
                 pass +: { clear_color: #(color) }
@@ -295,7 +280,7 @@ impl MatchEvent for App {
         // Cmd+G is the one shortcut that belongs to the chrome rather than
         // to the document: it puts the caret in the page field.
         if e.key_code == KeyCode::KeyG && e.modifiers.is_primary() {
-            let page_field = self.ui.text_input(cx, ids!(page_field));
+            let page_field = self.ui.text_input(cx, ids!(page_box.input));
             page_field.take_key_focus(cx);
             if let Some(mut inner) = page_field.borrow_mut() {
                 inner.select_all(cx);
@@ -390,7 +375,7 @@ impl App {
     }
 
     fn handle_page_field(&mut self, cx: &mut Cx, actions: &Actions) {
-        let page_field = self.ui.text_input(cx, ids!(page_field));
+        let page_field = self.ui.text_input(cx, ids!(page_box.input));
         if let Some((text, _)) = page_field.returned(actions) {
             if let Ok(number) = text.trim().parse::<usize>() {
                 if number >= 1 {
@@ -430,7 +415,7 @@ impl App {
             } else {
                 format!("{}", status.page)
             };
-            self.ui.text_input(cx, ids!(page_field)).set_text(cx, &text);
+            self.ui.text_input(cx, ids!(page_box.input)).set_text(cx, &text);
         }
 
         self.ui
@@ -488,11 +473,12 @@ fn status_line(status: &PdfStatus) -> String {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         Palette::for_vm(vm).publish(vm);
-        makepad_pdf::thumbs::script_mod(vm);
-        makepad_pdf::widget::script_mod(vm);
+        makepad_app_pdf::thumbs::script_mod(vm);
+        makepad_app_pdf::widget::script_mod(vm);
         self::script_mod(vm)
     }
 

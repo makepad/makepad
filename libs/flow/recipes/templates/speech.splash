@@ -1,0 +1,20 @@
+use mod.flow.*
+
+/** The words to speak. */
+let prompt = Input{ type: @text  default: "Welcome aboard. We leave at first light."  at: vec2(40, 120) }
+
+let speech = Speech{
+    text: prompt.text()
+    voice: "bm_daniel"
+    speed: 1.0
+    at: vec2(360, 120)
+}
+
+/** The spoken audio. */
+let voice = Output{ type: @audio  value: speech.audio()  at: vec2(680, 120) }
+
+Flow{
+    label: "Speech"
+    brief: "Speaks supplied text with the creator's default voice and natural speed."
+    prompt, speech, voice
+}

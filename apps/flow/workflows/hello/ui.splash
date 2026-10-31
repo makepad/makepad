@@ -1,0 +1,43 @@
+use mod.flow.*
+
+// Hello's app surface: what Flow shows on the right when this package is
+// open. Controls address the flow the way node faces do: `bind :=` writes
+// an Input node's port on the live instance, `show :=` follows an Output
+// node's value. The graph on the left is the same instance.
+
+// The themed title and hint of the face prelude: their colours follow
+// the theme; the sizes are the prelude's, the same this surface had.
+let Title = mod.flow.ui.Title
+
+let Hint = mod.flow.ui.Hint
+
+View{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: theme.space_3
+    padding: Inset{left: 18 right: 18 top: 16 bottom: 16}
+
+    Title{text: "Hello"}
+    Hint{text: "Type a name, then greet. The graph on the left runs it."}
+
+    name := TextInput{
+        width: Fill
+        height: 34
+        empty_text: "Who to greet"
+        bind := "name.text"
+    }
+
+    run_button := Button{
+        width: Fit
+        height: 32
+        text: "Greet"
+    }
+
+    Hint{text: "Greeting"}
+    greeting := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := "greeting.value"
+    }
+}

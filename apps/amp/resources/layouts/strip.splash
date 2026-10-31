@@ -1,0 +1,30 @@
+// title: Strip
+// class: pocket
+// order: 50
+// min: 300x94
+// pref: 320x100
+//
+// The compact form a window manager asks for when it parks Amp small beside
+// the work (compact form "strip", 320x100; see Amp's `compact_forms`). Never
+// picked by window size: what plays on top, the record and the title over the
+// artist; under it previous, play and next beside the mini spectrum. The rail
+// is gone; everything else is in the full layout the window returns to.
+use mod.prelude.widgets_internal.*
+use mod.widgets.*
+
+mod.widgets.HwLayout = View{
+    width: Fill
+    height: Fill
+    flow: Down
+    spacing: 4
+    mod.widgets.HwSlot{component: "now" width: Fill height: 58}
+    View{
+        width: Fill
+        height: Fill
+        flow: Right
+        spacing: 6
+        align: Align{y: 0.5}
+        mod.widgets.HwSlot{component: "transport" width: 172 height: Fill}
+        mod.widgets.HwSlot{component: "spectrum" width: Fill height: Fill}
+    }
+}

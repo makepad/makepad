@@ -1,7 +1,8 @@
 //! The tooltip story: one tip around a control, its pointer, what it may
 //! carry, how it is reached without a pointer, and the two tips a caller
 //! places by hand.
-use crate::makepad_widgets::callout_tooltip::{CalloutTooltipOptions, TooltipPosition};
+use crate::makepad_widgets::callout_tooltip::CalloutTooltipOptions;
+use crate::makepad_widgets::tooltip::TooltipPosition;
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 

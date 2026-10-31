@@ -1,0 +1,34 @@
+// A scene, drawn by one Splash pixel function on the GPU
+RoundedView{width: Fill height: 1000 show_bg: true
+    draw_bg +: {
+        pixel: fn() {
+            let t = self.draw_pass.time
+            let p = self.pos
+            let sky = mix(#x0b1030, #x3a1458, p.y)
+            let mut col = sky.xyz
+            let uv = (p - vec2(0.5, 0.5)) * vec2(self.rect_size.x / self.rect_size.y, 1.0)
+            let d = length(uv)
+            let sun = 1.0 - smoothstep(0.2, 0.205, d)
+            let glow = 0.02 / (d * d + 0.02)
+            col = mix(col, mix(#xffd27a, #xf0508a, p.y * 1.6 - 0.3).xyz, sun)
+            col = col + #xf0a27a.xyz * glow * 0.3
+            let band = step(0.5, fract((p.y + t * 0.04) * 26.0))
+            col = mix(col, sky.xyz, sun * band * step(0.53, p.y))
+            let cell = floor(p * self.rect_size / 5.0)
+            let h = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453)
+            let star = step(0.993, h) * (0.55 + 0.45 * sin(t * 2.5 + h * 60.0))
+            col = col + vec3(star, star, star) * (1.0 - sun) * step(p.y, 0.68)
+            let h1 = 0.70 + 0.035 * sin(p.x * 7.0 + t * 0.35)
+            col = mix(col, #x2a0f45.xyz, smoothstep(h1, h1 + 0.004, p.y))
+            let h2 = 0.74 + 0.03 * sin(p.x * 11.0 - t * 0.55 + 1.7)
+            col = mix(col, #x1a0a30.xyz, smoothstep(h2, h2 + 0.004, p.y))
+            let fy = max(p.y - 0.78, 0.002)
+            let gx = abs(fract((p.x - 0.5) / fy * 0.12) - 0.5)
+            let gz = abs(fract(0.05 / fy + t * 0.8) - 0.5)
+            let grid = 1.0 - smoothstep(0.0, 0.04, min(gx * fy * 6.0, gz * fy * 30.0))
+            col = mix(col, #x0d0618.xyz, step(0.78, p.y))
+            col = col + #x74d4f2.xyz * grid * step(0.78, p.y) * (0.4 + 2.0 * fy)
+            return vec4(col, 1.0)
+        }
+    }
+}

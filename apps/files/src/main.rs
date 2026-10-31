@@ -5,7 +5,7 @@
 //! (`src/view.rs`). The standalone binary is a `Window` around that view.
 
 pub use makepad_widgets;
-use makepad_files::view::FilesView;
+use makepad_app_files::view::FilesView;
 use makepad_widgets::*;
 
 app_main!(App);
@@ -19,7 +19,7 @@ script_mod! {
             main_window := Window{
                 window.title: "Files"
                 window.inner_size: vec2(1240, 800)
-                pass.clear_color: mod.mpf.bg
+                pass.clear_color: mod.theme.color_bg_app
                 body +: {
                     padding: 0 spacing: 0
                     files := FilesView{}
@@ -48,9 +48,10 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
-        makepad_files::script_mod(vm);
+        makepad_app_files::script_mod(vm);
         self::script_mod(vm)
     }
 

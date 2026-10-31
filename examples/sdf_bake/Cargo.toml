@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-sdf-bake"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The SDF engine's brick bake checked end to end: lowering vs csg_sdf, GPU vs CPU twin bit for bit, dirty re-bake vs full"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+makepad-sdf-engine = { path = "../../libs/sdf_engine" }
+makepad-csg-math = { path = "../../libs/csg/csg_math" }

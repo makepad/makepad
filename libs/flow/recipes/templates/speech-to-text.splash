@@ -1,0 +1,13 @@
+use mod.flow.*
+
+/** The speech recording to transcribe. */
+let audio = Input{ type: @audio }
+let transcribe = Stt{ audio: audio.audio() language: "" model: "whisper-large-v3-turbo" }
+/** Publish the timed transcript into the flow asset library. */
+let published = Publish{ value: transcribe.json() namespace: "flows" tags: ["flow", "transcript"] }
+
+Flow{
+    label: "Speech to text"
+    brief: "Transcribes supplied speech audio into a timed Whisper JSON record."
+    audio, transcribe, published
+}

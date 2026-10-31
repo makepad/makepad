@@ -1,0 +1,263 @@
+// Nostromo — the ship console from Alien (1979): putty and khaki panels
+// bolted on with visible screws and seams, chunky off-white keys with
+// stencilled black legends, and an amber monochrome CRT in a deep grey
+// bezel: scanlines, phosphor bloom, a darkened curved rim. Used, industrial.
+use mod.prelude.widgets_internal.*
+
+// ---- palette: amber phosphor on near-black glass ----
+mod.widgets.hw_palette.screen_bg = #x120d06
+mod.widgets.hw_palette.screen_text = #xffb347
+mod.widgets.hw_palette.screen_muted = #xd99d48
+mod.widgets.hw_palette.accent = #xffa21f
+
+// ---- the front: khaki putty, riveted plates, worn ----
+mod.widgets.HwChassis.draw_bg.ground = #xa9a288
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 0.97, 0.88, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.20, 0.19, 0.15, 1.0)
+mod.widgets.HwChassis.draw_bg.pattern = vec4(6.0, 1.0, 0.8, 0.0)
+mod.widgets.HwChassis.draw_bg.pattern_ink = vec4(0.30, 0.28, 0.22, 0.75)
+mod.widgets.HwChassis.draw_bg.pattern_seam = vec4(282.0, 212.0, 1.2, 3.2)
+mod.widgets.HwChassis.draw_bg.sheen = vec4(0.0, 0.3, 0.35, 0.25)
+mod.widgets.HwChassis.draw_bg.grain = 0.03
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(1.0, 0.62, 0.18, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(1.8, 0.6)
+mod.widgets.Window.pass.clear_color = #xa9a288
+// The hull front: seamed sheets on a grid, a screw at each sheet corner,
+// blotchy grime and the odd scuff where boots and trays have hit it.
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    let cell = vec2(282.0, 212.0)
+    let f = fract(w / cell)
+    let e = min(min(f.x, 1.0 - f.x) * cell.x, min(f.y, 1.0 - f.y) * cell.y)
+    let seam = 1.0 - smoothstep(0.0, 1.8, e)
+    let lip = (1.0 - smoothstep(1.8, 3.2, e)) * smoothstep(1.2, 1.8, e)
+    let grime = self.hw_noise(w * 0.012) * 0.6 + self.hw_noise(w * 0.05) * 0.4
+    var col = base * (0.93 + grime * 0.10)
+    col = col * (1.0 + (self.hw_hash(floor(w * 1.5)) - 0.5) * 0.05)
+    let stain = smoothstep(0.62, 0.9, self.hw_noise(w * 0.02 + vec2(31.0, 17.0)))
+    col = mix(col, col * vec3(0.84, 0.79, 0.68), stain * 0.30)
+    col = mix(col, vec3(0.20, 0.19, 0.15), seam * 0.85)
+    col = col + vec3(0.10, 0.10, 0.08) * lip
+    let corner = min(f, vec2(1.0, 1.0) - f) * cell
+    let v = corner - vec2(10.0, 10.0)
+    let r = length(v)
+    let sink = (1.0 - smoothstep(4.8, 6.0, r)) * smoothstep(3.8, 4.8, r)
+    col = col * (1.0 - sink * 0.45)
+    let head = 1.0 - smoothstep(3.9, 4.5, r)
+    col = mix(col, vec3(0.58, 0.56, 0.51), head)
+    let a = self.hw_hash(floor(w / cell + vec2(0.5, 0.5))) * 3.14159
+    let dist = abs(dot(v, vec2(0.0 - sin(a), cos(a))))
+    let slot = (1.0 - smoothstep(0.45, 1.0, dist)) * (1.0 - smoothstep(2.9, 3.5, r))
+    col = mix(col, vec3(0.10, 0.09, 0.07), slot * 0.9)
+    return col
+}
+
+// Raised plates: off-white putty, bolted at the corners, seamed.
+mod.widgets.HwPlate.draw_bg.ground = #xcfc8b0
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 0.98, 0.92, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.18, 0.17, 0.13, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern_ink = vec4(0.36, 0.34, 0.27, 0.8)
+mod.widgets.HwPlate.draw_bg.pattern_seam = vec4(120.0, 96.0, 1.0, 2.8)
+mod.widgets.HwPlate.draw_bg.sheen = vec4(0.0, 0.3, 0.35, 0.25)
+mod.widgets.HwPlate.draw_bg.relief = vec4(1.2, 0.3, 2.5, 0.15)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.55, 7.0, 1.0, 0.55)
+mod.widgets.HwPlate.draw_bg.grain = 0.035
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(1.0, 0.62, 0.18, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(2.2, 0.55)
+// Each plate carries its own four slotted screws, countersunk at the corners,
+// and the grime of forty years of hands.
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    var col = base * (1.0 + (self.hw_noise(w * 0.05) - 0.5) * 0.12 + (self.hw_hash(floor(w * 1.5)) - 0.5) * 0.05)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    col = col * (1.0 - uv.y * 0.07)
+    let m = self.inset + 9.0
+    let qx = mix(m, self.rect_size.x - m, step(self.rect_size.x * 0.5, p.x))
+    let qy = mix(m, self.rect_size.y - m, step(self.rect_size.y * 0.5, p.y))
+    let v = p - vec2(qx, qy)
+    let r = length(v)
+    let sink = (1.0 - smoothstep(4.6, 6.0, r)) * smoothstep(3.6, 4.6, r)
+    col = col * (1.0 - sink * 0.45)
+    let head = 1.0 - smoothstep(3.7, 4.4, r)
+    let shade = 1.05 - dot(v, vec2(0.7, 0.7)) * 0.06
+    let metal = vec3(0.62, 0.60, 0.55) * shade
+    col = mix(col, metal, head)
+    let a = self.hw_hash(floor(w - v) + vec2(3.0, 7.0)) * 3.14159
+    let dir = vec2(cos(a), sin(a))
+    let dist = abs(dot(v, vec2(0.0 - dir.y, dir.x)))
+    let slot = (1.0 - smoothstep(0.45, 1.0, dist)) * (1.0 - smoothstep(2.8, 3.4, r))
+    col = mix(col, vec3(0.10, 0.09, 0.07), slot * 0.9)
+    return col
+}
+
+// Recessed panels: darker khaki well.
+mod.widgets.HwPanel.draw_bg.ground = #x5c5747
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.95, 0.92, 0.82, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.12, 0.11, 0.08, 1.0)
+mod.widgets.HwPanel.draw_bg.pattern = vec4(4.0, 1.2, 0.10, 0.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.80, 8.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.grain = 0.03
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(1.0, 0.62, 0.18, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(2.0, 0.55)
+
+// The CRT surround: dark gunmetal grey, deep.
+mod.widgets.HwBezel.draw_bg.ground = #x2b2a26
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.70, 0.68, 0.60, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.pattern = vec4(7.0, 1.0, 0.0, 0.0)
+mod.widgets.HwBezel.draw_bg.pattern_seam = vec4(22.0, 9.0, 0.0, 0.0)
+mod.widgets.HwBezel.draw_bg.pattern_ink = vec4(0.80, 0.63, 0.14, 0.9)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.95, 14.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.glow_ink = vec4(1.0, 0.62, 0.18, 1.0)
+mod.widgets.HwBezel.draw_bg.spill = vec2(0.7, 0.4)
+
+// The tube: amber phosphor wash, heavy scanlines, bloom, curved dark corners.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.14, 0.06, 0.55, 0.35)
+mod.widgets.HwGlass.draw_bg.tint = vec4(1.0, 0.52, 0.08, 0.50)
+mod.widgets.HwGlass.draw_bg.radius = 18.0
+mod.widgets.HwGlass.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let d = Material.sd_box(p, c, c, self.radius)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    // Scanlines: every other device row goes dark.
+    // A CRT's rows: fine, even, with the screen filter only.
+    let line = 0.5 + 0.5 * sin(p.y * 3.14159 * self.draw_pass.dpi_factor)
+    // Vignette and curved-tube corners.
+    let q = (self.pos - vec2(0.5, 0.5)) * 2.0
+    let vig = clamp(dot(q, q) * 0.22 + dot(q * q, q * q) * self.glass.w, 0.0, 1.0)
+    let edge = smoothstep(-40.0, 0.0, d) * self.glass.z
+    let dark = clamp(line * self.glass.x * self.filter_on + vig + edge, 0.0, 0.95)
+    // Amber phosphor: a constant wash that tints the picture (with the filter).
+    let amb = self.tint.w * self.filter_on
+    // Reflection: a soft sheet on the upper left.
+    let r = smoothstep(0.55, 0.0, self.pos.y + (self.pos.x - 0.5) * 0.3) * self.glass.y
+    let a = clamp(amb + dark * (1.0 - amb) + r, 0.0, 1.0)
+    // Phosphor bloom: a faint amber haze hanging over the middle of the tube.
+    let bloom = (1.0 - clamp(dot(q, q), 0.0, 1.0)) * 0.07 * self.filter_on
+    let rgb = self.tint.xyz * (amb * (1.0 - dark) + bloom) + vec3(1.0, 0.9, 0.7) * r
+    // Outside the rounded tube: the bezel's black mask.
+    let inside = vec4(rgb, a) * cov
+    return inside + vec4(0.035, 0.032, 0.028, 1.0) * (1.0 - cov)
+}
+
+// ---- keys: chunky off-white caps, stencilled black legends ----
+mod.widgets.HwKey.draw_bg.ground = #xe2dcc6
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 0.99, 0.94, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.16, 0.15, 0.11, 1.0)
+mod.widgets.HwKey.draw_bg.pattern = vec4(5.0, 1.0, 0.06, 0.0)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.0, 0.3, 0.35, 0.25)
+mod.widgets.HwKey.draw_bg.relief = vec4(3.0, 0.25, 3.0, 0.20)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.70, 5.0, 1.0, 0.70)
+mod.widgets.HwKey.draw_bg.grain = 0.03
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.62, 0.18, 1.0)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.6, 0.5)
+mod.widgets.HwKey.radius = 3
+mod.widgets.HwKeyButton.draw_text.color = #x1c1b17
+mod.widgets.HwKeyButton.draw_text.color_hover = #x000000
+mod.widgets.HwKeyButton.draw_text.color_down = #x000000
+mod.widgets.HwKeyText.draw_text.color = #x1c1b17
+mod.widgets.HwKeyText.draw_text.color_hover = #x000000
+mod.widgets.HwKeyText.draw_text.color_down = #x000000
+
+// ---- lights: amber lamps ----
+mod.widgets.HwDash.emissive = vec4(1.0, 0.60, 0.15, 9.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.64, 0.18, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x3a3528
+mod.widgets.HwLed.emissive = vec4(1.0, 0.60, 0.15, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.64, 0.18, 1.0)
+
+// ---- knob: black chicken-head pointer on a putty skirt ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x2a2925
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(0.85, 0.83, 0.75, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(2.0, 0.62, 24.0, 0.3)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.16, 0.155, 0.14, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.93, 0.90, 0.80, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(11.0, 1.30, 2.6, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.30, 0.25, 0.16, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(1.0, 0.64, 0.18, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.7, 8.0, 1.0, 0.7)
+mod.widgets.HwKnobFace.emissive = vec4(1.0, 0.60, 0.15, 0.7)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(0.35, 0.5)
+
+// ---- meter: a lit amber needle dial ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x16120b
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 14.0, 0.8, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(1.0, 0.64, 0.18, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.30, 0.10, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.16, 0.12, 0.07, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(1.0, 0.60, 0.15, 0.5)
+
+// ---- the picture's light ----
+mod.widgets.HwMilk.light = 1.2
+mod.widgets.HwMilk.light_knee = 0.75
+mod.widgets.HwSpectrum.light = 5.0
+
+// ---- stencilled type ----
+mod.widgets.HwCaption.draw_text.color = #x24221c
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold{font_size: 8.0}
+mod.widgets.HwTitle.draw_text.color = #x1a1915
+mod.widgets.HwText.draw_text.color = #x2e2c25
+mod.widgets.HwPanelTitle.draw_text.color = #xf1ead2
+mod.widgets.HwPanelText.draw_text.color = #xe2d9bc
+mod.widgets.HwNavButton.draw_text.color = #xf1ead2
+mod.widgets.HwDisplayText.draw_text.color = #xffb347
+mod.widgets.HwDisplay.draw_bg.ground = #x16120b
+mod.widgets.HwDisplay.draw_bg.pattern = vec4(4.0, 0.8, 0.15, 0.0)
+mod.widgets.HwDisplay.draw_bg.spill = vec2(0.8, 0.4)
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.70, 0.68, 0.60, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.95, 9.0, 0.0, 0.55)
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.07, 0.05, 0.025, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(1.0, 0.7, 0.3, 0.18)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(1.0, 0.70, 0.28, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xffb347
+mod.widgets.HwDropDown.draw_text.color_hover = #xffd08a
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.07, 0.05, 0.025, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(1.0, 0.7, 0.3, 0.18)
+mod.widgets.HwTextInput.draw_text.color = #xffb347
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.35)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 0.97, 0.85, 0.40)
+// ---- all neighbour light comes back as amber phosphor ----
+mod.widgets.hw_palette.spill_color = #xff8f24
+mod.widgets.hw_palette.spill_mono = 1.0
+// The tube shows the picture in amber phosphor too.
+mod.widgets.HwMilk.tint = vec4(1.0, 0.56, 0.14, 0.85)
+// ---- transport: heavy console keys that drop and lock ----
+mod.widgets.HwTransportKey.latch = 1.0
+mod.widgets.HwTransportKey.press_secs = 0.07
+mod.widgets.HwTransportKey.draw_bg.spill = vec2(0.9, 0.45)
+mod.widgets.HwTransportKey.travel = 5.0
+mod.widgets.HwTransportKey.inset = 3.0
+mod.widgets.HwTransportKey.draw_bg.mech = vec4(1.0, 0.6, 0.0, 0.0)
+mod.widgets.HwTransportKey.draw_bg.dimple = vec4(0.0, 3.0, 0.3, 0.1)
+mod.widgets.HwTransportKey.draw_bg.housing_ink = vec4(0.06, 0.055, 0.045, 1.0)
+mod.widgets.HwTransportKey.draw_bg.front_ink = vec4(0.70, 0.66, 0.55, 1.0)
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x0d0600
+mod.widgets.hw_palette.map1 = #x5a2a00
+mod.widgets.hw_palette.map2 = #xff9a1f
+mod.widgets.hw_palette.map3 = #xffe0a0
+mod.widgets.hw_palette.map_strength = 0.9
+mod.widgets.hw_palette.map_default = 1.0
+// The colour map replaces the flat amber tint.
+mod.widgets.HwMilk.tint = vec4(1.0, 0.56, 0.14, 0.0)
+// The screen filter with the THEME COLOURS key: CRT: a bulging tube, scanlines, an RGB mask, bloom.
+mod.widgets.hw_palette.screen_filter = 1.0
+mod.widgets.hw_palette.screen_filter_strength = 1.0
+mod.widgets.hw_palette.screen_cell = 3.0
+mod.widgets.hw_palette.screen_curve = 0.1
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(1.0, 0.48, 6.0, 3.0)
+mod.widgets.HwEqGraph.draw_fader.segments = vec4(4.0, 1.6, 0.0, 0.0)
+mod.widgets.HwEqGraph.draw_fader.led_off = vec4(0.12, 0.08, 0.03, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(1.0, 1.8, 8.0, 0.08)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(3.0, 0.10, 0.30, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.18, 0.0, 0.3, 0.0)
+mod.widgets.HwEqGraph.light = 1.0
+true

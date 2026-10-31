@@ -185,6 +185,11 @@ impl PtView {
 
 impl Widget for PtView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        // the accumulation lived only on the GPU (a replaced device): it starts over
+        if let Event::GpuReset = event {
+            if let Some(t) = &mut self.tracer { t.restart(); }
+            self.area.redraw(cx);
+        }
         if let Event::NextFrame(ne) = event {
             if ne.set.contains(&self.next_frame) {
                 if let Some(t) = &mut self.tracer {

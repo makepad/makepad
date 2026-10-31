@@ -1,0 +1,46 @@
+use mod.flow.*
+
+/** Object photograph or illustration, preferably with a clear silhouette. */
+let image = Input{ type: @image default: nil at: vec2(40, 80) }
+
+/** Camera FOV and sampling settings. The camera angle is horizontal degrees. */
+let settings = Input{
+    type: @json
+    value: {
+        model: "pixal3d"
+        seed: 42
+        texture: true
+        remesh_resolution: 256
+        decimation_target: 80000
+        texture_size: 1024
+        pixal: {
+            resolution: 1024
+            camera_fov: 49.13
+            structure_seed: 56
+            texture_seed: 43
+            shape_steps: 20
+        }
+    }
+    at: vec2(40, 340)
+}
+
+let matte = Matte{ image: image.image() model: "birefnet-hr" at: vec2(350, 80) }
+
+/** Pixel-aligned shape and material generation; accepts a pre-segmented image. */
+let reconstruct = Gen{
+    domain: "mesh"
+    model: "pixal3d"
+    seed: nil
+    ports: { in: {image: @image request: @json} out: {mesh: @mesh} }
+    image: matte.out(@image)
+    request: settings.json()
+    at: vec2(670, 180)
+}
+
+let model = Output{ type: @mesh value: reconstruct.out(@mesh) at: vec2(990, 180) }
+
+Flow{
+    label: "Image to Pixal3D"
+    brief: "Builds a textured 3D object with Pixal3D and an adjustable camera angle."
+    image, settings, matte, reconstruct, model
+}

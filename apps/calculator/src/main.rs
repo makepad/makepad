@@ -2,7 +2,7 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_calculator::{ai, view::CalculatorView};
+use makepad_app_calculator::{ai, view::CalculatorView};
 use makepad_strict_json as json;
 use makepad_widgets::*;
 
@@ -112,9 +112,10 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
-        makepad_calculator::script_mod(vm);
+        makepad_app_calculator::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -160,3 +161,6 @@ fn is_close_requested(raw: &str) -> bool {
     };
     value.get("wm").and_then(|wm| wm.get("CloseRequested")).is_some()
 }
+
+#[cfg(test)]
+makepad_script_test::shader_inventory_test!("calculator", <App as AppMain>::script_mod);

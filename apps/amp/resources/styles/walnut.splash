@@ -1,0 +1,287 @@
+// Walnut & Brass — a 1970s hi-fi receiver: a brushed-brass faceplate set in
+// an oiled walnut cabinet (the frame round the front), walnut-lined wells for
+// the lists, dark bronze keys with brass legends, a knurled brass knob, a
+// backlit amber VU needle, and a smoked amber dial glass over the picture.
+use mod.prelude.widgets_internal.*
+
+// ---- palette: a warm amber dial ----
+mod.widgets.hw_palette.screen_bg = #x140d07
+mod.widgets.hw_palette.screen_text = #xf3dcae
+mod.widgets.hw_palette.screen_muted = #xa88a60
+mod.widgets.hw_palette.accent = #xffa338
+
+// ---- the front: brushed brass inside an oiled walnut frame ----
+mod.widgets.HwChassis.draw_bg.ground = #xa9843c
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 0.93, 0.74, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.22, 0.13, 0.05, 1.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(1.0, 0.62, 0.20, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(2.8, 0.6)
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    // Brass: long streaks along x, row by row.
+    let row = floor(w.y * 1.5)
+    let streak = self.hw_noise(vec2(w.x * 0.012 + row * 7.13, row * 0.37))
+    let fine = self.hw_hash(vec2(row, floor(w.x * 0.25)))
+    var brass = base * (1.0 + (streak - 0.5) * 0.24 + (fine - 0.5) * 0.08)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    let t = uv.x + (uv.y - 0.5) * 0.4 - 0.32
+    brass = brass + vec3(1.0, 0.9, 0.6) * exp(-(t * t) / 0.05) * 0.10
+    // Walnut: warped grain along x, dark late wood, open pores.
+    let q = w
+    let warp = self.hw_noise(q * vec2(0.005, 0.03)) * 16.0 + self.hw_noise(q * vec2(0.03, 0.2)) * 2.0
+    let ring = fract((q.y + warp) * 0.085)
+    let late = smoothstep(0.45, 0.95, ring)
+    let fig = self.hw_noise(q * vec2(0.008, 0.12))
+    var wood = mix(vec3(0.40, 0.235, 0.12), vec3(0.15, 0.075, 0.035), late * 0.85) * (0.82 + 0.36 * fig)
+    wood = wood * (1.0 - step(0.9, self.hw_hash(floor(q * vec2(0.4, 2.5)))) * 0.3)
+    // The cabinet frame round the faceplate, with a dark brass-to-wood reveal.
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
+    let fw = 9.0
+    let inwood = 1.0 - smoothstep(fw - 0.6, fw + 0.6, e)
+    let reveal = (1.0 - smoothstep(0.0, 1.6, abs(e - fw - 1.0))) * 0.55
+    let roundness = smoothstep(0.0, fw, e) * (1.0 - smoothstep(fw * 0.5, fw, e))
+    wood = wood * (0.78 + 0.35 * roundness)
+    var col = mix(brass, wood, inwood)
+    col = col * (1.0 - reveal * (1.0 - inwood))
+    return col
+}
+mod.widgets.Window.pass.clear_color = #x2a170b
+
+// Raised plates: polished brass escutcheons, a warmer sheen.
+mod.widgets.HwPlate.draw_bg.ground = #xbf9a52
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 0.95, 0.78, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.18, 0.10, 0.03, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern = vec4(1.0, 1.0, 0.20, 1.0)
+mod.widgets.HwPlate.draw_bg.sheen = vec4(0.14, 0.22, 0.30, 0.45)
+mod.widgets.HwPlate.draw_bg.relief = vec4(1.8, 0.85, 2.0, 0.60)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.55, 9.0, 1.0, 0.5)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(1.0, 0.62, 0.20, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(3.0, 0.5)
+
+// Recessed wells: lined with oiled walnut.
+mod.widgets.HwPanel.draw_bg.ground = #x5a3519
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(1.0, 0.86, 0.62, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.06, 0.03, 0.01, 1.0)
+mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let q = self.world.xy
+    let warp = self.hw_noise(q * vec2(0.004, 0.02)) * 22.0 + self.hw_noise(q * vec2(0.025, 0.15)) * 2.5
+    let ring = fract((q.y + warp) * 0.12)
+    let late = smoothstep(0.35, 0.95, ring) * (0.5 + 0.5 * self.hw_noise(q * vec2(0.02, 0.3)))
+    let fig = self.hw_noise(q * vec2(0.006, 0.06)) * 0.6 + self.hw_noise(q * vec2(0.02, 0.25)) * 0.4
+    var wood = mix(vec3(0.25, 0.14, 0.07), vec3(0.12, 0.06, 0.027), late * 0.6) * (0.80 + 0.36 * fig)
+    wood = wood * (1.0 - step(0.9, self.hw_hash(floor(q * vec2(0.4, 2.5)))) * 0.3)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    let t = uv.x + (uv.y - 0.5) * 0.3 - 0.3
+    return wood + vec3(1.0, 0.8, 0.5) * exp(-(t * t) / 0.08) * 0.04
+}
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.85, 9.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(1.0, 0.62, 0.20, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.5, 0.5)
+
+// The dial's surround: black-bronze, deep.
+mod.widgets.HwBezel.draw_bg.ground = #x1c130b
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.95, 0.78, 0.45, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.pattern = vec4(5.0, 1.0, 0.08, 0.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.95, 12.0, 0.0, 0.55)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.2, 0.4)
+
+// Smoked amber dial glass: a warm reflection, a darker rim.
+// No dark rim or bulge over the picture: it reads clean and bright.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.09, 0.0, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(1.0, 0.78, 0.45, 0.16)
+mod.widgets.HwGlass.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let d = Material.sd_box(p, c, c, self.radius)
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let cov = 1.0 - smoothstep(-px, px, d)
+    // Smoked glass: a darker rim, a warm reflection sheet at the top.
+    let edge = smoothstep(-34.0, 0.0, d) * self.glass.z
+    let r = smoothstep(0.62, 0.0, self.pos.y + (self.pos.x - 0.5) * 0.25) * self.glass.y
+    // The dial lamps: an amber glow creeping in from the rim (additive).
+    let lamp = smoothstep(-60.0, 0.0, d) * (0.6 + 0.4 * smoothstep(0.3, 1.0, self.pos.y)) * self.tint.w
+    let rgb = self.tint.xyz * r + vec3(1.0, 0.55, 0.15) * lamp
+    let a = r + edge * (1.0 - r)
+    return vec4(rgb * cov, a * cov)
+}
+
+// The picture lights the brass: a strong spill, a soft ceiling.
+mod.widgets.HwMilk.light = 2.0
+mod.widgets.HwMilk.light_knee = 1.0
+mod.widgets.HwSpectrum.light = 2.5
+
+// ---- keys: dark bronze caps, brass legends ----
+mod.widgets.HwKey.draw_bg.ground = #x2e1c0e
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 0.85, 0.55, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.05, 0.025, 0.01, 1.0)
+mod.widgets.HwKey.draw_bg.pattern = vec4(4.0, 0.8, 0.12, 0.0)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.06, 0.35, 0.30, 0.2)
+mod.widgets.HwKey.draw_bg.relief = vec4(2.4, 0.80, 2.5, 0.60)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.60, 6.0, 1.0, 0.6)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.0, 0.45)
+mod.widgets.HwKeyButton.draw_text.color = #xe8c27a
+mod.widgets.HwKeyButton.draw_text.color_hover = #xffdc98
+mod.widgets.HwKeyButton.draw_text.color_down = #xffb24a
+mod.widgets.HwKeyButton.draw_text.color_focus = #xe8c27a
+mod.widgets.HwKeyText.draw_text.color = #xe8c27a
+mod.widgets.HwKeyText.draw_text.color_hover = #xffdc98
+mod.widgets.HwKeyText.draw_text.color_down = #xffb24a
+mod.widgets.HwKeyText.draw_text.color_focus = #xe8c27a
+
+// ---- lamps: incandescent amber ----
+mod.widgets.HwDash.emissive = vec4(1.0, 0.58, 0.16, 5.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.62, 0.20, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x2a1b0e
+mod.widgets.HwLed.emissive = vec4(1.0, 0.58, 0.16, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.62, 0.20, 1.0)
+
+// ---- knob: knurled brass skirt, a spun brass cap ----
+mod.widgets.HwKnobFace.draw_bg.ground = #xb08a3e
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(1.0, 0.94, 0.75, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.14, 0.08, 0.02, 1.0)
+mod.widgets.HwKnobFace.draw_bg.pattern = vec4(1.0, 1.0, 0.10, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(1.0, 0.66, 72.0, 0.45)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.86, 0.68, 0.34, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.20, 0.11, 0.04, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(11.0, 1.30, 2.4, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.36, 0.25, 0.12, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(1.0, 0.62, 0.20, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.7, 9.0, 1.0, 0.65)
+mod.widgets.HwKnobFace.emissive = vec4(1.0, 0.58, 0.16, 0.7)
+
+// ---- meter: a backlit amber VU dial with a needle ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x1a1109
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(1.0, 16.0, 0.8, 0.95)
+mod.widgets.HwMeterFace.draw_bg.dial_ink = vec4(1.0, 0.72, 0.30, 1.0)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(1.0, 0.62, 0.20, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.25, 0.10, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.12, 0.08, 0.04, 1.0)
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let a = vec2(7.0, 7.0)
+    let b = self.rect_size - a
+    let inside = step(a.x, p.x) * step(p.x, b.x) * step(a.y, p.y) * step(p.y, b.y)
+    let u = (p - a) / max(b - a, vec2(1.0, 1.0))
+    // The lamp behind the dial: brightest low in the middle.
+    let lamp = 1.05 - 0.6 * length((u - vec2(0.5, 0.9)) * vec2(0.9, 1.2))
+    var dial = self.dial_ink.xyz * clamp(lamp, 0.3, 1.0)
+    // The printed scale: an arc, eleven ticks, a red zone.
+    let h = b.y - a.y
+    let piv = vec2(self.rect_size.x * 0.5, b.y + h * 0.6)
+    let q = p - piv
+    let rq = length(q)
+    let ang = atan2(q.x, -q.y)
+    let rr = piv.y - a.y - h * 0.30
+    let sweep = step(abs(ang), 0.8)
+    let arc = (1.0 - smoothstep(0.35, 0.35 + px, abs(rq - rr))) * sweep
+    let tk = abs(fract((ang + 0.8) / 0.16 + 0.5) - 0.5) * 0.16 * rq
+    let tick = (1.0 - smoothstep(0.45, 0.45 + px, tk)) * step(rr - 5.0, rq) * step(rq, rr) * sweep
+    let red = step(0.36, ang) * sweep * step(rr, rq) * step(rq, rr + 3.0)
+    dial = mix(dial, vec3(0.16, 0.08, 0.03), clamp(arc + tick, 0.0, 1.0) * 0.9)
+    dial = mix(dial, vec3(0.78, 0.13, 0.05), red)
+    // The needle, with a soft shadow on the dial.
+    let lv = max(self.level.x, self.level.y)
+    let na = (lv - 0.5) * 1.6
+    let dir = vec2(sin(na), -cos(na))
+    let qs = q - vec2(1.5, 1.5)
+    let ts = clamp(dot(qs, dir), 0.0, rr + 4.0)
+    let sd = length(qs - dir * ts)
+    dial = dial * (1.0 - (1.0 - smoothstep(0.0, 2.5, sd)) * 0.25)
+    let t = clamp(dot(q, dir), 0.0, rr + 4.0)
+    let nd = length(q - dir * t) - 0.6
+    dial = mix(dial, vec3(0.08, 0.04, 0.02), 1.0 - smoothstep(-px, px, nd))
+    // Glass over the dial: a sheen at the top, a dark rim.
+    dial = dial + vec3(1.0, 0.95, 0.85) * (1.0 - smoothstep(0.0, 0.45, u.y)) * 0.10
+    let e = min(min(u.x, 1.0 - u.x) * (b.x - a.x), min(u.y, 1.0 - u.y) * h)
+    dial = dial * (0.55 + 0.45 * smoothstep(0.0, 5.0, e))
+    o = vec4(mix(o.xyz, dial, inside), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+mod.widgets.HwMeterFace.emissive = vec4(1.0, 0.58, 0.16, 0.8)
+
+// ---- type: engraved dark brown on brass, cream on walnut ----
+mod.widgets.HwCaption.draw_text.color = #x4a2e12
+mod.widgets.HwTitle.draw_text.color = #x2a1706
+mod.widgets.HwText.draw_text.color = #x3d260f
+mod.widgets.HwPanelTitle.draw_text.color = #xf6e2b8
+mod.widgets.HwPanelText.draw_text.color = #xd6b98a
+mod.widgets.HwNavButton.draw_text.color = #xf0d7a6
+mod.widgets.HwDisplayText.draw_text.color = #xffc877
+mod.widgets.HwDisplay.draw_bg.ground = #x1a1109
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.95, 0.78, 0.45, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.95, 9.0, 0.0, 0.55)
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.10, 0.065, 0.035, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(1.0, 0.80, 0.45, 0.35)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(1.0, 0.76, 0.40, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xf3d49c
+mod.widgets.HwDropDown.draw_text.color_hover = #xffe6b8
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.10, 0.065, 0.035, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(1.0, 0.80, 0.45, 0.30)
+mod.widgets.HwTextInput.draw_text.color = #xf3dcae
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.05, 0.02, 0.0, 0.40)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 0.85, 0.55, 0.25)
+// ---- transport: brass piano keys with spun caps, dropping and latching ----
+mod.widgets.HwTransportKey.latch = 1.0
+mod.widgets.HwTransportKey.press_secs = 0.07
+mod.widgets.HwTransportKey.draw_bg.spill = vec2(0.9, 0.45)
+mod.widgets.HwTransportKey.travel = 4.5
+mod.widgets.HwTransportKey.inset = 3.0
+mod.widgets.HwTransportKey.draw_bg.mech = vec4(1.0, 0.66, 0.85, 0.0)
+mod.widgets.HwTransportKey.draw_bg.dimple = vec4(1.0, 3.4, 0.35, 0.18)
+mod.widgets.HwTransportKey.draw_bg.housing_ink = vec4(0.06, 0.035, 0.015, 1.0)
+mod.widgets.HwTransportKey.draw_bg.front_ink = vec4(0.42, 0.28, 0.12, 1.0)
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x1a0d05
+mod.widgets.hw_palette.map1 = #x6b3a14
+mod.widgets.hw_palette.map2 = #xc8873a
+mod.widgets.hw_palette.map3 = #xffe6b0
+mod.widgets.hw_palette.map_strength = 0.8
+mod.widgets.hw_palette.map_default = 1.0
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(0.0, 0.58, 17.0, 4.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.90, 0.78, 0.52, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.05, 0.03, 0.02, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(0.0, 1.8, 9.0, 0.10)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(1.0, 0.18, 0.24, 0.0)
+mod.widgets.HwEqGraph.draw_grid.grid_ink = vec4(0.95, 0.80, 0.55, 0.6)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.16, 1.0, 0.0, 0.0)
+true
+
+// ---- the meter's bar form (a pocket player): a backlit amber strip under
+// a printed scale, each channel's level a dark needle tip riding on it ----
+mod.widgets.HwMeterBarFace.draw_bg.ground = #x1a0f07
+mod.widgets.HwMeterBarFace.draw_bg.glow_ink = vec4(1.0, 0.68, 0.30, 1.0)
+mod.widgets.HwMeterBarFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let pad = vec2(5.0, 3.0)
+    let w = max(self.rect_size.x - pad.x * 2.0, 1.0)
+    let h = max(self.rect_size.y - pad.y * 2.0, 1.0)
+    let u = (p.x - pad.x) / w
+    let v = (p.y - pad.y) / h
+    let inside = step(0.0, u) * step(u, 1.0) * step(0.0, v) * step(v, 1.0)
+    // The lamp behind the dial card: brightest in the middle.
+    let lamp = 0.55 + 0.45 * (1.0 - pow(abs(u - 0.5) * 2.0, 2.0))
+    var col = self.glow_ink.xyz * lamp * mix(0.55, 1.0, 1.0 - abs(v - 0.5) * 1.4)
+    // The printed scale: a tick each tenth, the last fifth in red.
+    let tick = 1.0 - smoothstep(0.0, px * 1.3, abs(fract(u * 10.0 + 0.5) - 0.5) * w / 10.0)
+    col = mix(col, vec3(0.22, 0.12, 0.05), tick * step(0.62, v) * 0.8)
+    col = mix(col, vec3(0.75, 0.16, 0.08), step(0.8, u) * step(0.78, v) * 0.7)
+    // Two needle tips, left above right.
+    let lane = step(0.5, v)
+    let lv = mix(self.level.x, self.level.y, lane)
+    let ly = mix(0.26, 0.74, lane)
+    let tip = max(abs(u - lv) * w - (1.0 - abs(v - ly) * 4.0) * 2.2, abs(v - ly) * h - 3.0)
+    col = mix(col, vec3(0.10, 0.05, 0.02), (1.0 - smoothstep(-px, px, tip)) * step(0.01, lv))
+    o = mix(o, vec4(col, 1.0), inside)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+true

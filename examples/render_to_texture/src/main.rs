@@ -25,6 +25,7 @@ script_mod! {
                 body +: {
                     flow: Down
                     cached_pane := CachedView{
+                        a11y: {role: "group" label: "Cached pane"}
                         width: Fill
                         height: Fill
                         flow: Down
@@ -59,6 +60,8 @@ impl MatchEvent for App {}
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         self::script_mod(vm)
     }

@@ -55,13 +55,15 @@ impl AssistantService {
         Err("image search is not available in this build".to_string())
     }
 
+    pub fn set_offline(&mut self, _offline: bool) {}
+
     pub fn speak(&self, _text: &str) {}
 
     pub fn stop_speech(&mut self) {}
 
     pub fn submit_utterance(&mut self, _text: String, _recent: Vec<String>) {}
 
-    pub fn handle_event(&mut self, _cx: &mut Cx, _ui: &WidgetRef, _event: &Event) -> Vec<AssistantEvent> {
+    pub fn handle_event(&mut self, _cx: &mut Cx, _event: &Event) -> Vec<AssistantEvent> {
         Vec::new()
     }
 

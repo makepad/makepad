@@ -1,0 +1,22 @@
+# The styles built into the binary (src/embedded_styles.rs), one file stem per line.
+# Every style in this folder is listed: a style that is not finished does not live here.
+brushed
+rack
+walnut
+plastic
+piano
+nostromo
+military
+orbital
+artdeco
+bauhaus
+modern
+cyberpunk
+synthwave
+tube
+steampunk
+y2k
+brutalist
+holo
+graphite
+lcd

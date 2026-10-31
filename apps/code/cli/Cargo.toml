@@ -1,0 +1,18 @@
+# makepad-code: Makepad Code in a terminal. A plain Rust binary on the agent
+# core (makepad-code-agent): std, termios and ANSI only, no window, no GPU,
+# so it runs over ssh or on a bare console.
+
+[package]
+name = "makepad-code"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Makepad Code in the terminal: an interactive coding agent, or one task with -p"
+
+[[bin]]
+name = "makepad-code"
+path = "src/main.rs"
+
+[dependencies]
+makepad-code-agent = { path = "../agent" }
+makepad-cell-width = { path = "../../../libs/cell_width" }

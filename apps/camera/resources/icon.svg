@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a4152"/>
+      <stop offset="1" stop-color="#14161e"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glass" cx="0.4" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#7fb4ff"/>
+      <stop offset="0.6" stop-color="#2d5fc4"/>
+      <stop offset="1" stop-color="#132a5c"/>
+    </radialGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- camera: body, viewfinder hump, lens, flash -->
+  <path d="M392 336 L436 260 H588 L632 336 Z" fill="#e3e6ec"/>
+  <rect x="192" y="320" width="640" height="464" rx="104" fill="#e3e6ec"/>
+  <circle cx="512" cy="552" r="176" fill="#14161e"/>
+  <circle cx="512" cy="552" r="124" fill="url(#glass)"/>
+  <circle cx="470" cy="508" r="34" fill="#ffffff" fill-opacity="0.55"/>
+  <circle cx="724" cy="412" r="30" fill="#ff8a3d"/>
+</svg>

@@ -1,0 +1,12 @@
+// A scene, drawn by one Splash pixel function on the GPU
+RoundedView{width: Fill height: 1000 show_bg: true
+    draw_bg +: {
+        pixel: fn() {
+            let t = self.draw_pass.time
+            let p = self.pos
+            let sky = mix(#x0b1030, #x3a1458, p.y)
+            let mut col = sky.xyz
+            return vec4(col, 1.0)
+        }
+    }
+}
