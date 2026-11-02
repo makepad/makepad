@@ -1,6 +1,6 @@
 #!/bin/bash
-# land_gate.sh <fast <base> <cbase>|full|full-a|full-b|stage>: checks on an x86_64 node under a devhub lease.
-# The fast bucket checks a landed work/main tip against its previous tip. It never blocks landing.
+# land_gate.sh <fast <base> <cbase>|hot <base> <cbase>|full|full-a|full-b|stage>: checks under a devhub lease.
+# The fast and hot buckets check a landed work/main tip against their previous tip. They never block landing.
 #   full  : build (0 warnings), rustc-check, relax-compiler libtest build, x64 relax tests, tier fuzzer (fixed
 #           seeds block, random batch never), makepad check of the 7 gate packages + Stage, headless Calc+Stage
 #           present, boundary (provided_sweep.sh audits of the six smoke apps), warm_zero (Calculator: the warm launch shows no JIT spinner), warm_after_app_edit (Sandbox: a
@@ -12,6 +12,7 @@
 #   fast  : the JIT binary of the landed tree (kept or built here, 0 warnings), devhub's binary when changed,
 #           checks and warm presents of the affected set across the bucket's landings, plus affected JIT suites.
 #           GATE_PROVEN skips units whose inputs already passed.
+#   hot   : boot the directly touched apps on the hot Mac's warm JIT, then settle for 3 s.
 #   stage : build, makepad check makepad-stage, headless Stage present (commercial-only branches)
 # Every mode runs in place: a devhub rev lease runs in the node's ONE tree (its synced checkout, moved to the gated
 # commits: only changed files get new mtimes), with the node's one target, JIT binary and JIT cache, so it is warm.
@@ -40,7 +41,7 @@ step_build() {
   CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run -p makepad-remote --bin makepad --bin makepad-launcher --bin makepad-remote -j8 > "$log/build" 2>&1 || { fail="$fail build"; tail -20 "$log/build"; return 1; }
   if grep -E "^(warning|error)" "$log/build" | grep -qv sandbox; then grep -E "^(warning|error)" "$log/build" | grep -v sandbox | head -20; fail="$fail build-warnings"; return 1; fi
 }
-# a tracked file naming a private address, path or host: every mode, it costs a small build
+# a tracked file naming a private address, path or host: except hot, it costs a small build
 step_private() {
   cargo run -q --profile host -p makepad-private-check > "$log/private" 2>&1 || { head -20 "$log/private"; fail="$fail private"; }
 }
@@ -72,7 +73,7 @@ step_check_stage() { check_pkg stage makepad-stage apps/commercial; }
 present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh home; 1 when the app reports `present`
   name=$1; dir=$2; shift 2
   s=$log/hrun-$name; mkdir -p "$s"
-  if [ -n "$PRESENT_WARM" ]; then  # fast: the node's one warm JIT cache (the tree's; keyed by the loader build id)
+  if [ -n "$PRESENT_WARM" ]; then  # fast/hot: the node's one warm JIT cache (the tree's; keyed by the loader build id)
     (cd "$dir" && exec env MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 MAKEPAD_TRACE=startup $B run --report-to $s/report "$@" -- --remote > $s/out.log 2>&1) &
   else  # full: cold, from a fresh home
     rh=$s/home
@@ -88,12 +89,14 @@ present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh
   # the settle window: the first frame comes before the app's worker threads do their work (Fab's model thread
   # panicked 6.4 s after a passing present), so the app lives on until the JIT is idle (two quiet looks in a row)
   # or SETTLE s (15); a panic (parked or not), a JIT compile error or an exit in that window fails the present
+  # hot waits the full settle window
   settled=""
   if grep -q present $s/report 2>/dev/null; then
     app=$(pgrep -P $pid | head -1)  # the JIT under cargo run: the app's own pid, for inspect
     t0=$(date +%s); idle=0
-    while [ $(( $(date +%s) - t0 )) -lt ${SETTLE:-15} ] && [ $idle -lt 2 ] && kill -0 $pid 2>/dev/null; do
-      if [ -n "$app" ] && $B inspect $app jit ms=500 2>/dev/null | grep -q '^idle'; then idle=$((idle + 1)); else idle=0; sleep 0.5; fi
+    while [ $(( $(date +%s) - t0 )) -lt ${SETTLE:-15} ] && { [ "$mode" = hot ] || [ $idle -lt 2 ]; } && kill -0 $pid 2>/dev/null; do
+      if [ "$mode" = hot ]; then sleep 0.5
+      elif [ -n "$app" ] && $B inspect $app jit ms=500 2>/dev/null | grep -q '^idle'; then idle=$((idle + 1)); else idle=0; sleep 0.5; fi
     done
     kill -0 $pid 2>/dev/null || settled="exited during the settle window"
     bad=$(settle_errors "$s")
@@ -249,6 +252,7 @@ step_devhub() { # devhub's own binary when the bucket diff touches it (0 warning
 step_affected() {
   python3 -I tools/run/fixture/affected.py "$QBASE" "$QCBASE" > "$log/affected" 2> "$log/affected.err" || { fail="$fail affected"; tail -5 "$log/affected.err"; return 1; }
   grep '^why' "$log/affected"; sum="$sum $(grep -c '^check' "$log/affected") checks $(grep -c '^present' "$log/affected") presents"
+  return 0
 }
 # fast: the affected apps' checks and presents all at once on this one warm box, on its one JIT cache; each in its
 # own subshell, so its output and failures are gathered here in affected.py's order
@@ -256,7 +260,9 @@ at_once() { # at_once <fn> <lines file>: runs `<fn> <fields of a line>` per line
   i=0
   while read -r -a f; do
     i=$((i + 1))
-    ( fail=""; "$1" "${f[@]}" > "$log/par-$i.out" 2>&1; printf '%s' "$fail" > "$log/par-$i.fail" ) &
+    # both files open here: present's own `for i` loop changed $i inside the subshell, so its failures
+    # went to another par-N.fail and the verdict passed with GATEUNIT fail lines
+    ( fail=""; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) > "$log/par-$i.out" 2>&1 3> "$log/par-$i.fail" &
   done < "$2"
   wait
   for n in $(seq 1 $i); do
@@ -284,6 +290,20 @@ qpresent_one() {
 }
 step_qcheck() { at_once qcheck_one "$log/checks"; }
 step_qpresent() { at_once qpresent_one "$log/presents"; }
+if [ "$mode" = hot ]; then
+  QBASE=${2:?hot <makepad base sha> <commercial base sha|->}; QCBASE=${3:--}
+  export PRESENT_WARM=1 PRESENT_WAIT=60 SETTLE=3
+  if HOT=1 timed step_affected; then
+    grep '^present ' "$log/affected" > "$log/presents"
+    if [ ! -s "$log/presents" ]; then
+      echo "hot: no app touched"; echo "NODEGATE-OK hot"; exit 0
+    fi
+    if timed step_jit; then timed step_qpresent; fi
+  fi
+  who="[lease ${DEVHUB_LEASE:-none} lane ${MAKEPAD_TEST_LANE:-none} at $(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown) in $PWD]"
+  if [ -n "$fail" ]; then echo "NODEGATE-FAIL:$fail $who"; exit 1; fi
+  echo "NODEGATE-OK hot$sum $who"; exit 0
+fi
 if [ "$mode" = fast ]; then
   QBASE=${2:?fast <makepad base sha> <commercial base sha|->}; QCBASE=${3:--}
   export PRESENT_WARM=1 PRESENT_WAIT=${PRESENT_WAIT:-60}  # warm presents take 3-20 s alone, more side by side: a hang fails in 60 s

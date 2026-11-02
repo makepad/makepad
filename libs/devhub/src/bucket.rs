@@ -1,4 +1,4 @@
-//! Buckets check landed tips after a quiet minute, with a cap if merges keep coming.
+//! Buckets check landed tips on their own timers.
 //! One run covers all landings since that bucket's last tip.
 //! Failures name the lanes whose inputs changed; they never control landing.
 
@@ -147,8 +147,9 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
         let mut seen = last.clone();
         let mut last_merge = wall_ms();
         let mut due_since = None;
+        let poll = Duration::from_secs(if timing.quiet < Duration::from_secs(5) { 1 } else { 5 });
         loop {
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(poll);
             let Some(tip) = crate::orch::snapshot(&repo) else { continue };
             let now = wall_ms();
             if seen.as_ref() != Some(&tip) {
@@ -196,6 +197,7 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
                 ambiguous |= attribution_error.is_some();
                 let rows = entries.iter().zip(&units).map(|(e, units)| obj(vec![
                     ("id", Value::Int(e.id as i64)), ("label", s(&e.label())), ("agent", s(&e.agent)),
+                    ("land_to_verdict_ms", Value::Int(ended.saturating_sub(e.changed_ms) as i64)),
                     ("units", Value::Arr(units.iter().map(|u| s(u)).collect())),
                 ])).collect();
                 append(&home, obj(vec![
@@ -205,8 +207,11 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
                     ("summary", s(&outcome.summary)), ("log", s(&outcome.log)), ("landings", Value::Arr(rows)),
                     ("ambiguous", Value::Bool(ambiguous)),
                 ])).map_err(|e| format!("bucket ledger: {e}"))?;
+                let latency = entries.iter().map(|e| e.changed_ms).max().map(|landed| {
+                    format!("land->verdict {} s; ", ended.saturating_sub(landed) / 1000)
+                }).unwrap_or_default();
                 let (sev, line, detail) = if outcome.ok {
-                    (Sev::Info, format!("bucket {name} {} ok ({})", tip.short(), outcome.summary), String::new())
+                    (Sev::Info, format!("bucket {name} {} ok ({latency}{})", tip.short(), outcome.summary), String::new())
                 } else {
                     let blamed = entries.iter().zip(&units).flat_map(|(e, units)| units.iter().map(move |u| {
                         format!("{} ({}) changed {u}", e.label(), e.agent)
@@ -214,7 +219,7 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
                     let log = std::fs::read_to_string(&outcome.log).unwrap_or_default();
                     let mut detail = crate::land::failure_lines(&log);
                     if let Some(e) = attribution_error { detail.push(e); }
-                    (Sev::Err, format!("bucket {name} {} FAILED {}: {blamed}{}", tip.short(), outcome.failing.join(", "), if ambiguous { " (ambiguous)" } else { "" }), detail.join("\n"))
+                    (Sev::Err, format!("bucket {name} {} FAILED {}: {blamed}{} ({latency}{})", tip.short(), outcome.failing.join(", "), if ambiguous { " (ambiguous)" } else { "" }, outcome.summary), detail.join("\n"))
                 };
                 publish(hub_record(&machine, "", 0, "bucket", sev, line, detail));
                 Ok(tip)
@@ -230,38 +235,60 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
 pub fn fast(repo: PathBuf, proofs: Arc<crate::gateproof::Store>) -> Run {
     Arc::new(move |base, tip, log| {
         let (units, why) = proofs.proven(&repo, tip);
-        let own = crate::cli::own_argv(&repo);
-        let execute = || -> std::io::Result<std::process::ExitStatus> {
-            let mut file = std::fs::File::create(log)?;
-            for line in &why { writeln!(file, "{line}")?; }
-            let err = file.try_clone()?;
-            let base = base.expect("fast bucket needs a base");
-            std::process::Command::new(&own[0]).args(&own[1..])
-                .args(["lease", "gate", "--needs", GATE_NEEDS, "--lane", "landq-fast", "--prio", "0", "--rev", &tip.rev(), "--"])
-                .args(["env", &format!("GATE_PROVEN={}", units.join(";")), "bash", "tools/run/fixture/land_gate.sh", "fast", &base.work, &base.main])
-                .current_dir(&repo).env("DEVHUB_AGENT", "devhub-bucket")
-                .stdin(std::process::Stdio::null()).stdout(file).stderr(err).status()
-        };
-        let status = execute();
-        if let Err(e) = &status {
-            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(log) { let _ = writeln!(file, "gate lease: {e}"); }
-        }
-        let text = std::fs::read_to_string(log).unwrap_or_default();
+        let base = base.expect("fast bucket needs a base");
+        let lease = ["lease", "gate", "--needs", GATE_NEEDS, "--lane", "landq-fast", "--prio", "0", "--rev", &tip.rev(), "--"];
+        let proven = format!("GATE_PROVEN={}", units.join(";"));
+        let gate = ["env", &proven, "bash", "tools/run/fixture/land_gate.sh", "fast", &base.work, &base.main];
+        let (status, text) = lease_run(&repo, &lease, &gate, &why, log);
         proofs.record_log(&repo, tip, &text, &format!("bucket fast {}", tip.short()));
-        let ok = status.as_ref().is_ok_and(|s| s.success()) && text.lines().any(|l| l.starts_with("NODEGATE-OK"));
-        let mut failing: Vec<String> = text.lines().filter_map(|l| l.strip_prefix("GATEUNIT fail ").map(str::to_string)).collect();
-        if !ok && failing.is_empty() {
-            for line in text.lines().filter_map(|l| l.strip_prefix("NODEGATE-FAIL")) {
-                let steps = line.trim_start_matches(':').split(" [").next().unwrap_or("");
-                failing.extend(steps.split_whitespace().map(str::to_string));
-            }
-            if failing.is_empty() {
-                failing.push(match status { Ok(s) => format!("no verdict (exit {:?})", s.code()), Err(e) => format!("gate lease: {e}") });
-            }
-        }
-        failing.sort();
-        failing.dedup();
-        let summary = text.lines().filter(|l| l.starts_with("STEP ")).collect::<Vec<_>>().join(", ");
-        Outcome { ok, failing, log: log.display().to_string(), summary }
+        verdict(status, &text, log)
     })
+}
+
+/// Boots the apps the landings touched on the hot Mac's warm JIT, right after each landing.
+pub fn hot(repo: PathBuf) -> Run {
+    Arc::new(move |base, tip, log| {
+        let base = base.expect("hot bucket needs a base");
+        let lease = ["lease", "test", "--needs", "role=hot,os=macos", "--cost", "small", "--priority", "interactive", "--lane", "landq-hot", "--rev", &tip.rev(), "--"];
+        let gate = ["bash", "tools/run/fixture/land_gate.sh", "hot", &base.work, &base.main];
+        let (status, text) = lease_run(&repo, &lease, &gate, &[], log);
+        verdict(status, &text, log)
+    })
+}
+
+/// Runs land_gate.sh under a devhub lease, its output in `log` after the `why` lines.
+fn lease_run(repo: &Path, lease: &[&str], gate: &[&str], why: &[String], log: &Path) -> (std::io::Result<std::process::ExitStatus>, String) {
+    let own = crate::cli::own_argv(repo);
+    let execute = || -> std::io::Result<std::process::ExitStatus> {
+        let mut file = std::fs::File::create(log)?;
+        for line in why { writeln!(file, "{line}")?; }
+        let err = file.try_clone()?;
+        std::process::Command::new(&own[0]).args(&own[1..]).args(lease).args(gate)
+            .current_dir(repo).env("DEVHUB_AGENT", "devhub-bucket")
+            .stdin(std::process::Stdio::null()).stdout(file).stderr(err).status()
+    };
+    let status = execute();
+    if let Err(e) = &status {
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(log) { let _ = writeln!(file, "gate lease: {e}"); }
+    }
+    (status, std::fs::read_to_string(log).unwrap_or_default())
+}
+
+/// A run passes on exit 0 with NODEGATE-OK and no failing unit.
+fn verdict(status: std::io::Result<std::process::ExitStatus>, text: &str, log: &Path) -> Outcome {
+    let mut failing: Vec<String> = text.lines().filter_map(|l| l.strip_prefix("GATEUNIT fail ").map(str::to_string)).collect();
+    let ok = failing.is_empty() && status.as_ref().is_ok_and(|s| s.success()) && text.lines().any(|l| l.starts_with("NODEGATE-OK"));
+    if !ok && failing.is_empty() {
+        for line in text.lines().filter_map(|l| l.strip_prefix("NODEGATE-FAIL")) {
+            let steps = line.trim_start_matches(':').split(" [").next().unwrap_or("");
+            failing.extend(steps.split_whitespace().map(str::to_string));
+        }
+        if failing.is_empty() {
+            failing.push(match status { Ok(s) => format!("no verdict (exit {:?})", s.code()), Err(e) => format!("gate lease: {e}") });
+        }
+    }
+    failing.sort();
+    failing.dedup();
+    let summary = text.lines().filter(|l| l.starts_with("STEP ")).collect::<Vec<_>>().join(", ");
+    Outcome { ok, failing, log: log.display().to_string(), summary }
 }

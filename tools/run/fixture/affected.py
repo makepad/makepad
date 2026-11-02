@@ -14,7 +14,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import tomllib
 import sys
 
 # the smoke set, in run order: gated when the diff reaches the JIT or a workspace-wide input
@@ -53,6 +52,7 @@ def metadata(manifest):
 def old_dep_features(repo, ref, rel, directory):
     """The features the manifest at `ref` turned on per path dependency (normal dependencies,
     every target): {dependency dir: features}; empty when the manifest is new."""
+    import tomllib  # Python 3.11; the hot Mac's python3 is 3.9 and its mode never reads old manifests
     try:
         text = git(repo, "show", f"{ref}:{rel}")
     except subprocess.CalledProcessError:
@@ -140,6 +140,22 @@ def main():
     devhub_code = closure({devhub_dir}, forward) if devhub_dir else set()
     # Workspace-wide resolver/patch/profile inputs apply to every member.
     workspace = any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in compiled)
+    if os.environ.get("HOT") == "1":
+        selected = set()
+        for name in SMOKE:
+            if name not in PRESENT_ARGS:
+                continue
+            parts = by_name[name].relative_to(root).parts
+            app = "/".join(parts[:3] if parts[:2] == ("apps", "commercial") else parts[:2])
+            if parts[0] == "apps" and any(p.startswith(app + "/") for p in compiled):
+                selected.add(name)
+        print(f"why files {len(files)}; changed: {' '.join(sorted(packages[d]['name'] for d in touched)) or '-'}; affected gate packages: {' '.join(sorted(selected)) or '-'}; feature flips: -")
+        print("jit " + ("yes" if workspace or touched & jit_code else "no"))
+        print("devhub " + ("yes" if workspace or touched & devhub_code else "no"))
+        for name in SMOKE:
+            if name in selected:
+                print(" ".join(["present", name, str(by_name[name].relative_to(root)), *PRESENT_ARGS[name]]))
+        return
     if workspace:
         affected.update(packages)
     selected = {name for name in GATE_PACKAGES if by_name.get(name) in affected}

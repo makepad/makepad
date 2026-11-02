@@ -231,7 +231,14 @@ impl Master {
             let run = crate::bucket::fast(repo.clone(), proofs);
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::from_secs(60), cap: Duration::from_secs(10 * 60) };
-            crate::bucket::spawn("fast", timing, repo, home.clone(), Arc::new(move |r: Record| {
+            crate::bucket::spawn("fast", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }), run);
+            let run = crate::bucket::hot(repo.clone());
+            let (s, o) = (sink.clone(), on_record.clone());
+            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO };
+            crate::bucket::spawn("hot", timing, repo, home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
             }), run);
