@@ -79,6 +79,15 @@ fn read_tail(path: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+fn jit_diagnostic(t: &str) -> bool {
+    let Some((_, rest)) = t.split_once(".rs:") else { return false };
+    let Some((line, rest)) = rest.split_once(':') else { return false };
+    let Some((col, rest)) = rest.split_once(':') else { return false };
+    let Some((code, _)) = rest.trim_start().strip_prefix('E').and_then(|s| s.split_once(':')) else { return false };
+    line.parse::<u64>().is_ok() && col.parse::<u64>().is_ok()
+        && !code.is_empty() && code.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// The lines of a log that say why it failed: cargo's `error` lines with the few lines under each
 /// (the `-->` pointer, the code), and test failures and panics.
 pub fn error_lines(log: &str) -> Vec<String> {
@@ -92,7 +101,9 @@ pub fn error_lines(log: &str) -> Vec<String> {
             || t.starts_with("CIERR ")
             // cargo's short format: `path:line:col: error[E0659]: ...`
             || t.contains(": error[")
-            || t.contains(": error: ");
+            || t.contains(": error: ")
+            // the JIT's short format: path:line:col: E0277: ...
+            || jit_diagnostic(t);
         if starts {
             under = 3;
             out.push(crate::proto::clean(line, 300));
@@ -284,6 +295,7 @@ mod tests {
         assert!(detail.contains("error[E0425]") && detail.contains("--> src/a.rs") && !detail.contains("could not compile"), "{detail}");
         assert_eq!(get(cross, &["steps", "0", "state"]).as_str(), Some("failed"));
         assert_eq!(get(br, &["scripts", "1", "verdict"]).as_str(), Some("green"));
+        assert_eq!(error_lines("src/a.rs:1:2: E0308: mismatched types\n"), vec!["src/a.rs:1:2: E0308: mismatched types"]);
     }
 
     #[test]

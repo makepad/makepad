@@ -332,6 +332,38 @@ impl<'a, T: Clone> From<&'a [T]> for Arc<[T]> {
     }
 }
 
+// library/alloc/src/rcs/arc.rs:4095,4135,4223,4250 @8d1a764
+impl<'a, T: Clone> From<&'a mut [T]> for Arc<[T]> {
+    fn from(v: &'a mut [T]) -> Arc<[T]> {
+        Arc::from(&*v)
+    }
+}
+
+impl<'a> From<&'a mut str> for Arc<str> {
+    fn from(v: &'a mut str) -> Arc<str> {
+        Arc::from(&*v)
+    }
+}
+
+impl<'a, B> From<crate::borrow::Cow<'a, B>> for Arc<B>
+where
+    B: crate::borrow::ToOwned + ?Sized,
+    Arc<B>: From<&'a B> + From<<B as crate::borrow::ToOwned>::Owned>,
+{
+    fn from(cow: crate::borrow::Cow<'a, B>) -> Arc<B> {
+        match cow {
+            crate::borrow::Cow::Borrowed(s) => Arc::from(s),
+            crate::borrow::Cow::Owned(s) => Arc::from(s),
+        }
+    }
+}
+
+impl From<Arc<str>> for Arc<[u8]> {
+    fn from(rc: Arc<str>) -> Arc<[u8]> {
+        unsafe { Arc::from_raw(Arc::into_raw(rc) as *const [u8]) }
+    }
+}
+
 /// Moves a boxed (possibly unsized) value into a new Arc block and frees the box's allocation.
 impl<T: ?Sized> From<crate::boxed::Box<T>> for Arc<T> {
     fn from(b: crate::boxed::Box<T>) -> Arc<T> {

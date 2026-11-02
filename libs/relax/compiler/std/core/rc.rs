@@ -381,6 +381,38 @@ impl<'a, T: Clone> From<&'a [T]> for Rc<[T]> {
     }
 }
 
+// library/alloc/src/rcs/rc.rs:3060,3100,3188,3215 @8d1a764
+impl<'a, T: Clone> From<&'a mut [T]> for Rc<[T]> {
+    fn from(v: &'a mut [T]) -> Rc<[T]> {
+        Rc::from(&*v)
+    }
+}
+
+impl<'a> From<&'a mut str> for Rc<str> {
+    fn from(v: &'a mut str) -> Rc<str> {
+        Rc::from(&*v)
+    }
+}
+
+impl<'a, B> From<crate::borrow::Cow<'a, B>> for Rc<B>
+where
+    B: crate::borrow::ToOwned + ?Sized,
+    Rc<B>: From<&'a B> + From<<B as crate::borrow::ToOwned>::Owned>,
+{
+    fn from(cow: crate::borrow::Cow<'a, B>) -> Rc<B> {
+        match cow {
+            crate::borrow::Cow::Borrowed(s) => Rc::from(s),
+            crate::borrow::Cow::Owned(s) => Rc::from(s),
+        }
+    }
+}
+
+impl From<Rc<str>> for Rc<[u8]> {
+    fn from(rc: Rc<str>) -> Rc<[u8]> {
+        unsafe { Rc::from_raw(Rc::into_raw(rc) as *const [u8]) }
+    }
+}
+
 /// Moves a boxed (possibly unsized) value into a new Rc block and frees the box's allocation.
 impl<T: ?Sized> From<crate::boxed::Box<T>> for Rc<T> {
     fn from(b: crate::boxed::Box<T>) -> Rc<T> {

@@ -28,14 +28,21 @@ pub(crate) fn running_tests(line: &str) -> bool {
         && matches!(words.next(), Some("test" | "tests")) && words.next().is_none()
 }
 
-/// Only a run that never reached the test harness can be a compile miss. In particular,
-/// diagnostics in a failing test's captured output must not turn that test into a JIT miss.
+/// Only output outside a target's harness window (`running N tests` .. `test result:`) can
+/// be a compile miss. A package run builds and runs one target after another, so one target's
+/// compile error counts even when other targets ran. Diagnostics in a failing test's captured
+/// output inside its window never turn that test into a JIT miss.
 pub(crate) fn compile_errors(log: &str) -> Vec<String> {
     let log = plain(log);
-    if log.lines().any(running_tests) { return Vec::new(); }
     let mut errors: Vec<String> = Vec::new();
     let mut summary = Vec::new();
+    let mut harness = false;
     for line in log.lines().map(str::trim) {
+        if running_tests(line) { harness = true; continue; }
+        if harness {
+            if line.starts_with("test result:") { harness = false; }
+            continue;
+        }
         if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
             if text(&v, "severity") == "error" {
                 let file = text(&v, "file");
@@ -214,4 +221,42 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
     drop(_guard);
     event(action, &value);
     Ok(value.to_json())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_target_that_fails_to_compile_between_passing_targets_is_a_miss() {
+        let error = "/home/me/devhub/ci-tree/apps/commercial/scope/deps/code_atlas/tests/relief.rs:160:62: E0277: the trait bound `HashMap<Arc<str>, Arc<str>, RandomState>: FromIterator<<Map<Iter<String, FrozenFile>, closure#825> as Iterator>::Item>` is not satisfied";
+        let log = format!("running 2 tests
+test a ... ok
+test b ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+{error}
+error: could not compile `relief` (test) due to 1 previous error: no test ran (`makepad test` fails as `cargo test` does on code rustc rejects; if `cargo test` builds it, this is a makepad run bug)
+
+running 10 tests
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+");
+        assert_eq!(compile_errors(&log), vec![error.to_string()]);
+        let log = "running 1 test
+test t ... FAILED
+
+failures:
+
+---- t stdout ----
+src/a.rs:1:2: E0308: mismatched types
+error: could not compile `a` (lib) due to 1 previous error
+
+failures:
+    t
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+";
+        assert!(compile_errors(log).is_empty());
+    }
 }
