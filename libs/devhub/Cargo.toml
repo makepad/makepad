@@ -18,6 +18,7 @@ relax-base = { workspace = true, optional = true }
 makepad-ci-merge = { path = "../../tools/ci_merge" }
 makepad-ci-judge = { path = "../ci_judge", optional = true }
 makepad-network = { path = "../../platform/network" }
+makepad-devhub-conf = { path = "../devhub_conf" }
 makepad-remote = { workspace = true }
 makepad-strict-json = { workspace = true }
 makepad-toml-parser = { path = "../toml_parser" }
@@ -33,6 +34,10 @@ makepad-filesystem-watcher = { path = "../filesystem_watcher", optional = true }
 # checkout (tools/run/android_host) builds without it and installs its source store instead
 default = ["checkout"]
 checkout = ["dep:relax-base", "dep:makepad-app-registry", "dep:makepad-filesystem-watcher", "dep:makepad-ci-judge"]
+
+# the hosted wire's fingerprint: a box's WM must speak it for gui work (caps::display)
+[target.'cfg(target_os = "linux")'.dependencies]
+makepad-studio-protocol = { path = "../../platform/studio" }
 
 [target.'cfg(windows)'.dependencies.windows]
 package = "makepad-windows-sys"

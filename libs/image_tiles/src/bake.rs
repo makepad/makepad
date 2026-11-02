@@ -16,7 +16,7 @@ use crate::tape::{
     FULL_BPP, LEVELS, PAGE_BPP, PYRAMID_LEVELS,
 };
 use makepad_network::blocking_http::{self, Limits, Request};
-use makepad_widgets_core::makepad_platform::thread::{Lane, TaskPool};
+use makepad_widgets_core::makepad_platform::thread::{TaskPool};
 use makepad_widgets_core::Cx;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -268,7 +268,7 @@ pub fn bake(
     let mut completed = Vec::with_capacity(total);
     for batch in pending.chunks(batch_width) {
         let results = Mutex::new((0..batch.len()).map(|_| None).collect::<Vec<Option<PackMsg>>>());
-        pool.fan_out(Lane::Heavy, batch.len(), |index| {
+        pool.fan_out(batch.len(), |index| {
             let (id, url) = &batch[index];
             let msg = match fetch_bytes(url, PICTURE_MAX_BYTES) {
                 Ok(bytes) => match process_picture(&library, geometry, *id, &bytes) {

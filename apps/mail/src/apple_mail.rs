@@ -1,7 +1,7 @@
 //! Read-only adapter for downloaded Apple Mail .emlx files and exported .eml.
 use crate::mime;
 use crate::source::*;
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle, TaskPool};
+use makepad_widgets::makepad_platform::thread::{Class, TaskHandle, TaskPool};
 use std::{
     collections::{HashMap, VecDeque},
     fs,
@@ -96,14 +96,13 @@ impl MailSource for AppleMailSource {
                 }
             }
         }
-        while self.scans.len() < pool.heavy_workers() && !self.dirs.is_empty() {
-            let Ok(slot) = pool.reserve(Lane::Heavy) else { break; };
+        while self.scans.len() < pool.worker_count() && !self.dirs.is_empty() {
             let work = self.dirs.pop_front().unwrap();
             let root = self.root.clone();
             let labels = self.labels.clone();
             // A large folder yields after a fixed number of entries so scans
             // cannot monopolize the decoder pool or produce unbounded results.
-            self.scans.push(slot.submit_named("mail-discover", move || work.scan(&root, 128, &labels)));
+            self.scans.push(pool.submit_named(Class::Visible, "mail-discover", move || work.scan(&root, 128, &labels)).map_err(|error| error.to_string())?);
         }
         batch.complete = self.dirs.is_empty() && self.scans.is_empty();
         batch.full_inventory = true;

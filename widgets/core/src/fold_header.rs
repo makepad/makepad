@@ -69,7 +69,7 @@ pub struct FoldHeader {
     #[rust]
     rect_size: f64,
     /// Set by the header step when the body is drawn unconstrained (fully
-    /// open or first draw) — the only draw whose used height is the truth.
+    /// open or first draw), so its measured height may shrink the remembered size.
     #[rust]
     measure_body: bool,
     /// The fold's full outer rect (header + body), captured when the outer
@@ -242,17 +242,21 @@ impl Widget for FoldHeader {
         if let Some(DrawState::DrawBody) = self.draw_state.get() {
             let walk = self.body.walk(cx);
             self.body.draw_walk(cx, scope, walk)?;
-            // Remember the content height ONLY from an unconstrained draw. A
-            // folded or animating body is drawn into a shorter turtle, and
-            // measuring it there would shrink the remembered size: a Fill body
-            // collapses to its Fit children while closed, and re-opening then
-            // gave the body that collapsed height (the chat text box never
-            // came back).
+            // An unconstrained draw sets the remembered height. A folded or
+            // animating draw may only grow it: a Fit body lays out at its full
+            // height in the shorter turtle too, so rows a panel makes when the
+            // fold opens set the animation's target on its first frame (it ran
+            // to the empty body's height and then jumped open). A Fill body
+            // measures at most the clamped height there; shrinking to that
+            // collapsed it to its Fit children while closed (the chat text box
+            // never came back on re-opening).
+            let used_y = cx.turtle().used().y;
             if self.measure_body {
-                let used_y = cx.turtle().used().y;
                 if used_y > 0.0 {
                     self.rect_size = used_y;
                 }
+            } else if used_y > self.rect_size {
+                self.rect_size = used_y;
             }
             cx.end_turtle();
             cx.end_turtle_with_area(&mut self.area);

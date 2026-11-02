@@ -1114,13 +1114,14 @@ where
             Ok(())
         }
         Ok(Err(err)) => {
+            let err = with_jit_capture(&app, err);
             capture_failure_artifacts(&app, err.message());
             app.pause_before_shutdown();
             app.shutdown();
             Err(err)
         }
         Err(payload) => {
-            let err = TestError::from_panic_payload(payload);
+            let err = with_jit_capture(&app, TestError::from_panic_payload(payload));
             capture_failure_artifacts(&app, err.message());
             app.pause_before_shutdown();
             app.shutdown();
@@ -1150,6 +1151,17 @@ pub fn run_current_package_test<F, R>(
     };
     if let Err(err) = run_with_config(config, test) {
         panic_for_error(err);
+    }
+}
+
+/// A failed test of a JIT app names the app's state at the failure (first, before the
+/// screenshots): a wait that timed out says what the app was doing, without a rerun.
+fn with_jit_capture(app: &TestApp, err: TestError) -> TestError {
+    let first = err.message().lines().next().unwrap_or("");
+    let why: String = format!("test failed: {first}").chars().take(200).collect();
+    match app.client().jit_capture(&why) {
+        Some(state) => TestError::new(format!("{}\n  JIT state at the failure: {state}", err.message())),
+        None => err,
     }
 }
 

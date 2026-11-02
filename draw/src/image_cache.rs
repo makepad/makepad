@@ -975,7 +975,7 @@ impl ImageCache {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
-            decode_queue: TaskQueue::new(Lane::Light, MAX_POOL_WORKERS, 1024),
+            decode_queue: TaskQueue::new(Class::Visible, available_parallelism().get().saturating_sub(1).max(1), 1024),
             pending_http_requests: HashMap::new(),
             fresh: Vec::new(),
             fresh_event: 0,
@@ -2375,8 +2375,9 @@ where
                 result: RefCell::new(Some(result)),
             });
         };
-    let pool = cx.task_pool();
-    if pool.is_open() {
+    #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
+    {
+        let pool = cx.task_pool();
         let queue = &mut cx.get_global::<ImageCache>().decode_queue;
         queue.set_in_flight_limit(pool.worker_count());
         if let Err(error) = queue.push(&pool, task_key.clone(), true, QueueOrder::Lifo, job) {
@@ -2385,7 +2386,9 @@ where
                 result: RefCell::new(Some(Err(ImageError::Worker(error.to_string())))),
             });
         }
-    } else {
+    }
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+    {
         // A non-threaded wasm build has an explicit serial path for this pure
         // CPU decode.
         job();

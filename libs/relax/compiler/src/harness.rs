@@ -241,12 +241,16 @@ extern "C" fn next_run(t: *mut Tests, ms: f64) -> u32 {
             run.why = match edit.changed.as_deref() {
                 None => Some("non-body edit".to_string()),
                 Some(changed) => {
-                    // an unattributed changed fn may run in any test: all; a test whose reach is
-                    // unknown (it never finished a recorded run) reruns itself, the rest by reach
+                    // an unattributed changed fn may run in any test: all; so may one no test
+                    // reached here (it runs in a process a test started, or before the captures,
+                    // or is reached only through data such as Splash script): when unsure, run.
+                    // A test whose reach is unknown (it never finished a recorded run) or that
+                    // started a process (an app it drives) reruns itself, the rest by reach
                     let (reach, unattributed) = reach::snapshot(u);
-                    let why = changed.iter().find(|d| unattributed.contains(*d)).map(|d| format!("unattributed: {}", u.prog.def_path(*d)));
+                    let why = changed.iter().find(|d| unattributed.contains(*d)).map(|d| format!("unattributed: {}", u.prog.def_path(*d)))
+                        .or_else(|| changed.iter().find(|d| !reach.iter().any(|r| r.reaches(**d))).map(|d| format!("reached by no test here: {}", u.prog.def_path(*d))));
                     for (i, test) in run.table.iter_mut().enumerate() {
-                        let unknown = reach.get(i).is_none_or(|r| r.unknown);
+                        let unknown = reach.get(i).is_none_or(|r| r.unknown || r.spawned);
                         test.selected = (test.eligible != 0 && (why.is_some() || unknown ||
                             test.result != 3 && reach[i].affected(changed))) as u32;
                     }

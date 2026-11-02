@@ -149,6 +149,9 @@ pub trait Gpu {
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String>;
     fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]);
     fn buffer_destroy(&mut self, sid: u32, id: Id);
+    fn buffer_readback(&mut self, s: &mut Session, _id: Id, req: u32, _offset: u64, _len: u64) {
+        s.events.readback(req, readback::NO_RASTER, [0; 4], &[]);
+    }
     fn buffer_evictable(&mut self, sid: u32, id: Id);
     fn pipeline_create(&mut self, s: &mut Session, id: Id, dialect: u32, blob: &PipelineBlob, attr: Attr) -> PipeStatus;
     /// Whether the pipeline was still compiling (it no longer counts as pending).
@@ -409,7 +412,8 @@ pub fn texture_detail(format: u32, usage: u16) -> &'static str {
 }
 
 pub fn buffer_detail(kind: u16) -> &'static str {
-    match kind {
+    match kind & buffer_kind::KIND_MASK {
+        buffer_kind::STORAGE => "storage",
         buffer_kind::INSTANCE => "instance buffers",
         buffer_kind::VERTEX | buffer_kind::INDEX => "geometry",
         _ => "uniform buffers",
@@ -918,6 +922,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let live = match kind & !target::FLAGS {
                 target::WINDOW => s.windows.get(sid, target).is_ok(),
                 target::TEXTURE => s.textures.get(sid, target).is_ok(),
+                target::COMPUTE => true,
                 _ => false,
             };
             if !live {
@@ -1540,6 +1545,13 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     }
                 }
                 Err(_) => s.stale(),
+            }
+        }
+        HalCmd::BufferReadback { id, req, offset, len } => {
+            match s.buffers.get(sid, id) {
+                Ok(b) if offset.checked_add(len).is_some_and(|end| end <= b.val.size) => gpu.buffer_readback(s, id, req, offset, len),
+                Ok(_) => { s.bad(); s.events.readback(req, readback::FAILED, [0; 4], &[]); }
+                Err(_) => { s.stale(); s.events.readback(req, readback::STALE, [0; 4], &[]); }
             }
         }
         HalCmd::BufferDestroy { id } => match s.buffers.remove(sid, id) {

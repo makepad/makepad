@@ -14,15 +14,20 @@ pub struct Context {
 }
 impl Context {
     pub fn new(_root: &str, sources: Arc<SourceRegistry>, session: &crate::Session) -> Arc<Self> {
-        Arc::new(Self { sources, reads: crate::vfs::ReadSnapshot::new(session.runtime.profile), session: crate::Session { options: session.options.clone(), runtime: session.runtime.clone() },
+        Self::with_reads(sources, session, crate::vfs::ReadSnapshot::new(session.runtime.profile))
+    }
+    fn with_reads(sources: Arc<SourceRegistry>, session: &crate::Session, reads: Arc<crate::vfs::ReadSnapshot>) -> Arc<Self> {
+        Arc::new(Self { sources, reads, session: crate::Session { options: session.options.clone(), runtime: session.runtime.clone() },
             rust_outlines: Default::default(), outline_reuse: Default::default(),
             demand_identity: OnceLock::new(), fingerprint: OnceLock::new() })
     }
     pub fn for_units(crates: &[crate::crates::CrateUnit], sources: Arc<SourceRegistry>, session: &crate::Session) -> Vec<Arc<Self>> {
-        crates.iter().map(|c| Self::new(&c.src_path, sources.clone(), session)).collect()
+        let reads = crate::vfs::ReadSnapshot::new(session.runtime.profile);
+        crates.iter().map(|_| Self::with_reads(sources.clone(), session, reads.clone())).collect()
     }
     pub fn for_crates(crates: &[crate::preload::PreCrate], sources: Arc<SourceRegistry>, session: &crate::Session) -> Vec<Arc<Self>> {
-        crates.iter().map(|c| Self::new(&c.root, sources.clone(), session)).collect()
+        let reads = crate::vfs::ReadSnapshot::new(session.runtime.profile);
+        crates.iter().map(|_| Self::with_reads(sources.clone(), session, reads.clone())).collect()
     }
     pub fn bind_source_reads(&self) -> crate::vfs::ReadScope { self.reads.bind() }
     pub fn finish_load(&mut self) { self.fingerprint(); self.release_prescan(); }
@@ -30,8 +35,7 @@ impl Context {
         self.rust_outlines.lock().unwrap().clear();
         self.outline_reuse.lock().unwrap().clear();
     }
-    /// `path`'s authored bytes are now a mapped image's: the load's read snapshot drops its copy.
-    pub fn release_read(&self, path: &str) { self.reads.release(std::path::Path::new(path)); }
+    pub(crate) fn read_snapshot(&self) -> &Arc<crate::vfs::ReadSnapshot> { &self.reads }
     pub fn report_host_profile(&self) { self.reads.report(); }
     pub fn read_source(&self, path: &str) -> Result<Arc<crate::source::SourceFile>, String> {
         let _reads = self.bind_source_reads();

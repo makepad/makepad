@@ -139,6 +139,23 @@ impl RemoteClient {
             .map_err(|err| TestError::new(format!("app remote JIT state: {err}")))
     }
 
+    /// Under the JIT, the app's state captured before teardown (the host's `capture`: stacks
+    /// with tiers, compile queue, waits, flight recording): its likely cause and the report's
+    /// path. None for a native app or without an answer.
+    pub(crate) fn jit_capture(&self, why: &str) -> Option<String> {
+        if !self.jit {
+            return None;
+        }
+        let line = makepad_remote::app::request_line(&["capture".to_string()], &[("why".to_string(), why.to_string())]);
+        for line in self.client.cmd(&line).ok()? {
+            let Ok(json) = JsonValue::deserialize_json(line.ok()?.trim()) else { continue };
+            if let (Some(cause), Some(path)) = (json.key("cause").and_then(JsonValue::string), json.key("path").and_then(JsonValue::string)) {
+                return Some(format!("{cause} [report {path}]"));
+            }
+        }
+        None
+    }
+
     /// The socket path this client dials, for diagnostics.
     pub fn socket(&self) -> String {
         self.socket.display().to_string()

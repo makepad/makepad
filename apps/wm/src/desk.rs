@@ -2273,8 +2273,9 @@ impl WmDesk {
                 continue;
             }
             let sent = self.items.get(&client).and_then(|item| with_tile_host(item, |v| {
-                // A window with no frame yet needs its child running.
-                if hide_now && !v.has_frame() { return false; }
+                // A JIT load screen is not the app's frame: hiding it would hold the
+                // app's first frame until the window is uncovered.
+                if hide_now && !v.app_drawn() { return false; }
                 v.set_visible(cx, !hide_now)
             })).unwrap_or(false);
             if sent {

@@ -51,6 +51,12 @@ fn init() {
         relax_compiler::inspect::register_host_inspect("cap", makepad_hal::inspect::dispatch);
         relax_compiler::inspect::register_host_commands(makepad_hal::framecap::COMMANDS);
         relax_compiler::inspect::register_host_commands(makepad_hal::a11y::COMMANDS);
+        // a font or automation script the run names under a virtual folder (an overlay's
+        // sources) has no disk file; a relative path is the virtual workspace's, as in JIT code
+        makepad_hal::set_virtual_reader(|path| {
+            let path = if std::path::Path::new(path).is_relative() { format!("{}/{path}", relax_compiler::run::workspace_dir()) } else { path.to_string() };
+            relax_compiler::vfs::is_virtual(&path).then(|| relax_compiler::vfs::read(&path))
+        });
     }
 }
 
@@ -110,6 +116,7 @@ fn source_manifest(name: &str) -> &'static [u8] {
         "makepad_script_census" => include_bytes!(concat!(env!("OUT_DIR"), "/makepad-script-census.src.bin")),
         "makepad_script_compute" => include_bytes!(concat!(env!("OUT_DIR"), "/makepad-script-compute.src.bin")),
         "makepad_shader" => include_bytes!(concat!(env!("OUT_DIR"), "/makepad-shader.src.bin")),
+        "makepad_cpu_budget" => include_bytes!(concat!(env!("OUT_DIR"), "/makepad-cpu-budget.src.bin")),
         "makepad_tween_script" => include_bytes!(concat!(env!("OUT_DIR"), "/makepad-tween-script.src.bin")),
         "makepad_script_audio_aot" => include_bytes!(concat!(env!("OUT_DIR"), "/makepad-script-audio-aot.src.bin")),
         "makepad_hal" => include_bytes!(concat!(env!("OUT_DIR"), "/makepad-hal.src.bin")),
@@ -127,6 +134,7 @@ fn src(name: &str) -> u64 {
         "makepad_script_census" => env!("MAKEPAD_RUN_SRC_makepad_script_census"),
         "makepad_script_compute" => env!("MAKEPAD_RUN_SRC_makepad_script_compute"),
         "makepad_shader" => env!("MAKEPAD_RUN_SRC_makepad_shader"),
+        "makepad_cpu_budget" => env!("MAKEPAD_RUN_SRC_makepad_cpu_budget"),
         "makepad_tween_script" => env!("MAKEPAD_RUN_SRC_makepad_tween_script"),
         "makepad_script_audio_aot" => env!("MAKEPAD_RUN_SRC_makepad_script_audio_aot"),
         "makepad_hal" => env!("MAKEPAD_RUN_SRC_makepad_hal"),
@@ -150,6 +158,7 @@ extern crate makepad_script_compute;
 extern crate makepad_script_std;
 extern crate makepad_shader;
 extern crate makepad_tween_script;
+extern crate makepad_cpu_budget;
 extern crate relax_provided_fixture;
 
 fn provided() {
@@ -159,7 +168,7 @@ fn provided() {
     // the registry, its keys and the lazily built `type_name` strings of the entries (statics of
     // the provided crates) live for the process: the program's heap, not the compiler's
     let _kept = relax_compiler::zone_alloc::kept();
-    const CRATES: [&str; 10] = [
+    const CRATES: [&str; 11] = [
         "relax_provided_fixture",
         "makepad_live_id",
         "makepad_script",
@@ -168,6 +177,7 @@ fn provided() {
         "makepad_script_compute",
         "makepad_shader",
         "makepad_tween_script",
+        "makepad_cpu_budget",
         "makepad_script_audio_aot",
         "makepad_hal",
     ];

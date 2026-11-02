@@ -20,7 +20,7 @@
 //! while a scan is still feeding it.
 
 use makepad_widgets_core::makepad_platform::thread::{
-    Lane, PoolOptions, SignalToUI, TaskPool, ThreadOptions,
+    Class, SignalToUI, TaskPool, ThreadOptions,
 };
 use makepad_widgets_core::*;
 
@@ -495,8 +495,7 @@ pub struct DiskMap {
     generation: u64,
     #[rust]
     cancel: Option<Arc<AtomicBool>>,
-    /// The running scan's pool (see [`scan_pool`]); released when the scan
-    /// ends or stops, so its workers exit once the walk's last job does.
+    /// A shared pool handle retained for the running scan.
     #[rust]
     scan_pool: Option<TaskPool>,
     #[rust]
@@ -1068,7 +1067,7 @@ impl DiskMap {
         };
         let root = self.root.clone();
         let instant = backend::backend().is_instant();
-        let pool = match self.scan_pool.as_ref().filter(|pool| pool.is_open()) {
+        let pool = match self.scan_pool.as_ref() {
             Some(pool) => pool.clone(),
             None => {
                 let pool = scan_pool(cx);
@@ -1154,10 +1153,10 @@ impl DiskMap {
             scan();
             self.drain(cx);
         } else {
-            match pool.submit(Lane::Heavy, scan) {
+            match pool.submit(Class::Visible, scan) {
                 Ok(handle) => handle.detach(),
                 Err(_) => {
-                    // The pool refused the job (closed or saturated): don't
+                    // The pool closed: don't
                     // spin the "Scanning…" state forever with nothing behind it.
                     self.scanning = false;
                     self.cancel = None;
@@ -1893,7 +1892,7 @@ impl DiskMap {
         let root = self.root.clone();
         if backend::backend().is_instant() {
             let _ = backend::backend().store_scan_cache(&root, &bytes);
-        } else if let Ok(handle) = cx.task_pool().submit(Lane::Light, move || {
+        } else if let Ok(handle) = cx.task_pool().submit(Class::Visible, move || {
             let _ = backend::backend().store_scan_cache(&root, &bytes);
         }) {
             handle.detach();
@@ -4392,20 +4391,9 @@ mod tests {
     }
 }
 
-/// The pool map scans run on: the user is watching the map grow, so its heavy
-/// workers run at UserInitiated. The shared runtime pool's heavy lane is
-/// Utility, which on Apple silicon parks the walk on the efficiency cores:
-/// `/Applications` (590k entries, M-series) took 7.7 s there and 1.8 s here.
-/// Its own pool also leaves the shared heavy lane free for thumbnails and
-/// previews while a scan holds every worker it has. A scan owns its pool:
-/// the map and the walk hold the only handles, so the workers exit when the
-/// scan ends instead of idling for the rest of the process.
+/// Map scans use the application pool at Visible priority.
 fn scan_pool(cx: &Cx) -> TaskPool {
-    let spawner = cx.thread_spawner();
-    let mut options = PoolOptions::runtime(spawner.available_parallelism());
-    options.name = "diskmap-scan".into();
-    TaskPool::new_with_priority(spawner, options, CxThreadPriority::UserInitiated)
-        .unwrap_or_else(|_| cx.task_pool())
+    cx.task_pool()
 }
 
 /// Drop `value` on a background thread. Old maps and abandoned scan steps are

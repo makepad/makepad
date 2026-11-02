@@ -69,6 +69,28 @@ impl GrabEdits {
         }
     }
 
+    /// Job `job` was refused: release its items and let the app discard their deltas.
+    pub fn failed(&mut self, job: u64, mut reset: impl FnMut(usize)) {
+        for i in 0..self.job.len() {
+            if self.job[i] == Some(job) {
+                self.job[i] = None;
+                self.waiting[i] = false;
+                reset(i);
+            }
+        }
+    }
+
+    /// The oldest finished gesture could not be sent at all: release its items and let the
+    /// app discard their deltas.
+    pub fn failed_unsent(&mut self, mut reset: impl FnMut(usize)) {
+        for i in self.unsent.pop_front().unwrap_or_default() {
+            if let Some(w) = self.waiting.get_mut(i) {
+                *w = false;
+            }
+            reset(i);
+        }
+    }
+
     /// The document was rebuilt by `job`: items whose edit it carries are settled (unless
     /// `held`: a hand took them again), and `settled` is called for each.
     pub fn settle(&mut self, job: u64, held: impl Fn(usize) -> bool, mut settled: impl FnMut(usize)) {

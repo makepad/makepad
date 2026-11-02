@@ -155,6 +155,7 @@ pub(super) struct Program {
     pub desc: PipelineDesc,
     pub code: SpirvPipeline,
     pub bindings: Vec<u32>,
+    pub storage: Vec<StorageBinding>,
     pub vertex_stride: u32,
     pub layout: vk::PipelineLayout,
     pub descriptors: vk::DescriptorSetLayout,
@@ -177,7 +178,7 @@ pub(super) struct Program {
 
 impl Program {
     /// `video`: the samplers of its video slots (`None`: an ordinary image's for each).
-    pub fn new(dev: Arc<Device>, desc: PipelineDesc, code: SpirvPipeline, bindings: Vec<u32>, vertex_stride: u32, video: Option<&[VideoSampler]>) -> Result<Arc<Self>, String> {
+    pub fn new(dev: Arc<Device>, desc: PipelineDesc, code: SpirvPipeline, bindings: Vec<u32>, vertex_stride: u32, storage: Vec<StorageBinding>, video: Option<&[VideoSampler]>) -> Result<Arc<Self>, String> {
         if bindings.len() < pipeline_binding::BUFFERS || bindings.len() > pipeline_binding::BUFFERS + 4
             || bindings[pipeline_binding::TEXTURES] as usize != code.textures.len() || vertex_stride % 4 != 0 {
             return Err("SPIR-V pipeline binding/layout mismatch".into());
@@ -189,7 +190,7 @@ impl Program {
             None if slots == 0 => Vec::new(),
             None => vec![dev.video_sampler(0, None)?; slots],
         };
-        let mut out = Self { dev, desc, code, bindings, vertex_stride, layout: vk::PipelineLayout::null(),
+        let mut out = Self { dev, desc, code, bindings, storage, vertex_stride, layout: vk::PipelineLayout::null(),
             descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), dynamic: Vec::new(), samplers: Vec::new(), video,
             vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null(),
             xr_vertex: vk::ShaderModule::null(), xr_fragment: vk::ShaderModule::null() };
@@ -247,7 +248,11 @@ impl Program {
         unsafe {
             out.descriptors = out.dev.raw.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None).map_err(error)?;
             let layouts = [out.descriptors];
-            out.layout = out.dev.raw.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts), None).map_err(error)?;
+            let push_size = out.desc.storage_push_size;
+            if out.storage.iter().any(|b| b.offset % 8 != 0 || b.offset.checked_add(8).is_none_or(|n| n > push_size)) { return Err("invalid draw storage push layout".into()); }
+            if push_size > 128 || (!out.storage.is_empty() && !out.dev.compute) { return Err("draw storage unsupported".into()); }
+            let push: Vec<_> = (push_size > 0).then(|| vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).size(push_size)).into_iter().collect();
+            out.layout = out.dev.raw.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&push), None).map_err(error)?;
             out.vertex = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.vertex), None).map_err(error)?;
             out.fragment = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.fragment), None).map_err(error)?;
             if out.dev.multiview && !out.code.xr_vertex.is_empty() {
@@ -310,6 +315,7 @@ pub(super) struct Source {
     pub desc: PipelineDesc,
     pub code: SpirvPipeline,
     pub bindings: Vec<u32>,
+    pub storage: Vec<StorageBinding>,
     pub stride: u32,
     pub key: Vec<u8>,
 }
@@ -411,7 +417,7 @@ impl State {
         let program = {
             let mut programs = lock(&self.video);
             programs.entry(video.to_vec()).or_insert_with(|| {
-                let made = Program::new(base.dev.clone(), self.src.desc, self.src.code.clone(), self.src.bindings.clone(), self.src.stride, Some(video));
+                let made = Program::new(base.dev.clone(), self.src.desc, self.src.code.clone(), self.src.bindings.clone(), self.src.stride, self.src.storage.clone(), Some(video));
                 if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline: {e}"); }
                 made
             }).as_ref().ok()?.clone()

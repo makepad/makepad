@@ -3064,7 +3064,9 @@ impl<'a> Fcx<'a> {
                 continue;
             }
             let cname = crate::parser::derive::default_const_name(&ty_name, variant.as_deref(), &fname);
-            match self.prog.syms.get(&cname).and_then(|s| self.prog.lookup_in_scope(scope, s, false)) {
+            // rustc: `#[rust(expr)]` is no declared default for a bare `..`.
+            match self.prog.syms.get(&cname).and_then(|s| self.prog.lookup_in_scope(scope, s, false))
+                .filter(|&cd| !crate::mir::transform::const_check::is_live_default(self.prog, cd)) {
                 Some(cd) => out.push((i as u32, cd)),
                 // rustc: E0063 missing field (a bare `..` fills only fields with a default value)
                 None => self.err(lo, format!("E0063: missing field `{}` in initializer of `{}`; `..` fills only fields declared with a default value (`{}: T = value`){}", fname, ty_name, fname, if adt.n_generics > 0 { "; default values of generic types are not supported yet" } else { "" })),

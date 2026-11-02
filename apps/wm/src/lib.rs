@@ -14,7 +14,7 @@
 
 #![allow(dead_code)] // shell surface (icons, OSD, panels) built ahead of the flows that use it
 pub use makepad_widgets;
-use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI, TaskHandle};
+use makepad_widgets::makepad_platform::thread::{Class, SignalToUI, TaskHandle};
 use makepad_widgets::makepad_platform::hosted_relay::HostRelayServer;
 use makepad_widgets::tween::{ClockPolicy, LagSmoothing, TweenClock};
 use makepad_widgets::*;
@@ -1278,12 +1278,12 @@ impl App {
         // It is a real window from here: out of the pool, into the layout
         // at the ordinary insertion point, focused like any launch.
         let area = self.desk_area(cx);
-        let window_id = self
+        let (window_id, app_drawn) = self
             .state_mut()
             .clients
             .get(&client)
-            .map(|s| s.window_id)
-            .unwrap_or(0);
+            .map(|s| (s.window_id, s.app_drawn))
+            .unwrap_or((0, false));
         {
             let state = self.state_mut();
             if let Some(slot) = state.clients.get_mut(&client) {
@@ -1304,6 +1304,7 @@ impl App {
             d.with_run_view(cx, client, |cx, v| {
                 v.set_run_target(cx, client, window_id, hub_port);
                 v.app_ready(cx, client, window_id);
+                v.set_app_drawn(app_drawn);
             })
         });
         self.activate_client(cx, client);
@@ -1554,23 +1555,30 @@ impl App {
         }
     }
 
-    fn note_app_frame(&mut self, client: ClientId) {
-        if let Some(slot) = self.state_mut().clients.get_mut(&client) {
-            if !slot.app_drawn {
-                slot.app_drawn = true;
-                slot.starting = false;
-                log!("wm: {} client {} app first frame", slot.app, client);
-            }
+    fn note_app_frame(&mut self, cx: &mut Cx, client: ClientId) {
+        let Some(slot) = self.state_mut().clients.get_mut(&client) else { return };
+        if !slot.app_drawn {
+            slot.app_drawn = true;
+            slot.starting = false;
+            log!("wm: {} client {} app first frame", slot.app, client);
+        }
+        let warm = slot.warm;
+        if self.ai_bus.is_pane(client) {
+            self.with_pane_run_view(cx, |_, v| v.set_app_drawn(true));
+        } else if !warm {
+            self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+                d.with_run_view(cx, client, |_, v| v.set_app_drawn(true))
+            });
         }
     }
 
-    fn note_first_frame(&mut self, client: ClientId) {
+    fn note_first_frame(&mut self, cx: &mut Cx, client: ClientId) {
         let Some(slot) = self.state_mut().clients.get_mut(&client) else {
             return;
         };
         let app_frame = !slot.app_drawn && !slot.launch.as_ref().is_some_and(|l| l.runner() == makepad_app_registry::Runner::Jit);
         let arrival = slot.open_at.take().map(|at| (at, slot.app.clone(), slot.opened_warm));
-        if app_frame { self.note_app_frame(client); }
+        if app_frame { self.note_app_frame(cx, client); }
         let Some((at, app, warm)) = arrival else {
             return;
         };
@@ -3562,6 +3570,10 @@ impl App {
                 // window: the tile stays where it is, its content refreshes.
                 let again = self.state_mut().clients.get(&client).is_some_and(|slot| slot.ready && slot.window_id == window_id && slot.parent.is_none());
                 if again {
+                    if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+                        slot.app_drawn = false;
+                        slot.starting = true;
+                    }
                     log!("wm: client {client} announced its window {window_id} again (restarted in place): the same tile");
                 }
                 let first = again || self
@@ -3642,7 +3654,7 @@ impl App {
                     if let Some(mut scene) = self.ui.widget(cx, ids!(scene)).borrow_mut::<scene::WmScene>() {
                         scene.redraw_content_all(cx);
                     }
-                    self.note_first_frame(client);
+                    self.note_first_frame(cx, client);
                     return;
                 }
                 // Which of the phone's captures this frame may refresh: a
@@ -3657,7 +3669,7 @@ impl App {
                 // invalidate the outer cached scene explicitly.
                 self.redraw_scene_content(cx);
                 self.note_arrival_fade(cx, client);
-                self.note_first_frame(client);
+                self.note_first_frame(cx, client);
                 // A focus that couldn't land at launch (tile not yet
                 // drawn) lands now that the client has a frame.
                 // (Not when the person has gone to another space since: the
@@ -3804,7 +3816,7 @@ impl App {
             }
             AppToStudio::Custom(json) => {
                 if makepad_hal::window_controls::HostedAppFrame::parse(&json).is_some() {
-                    self.note_app_frame(client);
+                    self.note_app_frame(cx, client);
                     return;
                 }
                 // A tray app's dropdown window: shown under its tray item, or hidden (dropdown.rs).
@@ -4026,7 +4038,7 @@ impl App {
         }
         self.backgrounds_pending = true;
         log!("wm: theme '{}' has no wallpapers; fetching them", name);
-        match cx.task_pool().submit(Lane::Heavy, move || {
+        match cx.task_pool().submit(Class::Background, move || {
                 let n = theme::fetch_backgrounds_if_missing(&name);
                 log!("wm: fetched {} wallpaper(s) for '{}'", n, name);
                 n
@@ -4651,9 +4663,10 @@ impl App {
     /// and the panel. `changed`: who is connected changed, so the bar is laid out again.
     fn sync_desk_link(&mut self, cx: &mut Cx, changed: bool) {
         let viewers = self.desk_link.viewers();
-        // a viewer attached may be a person watching this node (`activity`, the node's hub)
+        // a viewer showing this node (not paused: its tab selected, its window visible) may be a
+        // person watching it (`activity`, the node's hub); a tab merely connected is not
         #[cfg(not(target_arch = "wasm32"))]
-        makepad_hal::user_input::set_viewers(viewers.len());
+        makepad_hal::user_input::set_viewers(viewers.iter().filter(|v| !v.paused).count());
         if changed {
             self.bar_sample.desk_link = viewers.iter().map(|v| (v.name.clone(), v.peer.clone())).collect();
         }

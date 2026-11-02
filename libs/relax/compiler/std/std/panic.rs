@@ -76,8 +76,18 @@ type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 static HOOK: RwLock<Option<Hook>> = RwLock::new(None);
 
 fn trampoline(message: &str, location: &Location<'_>) {
-    let payload = String::from(message);
-    let info = PanicHookInfo { payload: &payload, message, location };
+    #[cfg(not(any(relax_web, relax_shim)))]
+    {
+        let payload = take_payload();
+        run_hook(&*payload, message, location);
+        store_payload(payload);
+    }
+    #[cfg(any(relax_web, relax_shim))]
+    run_hook(&String::from(message), message, location);
+}
+
+fn run_hook(payload: &(dyn Any + Send), message: &str, location: &Location<'_>) {
+    let info = PanicHookInfo { payload, message, location };
     let guard = match HOOK.read() {
         Ok(g) => g,
         Err(e) => e.into_inner(),
@@ -177,6 +187,14 @@ fn clear_payload() {
     });
 }
 
+fn store_payload(payload: Box<dyn Any + Send>) {
+    let _ = PAYLOAD.try_with(|c| {
+        if let Some(old) = c.replace(Some(unsafe { core::ptr::NonNull::new_unchecked(Box::into_raw(payload)) })) {
+            drop(unsafe { Box::from_raw(old.as_ptr()) });
+        }
+    });
+}
+
 /// The payload of the panic that just ended this thread's catch point (taken).
 pub(crate) fn take_payload() -> Box<dyn Any + Send> {
     match PAYLOAD.try_with(|c| c.take()) {
@@ -225,12 +243,14 @@ pub(crate) fn take_resuming() -> bool {
 
 /// Panics with `payload` as the payload catch_unwind / join return. No hook runs for it and
 /// inspect does not park it again; the runtime's report is the only trace.
+#[track_caller]
 pub fn resume_unwind(payload: Box<dyn Any + Send>) -> ! {
     let _ = RESUMING.try_with(|c| c.set(true));
     sys::rt::rethrow();
     unwind_with(payload)
 }
 
+#[track_caller]
 fn unwind_with(payload: Box<dyn Any + Send>) -> ! {
     let msg: String = if let Some(s) = payload.downcast_ref::<&'static str>() {
         String::from(*s)
@@ -240,14 +260,11 @@ fn unwind_with(payload: Box<dyn Any + Send>) -> ! {
         String::from("Box<dyn Any>")
     };
     sys::rt::install_core_hook();
-    let _ = PAYLOAD.try_with(|c| {
-        if let Some(old) = c.replace(Some(unsafe { core::ptr::NonNull::new_unchecked(Box::into_raw(payload)) })) {
-            drop(unsafe { Box::from_raw(old.as_ptr()) });
-        }
-    });
+    store_payload(payload);
     panic!("{}", msg)
 }
 
+#[track_caller]
 pub fn panic_any<M: 'static + Any + Send>(msg: M) -> ! {
     unwind_with(Box::new(msg))
 }

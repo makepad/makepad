@@ -158,12 +158,14 @@ const OPEN_ALWAYS: u32 = 4;
 const TRUNCATE_EXISTING: u32 = 5;
 
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
 
 pub(crate) const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
 pub(crate) const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub(crate) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
 
 const FILE_BEGIN: u32 = 0;
 const FILE_CURRENT: u32 = 1;
@@ -184,7 +186,6 @@ const ERROR_BROKEN_PIPE: u32 = 109;
 const ERROR_NOT_LOCKED: u32 = 158;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 const ERROR_DIRECTORY: u32 = 267;
-const ERROR_NEGATIVE_SEEK: u32 = 131;
 const ERROR_IO_PENDING: u32 = 997;
 const ERROR_CANT_ACCESS_FILE: u32 = 1920;
 
@@ -365,13 +366,24 @@ fn intervals_from_system_time(t: SystemTime) -> io::Result<FILETIME> {
 
 pub struct File {
     handle: OwnedHandle,
-    /// a virtual file of a git run (Relax's VFS): its bytes and cursor; the handle is NUL's
-    mem: Option<Box<Mem>>,
+    virtual_len: Option<u64>,
 }
 
-struct Mem {
-    data: Arc<Vec<u8>>,
-    pos: core::sync::atomic::AtomicU64,
+fn virtual_file() -> io::Result<File> {
+    let dir = crate::env::temp_dir();
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create_new(true);
+    opts.set_custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
+    opts.set_attributes(FILE_ATTRIBUTE_TEMPORARY);
+    loop {
+        let mut random = [0u8; 16];
+        crate::sys::os::fill_random(&mut random);
+        let path = dir.join(alloc::format!("relax-vfs-{:032x}", u128::from_ne_bytes(random)));
+        match opts.open_native(&maybe_verbatim(&path)?) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            result => return result,
+        }
+    }
 }
 
 use super::vfs;
@@ -463,10 +475,11 @@ impl OpenOptions {
             return match k {
                 vfs::Kind::File(_) => {
                     let data = vfs::read(&*abs)?;
-                    let null: Vec<u16> = "NUL".encode_utf16().chain(core::iter::once(0)).collect();
-                    let mut f = OpenOptions::new().read(true).open_native(&null)?;
-                    f.mem = Some(Box::new(Mem { data: Arc::new(data), pos: core::sync::atomic::AtomicU64::new(0) }));
-                    Ok(f)
+                    let mut file = virtual_file()?;
+                    file.write_all(&data)?;
+                    file.seek(SeekFrom::Start(0))?;
+                    file.virtual_len = Some(data.len() as u64);
+                    Ok(file)
                 }
                 vfs::Kind::Dir => Err(os_error(ERROR_ACCESS_DENIED)),
                 vfs::Kind::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
@@ -532,7 +545,7 @@ impl OpenOptions {
         if h == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let file = File { handle: unsafe { OwnedHandle::from_raw_handle(h as RawHandle) }, mem: None };
+        let file = File { handle: unsafe { OwnedHandle::from_raw_handle(h as RawHandle) }, virtual_len: None };
         if self.truncate && creation == OPEN_ALWAYS && last_error() == ERROR_ALREADY_EXISTS {
             // FileAllocationInfo first, FileEndOfFileInfo for filesystems without it (WINE)
             let alloc_info = FILE_ALLOCATION_INFO { AllocationSize: 0 };
@@ -605,12 +618,15 @@ impl File {
         self.sync_all()
     }
     pub fn set_len(&self, size: u64) -> io::Result<()> {
+        if self.virtual_len.is_some() {
+            return Err(vfs::read_only());
+        }
         let info = FILE_END_OF_FILE_INFO { EndOfFile: size as i64 };
         set_info(self.raw(), FileEndOfFileInfo, &info)
     }
     pub fn metadata(&self) -> io::Result<Metadata> {
-        if let Some(m) = &self.mem {
-            return Ok(Metadata::virtual_entry(&vfs::Kind::File(m.data.len() as u64)));
+        if let Some(len) = self.virtual_len {
+            return Ok(Metadata::virtual_entry(&vfs::Kind::File(len)));
         }
         unsafe {
             let mut info: BY_HANDLE_FILE_INFORMATION = core::mem::zeroed();
@@ -643,8 +659,7 @@ impl File {
         Ok(info)
     }
     pub fn try_clone(&self) -> io::Result<File> {
-        let mem = self.mem.as_ref().map(|m| Box::new(Mem { data: m.data.clone(), pos: core::sync::atomic::AtomicU64::new(m.pos.load(core::sync::atomic::Ordering::Relaxed)) }));
-        Ok(File { handle: self.handle.try_clone()?, mem })
+        Ok(File { handle: self.handle.try_clone()?, virtual_len: self.virtual_len })
     }
     pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
         let info = FILE_BASIC_INFO { CreationTime: 0, LastAccessTime: 0, LastWriteTime: 0, ChangeTime: 0, FileAttributes: perm.attrs };
@@ -762,14 +777,6 @@ impl File {
     }
 
     fn read_raw(&self, buf: &mut [u8], offset: Option<u64>) -> io::Result<usize> {
-        if let Some(m) = &self.mem {
-            // a positional read moves the cursor too, as ReadFile with an OVERLAPPED offset does
-            let at = offset.unwrap_or_else(|| m.pos.load(core::sync::atomic::Ordering::Relaxed)) as usize;
-            let n = if at >= m.data.len() { 0 } else { buf.len().min(m.data.len() - at) };
-            buf[..n].copy_from_slice(&m.data[at..at + n]);
-            m.pos.store((at + n) as u64, core::sync::atomic::Ordering::Relaxed);
-            return Ok(n);
-        }
         let len = if buf.len() > u32::MAX as usize { u32::MAX } else { buf.len() as u32 };
         let mut read: DWORD = 0;
         let mut overlapped = zeroed_overlapped();
@@ -792,7 +799,7 @@ impl File {
         Ok(read as usize)
     }
     fn write_raw(&self, buf: &[u8], offset: Option<u64>) -> io::Result<usize> {
-        if self.mem.is_some() {
+        if self.virtual_len.is_some() {
             return Err(vfs::read_only());
         }
         let len = if buf.len() > u32::MAX as usize { u32::MAX } else { buf.len() as u32 };
@@ -820,19 +827,6 @@ impl File {
         self.write_raw(buf, Some(offset))
     }
     fn seek_raw(&self, pos: SeekFrom) -> io::Result<u64> {
-        if let Some(m) = &self.mem {
-            let cur = m.pos.load(core::sync::atomic::Ordering::Relaxed) as i64;
-            let to = match pos {
-                SeekFrom::Start(o) => o as i64,
-                SeekFrom::End(o) => m.data.len() as i64 + o,
-                SeekFrom::Current(o) => cur + o,
-            };
-            if to < 0 {
-                return Err(os_error(ERROR_NEGATIVE_SEEK));
-            }
-            m.pos.store(to as u64, core::sync::atomic::Ordering::Relaxed);
-            return Ok(to as u64);
-        }
         let (whence, off) = match pos {
             SeekFrom::Start(o) => (FILE_BEGIN, o as i64),
             SeekFrom::End(o) => (FILE_END, o),
@@ -844,10 +838,6 @@ impl File {
     }
     /// Buffer sized from the file length for read_to_end (as real std does).
     fn size_hint(&self) -> Option<usize> {
-        if let Some(m) = &self.mem {
-            let pos = m.pos.load(core::sync::atomic::Ordering::Relaxed) as usize;
-            return Some(m.data.len().saturating_sub(pos));
-        }
         let mut size: i64 = 0;
         if unsafe { GetFileSizeEx(self.raw(), &mut size) } == 0 {
             return None;
@@ -944,7 +934,7 @@ impl AsHandle for File {
 }
 impl FromRawHandle for File {
     unsafe fn from_raw_handle(handle: RawHandle) -> File {
-        File { handle: OwnedHandle::from_raw_handle(handle), mem: None }
+        File { handle: OwnedHandle::from_raw_handle(handle), virtual_len: None }
     }
 }
 impl IntoRawHandle for File {
@@ -959,7 +949,7 @@ impl From<File> for OwnedHandle {
 }
 impl From<OwnedHandle> for File {
     fn from(handle: OwnedHandle) -> File {
-        File { handle, mem: None }
+        File { handle, virtual_len: None }
     }
 }
 
@@ -1416,6 +1406,9 @@ impl Default for DirBuilder {
 // ---- free functions
 
 pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
+    if let Some((abs, vfs::Kind::File(_))) = vfs::kind(path.as_ref()) {
+        return vfs::read(&*abs);
+    }
     let mut file = File::open(path.as_ref())?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
@@ -1423,6 +1416,9 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
 }
 
 pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
+    if let Some((abs, vfs::Kind::File(_))) = vfs::kind(path.as_ref()) {
+        return String::from_utf8(vfs::read(&*abs)?).map_err(|_| io::Error::INVALID_UTF8);
+    }
     let mut file = File::open(path.as_ref())?;
     let mut s = String::new();
     file.read_to_string(&mut s)?;

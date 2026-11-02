@@ -118,7 +118,7 @@ impl<'a> Rig<'a> {
         relaxgit::prepare(work, &lane, &pin)?;
         let empty = makepad_strict_json::Value::Obj(Vec::new());
         relaxgit::finish(work, &lane, &pin, &root.join("empty"), &[], &[], &empty)?;
-        let selected = super::loaders::find_overlay(work, &lane, lease, &pin, None, cores, "test", build).map_err(|e| format!("JIT error selecting the dev JIT: {e}"))?;
+        let selected = super::loaders::find_overlay(work, &lane, lease, &pin, None, "test", build).map_err(|e| format!("JIT error selecting the dev JIT: {e}"))?;
         Ok(Self { work: root.join("box"), box_work: work.to_path_buf(), root, repo, binary: selected.binary, base, committed, cores, lease: lease.into(), build, spawn })
     }
 

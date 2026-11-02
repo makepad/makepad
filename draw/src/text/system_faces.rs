@@ -13,7 +13,7 @@
 use {
     crate::makepad_platform::{
         log,
-        thread::{Lane, TaskHandle, TaskPool},
+        thread::{Class, TaskHandle, TaskPool},
         Cx,
     },
     fxhash::FxHashMap,
@@ -69,7 +69,7 @@ impl SystemFaces {
             None => {
                 let name = key.name.clone();
                 let (weight, italic) = (key.weight, key.italic);
-                let entry = match pool.submit(Lane::Light, move || system_fonts::find_family(&name, weight, italic)) {
+                let entry = match pool.submit(Class::Visible, move || system_fonts::find_family(&name, weight, italic)) {
                     Ok(task) => Entry::Pending(task),
                     // No pool (a single-threaded web build): no OS fonts to find there either.
                     Err(_) => Entry::Done(None),
@@ -107,7 +107,7 @@ impl SystemFaces {
         if !system_fonts::needs_prewarm() {
             return;
         }
-        if let Ok(task) = pool.submit(Lane::Heavy, system_fonts::prewarm) {
+        if let Ok(task) = pool.submit(Class::Background, system_fonts::prewarm) {
             self.prewarm = Some(task);
         }
     }

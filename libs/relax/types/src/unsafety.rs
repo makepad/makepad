@@ -603,40 +603,70 @@ pub fn run_body_errors(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<String> {
 /// (an impl whose supertrait bound does not hold). `makepad check` runs these as part of its
 /// item checks; `run` used to skip them.
 pub fn run_crate_impl_errors(prog: &Program, tcx: &Tcx, krate: u32) -> std::sync::Arc<Vec<String>> {
-    static MEMO: std::sync::Mutex<Option<std::collections::HashMap<(u32, u64), std::sync::Arc<Vec<String>>>>> = std::sync::Mutex::new(None);
     let epoch = tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst);
-    if let Some(e) = MEMO.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&(krate, epoch))) {
+    if let Some(e) = IMPL_ERRORS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&(krate, epoch))) {
         return e.clone();
     }
-    // a body type-checked while these checks run (a constant a well-formedness check evaluates)
-    // does not start them again: that would ask for the query in progress (a false E0391)
-    thread_local! { static ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-    if ACTIVE.with(|a| a.replace(true)) {
-        return std::sync::Arc::new(Vec::new());
-    }
-    struct Reset;
-    impl Drop for Reset { fn drop(&mut self) { ACTIVE.with(|a| a.set(false)); } }
-    let _reset = Reset;
+    let Some(_active) = ImplChecks::enter() else { return std::sync::Arc::new(Vec::new()) };
     let mut out = Vec::new();
-    for i in 0..prog.defs.len() {
-        let d = DefId(i as u32);
-        let def = prog.def(d);
-        if def.krate != krate || def.kind != DefKind::Impl { continue; }
-        out.extend(check_impl(prog, tcx, d));
-        let Some(&td) = tcx.impl_trait.get(&d) else { continue };
-        let tdef = prog.def(td);
-        let tast = &prog.files[tdef.file as usize].ast;
-        let ItemKind::Trait(tr) = tast.item(tdef.item).kind else { continue };
-        let t = tast.row(tr);
-        if t.unsafe_ || t.auto || !tast.list(t.supers).is_empty() {
-            out.extend(crate::wfcheck::obligations::check_def(prog, tcx, d));
-        }
+    for d in crate_impls(prog, &[krate]) {
+        out.extend(impl_errors_inner(prog, tcx, d.1));
     }
+    store_crate_impl_errors(krate, epoch, out)
+}
+
+/// run_crate_impl_errors' memo: (crate, collect epoch) -> its impls' errors, in definition order
+static IMPL_ERRORS: std::sync::Mutex<Option<std::collections::HashMap<(u32, u64), std::sync::Arc<Vec<String>>>>> = std::sync::Mutex::new(None);
+
+thread_local! {
+    /// this thread runs impl checks (run_crate_impl_errors, impl_errors)
+    static IMPL_CHECKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A body type-checked while impl checks run (a constant a well-formedness check evaluates)
+/// does not start them again: that would ask for the query in progress (a false E0391).
+struct ImplChecks;
+impl ImplChecks {
+    fn enter() -> Option<ImplChecks> {
+        (!IMPL_CHECKS.with(|a| a.replace(true))).then_some(ImplChecks)
+    }
+}
+impl Drop for ImplChecks {
+    fn drop(&mut self) { IMPL_CHECKS.with(|a| a.set(false)); }
+}
+
+/// The impls of `crates` (crate, impl), in definition order.
+pub fn crate_impls(prog: &Program, crates: &[u32]) -> Vec<(u32, DefId)> {
+    (0..prog.defs.len() as u32).map(DefId).filter(|&d| { let def = prog.def(d); def.kind == DefKind::Impl && crates.contains(&def.krate) }).map(|d| (prog.def(d).krate, d)).collect()
+}
+
+/// Impl `d`'s part of its crate's run_crate_impl_errors (one impl, so a whole crate's can be
+/// checked on several threads: makepad run's app check). None: impl checks run on this thread.
+pub fn impl_errors(prog: &Program, tcx: &Tcx, d: DefId) -> Option<Vec<String>> {
+    let _active = ImplChecks::enter()?;
+    Some(impl_errors_inner(prog, tcx, d))
+}
+
+fn impl_errors_inner(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
+    let mut out = check_impl(prog, tcx, d);
+    let Some(&td) = tcx.impl_trait.get(&d) else { return out };
+    let tdef = prog.def(td);
+    let tast = &prog.files[tdef.file as usize].ast;
+    let ItemKind::Trait(tr) = tast.item(tdef.item).kind else { return out };
+    let t = tast.row(tr);
+    if t.unsafe_ || t.auto || !tast.list(t.supers).is_empty() {
+        out.extend(crate::wfcheck::obligations::check_def(prog, tcx, d));
+    }
+    out
+}
+
+/// Stores crate `krate`'s impl errors for collect epoch `epoch` (its impls' impl_errors in
+/// definition order); the first stored value stands.
+pub fn store_crate_impl_errors(krate: u32, epoch: u64, out: Vec<String>) -> std::sync::Arc<Vec<String>> {
     // (the memo outlives compiler generations: its contents are made in the kept heap)
     let _k = crate::zone_alloc::kept();
     let out = std::sync::Arc::new(out.clone());
-    MEMO.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((krate, epoch), out.clone());
-    out
+    IMPL_ERRORS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).entry((krate, epoch)).or_insert(out).clone()
 }
 
 /// rustc_hir_analysis coherence/unsafety.rs (E0199, E0200), E0197 (inherent impls) and

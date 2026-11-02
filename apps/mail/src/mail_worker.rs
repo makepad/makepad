@@ -5,7 +5,7 @@ use crate::{
     source::*,
 };
 use makepad_widgets::makepad_platform::thread::{
-    Lane, PoolOptions, TaskHandle, TaskPool, ThreadOptions, ThreadSpawner,
+    Class, TaskHandle, TaskPool, ThreadOptions,
 };
 use makepad_widgets::*;
 use std::{
@@ -90,7 +90,7 @@ impl MailWorker {
         let worker_generation = generation.clone();
         let worker_finished = finished.clone();
         let spawner = cx.thread_spawner();
-        let pool_spawner = spawner.clone();
+        let pool = cx.task_pool();
         spawner
             .spawn_worker(
                 ThreadOptions {
@@ -107,7 +107,7 @@ impl MailWorker {
                     if let Err(error) = run(
                         source,
                         &cache,
-                        pool_spawner,
+                        pool,
                         requests,
                         &out,
                         &worker_stop,
@@ -209,7 +209,7 @@ fn load_cache(
     out: &SyncSender<Reply>,
     stop: &Arc<AtomicBool>,
 ) -> Result<bool, String> {
-    let mut pending: VecDeque<_> = index.cache_ranges(pool.heavy_workers()).into_iter().enumerate().collect();
+    let mut pending: VecDeque<_> = index.cache_ranges(pool.worker_count()).into_iter().enumerate().collect();
     let partitions = pending.len();
     let cancel = CacheLoadCancel(Arc::new(AtomicBool::new(false)));
     let progress = Arc::new(AtomicU64::new(0));
@@ -224,18 +224,17 @@ fn load_cache(
     while !pending.is_empty() || !jobs.is_empty() {
         if stop.load(Ordering::Relaxed) { return Ok(false); }
         while let Some(&(partition, range)) = pending.front() {
-            let Ok(slot) = pool.reserve(Lane::Heavy) else { break; };
             pending.pop_front();
             let path = cache.to_path_buf();
             let source = source.to_owned();
             let progress = progress.clone();
             let stopped = stop.clone();
             let cancelled = cancel.0.clone();
-            jobs.push((partition, slot.submit_named("mail-cache-load", move || {
+            jobs.push((partition, pool.submit_named(Class::Visible, "mail-cache-load", move || {
                 CachePartition::load(&path, &source, range, &progress, || {
                     stopped.load(Ordering::Relaxed) || cancelled.load(Ordering::Relaxed)
                 })
-            })));
+            }).map_err(|error| error.to_string())?));
         }
         for i in (0..jobs.len()).rev() {
             if let Some(result) = jobs[i].1.try_take() {
@@ -268,7 +267,7 @@ fn load_cache(
 fn run(
     mut source: Box<dyn MailSource>,
     cache: &std::path::Path,
-    spawner: ThreadSpawner,
+    pool: TaskPool,
     requests: Receiver<Request>,
     out: &SyncSender<Reply>,
     stop: &Arc<AtomicBool>,
@@ -278,11 +277,7 @@ fn run(
     // Check access before exposing cached data for this source.
     source.begin_sync(None)?;
     let mut reader = source.reader();
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let mut options = PoolOptions::with_workers(workers, 0);
-    options.name = "mail-decode".into();
-    let pool = TaskPool::new_with_priority(spawner, options, CxThreadPriority::UserInitiated)
-        .map_err(|e| e.to_string())?;
+    let workers = pool.worker_count();
     source.configure_workers(pool.clone());
     emit(out, Reply::Status("Opening search cache…".into()));
     let mut index = MailIndex::open(cache, source.id())?;
@@ -428,7 +423,7 @@ fn run(
             let reader = reader.clone();
             let task_entry = entry.clone();
             let stopped = stop.clone();
-            match pool.try_submit_named(Lane::Heavy, "mail-decode-index", move || {
+            match pool.submit_named(Class::Visible, "mail-decode-index", move || {
                 let phase = Instant::now();
                 let result = if stopped.load(Ordering::Relaxed) {
                     Err("Stopped".into())
@@ -438,10 +433,7 @@ fn run(
                 (phase.elapsed(), result)
             }) {
                 Ok(handle) => jobs.push((entry, handle)),
-                Err(_) => {
-                    pending.push_front(entry);
-                    break;
-                }
+                Err(error) => return Err(error.to_string()),
             }
         }
         timing.peak_jobs = timing.peak_jobs.max(jobs.len());

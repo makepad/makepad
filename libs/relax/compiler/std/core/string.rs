@@ -765,9 +765,8 @@ impl From<crate::boxed::Box<str>> for String {
 
 impl From<char> for String {
     fn from(c: char) -> String {
-        let mut s = String::new();
-        s.push(c);
-        s
+        // real alloc's `c.to_string()`: the capacity is the encoded length
+        String::from(c.encode_utf8(&mut [0; 4]))
     }
 }
 
@@ -889,12 +888,138 @@ pub trait ToString {
 #[cfg(not(relax_check))]
 impl<T: fmt::Display + ?Sized> ToString for T {
     fn to_string(&self) -> String {
+        if let Some(s) = exact_to_string(self) {
+            return s;
+        }
         let mut buf = String::new();
         let mut formatter = fmt::Formatter::new(&mut buf);
         if fmt::Display::fmt(self, &mut formatter).is_err() {
             panic!("a Display implementation returned an error unexpectedly");
         }
         buf
+    }
+}
+
+/// real alloc's SpecToString classes, selected by type identity with lifetimes erased.
+/// A non-generic classifier keeps the comparisons out of each ToString instance; the inliner
+/// folds it for the constant type id of an instance.
+#[cfg(not(relax_check))]
+fn spec_class(id: u64) -> u8 {
+    macro_rules! classes {
+        ($($t:ty => $class:expr,)*) => {
+            $(
+                if id == unsafe { crate::intrinsics_mem::type_id::<$t>() } {
+                    return $class;
+                }
+            )*
+        };
+    }
+    classes! {
+        str => 1,
+        &'static str => 2,
+        &&'static str => 3,
+        &&&'static str => 4,
+        &&&&'static str => 5,
+        &&&&&'static str => 6,
+        &&&&&&'static str => 7,
+        &&&&&&&'static str => 8,
+        &&&&&&&&'static str => 9,
+        &&&&&&&&&'static str => 10,
+        &&&&&&&&&&'static str => 11,
+        &&&&&&&&&&&'static str => 12,
+        &&&&&&&&&&&&'static str => 13,
+        String => 14,
+        crate::borrow::Cow<'static, str> => 15,
+        char => 16,
+        bool => 17,
+        u8 => 18,
+        u16 => 19,
+        u32 => 20,
+        u64 => 21,
+        usize => 22,
+        u128 => 23,
+        i8 => 24,
+        i16 => 25,
+        i32 => 26,
+        i64 => 27,
+        isize => 28,
+        i128 => 29,
+        crate::fmt::Arguments<'static> => 30,
+    }
+    0
+}
+
+/// real alloc's SpecToString: preserve each specialized type's allocation capacity.
+#[cfg(not(relax_check))]
+fn exact_to_string<T: ?Sized>(v: &T) -> Option<String> {
+    macro_rules! integer {
+        (unsigned $t:ty) => {{
+            let n = unsafe { *(v as *const T as *const $t) };
+            let digits = match n.checked_ilog10() {
+                Some(l) => l as usize + 1,
+                None => 1,
+            };
+            integer!(n, digits)
+        }};
+        (signed $t:ty) => {{
+            let n = unsafe { *(v as *const T as *const $t) };
+            const SIZE: usize = <$t>::MAX.ilog10() as usize + 1;
+            integer!(n, SIZE + (n < 0) as usize)
+        }};
+        ($n:ident, $capacity:expr) => {{
+            let mut s = String::with_capacity($capacity);
+            let _ = fmt::Write::write_fmt(&mut s, format_args!("{}", $n));
+            Some(s)
+        }};
+    }
+
+    match spec_class(unsafe { crate::intrinsics_mem::type_id::<T>() }) {
+        1 => {
+            let s = unsafe { crate::mem::transmute_copy::<&T, &str>(&v) };
+            Some(String::from(s))
+        }
+        class @ 2..=13 => {
+            let mut p = v as *const T as *const u8;
+            let mut remaining = class - 2;
+            while remaining > 0 {
+                p = unsafe { *(p as *const *const u8) };
+                remaining -= 1;
+            }
+            Some(String::from(unsafe { *(p as *const &str) }))
+        }
+        14 => {
+            let s = unsafe { &*(v as *const T as *const String) };
+            Some(String::from(s.as_str()))
+        }
+        15 => {
+            let s = unsafe { &*(v as *const T as *const crate::borrow::Cow<'_, str>) };
+            Some(String::from(&**s))
+        }
+        16 => {
+            let c = unsafe { *(v as *const T as *const char) };
+            Some(String::from(c.encode_utf8(&mut [0; 4])))
+        }
+        17 => {
+            let b = unsafe { *(v as *const T as *const bool) };
+            Some(String::from(if b { "true" } else { "false" }))
+        }
+        18 => integer!(unsigned u8),
+        19 => integer!(unsigned u16),
+        20 => integer!(unsigned u32),
+        21 => integer!(unsigned u64),
+        22 => integer!(unsigned usize),
+        23 => integer!(unsigned u128),
+        24 => integer!(signed i8),
+        25 => integer!(signed i16),
+        26 => integer!(signed i32),
+        27 => integer!(signed i64),
+        28 => integer!(signed isize),
+        29 => integer!(signed i128),
+        30 => {
+            let args = unsafe { *(v as *const T as *const crate::fmt::Arguments<'_>) };
+            Some(crate::fmt::format(args))
+        }
+        _ => None,
     }
 }
 

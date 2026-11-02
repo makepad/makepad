@@ -33,7 +33,7 @@
 use super::*;
 use crate::hdri::envmap::GeneratedEnvMap;
 use crate::hdri::prepare::{prepare_ibl_until, KeyRemoval, PrepareSizes, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH, LIGHTING_MAX_WIDTH};
-use makepad_draw::makepad_platform::thread::{CancellationToken, Lane, SubmitError, TaskHandle, TaskPool};
+use makepad_draw::makepad_platform::thread::{CancellationToken, Class, SubmitError, TaskHandle, TaskPool};
 use makepad_render_material::ibl::{EnvMap, EnvPreset};
 use makepad_scene::{Background, EnvSun, Environment, IblSource, TextureRef};
 use std::collections::HashMap;
@@ -308,7 +308,6 @@ pub(super) struct IblState {
     generation: u64,
     /// A key whose job failed (a worker panic) is not retried every frame.
     failed_for: Option<PrepareKey>,
-    queue_full_logged: bool,
     background: Option<Box<DrawEnvBackground>>,
     /// This renderer draws another renderer's environment
     /// (`Renderer::mirror_environment_from`): it resolves nothing, so it
@@ -342,7 +341,6 @@ impl IblState {
             job: _,
             generation: _,
             failed_for: _,
-            queue_full_logged: _,
             background: _,
             mirror: _,
         } = live;
@@ -878,31 +876,23 @@ impl Renderer {
             return;
         }
         let pool = cx.task_pool();
-        match pool.reserve(Lane::Heavy) {
-            Ok(slot) => {
-                self.ibl.generation = self.ibl.generation.wrapping_add(1);
-                self.ibl.queue_full_logged = false;
-                let generation = self.ibl.generation;
-                let rows: TaskPool = pool.clone();
-                let cancel = CancellationToken::new();
-                let token = cancel.clone();
-                let job_map = map.clone();
-                let handle = slot.submit(move || {
-                    // Inside a Heavy job: a bake's rows fan out over the pool
-                    // and stop once the token is set; the stages poll it too.
-                    let pool_rows = move |n: usize, f: &(dyn Fn(usize) + Sync)| rows.fan_out(Lane::Heavy, n, f);
-                    let run = rows_until_cancelled(&pool_rows, &token);
-                    let stop = || token.is_cancelled();
-                    build_ibl(generation, wanted, map, intensity, rotation_deg, &run, JOB_SIZES, PROCEDURAL_HDRI_WIDTH, &stop)
-                });
-                self.ibl.job = Some(IblJob { handle, key: wanted, map: job_map, cancel });
-            }
-            Err(SubmitError::QueueFull) => {
-                if !self.ibl.queue_full_logged {
-                    log!("ibl: worker queue busy; the environment prepares next frame");
-                    self.ibl.queue_full_logged = true;
-                }
-            }
+        self.ibl.generation = self.ibl.generation.wrapping_add(1);
+        let generation = self.ibl.generation;
+        let rows: TaskPool = pool.clone();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let job_map = map.clone();
+        let work_map = map.clone();
+        let submitted = pool.submit(Class::Background, move || {
+            // Inside a Background job: a bake's rows fan out over the pool
+            // and stop once the token is set; the stages poll it too.
+            let pool_rows = move |n: usize, f: &(dyn Fn(usize) + Sync)| rows.fan_out(n, f);
+            let run = rows_until_cancelled(&pool_rows, &token);
+            let stop = || token.is_cancelled();
+            build_ibl(generation, wanted, work_map, intensity, rotation_deg, &run, JOB_SIZES, PROCEDURAL_HDRI_WIDTH, &stop)
+        });
+        match submitted {
+            Ok(handle) => self.ibl.job = Some(IblJob { handle, key: wanted, map: job_map, cancel }),
             Err(SubmitError::Closed) => {
                 self.ibl.generation = self.ibl.generation.wrapping_add(1);
                 let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| {
@@ -1432,34 +1422,6 @@ mod tests {
         assert!(renderer.ibl_texture().is_none());
         renderer.resolve_ibl(&mut cx, &env);
         assert!(renderer.environment_ready() && renderer.items_ready(&cx));
-    }
-
-    /// A full Heavy queue means no job was submitted, but the world still
-    /// wants the environment: the host keeps waiting (and drawing, which is
-    /// the retry), and the next draw with room submits it.
-    #[test]
-    fn a_full_queue_is_awaited_and_retried() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut renderer = Renderer::default();
-        renderer.register_environment(TextureRef(1), grey(16, 0.25));
-        let env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
-        // Hold every Heavy slot (reserved, never submitted).
-        let pool = cx.task_pool();
-        let mut held = Vec::new();
-        while let Ok(slot) = pool.reserve(Lane::Heavy) {
-            held.push(slot);
-        }
-        renderer.resolve_ibl(&mut cx, &env);
-        renderer.resolve_ibl(&mut cx, &env);
-        assert!(renderer.ibl.job.is_none() && renderer.environment_preparations() == 0, "nothing could be submitted");
-        assert!(renderer.environment_pending(), "wanted, not prepared: the host keeps drawing");
-        assert!(!renderer.items_ready(&cx));
-
-        drop(held);
-        renderer.resolve_ibl(&mut cx, &env);
-        assert_eq!(renderer.environment_preparations(), 1, "the retry submitted it");
-        settle(&mut renderer, &mut cx, &env);
-        assert!(renderer.environment_ready() && !renderer.environment_pending() && renderer.items_ready(&cx));
     }
 
     /// Nothing to wait for when nothing will come: an index past the table,

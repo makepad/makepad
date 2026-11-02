@@ -111,12 +111,12 @@ mod tests {
         let root = Path::new("installation/cache/loader");
         let binary = if cfg!(windows) { "makepad.exe" } else { "makepad" };
         let src = root.join("src/target/host").join(binary);
-        let commit = "0123456789abcdef0123456789abcdef0123456789";
+        let commit = "0123456789abcdef0123456789abcdef01234567";
         let selected = root.join(commit).join("target/host").join(binary);
         assert_eq!(loader_path(root, &format!(" {commit}\n"), |p| p == selected), selected);
         assert_eq!(loader_path(root, commit, |_| false), src);
         assert_eq!(loader_path(root, "src\n", |p| p == src), src);
-        for invalid in ["", "../outside", "/outside", "0123456789ABCDEF0123456789ABCDEF0123456789", "abc", "src/../other"] {
+        for invalid in ["", "../outside", "/outside", "0123456789ABCDEF0123456789ABCDEF01234567", "abc", "src/../other"] {
             assert_eq!(loader_path(root, invalid, |_| panic!("invalid pointer reached the filesystem")), src);
         }
     }

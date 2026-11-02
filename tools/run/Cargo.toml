@@ -38,6 +38,7 @@ makepad-script = { path = "../../platform/script", features = ["host-shims"] }
 makepad-script-std = { path = "../../platform/script/std", features = ["host-shims"] }
 makepad-script-compute = { path = "../../platform/script/compute", features = ["host-shims", "vm"] }
 makepad-shader = { path = "../../platform/shader", features = ["host-shims"] }
+makepad-cpu-budget = { workspace = true, features = ["host-shims"] }
 makepad-tween-script = { path = "../../libs/tween/script", features = ["host-shims"] }
 makepad-script-audio-aot = { path = "../../platform/script/audio_aot", features = ["host-shims"] }
 makepad-hal = { path = "../../platform/hal", features = ["host-shims"] }

@@ -1,5 +1,6 @@
 //! Compile/resolve misses: cargo supplies the verdict, the master remembers which JIT targets
-//! to skip until their miss is closed. The JSONL ledger has one current row per diagnostic.
+//! to skip until their miss is closed or the JIT's inputs changed since its last failure.
+//! The JSONL ledger has one current row per diagnostic.
 
 use makepad_strict_json::{obj, s, Value};
 use std::path::Path;
@@ -28,10 +29,25 @@ pub(crate) fn running_tests(line: &str) -> bool {
         && matches!(words.next(), Some("test" | "tests")) && words.next().is_none()
 }
 
+fn summary_line(line: &str) -> bool {
+    line.starts_with("error: could not compile")
+        || line.starts_with("makepad-run:") && (line.contains("unresolved imports") || line.contains("signature errors") || line.contains("load error"))
+}
+
+/// The JIT's own word that it could not build a target: `makepad test`'s `error: could not compile ..`
+/// summary or a makepad-run load failure. Test output never says this.
+pub(crate) fn build_failed(log: &str) -> bool {
+    plain(log).lines().map(str::trim).any(summary_line)
+}
+
 /// Only output outside a target's harness window (`running N tests` .. `test result:`) can
 /// be a compile miss. A package run builds and runs one target after another, so one target's
 /// compile error counts even when other targets ran. Diagnostics in a failing test's captured
-/// output inside its window never turn that test into a JIT miss.
+/// output inside its window never turn that test into a JIT miss; a test's own uncaptured
+/// `test result:` text does not end the window.
+/// The JIT's live-edit reports (`makepad live:` lines) and restart reasons (also with a prefix a
+/// log window cut off) reach devhub through its patch events: never a build's compile errors (a
+/// restart reason's edit is applied by the warm restart).
 pub(crate) fn compile_errors(log: &str) -> Vec<String> {
     let log = plain(log);
     let mut errors: Vec<String> = Vec::new();
@@ -40,9 +56,10 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
     for line in log.lines().map(str::trim) {
         if running_tests(line) { harness = true; continue; }
         if harness {
-            if line.starts_with("test result:") { harness = false; }
+            if line.starts_with("test result: ok.") || line.starts_with("test result: FAILED.") { harness = false; }
             continue;
         }
+        if line.starts_with("makepad live:") || line.contains("restart the app") { continue; }
         if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
             if text(&v, "severity") == "error" {
                 let file = text(&v, "file");
@@ -57,10 +74,11 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
             if let Some(error) = errors.last_mut().filter(|e| e.starts_with("error")) { *error = format!("{location}: {error}"); }
             continue;
         }
-        if line.starts_with("error: could not compile") || line.starts_with("error: aborting")
-            || line.starts_with("makepad-run:") && (line.contains("unresolved imports") || line.contains("signature errors") || line.contains("load error")) {
+        if summary_line(line) || line.starts_with("error: aborting") {
             summary.push(line.to_string());
-        } else if line.starts_with("error: test failed") || line.contains("panicked at") || line.contains("internal compiler error") || line.contains("makepad run bug") || line.contains("jit panic") || line.contains("jit ice") {
+        } else if line.starts_with("error: test failed") || line.contains("panicked at") || line.contains("internal compiler error") || line.contains("makepad run bug") || line.contains("jit panic") || line.contains("jit ice")
+            || line.ends_with("restart the app") // A live restart notice, not a build error.
+        {
             continue;
         } else if line.starts_with("error:") || line.starts_with("error[")
             || line.contains(": error:") || line.contains(": error[")
@@ -81,6 +99,7 @@ pub(crate) fn target(args: &[String]) -> String {
     for (i, arg) in select.iter().enumerate() {
         match arg.as_str() {
             "--lib" | "--tests" => return arg.clone(),
+            "--bin" => return format!("--bin {}", select.get(i + 1).map_or("", String::as_str)),
             "--test" => return format!("--test {}", select.get(i + 1).map_or("", String::as_str)),
             _ => {}
         }
@@ -99,6 +118,8 @@ struct Miss {
     last_ms: u64,
     count: u64,
     closed_ms: u64,
+    /// how to see it again, for one filed by hand (`jit miss add --repro`)
+    repro: String,
 }
 
 impl Miss {
@@ -108,7 +129,7 @@ impl Miss {
             ("error", Value::Arr(self.error.iter().map(|e| s(e)).collect())),
             ("lane", s(&self.lane)), ("pair", obj(vec![("work", s(&self.pair.work)), ("main", s(&self.pair.main))])),
             ("first_ms", Value::Int(self.first_ms as i64)), ("last_ms", Value::Int(self.last_ms as i64)),
-            ("count", Value::Int(self.count as i64)), ("closed_ms", Value::Int(self.closed_ms as i64)),
+            ("count", Value::Int(self.count as i64)), ("closed_ms", Value::Int(self.closed_ms as i64)), ("repro", s(&self.repro)),
         ])
     }
 
@@ -120,12 +141,12 @@ impl Miss {
         }
         let n = |k| v.get(k).and_then(Value::as_u64).unwrap_or(0);
         let pair = v.get("pair").map(|p| crate::state::Pair::new(text(p, "work"), text(p, "main"))).unwrap_or_default();
-        Ok(Self { id: id.into(), pkg: text(v, "pkg").into(), target: text(v, "target").into(), error: errors, lane: text(v, "lane").into(), pair, first_ms: n("first_ms"), last_ms: n("last_ms"), count: n("count"), closed_ms: n("closed_ms") })
+        Ok(Self { id: id.into(), pkg: text(v, "pkg").into(), target: text(v, "target").into(), error: errors, lane: text(v, "lane").into(), pair, first_ms: n("first_ms"), last_ms: n("last_ms"), count: n("count"), closed_ms: n("closed_ms"), repro: text(v, "repro").into() })
     }
 
-    fn touch(&mut self, req: &Value, now: u64) -> Result<(), String> {
+    fn touch(&mut self, req: &Value, now: u64, set_pair: bool) -> Result<(), String> {
         let pin = crate::lease::Pin::of_rev(text(req, "rev")).ok_or("jit misses: missing commit pair")?;
-        self.pair = crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or(""));
+        if set_pair { self.pair = crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or("")); }
         self.lane = text(req, "lane").into();
         self.last_ms = now;
         self.count += 1;
@@ -139,22 +160,70 @@ pub(crate) fn notice(v: &Value) -> String {
     format!("devhub test: JIT miss on {} {} (recorded {}): {error}; this verdict is cargo's", text(v, "pkg"), text(v, "target"), text(v, "id"))
 }
 
+/// Whether a package is JIT-own; an empty repo uses the local checkout.
+pub(crate) fn jit_own(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Result<bool, String> {
+    #[cfg(feature = "checkout")]
+    {
+        use crate::orch::ci::{jit_own_dirs, package_dirs, Tree};
+        let repo = if repo.as_os_str().is_empty() { crate::orch::repo() } else { repo.to_path_buf() };
+        let tree = Tree::at(&repo, pair)?;
+        Ok(package_dirs(&tree).get(pkg).is_some_and(|dir| jit_own_dirs(&tree).contains(dir)))
+    }
+    #[cfg(not(feature = "checkout"))]
+    {
+        let _ = (repo, pair, pkg);
+        Ok(false)
+    }
+}
+
 /// The old CI refusal seeds a miss once. A closed row overrides the stale mark, allowing the
 /// next attempt to reach the JIT; a real miss on that attempt reopens its diagnostic's row.
 fn ci_error(home: &Path, pkg: &str) -> Option<Vec<String>> {
-    crate::state::Store::open_quiet(home, "").read(|d| {
+    let (pair, checkout, errors) = crate::state::Store::open_quiet(home, "").read(|d| {
         d.ci.timing(&format!("failing:{pkg}"))?;
         let id = format!("test:{pkg}");
-        let shard = d.ci.run.iter().chain(d.ci.sweep_run.iter()).chain(d.ci.runs.iter().rev())
-            .flat_map(|r| &r.shards).find(|s| s.state == "fail" && (s.id == id || s.id.starts_with(&format!("{id}:"))));
-        // a crate whose tests merely fail is no JIT miss: only compile or resolve errors seed one
-        // (any failing mark did, and `devhub test` then answered with cargo's verdict)
-        let compile = compile_errors(&shard?.errors.join("\n"));
-        if compile.is_empty() { return None; }
-        let mut errors = vec![format!("CI marks failing:{pkg}: the JIT could not build its tests")];
-        errors.extend(compile.into_iter().take(4));
-        Some(errors)
-    })
+        d.ci.run.iter().chain(d.ci.sweep_run.iter()).chain(d.ci.runs.iter().rev()).find_map(|r| {
+            r.shards.iter().find(|s| s.state == "fail" && (s.id == id || s.id.starts_with(&format!("{id}:"))))
+                .map(|s| (r.pair.clone(), r.checkout.clone(), s.errors.clone()))
+        })
+    })?;
+    // a crate whose tests merely fail is no JIT miss: only compile or resolve errors seed one
+    // (any failing mark did, and `devhub test` then answered with cargo's verdict). The
+    // filtered sample lacks harness windows: require the JIT's build failure summary so a
+    // test's own error lines cannot seed a miss
+    let log = errors.join("\n");
+    if !build_failed(&log) { return None; }
+    let compile = compile_errors(&log);
+    if compile.is_empty() { return None; }
+    // JIT-own tests run under cargo; their compile errors cannot diagnose the JIT.
+    if jit_own(Path::new(&checkout), &pair, pkg).ok()? { return None; }
+    let mut errors = vec![format!("CI marks failing:{pkg}: the JIT could not build its tests")];
+    errors.extend(compile.into_iter().take(4));
+    Some(errors)
+}
+
+/// The id of an open miss of `pkg` (any target), if the ledger has one.
+pub(crate) fn open(home: &Path, pkg: &str) -> Option<String> {
+    std::fs::read_to_string(home.join("jit_misses.jsonl")).ok()?.lines()
+        .filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok().and_then(|v| Miss::parse(&v).ok()))
+        .find(|m| m.pkg == pkg && m.closed_ms == 0).map(|m| m.id)
+}
+
+/// Whether the JIT's inputs differ between the pair of a miss's last JIT failure and the
+/// requester's (the JIT id changed): CI's own JIT-input rule. Commits git cannot compare
+/// count as changed (one JIT attempt, and a real miss reopens its row); no repo: unchanged.
+#[cfg(feature = "checkout")]
+fn jit_changed(repo: &str, from: &crate::state::Pair, to: &crate::state::Pair) -> bool {
+    if repo.is_empty() || from == to || from.work.is_empty() { return false; }
+    crate::orch::ci::Inputs::between(std::path::Path::new(repo), from, to).map_or(true, |i| i.jit_changed)
+}
+#[cfg(not(feature = "checkout"))]
+fn jit_changed(_: &str, _: &crate::state::Pair, _: &crate::state::Pair) -> bool { false }
+
+fn write_ledger(home: &Path, path: &Path, entries: &[Miss]) -> Result<(), String> {
+    let tmp = path.with_extension("jsonl.new");
+    let contents: String = entries.iter().map(|m| format!("{}\n", m.value().to_json())).collect();
+    std::fs::create_dir_all(home).and_then(|_| std::fs::write(&tmp, contents)).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Called only on the master. Serialize read/modify/rename, including across simultaneous
@@ -177,13 +246,28 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
         let list: Vec<_> = entries.iter().filter(|m| rest == "--all" || m.closed_ms == 0).collect();
         let mut out = String::new();
         for m in &list {
-            out.push_str(&format!("{} {} {} {} ({} times, lane {}, pair {}, first {}, last {}): {}\n", m.id, if m.closed_ms == 0 { "open" } else { "closed" }, m.pkg, m.target, m.count, m.lane, m.pair.short(), m.first_ms, m.last_ms, m.error[0]));
+            out.push_str(&format!("{} {} {} {} ({} times, lane {}, pair {}, first {}, last {}): {}{}\n", m.id, if m.closed_ms == 0 { "open" } else { "closed" }, m.pkg, m.target, m.count, m.lane, m.pair.short(), m.first_ms, m.last_ms, m.error[0], if m.repro.is_empty() { String::new() } else { format!(" (repro: {})", m.repro) }));
         }
         if list.is_empty() { out.push_str("no JIT misses\n"); }
         return Ok(obj(vec![("text", s(&out)), ("misses", Value::Arr(list.iter().map(|m| m.value()).collect()))]).to_json());
     }
     let (verb, arg) = rest.split_once(' ').ok_or("jit misses [--all] | close <id>")?;
     let (index, action) = match verb {
+        // filed by hand (`jit miss add`): target `manual`, so it never routes a test to cargo
+        "add" => {
+            let req = makepad_strict_json::parse(arg.as_bytes()).map_err(|_| "jit misses: bad request")?;
+            let (pkg, error) = (text(&req, "pkg"), text(&req, "error").lines().next().unwrap_or("").trim());
+            if pkg.is_empty() || error.is_empty() { return Err("jit miss add <pkg> \"<error line>\" [--repro \"<cmd>\"]".into()); }
+            let i = entries.iter().position(|m| m.pkg == pkg && m.target == "manual" && m.closed_ms == 0 && m.error.first().map(String::as_str) == Some(error)).unwrap_or_else(|| {
+                let id = entries.iter().filter_map(|m| m.id[1..].parse::<u64>().ok()).max().unwrap_or(0) + 1;
+                entries.push(Miss { id: format!("M{id}"), pkg: pkg.into(), target: "manual".into(), error: vec![error.into()], lane: String::new(), pair: Default::default(), first_ms: now, last_ms: now, count: 0, closed_ms: 0, repro: String::new() });
+                entries.len() - 1
+            });
+            let m = &mut entries[i];
+            (m.lane, m.last_ms, m.count) = (text(&req, "lane").into(), now, m.count + 1);
+            if !text(&req, "repro").is_empty() { m.repro = text(&req, "repro").into(); }
+            (i, "recorded")
+        }
         "close" => {
             let i = entries.iter().position(|m| m.id == arg.trim()).ok_or_else(|| format!("no JIT miss {}", arg.trim()))?;
             entries[i].closed_ms = now;
@@ -195,7 +279,20 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
             if pkg.is_empty() || target.is_empty() { return Err("jit misses: pkg and target required".into()); }
             let existing = entries.iter().position(|m| m.pkg == pkg && m.target == target && m.closed_ms == 0);
             let errors = if verb == "lookup" {
-                if let Some(i) = existing { entries[i].error.clone() }
+                if let Some(i) = existing {
+                    if let Some(pin) = crate::lease::Pin::of_rev(text(&req, "rev")) {
+                        let to = crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or(""));
+                        if jit_changed(text(&req, "repo"), &entries[i].pair, &to) {
+                            entries[i].closed_ms = now;
+                            write_ledger(home, &path, &entries)?;
+                            let value = entries[i].value();
+                            drop(_guard);
+                            event("retried", &value);
+                            return Ok("null".into());
+                        }
+                    }
+                    entries[i].error.clone()
+                }
                 else if entries.iter().any(|m| m.pkg == pkg && m.target == target) { return Ok("null".into()); }
                 else if let Some(errors) = ci_error(home, pkg) { errors }
                 else { return Ok("null".into()); }
@@ -205,18 +302,17 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
             if errors.is_empty() { return Err("jit misses: error lines required".into()); }
             let i = entries.iter().position(|m| m.pkg == pkg && m.target == target && m.error.first() == errors.first()).unwrap_or_else(|| {
                 let id = entries.iter().filter_map(|m| m.id[1..].parse::<u64>().ok()).max().unwrap_or(0) + 1;
-                entries.push(Miss { id: format!("M{id}"), pkg: pkg.into(), target: target.into(), error: errors.clone(), lane: String::new(), pair: Default::default(), first_ms: now, last_ms: now, count: 0, closed_ms: 0 });
+                entries.push(Miss { id: format!("M{id}"), pkg: pkg.into(), target: target.into(), error: errors.clone(), lane: String::new(), pair: Default::default(), first_ms: now, last_ms: now, count: 0, closed_ms: 0, repro: String::new() });
                 entries.len() - 1
             });
-            entries[i].touch(&req, now)?;
+            let action = if verb == "lookup" && existing.is_some() { "used" } else { "recorded" };
+            entries[i].touch(&req, now, action == "recorded")?;
             entries[i].error = errors;
-            (i, if verb == "lookup" && existing.is_some() { "used" } else { "recorded" })
+            (i, action)
         }
         _ => return Err("jit misses [--all] | close <id>".into()),
     };
-    let tmp = path.with_extension("jsonl.new");
-    let contents: String = entries.iter().map(|m| format!("{}\n", m.value().to_json())).collect();
-    std::fs::create_dir_all(home).and_then(|_| std::fs::write(&tmp, contents)).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("{}: {e}", path.display()))?;
+    write_ledger(home, &path, &entries)?;
     let value = entries[index].value();
     drop(_guard);
     event(action, &value);
@@ -228,8 +324,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_miss_filed_by_hand_is_listed_and_counted() {
+        let home = std::env::temp_dir().join(format!("devhub-miss-add-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let add = r#"misses add {"pkg":"makepad-fab","error":"src/a.rs:3:1: unsupported intrinsic\nmore","repro":"devhub test x makepad-fab --lib","lane":"wp"}"#;
+        let first = serve(&home, add, 1, &|_, _| {}).unwrap();
+        assert!(first.contains("\"id\":\"M1\"") && first.contains("\"target\":\"manual\""), "{first}");
+        assert!(serve(&home, add, 2, &|_, _| {}).unwrap().contains("\"count\":2"));
+        let list = serve(&home, "misses", 3, &|_, _| {}).unwrap();
+        assert!(list.contains("M1 open makepad-fab manual (2 times, lane wp") && list.contains("unsupported intrinsic (repro: devhub test x makepad-fab --lib)"), "{list}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_tests_own_result_line_does_not_end_its_window() {
+        let mut log = String::from(r#"running 3 tests
+test a ... ok
+test result: 10 passed; 0 failed. compiled 185 fns (35708 bytes, 6827 RIR insts): typeck 139.68 ms
+  report: {"kind":"panic","message":"Box<dyn Any>","location":"/tree/std/std/panic.rs:248:5"}
+src/a.rs:12:5: some note
+test b ... ok
+test c ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"#);
+        assert!(compile_errors(&log).is_empty());
+        let error = "/tree/src/b.rs:1:2: E0308: mismatched types";
+        log.push_str(error);
+        assert_eq!(compile_errors(&log), vec![error.to_string()]);
+    }
+
+    #[test]
+    fn a_warm_restarts_reasons_are_not_misses() {
+        let log = "testverdict group=1 ran=101 passed=101 failed=0
+makepad live:   /tree/src/lease/exec.rs:2435:1: mod `tests` changed: a module's item list changed -- restart the app
+makepad live:   /tree/src/proto.rs:1:1: const `HUB_PROTO` is used in a type: its users' types change -- restart the app
+makepad live:   /tree/src/jit_misses.rs:147:9: use use crate::x; added here (inside a fn body) -- adding this kind of item is not applied live yet: restart the app
+makepad live: restarting (/tree/src/a.rs, /tree/src/b.rs)
+running 103 tests
+test a ... ok
+test b ... ok
+";
+        assert!(compile_errors(log).is_empty(), "warm restart reasons are not compile errors");
+        let cut = "rch/src/jit_misses.rs:147:9: use use crate::x; added here (inside a fn body) -- adding this kind of item is not applied live yet: restart the app";
+        assert!(compile_errors(cut).is_empty(), "a cut-off restart reason is not a compile error");
+        let error = "/tree/src/b.rs:1:2: E0308: mismatched types";
+        let log = log.replace("running 103 tests", &format!("{error}\nrunning 103 tests"));
+        assert_eq!(compile_errors(&log), vec![error.to_string()], "a real compile error before the restarted harness still counts");
+    }
+
+    #[test]
     fn a_target_that_fails_to_compile_between_passing_targets_is_a_miss() {
-        let error = "/home/me/devhub/ci-tree/apps/commercial/scope/deps/code_atlas/tests/relief.rs:160:62: E0277: the trait bound `HashMap<Arc<str>, Arc<str>, RandomState>: FromIterator<<Map<Iter<String, FrozenFile>, closure#825> as Iterator>::Item>` is not satisfied";
+        let error = "/tree/apps/commercial/scope/deps/code_atlas/tests/relief.rs:160:62: E0277: the trait bound `HashMap<Arc<str>, Arc<str>, RandomState>: FromIterator<<Map<Iter<String, FrozenFile>, closure#825> as Iterator>::Item>` is not satisfied";
         let log = format!("running 2 tests
 test a ... ok
 test b ... ok

@@ -518,6 +518,11 @@ impl Modal {
             draw_list.redraw(cx);
         }
         self.draw_bg.redraw(cx);
+        // A glass backdrop shows the page as it is at the open: the frame it first paints in
+        // captures the scene, also for a still backdrop that holds an earlier one.
+        if self.view.widget(cx, ids!(bg_view)).borrow::<crate::gauss_view::GaussRoundedView>().is_some() {
+            crate::gauss_view::arm_gauss_capture(cx);
+        }
         let content = self.view.widget(cx, ids!(content));
         // NOT the key focus here: at this point the content has never been
         // drawn and its area is Empty, so the focus went to nothing at all.

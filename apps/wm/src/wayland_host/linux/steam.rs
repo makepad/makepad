@@ -3,7 +3,7 @@
 
 use super::Win;
 use makepad_app_host::ClientId;
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
+use makepad_widgets::makepad_platform::thread::{Class, TaskHandle};
 use makepad_widgets::{log, Cx};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -87,13 +87,12 @@ impl Session {
         // This is a quiet period, not a shutdown deadline; systemd owns process cleanup.
         if since.elapsed() < Duration::from_secs(1) { return None; }
         let runtime = runtime.to_owned();
-        match cx.task_pool().submit(Lane::Heavy, move || stop_services(&runtime)) {
+        match cx.task_pool().submit(Class::Background, move || stop_services(&runtime)) {
             Ok(task) => {
                 log!("wm: last Steam/game window closed; stopping Steam and its Xwayland bridge");
                 self.stopping = Some(task);
             }
-            // Keep the request and retry on the next maintenance tick when the pool is full.
-            Err(error) => self.error(error.to_string()),
+            Err(error) => { self.empty_since = None; self.error(error.to_string()); }
         }
         None
     }

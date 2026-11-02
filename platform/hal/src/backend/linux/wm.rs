@@ -12,6 +12,7 @@ pub(crate) mod a11y;
 pub mod native;
 
 use super::{io, lock, log_enabled, Key, Op, OsCmd, Protocol, Shared, Shell};
+use crate::backend::shell;
 use crate::backend::vulkan::share::import_hosted;
 use crate::backend::vulkan::surface::{FramePresenter, Offscreen, SurfaceState, VkSurfaceSource};
 use crate::backend::vulkan::{Device, Image};
@@ -33,6 +34,61 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 static STATE: OnceLock<Arc<State>> = OnceLock::new();
+
+#[derive(Clone)]
+struct Pace {
+    started: bool,
+    asked_since_ns: u64,
+    tick_open_since_ns: u64,
+    last_tick_ns: u64,
+    last_tick_done_ns: u64,
+    last_raf_ns: u64,
+    ticks: u64,
+    tick_dones: u64,
+    rafs: u64,
+    rafs_in_tick: u64,
+    hidden: bool,
+    windows: Vec<(usize, bool, bool, u32, u32)>,
+}
+
+static PACE: Mutex<Pace> = Mutex::new(Pace {
+    started: false, asked_since_ns: 0, tick_open_since_ns: 0, last_tick_ns: 0,
+    last_tick_done_ns: 0, last_raf_ns: 0, ticks: 0, tick_dones: 0, rafs: 0,
+    rafs_in_tick: 0, hidden: false, windows: Vec::new(),
+});
+
+impl Pace {
+    fn tick_done(&mut self) {
+        self.tick_open_since_ns = 0;
+        self.last_tick_done_ns = crate::clock_ns();
+        self.tick_dones += 1;
+    }
+}
+
+/// A snapshot avoids asking the shell or UI thread why a frame never came.
+pub fn pace_lines() -> Vec<String> {
+    let p = lock(&PACE).clone();
+    if !p.started { return Vec::new(); }
+    let now = crate::clock_ns();
+    let age = |at| (at != 0).then(|| now.saturating_sub(at) / 1_000_000);
+    let raf_age = age(p.last_raf_ns);
+    let owed = p.windows.iter().any(|&(_, requested, awaiting, _, _)| requested && !awaiting)
+        && p.tick_open_since_ns == 0 && p.last_tick_ns < p.last_raf_ns
+        && raf_age.is_some_and(|ms| ms >= 1000);
+    let why = if owed {
+        format!("the app asked the WM for a frame {} ms ago and no Tick came ({} requests were sent while a Tick was open)", raf_age.unwrap(), p.rafs_in_tick)
+    } else { String::new() };
+    let number = |at| age(at).map(|n| n.to_string()).unwrap_or_else(|| "null".into());
+    let mut lines = vec![format!(
+        "{{\"verdict\":\"{}\",\"why\":{},\"asked_ms_ago\":{},\"tick_open_ms\":{},\"last_tick_ms_ago\":{},\"last_tick_done_ms_ago\":{},\"last_raf_ms_ago\":{},\"ticks\":{},\"tick_dones\":{},\"rafs\":{},\"rafs_in_tick\":{},\"hidden\":{}}}",
+        if owed { "OWED" } else { "OK" }, makepad_remote::json_str(&why), number(p.asked_since_ns),
+        number(p.tick_open_since_ns), number(p.last_tick_ns), number(p.last_tick_done_ns), number(p.last_raf_ns),
+        p.ticks, p.tick_dones, p.rafs, p.rafs_in_tick, p.hidden)];
+    for (id, requested, awaiting, ahead, in_flight) in p.windows {
+        lines.push(format!("{{\"window\":{id},\"requested\":{requested},\"awaiting\":{awaiting},\"ahead\":{ahead},\"in_flight\":{in_flight}}}"));
+    }
+    lines
+}
 
 /// What the shell thread, the hub reader and the renderer share.
 struct State {
@@ -147,15 +203,21 @@ impl VkSurfaceSource for Source {
             }
             if let Some(image) = slot.image.clone().filter(|i| i.hosted_writable()) {
                 ring.next = (index + 1) % count;
-                if let Some((since, true)) = ring.starved.take() {
-                    eprintln!("[hal-wm] window {}: the WM released a shared image again after {} ms", ring.window_id, since.elapsed().as_millis());
+                if let Some((since, said)) = ring.starved.take() {
+                    if let Some(w) = shell::snapshot().windows.get_mut(&ring.window_id) { w.starved = None; }
+                    if said { eprintln!("[hal-wm] window {}: the WM released a shared image again after {} ms", ring.window_id, since.elapsed().as_millis()); }
                 }
                 return Some(image);
             }
         }
         if ring.images.iter().all(|s| s.image.is_some() || s.failed) {
             crate::profile::count("hal-wm: no free shared image");
-            let (since, said) = ring.starved.get_or_insert((std::time::Instant::now(), false));
+            let window_id = ring.window_id;
+            let (since, said) = ring.starved.get_or_insert_with(|| {
+                let now = std::time::Instant::now();
+                if let Some(w) = shell::snapshot().windows.get_mut(&window_id) { w.starved = Some(now); }
+                (now, false)
+            });
             if !*said && since.elapsed() >= STARVED_SAY {
                 *said = true;
                 let states: Vec<String> = ring.images.iter().map(|s| match s.image.as_ref().and_then(|i| i.hosted_state()) {
@@ -211,7 +273,7 @@ struct Hub {
 
 /// The connection an exec hands over (`prepare_exec`): the hub, its port and this client's id.
 static HANDOVER: Mutex<Option<(Arc<Hub>, u16, u64)>> = Mutex::new(None);
-/// The variable that names the handed-over connection to the next image: `<fd> <port> <client>`.
+/// The handed-over connection: `<fd> <port> <client> [protocol]` (older images omit protocol).
 const RESUME_ENV: &str = "MAKEPAD_WM_RESUME";
 
 /// Before an exec of this process (a restart into a rebuilt makepad): the WM connection stays
@@ -244,7 +306,8 @@ pub fn prepare_exec() -> Vec<(String, String)> {
         hub.pause.store(false, Ordering::Release);
         return Vec::new();
     }
-    vec![(RESUME_ENV.to_string(), format!("{fd} {port} {client}"))]
+    let protocol = shell::snapshot().protocol.map_or(String::new(), |v| format!(" {v}"));
+    vec![(RESUME_ENV.to_string(), format!("{fd} {port} {client}{protocol}"))]
 }
 
 /// The exec after `prepare_exec` failed: this process goes on with its connection.
@@ -257,6 +320,11 @@ pub fn undo_exec() {
 }
 
 impl Hub {
+    fn publish_link(&self, link: &'static str) {
+        let mut s = shell::snapshot();
+        if s.hub_id == self as *const Self as usize { s.hub = link; }
+    }
+
     fn connect(port: u16, client: u64, name: &str, state: Arc<State>) -> Result<Arc<Hub>, String> {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("hub 127.0.0.1:{port}: {e}"))?;
         let _ = stream.set_nodelay(true);
@@ -290,6 +358,7 @@ impl Hub {
         let mut w = text.split_whitespace().map(|x| x.parse::<u64>().ok());
         let (Some(Some(fd)), Some(Some(port)), Some(Some(client))) = (w.next(), w.next(), w.next()) else { return None };
         let fd = i32::try_from(fd).ok()?;
+        let protocol = w.next().flatten().and_then(|v| u32::try_from(v).ok());
         // the descriptor must still be a connected socket (else: ask the WM socket)
         let stream = unsafe { TcpStream::from_raw_fd(fd) };
         if stream.peer_addr().is_err() {
@@ -299,6 +368,11 @@ impl Hub {
         let _ = io::close_on_exec(fd, true);
         let port = u16::try_from(port).ok()?;
         let hub = Self::start(stream, state).ok()?;
+        {
+            let mut s = shell::snapshot();
+            s.admitted = Some(client);
+            s.protocol = protocol;
+        }
         *lock(&HANDOVER) = Some((hub.clone(), port, client));
         Some((hub, port, client))
     }
@@ -306,12 +380,18 @@ impl Hub {
     fn start(stream: TcpStream, state: Arc<State>) -> Result<Arc<Hub>, String> {
         let reader = stream.try_clone().map_err(|e| e.to_string())?;
         let hub = Arc::new(Hub { stream: Mutex::new(stream), broken: AtomicBool::new(false), pause: AtomicBool::new(false), paused: AtomicBool::new(false), frozen: AtomicBool::new(false) });
+        {
+            let mut s = shell::snapshot();
+            s.hub_id = Arc::as_ptr(&hub) as usize;
+            s.hub = "connected";
+        }
         let pong = hub.clone();
         std::thread::Builder::new().name("wm-hub-reader".into()).spawn(move || {
             read_frames(reader, &pong, &state);
+            pong.publish_link("broken");
             state.hung_up.store(true, Ordering::Release);
             state.shared.signal();
-        }).map_err(|e| e.to_string())?;
+        }).map_err(|e| { hub.publish_link("broken"); e.to_string() })?;
         Ok(hub)
     }
 
@@ -340,6 +420,7 @@ impl Hub {
         if self.broken.load(Ordering::Acquire) { return; }
         if let Err(e) = self.frame(0x2, &AppToStudioVec(msgs).serialize_bin()) {
             self.broken.store(true, Ordering::Release);
+            self.publish_link("broken");
             eprintln!("[hal-wm] the WM's hub socket failed: {e}");
         }
     }
@@ -347,6 +428,7 @@ impl Hub {
     fn close(&self) {
         let _ = self.frame(0x8, &[]);
         let _ = lock(&self.stream).shutdown(std::net::Shutdown::Both);
+        self.publish_link("broken");
     }
 }
 
@@ -497,6 +579,11 @@ impl App {
             None => {
                 let admission = wm_socket::adopt(&path, WIRE, std::process::id(), &name)
                     .map_err(|probe| format!("the makepad WM at {} did not adopt this process: {probe:?}", path.display()))?;
+                {
+                    let mut s = shell::snapshot();
+                    s.protocol = Some(admission.version);
+                    s.admitted = Some(admission.client);
+                }
                 let hub = Hub::connect(admission.port, admission.client, &name, state.clone())?;
                 eprintln!("[hal-wm] the makepad WM at {} hosts this process as client {} ({name}, hosted protocol {})", path.display(), admission.client, admission.version);
                 (hub, admission.port, admission.client)
@@ -508,6 +595,7 @@ impl App {
         // compositor without server decorations. Its caption's drag query and its window
         // buttons go to the WM through this shell (`HostedDragQuery`, `HostedWindowOp`).
         shared.client_chrome.store(true, Ordering::Release);
+        lock(&PACE).started = true;
         Ok(Self { state, hub, aux_path: hosted_ipc::aux_path(port, &client.to_string()), aux: None,
             pending: Vec::new(), windows: HashMap::new(), early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, app_drawn: false, hidden: false,
             clip_reads: HashMap::new(), next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(), trays: HashMap::new(),
@@ -552,8 +640,15 @@ impl App {
 
     fn install(&mut self, swapchain: SharedSwapchain) {
         self.connect_aux();
-        let Some(aux) = &self.aux else { self.pending.push(swapchain); return };
+        let Some(aux) = &self.aux else {
+            if let Some(w) = shell::snapshot().windows.get_mut(&swapchain.window_id) { w.pending_swapchain = true; }
+            self.pending.push(swapchain);
+            return;
+        };
         let Some(key) = self.key_of(swapchain.window_id) else { return };
+        if let Some(w) = shell::snapshot().windows.get_mut(&swapchain.window_id) {
+            w.pending_swapchain = self.pending.iter().any(|s| s.window_id == swapchain.window_id);
+        }
         let images: Result<Vec<_>, _> = swapchain.presentable_images.iter().map(|image| {
             hosted_ipc::recv_image(aux, *image, swapchain.alloc_width, swapchain.alloc_height)
                 .map(|native| RingImage { id: image.id, native: Arc::new(native), image: None, failed: false })
@@ -562,8 +657,14 @@ impl App {
             Ok(images) => {
                 if log_enabled() { eprintln!("[hal-wm] window {} has {} shared images of {}x{}", swapchain.window_id, images.len(), swapchain.alloc_width, swapchain.alloc_height); }
                 let pixels = self.windows.get(&key).and_then(|w| w.geom).map_or([swapchain.alloc_width, swapchain.alloc_height], |(g, dpi, _)| pixels(g, dpi));
-                lock(&self.state.rings).insert(key, Ring { window_id: swapchain.window_id, alloc: [swapchain.alloc_width, swapchain.alloc_height],
+                let mut rings = lock(&self.state.rings);
+                rings.insert(key, Ring { window_id: swapchain.window_id, alloc: [swapchain.alloc_width, swapchain.alloc_height],
                     pixels, images, next: 0, starved: None });
+                if let Some(w) = shell::snapshot().windows.get_mut(&swapchain.window_id) {
+                    w.pixels = pixels;
+                    w.starved = None;
+                }
+                drop(rings);
                 // A frame asked for before there was anywhere to draw it.
                 if self.windows.get(&key).is_some_and(|w| w.requested) {
                     self.ask_frame();
@@ -615,9 +716,18 @@ impl App {
                     crate::a11y::set_screen_origin(crate::a11y::window_key(w.recipient.0, w.recipient.1.index), screen_origin.map(|(x,y)| (x as f32,y as f32)));
                 }
                 if let Some(ring) = lock(&self.state.rings).get_mut(&key) { ring.pixels = pixels(geom, dpi_factor); }
+                if let Some(w) = shell::snapshot().windows.get_mut(&window_id) { w.pixels = pixels(geom, dpi_factor); }
                 if resized { self.push_geom(key); }
             }
             StudioToApp::Tick => {
+                {
+                    let now = crate::clock_ns();
+                    let mut pace = lock(&PACE);
+                    pace.asked_since_ns = 0;
+                    if pace.tick_open_since_ns == 0 { pace.tick_open_since_ns = now; }
+                    pace.last_tick_ns = now;
+                    pace.ticks += 1;
+                }
                 self.asked_frame = false;
                 self.ticking = true;
                 let mut any = false;
@@ -638,6 +748,7 @@ impl App {
                 drop(in_flight);
                 if !any {
                     self.ticking = false;
+                    lock(&PACE).tick_done();
                     self.hub.send(vec![AppToStudio::TickDone]);
                 }
             }
@@ -776,8 +887,18 @@ impl App {
 
     /// One Tick asked for at a time, and none while the WM shows nothing of the tile.
     fn ask_frame(&mut self) {
-        if self.hidden || self.asked_frame { return; }
+        // A request during a Tick goes out with its TickDone: the WM takes a request
+        // that arrives while its Tick is open as served by that Tick.
+        if self.hidden || self.asked_frame || self.ticking { return; }
         self.asked_frame = true;
+        {
+            let now = crate::clock_ns();
+            let mut pace = lock(&PACE);
+            pace.asked_since_ns = now;
+            pace.last_raf_ns = now;
+            pace.rafs += 1;
+            if self.ticking { pace.rafs_in_tick += 1; }
+        }
         self.hub.send(vec![AppToStudio::RequestAnimationFrame]);
     }
 
@@ -787,8 +908,30 @@ impl App {
         // fallback).
         if self.ticking && !self.windows.values().any(|w| w.awaiting) {
             self.ticking = false;
+            lock(&PACE).tick_done();
             self.hub.send(vec![AppToStudio::TickDone]);
+            let in_flight = lock(&self.state.in_flight);
+            let wanted = self.windows.iter().any(|(key, w)| {
+                w.requested && !w.awaiting && in_flight.get(key).copied().unwrap_or(0) < MAX_IN_FLIGHT
+            });
+            drop(in_flight);
+            if wanted { self.ask_frame(); }
         }
+    }
+
+    /// Reuse the window storage so observing pacing adds no allocation to a steady turn.
+    fn publish_pace(&self) {
+        let in_flight = lock(&self.state.in_flight);
+        let mut pace = lock(&PACE);
+        pace.started = true;
+        pace.hidden = self.hidden;
+        // Detaching abandons the old WM's open Tick and unanswered request.
+        if !self.ticking { pace.tick_open_since_ns = 0; }
+        if !self.asked_frame { pace.asked_since_ns = 0; }
+        pace.windows.clear();
+        pace.windows.extend(self.windows.iter().map(|(key, w)| {
+            (w.window_id, w.requested, w.awaiting, w.ahead, in_flight.get(key).copied().unwrap_or(0))
+        }));
     }
 }
 
@@ -863,6 +1006,11 @@ impl App {
         eprintln!("[hal-wm] the makepad WM went away; this process keeps its tray and waits for the next WM");
         self.detached_at = Some(std::time::Instant::now());
         lock(&self.state.rings).clear();
+        {
+            let mut s = shell::snapshot();
+            s.detached = true;
+            for w in s.windows.values_mut() { w.starved = None; w.pending_swapchain = false; }
+        }
         lock(&self.state.in_flight).clear();
         self.pending.clear();
         self.aux = None;
@@ -896,12 +1044,19 @@ impl App {
         let mut found = None;
         let mut last = String::from("no WM socket to ask");
         for path in wm_socket::reattach_paths() {
+            {
+                let mut s = shell::snapshot();
+                s.wm_socket = Some(path.to_string_lossy().into_owned());
+                s.protocol = None;
+                s.admitted = None;
+            }
             match wm_socket::adopt(&path, WIRE, std::process::id(), &name) {
                 Ok(admission) => { found = Some((path, admission)); break; }
                 Err(e) => last = format!("{}: {e:?}", path.display()),
             }
         }
         let Some((path, admission)) = found else {
+            shell::snapshot().refused = Some(last.clone());
             // once per distinct reason, so a long wait is visible without a line a second
             if self.reattach_error.as_deref() != Some(last.as_str()) {
                 eprintln!("[hal-wm] still waiting for the next WM: {last}");
@@ -910,10 +1065,17 @@ impl App {
             return;
         };
         self.reattach_error = None;
+        {
+            let mut s = shell::snapshot();
+            s.protocol = Some(admission.version);
+            s.admitted = Some(admission.client);
+            s.refused = None;
+        }
         self.state.hung_up.store(false, Ordering::Release);
         let hub = match Hub::connect(admission.port, admission.client, &name, self.state.clone()) {
             Ok(hub) => hub,
             Err(e) => {
+                shell::snapshot().refused = Some(e.clone());
                 eprintln!("[hal-wm] the next WM admitted this process but its hub did not take it: {e}");
                 return;
             }
@@ -925,6 +1087,7 @@ impl App {
         self.detached_at = None;
         self.state.detached.store(false, Ordering::Release);
         self.hidden = false;
+        shell::snapshot().detached = false;
         let mut windows: Vec<(Key, usize, bool)> = self.windows.iter().map(|(k, w)| (*k, w.window_id, w.dropdown)).collect();
         windows.sort_by_key(|(_, id, _)| *id);
         for (key, window_id, dropdown) in windows {
@@ -953,7 +1116,17 @@ impl Shell for App {
                     self.next_window += 1;
                     let geom = self.early.remove(&window_id);
                     let dropdown = kind & 0xff == window_kind::DROPDOWN;
-                    self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom, dropdown });
+                    let old = self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom, dropdown });
+                    {
+                        let mut s = shell::snapshot();
+                        if let Some(w) = old { s.windows.remove(&w.window_id); }
+                        s.windows.insert(window_id, shell::Window {
+                            pixels: geom.map_or([0, 0], |(g, dpi, _)| pixels(g, dpi)),
+                            hidden: self.hidden_windows.contains(&(sid, id)),
+                            pending_swapchain: self.pending.iter().any(|s| s.window_id == window_id),
+                            ..Default::default()
+                        });
+                    }
                     self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } }]);
                     a11y::window(window_id, Some((sid, id)));
                     let focused = self.wm_focus.get(&window_id).copied().unwrap_or(true);
@@ -965,6 +1138,7 @@ impl Shell for App {
                     let Some(key) = self.resolve((sid, id)) else { return };
                     let tile = self.tile_window() == Some(key);
                     if let Some(w) = self.windows.remove(&key) {
+                        shell::snapshot().windows.remove(&w.window_id);
                         a11y::window(w.window_id, None);
                         lock(&self.state.rings).remove(&key);
                         lock(&self.state.in_flight).remove(&key);
@@ -993,11 +1167,13 @@ impl Shell for App {
                         // A hidden window (a tray app's closed one) is a minimised tile.
                         window_state::HIDE => {
                             self.hidden_windows.insert(key);
+                            if let Some(w) = shell::snapshot().windows.get_mut(&self.windows[&key].window_id) { w.hidden = true; }
                             self.window_op(window_op::MINIMIZE);
                         }
                         window_state::MINIMIZE => self.window_op(window_op::MINIMIZE),
                         window_state::SHOW => {
                             self.hidden_windows.remove(&key);
+                            if let Some(w) = shell::snapshot().windows.get_mut(&self.windows[&key].window_id) { w.hidden = false; }
                             self.window_op(window_op::SHOW);
                         }
                         window_state::MAXIMIZE => self.window_op(window_op::MAXIMIZE),
@@ -1104,7 +1280,7 @@ impl Shell for App {
                 }
                 let closing: Vec<Key> = self.windows.keys().filter(|k| k.0 == sid).copied().collect();
                 for key in closing {
-                    self.windows.remove(&key);
+                    if let Some(w) = self.windows.remove(&key) { shell::snapshot().windows.remove(&w.window_id); }
                     lock(&self.state.rings).remove(&key);
                     lock(&self.state.in_flight).remove(&key);
                 }
@@ -1132,16 +1308,24 @@ impl Shell for App {
             }
             Op::Retire(_) | Op::Reveal => {}
         }
+        self.publish_pace();
     }
     fn dispatch(&mut self) -> Result<(), String> {
         self.native_outgoing();
-        if self.stopping { return Ok(()); }
+        if self.stopping { self.publish_pace(); return Ok(()); }
         // The WM shares a swapchain only once this end of the descriptor channel is connected;
         // its listener exists from the adoption on.
         self.connect_aux();
         if !self.pending.is_empty() {
             if self.aux.is_some() {
-                for swapchain in std::mem::take(&mut self.pending) { self.install(swapchain); }
+                let pending = std::mem::take(&mut self.pending);
+                {
+                    let mut s = shell::snapshot();
+                    for swapchain in &pending {
+                        if let Some(w) = s.windows.get_mut(&swapchain.window_id) { w.pending_swapchain = false; }
+                    }
+                }
+                for swapchain in pending { self.install(swapchain); }
             }
         }
         let finished = std::mem::take(&mut *lock(&self.state.finished));
@@ -1160,6 +1344,11 @@ impl Shell for App {
                     flips.push(AppToStudio::DrawCompleteAndFlip(draw));
                     if !self.app_drawn && from != session::HOST {
                         self.app_drawn = true;
+                        {
+                            let mut s = shell::snapshot();
+                            s.app_frame_shown = Some(self.app_drawn);
+                            s.app_frame_at = Some(crate::clock_ns());
+                        }
                         flips.push(AppToStudio::Custom(HostedAppFrame.to_json()));
                     }
                 }
@@ -1178,6 +1367,7 @@ impl Shell for App {
             // A process with a tray outlives its WM (a WM restart): it waits for the next one.
             if self.trays.is_empty() { self.quit(); } else { self.detach(); }
         }
+        self.publish_pace();
         Ok(())
     }
     fn wait(&mut self, wake: i32) -> Result<(), String> {

@@ -168,6 +168,21 @@ fn derive_script_impl_inner(
         if !resolved.is_empty() {
             emit_resolve(tb, &resolved);
         }
+        let source_field = fields
+            .iter()
+            .find(|field| field.attrs.iter().any(|a| a.name == "source"));
+        if let Some(source_field) = source_field {
+            if fields.iter().any(|field| {
+                !field.attrs.iter().any(|a| a.name == "source")
+                    && field.attrs.iter().any(|a| a.name == "live" || a.name == "apply_default")
+                    && field.attrs.iter().any(|a| a.name == "apply_state" || a.name == "imperative" || a.name == "visible")
+            }) {
+                // Capture the previous template before the field loop rebinds the source.
+                tb.add("let __old_source: ScriptValue = if apply.is_live_edit_reload() {self.")
+                    .ident(&source_field.name)
+                    .add(".as_object().into()} else {ScriptValue::NIL};");
+            }
+        }
         let mut slot = 0usize;
 
         for field in &fields {
@@ -187,8 +202,9 @@ fn derive_script_impl_inner(
                 .any(|a| a.name == "live" || a.name == "apply_default")
             {
                 // Runtime widget state survives a stylesheet reapply and a
-                // Rebake (`script_mod` re-run with unchanged DSL). Explicit
-                // edits and ordinary source reloads still update the property.
+                // Rebake (`script_mod` re-run with unchanged DSL). With a source,
+                // Reload only updates fields whose resolved template value changed;
+                // unrelated edits must not overwrite an imperative setter's value.
                 // `#[apply_state]` is the stylesheet-reapply mark; `#[visible]`
                 // / `#[imperative]` mark fields whose canonical mutation path
                 // is an imperative setter sharing storage with the DSL value.
@@ -198,7 +214,15 @@ fn derive_script_impl_inner(
                     .iter()
                     .any(|a| a.name == "imperative" || a.name == "visible");
                 if preserve_state || imperative {
-                    tb.add("if !apply.preserves_runtime_state() {");
+                    tb.add("if !apply.preserves_runtime_state()");
+                    if source_field.is_some() {
+                        tb.add(" && !vm.script_derive_unchanged(apply, __old_source,")
+                            .live_id(script_name(&field.name))
+                            .add(", __slots[")
+                            .unsuf_usize(slot)
+                            .add("])");
+                    }
+                    tb.add(" {");
                 }
                 // One call into a helper generic over the field type: it
                 // applies the field's resolved slot, or on a reload the
@@ -352,9 +376,6 @@ fn derive_script_impl_inner(
         // `__script_source__` (and thus the proto scope, type names, etc.) just
         // like it would on the bare base. Without this a custom widget's source
         // falls back to ZERO and every eval against it fails to resolve names.
-        let source_field = fields
-            .iter()
-            .find(|field| field.attrs.iter().any(|a| a.name == "source"));
         if let Some(source_field) = source_field {
             tb.add("    fn script_source(&self) -> ScriptObject {self.")
                 .ident(&source_field.name)

@@ -194,39 +194,6 @@ pub fn ahead_progress() -> (u64, u64) {
     (AHEAD_DONE.load(Relaxed), crate::jit::ahead_queued() + AHEAD_RUNNING.load(Relaxed))
 }
 
-// ------------------------------------------------------------ compile pressure (helpers yield)
-
-/// O3 builds running now (TIER_ACTIVE's length, read without its lock)
-pub(crate) static O3_BUILDING: AtomicU64 = AtomicU64::new(0);
-/// wall ns a background build (O3, O2, ahead) last ended, or was last seen running
-static BUILT_LAST: AtomicU64 = AtomicU64::new(0);
-/// The pressure holds this long past the last background build: the gaps between a worker's
-/// builds (a pop, a counted window's end) do not let every helper start and stop again.
-const PRESSURE_HOLD_NS: u64 = 250_000_000;
-
-/// A background build (O3, O2, ahead) ended.
-pub(crate) fn background_build_ended() {
-    BUILT_LAST.store(wall_ns(), Relaxed);
-}
-
-/// The loader symbol `relax_compile_pressure` (makepad platform's task pool, thread.rs
-/// `compile_pressure`): the JIT builds code the program runs in the background now -- an O3 or O2
-/// build of hot code, a function ahead of its call -- or ended one less than PRESSURE_HOLD_NS ago.
-/// The program's parallel helpers pause meanwhile and their callers work on alone: the builds get
-/// the cores, and hot code its optimised version sooner, instead of many threads running it
-/// unoptimised while the compiler starves (Fab's slicer: 15 helpers at UserInitiated against 3 O3
-/// workers below them). Atomics only.
-pub extern "C" fn relax_compile_pressure() -> bool {
-    use crate::jit::O2_RUNNING;
-    let now = wall_ns();
-    if O3_BUILDING.load(Relaxed) > 0 || O2_RUNNING.load(Relaxed) || AHEAD_RUNNING.load(Relaxed) > 0 {
-        BUILT_LAST.store(now, Relaxed);
-        return true;
-    }
-    let last = BUILT_LAST.load(Relaxed);
-    last != 0 && now.saturating_sub(last) < PRESSURE_HOLD_NS
-}
-
 /// The JIT's work: what is queued and running now, and what it has finished so far (monotonic,
 /// so two looks give the work rate). For the run's JIT ring and makepad inspect `jit`: a look,
 /// not a measurement (two queue locks, each alone; the rest atomics).
@@ -312,7 +279,7 @@ impl Activity {
 
 /// A fn's path for one line: its last two segments without generics (`<T as Tr>::f` -> `T::f`),
 /// a trailing ` [..]` note kept, at most 40 chars.
-fn short_fn(name: &str) -> String {
+pub(crate) fn short_fn(name: &str) -> String {
     let (name, note) = match name.find(" [") {
         Some(i) => (&name[..i], &name[i..]),
         None => (name, ""),
@@ -538,14 +505,15 @@ pub(crate) fn before_present_line(main_ns: u64) -> String {
     ) + &{
         let a = |i: usize| crate::jit::AHEAD_STATS[i].load(Relaxed);
         let w = |i: usize| crate::jit::MAIN_AHEAD_WAIT[i].load(Relaxed);
-        format!("; checks ahead: {} bodies ({} taken), cpu callers {:.0} ms, helpers {:.0} ms, main waited for a helper's check {}x {:.0} ms, main's cpu in them {:.0} ms of which lowering its slots {:.0} ms; lowered ahead {} ({} taken) {:.0} ms",
-            a(0), a(1), a(3) as f64 / 1e6, a(4) as f64 / 1e6, w(0), w(1) as f64 / 1e6, w(3) as f64 / 1e6, w(2) as f64 / 1e6, a(5), a(6), a(7) as f64 / 1e6)
+        format!("; checks ahead: {} bodies ({} taken), cpu callers {:.0} ms, helpers {:.0} ms, main waited for a helper's check {}x {:.0} ms, main waited for a helper's lowering {}x {:.0} ms, main's cpu in them {:.0} ms of which lowering its slots {:.0} ms; lowered ahead {} ({} taken) {:.0} ms; looked ahead {} bodies",
+            a(0), a(1), a(3) as f64 / 1e6, a(4) as f64 / 1e6, w(0), w(1) as f64 / 1e6, w(4), w(5) as f64 / 1e6, w(3) as f64 / 1e6, w(2) as f64 / 1e6, a(5), a(6), a(7) as f64 / 1e6, crate::jit::LOOK_QUEUED.load(Relaxed))
     } + &{
         let o = |r: usize, i: usize| crate::jit::OWNER_LOWERS[r][i].load(Relaxed);
         format!("; owner's own lowerings: of bodies checked ahead {} ({:.0} ms), by const eval {} ({:.0} ms), checked on the owner {} ({:.0} ms), closures {} ({:.0} ms), requests' own slots checked ahead {} ({:.0} ms); main's lowerings ahead of its slots by result: {}",
             o(0, 0), o(0, 1) as f64 / 1e6, o(1, 0), o(1, 1) as f64 / 1e6, o(2, 0), o(2, 1) as f64 / 1e6, o(3, 0), o(3, 1) as f64 / 1e6, o(4, 0), o(4, 1) as f64 / 1e6,
             crate::jit::MAIN_LOWER_WHY.iter().enumerate().filter(|(_, n)| n.load(Relaxed) > 0).map(|(i, n)| format!("af{} {}", i, n.load(Relaxed))).collect::<Vec<_>>().join(", "))
-    }
+    } + &format!("; bodies type-checked {} ({} of them by the app check, before main or beside it: {} crates, {:.0} ms)",
+        crate::type_queries::BODIES_CHECKED.load(Relaxed), crate::check::RUN_CHECK[1].load(Relaxed), crate::check::RUN_CHECK[0].load(Relaxed), crate::check::RUN_CHECK[2].load(Relaxed) as f64 / 1e6)
 }
 
 pub(crate) fn main_owner_wait(t0: u64, w: u64) {

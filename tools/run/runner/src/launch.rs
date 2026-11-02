@@ -12,19 +12,24 @@
 //!
 //! `makepad app <id>` reads that file, sets MAKEPAD_APP_ID=<id> (the platform names its windows
 //! and its process after it: Linux app_id / WM_CLASS `nl.makepad.<id>`) and MAKEPAD_RUN_HOME, and
-//! runs the words as if they were its own command line. The per-app OS entries the launcher
-//! writes (a macOS bundle, a Windows Start menu shortcut, a Linux .desktop file) start a tiny
-//! `makepad-launcher` stub. It selects the active loader, sets MAKEPAD_RUN_HOME and passes
-//! `app <id>`, so every app shares the loader and its warm JIT cache.
+//! runs the words as if they were its own command line. The runner's pinned entries start the
+//! loader itself: a macOS bundle whose executable is a symlink to it (its Info.plist's
+//! LSEnvironment sets MAKEPAD_RUN_APP and MAKEPAD_RUN_HOME), a Linux .desktop file or a Windows
+//! shortcut with `app <id>`, so every app shares the loader and its warm JIT cache.
 //!
-//! `makepad` with no arguments: the launch record `runner` (the entry scripts write it),
-//! otherwise the host's default (the `makepad` binary: the runner of the checkout it was built
-//! from). The macOS stub reads MakepadApp and MakepadRunHome from its bundle's Info.plist.
+//! `makepad` with no arguments: the app MAKEPAD_RUN_APP names, otherwise the launch record
+//! `runner` (the entry scripts write it), then the host's default (the `makepad` binary: the
+//! runner of the checkout it was built from).
 //!
 //! A launcher that wants to follow a start sets MAKEPAD_RUN_REPORT_TO=<file> in the environment
 //! of the launch (macOS `open --env`): a `run` then reports to it as with `--report-to`, after a
 //! first line `pid <pid>` that names the process.
 use std::path::{Path, PathBuf};
+
+/// An app id: letters, digits, `-` and `_` (a file name and an identifier part on every OS).
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
 
 /// One launch record (see the module doc).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -34,11 +39,6 @@ pub struct Launch {
     pub cwd: Option<PathBuf>,
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
-}
-
-/// An app id: letters, digits, `-` and `_` (a file name and an identifier part on every OS).
-pub fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// `<home>/apps`
@@ -121,14 +121,24 @@ pub fn write(home: &Path, l: &Launch) -> Result<(), String> {
     std::fs::write(&part, format(l)).and_then(|_| std::fs::rename(&part, &p)).map_err(|e| format!("{}: {e}", p.display()))
 }
 
-/// What a command line becomes when it names a launch record: `[exe]` (no arguments) or
-/// `[exe, "app", <id>, extra...]`. `default` is the host's own no-argument launch. None: the
-/// command line stays as it is. The launch's environment and folder are applied here.
+/// Resolves `[exe, "app", <id>, extra...]` or no arguments. No arguments run MAKEPAD_RUN_APP
+/// when it is set (and take it out of the environment), otherwise `runner` or the host's
+/// `default`. None leaves the command line unchanged. The launch's environment and folder are
+/// applied here.
 pub fn resolve(raw: &[Vec<u8>], default: Option<fn() -> Option<Launch>>) -> Option<Result<Vec<Vec<u8>>, String>> {
     let exe = raw.first().cloned().unwrap_or_default();
     let launch = match raw.get(1).map(Vec::as_slice) {
         None => {
-            if path(&crate::fetch::home(), "runner").is_file() {
+            // a macOS bundle's: Launch Services sets it (with MAKEPAD_RUN_HOME) from the bundle's
+            // LSEnvironment; the app's own children must not inherit it
+            let bundle = std::env::var("MAKEPAD_RUN_APP").ok();
+            std::env::remove_var("MAKEPAD_RUN_APP");
+            if let Some(id) = bundle {
+                if !valid_id(&id) {
+                    return Some(Err(format!("MAKEPAD_RUN_APP: not an app id: {id}")));
+                }
+                read(&crate::fetch::home(), &id)
+            } else if path(&crate::fetch::home(), "runner").is_file() {
                 read(&crate::fetch::home(), "runner")
             } else {
                 match default.and_then(|f| f()) {

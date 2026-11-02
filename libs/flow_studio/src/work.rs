@@ -1,9 +1,9 @@
 //! Adapt Flow's work admission to the application's existing platform pool.
 //! Long-lived engine loops use the platform spawner; evaluations/preparation
-//! use warm, bounded pool lanes. Dropping a handle never joins a worker.
+//! use the shared pool's Background class. Dropping a handle never joins a worker.
 
 use makepad_flow::runtime::{HostWork, Job, JobLane, JobRefused, SpawnRefused, WorkBudget};
-use makepad_widgets::{Cx, Lane, TaskPool, ThreadOptions, ThreadSpawner};
+use makepad_widgets::{Cx, Class, TaskPool, ThreadOptions, ThreadSpawner};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -44,17 +44,17 @@ impl AppWork {
 impl HostWork for AppWork {
     fn submit_job(&self, _lane: JobLane, job: Job) -> Result<(), JobRefused> {
         let Some(permit) = Permit::take(&self.jobs, JOBS) else { return Err(JobRefused(job)) };
-        // Splash evaluation can consume millions of instructions. Keep
-        // the reserved interactive lane free for short UI work.
-        let lane = Lane::Heavy;
-        // Do not move the job into a fallible submission: a refused job
-        // belongs to Flow so it can retry with its exact captured inputs.
-        let slot = match self.pool.reserve(lane) {
-            Ok(slot) => slot,
-            Err(_) => return Err(JobRefused(job)),
-        };
-        slot.submit_named("flow-studio", move || { let _permit = permit; job(); }).detach();
-        Ok(())
+        // HostWork returns the original job if the application pool closed.
+        let pending = Arc::new(std::sync::Mutex::new(Some(job)));
+        let work = pending.clone();
+        match self.pool.submit_named(Class::Background, "flow-studio", move || {
+            let _permit = permit;
+            let job = work.lock().unwrap().take().unwrap();
+            job();
+        }) {
+            Ok(handle) => { handle.detach(); Ok(()) }
+            Err(_) => Err(JobRefused(pending.lock().unwrap().take().unwrap())),
+        }
     }
 
     fn spawn_loop(&self, name: &str, body: Job) -> Result<(), SpawnRefused> {

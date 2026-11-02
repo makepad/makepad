@@ -6,7 +6,9 @@ use crate::master::Master;
 use makepad_remote::hub;
 use makepad_remote::link::{Client, Target};
 use makepad_strict_json::Value;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct JitRow {
@@ -164,6 +166,8 @@ pub struct MachineRow {
     pub err: Option<String>,
     /// this machine (the master's own)
     pub local: bool,
+    /// asked at this time (ms) and not answered yet: the row is its last answer, if any
+    pub pending_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -229,37 +233,57 @@ pub fn parse_ps(name: &str, lines: &[String]) -> MachineRow {
     m
 }
 
-/// Every machine the master knows, asked in parallel (a slow node never holds up the others
-/// past the link's own timeouts).
+/// The nodes' last `ps` answers and the asks still out (one per node at a time).
+#[derive(Default)]
+struct Asks {
+    rows: HashMap<String, MachineRow>,
+    asking: HashMap<String, u64>,
+}
+
+static ASKS: OnceLock<(Mutex<Asks>, Condvar)> = OnceLock::new();
+
+/// How long a listing waits for the answers before it shows the silent nodes as pending
+/// (their asks go on; an answer lands in the next listing).
+const ANSWER_WAIT: Duration = Duration::from_secs(2);
+
+/// Every machine the master knows, asked in parallel. A silent node never holds up the listing:
+/// it shows as pending with its last answer, and is not asked again until it answers.
 pub fn collect(master: &Master) -> Snapshot {
     let mut local = Vec::new();
     master.local.ps(&mut local);
     let mut me = parse_ps(&master.name, &local);
     me.local = true;
-    let hosts = master.hosts();
-    let threads: Vec<_> = hosts
-        .hosts
-        .into_iter()
-        .map(|h| {
-            std::thread::spawn(move || {
-                let c = Client::new(Target::Unix(crate::proto::control_socket()), "devhub-explorer");
-                let mut lines = Vec::new();
-                match hub::ask(&c, &h.name, "ps", "", "ps", &mut |l| {
-                    lines.push(l.to_string());
-                    true
-                }) {
-                    // the master's name for it (nodes.conf): what routing and the lease view use
-                    Ok(_) => MachineRow { name: h.name.clone(), ..parse_ps(&h.name, &lines) },
-                    Err(e) => MachineRow { name: h.name.clone(), err: Some(e), ..MachineRow::default() },
-                }
-            })
-        })
-        .collect();
+    let names: Vec<String> = master.hosts().hosts.into_iter().map(|h| h.name).collect();
+    let (lock, answered) = ASKS.get_or_init(Default::default);
+    let mut asks = lock.lock().unwrap();
+    for name in &names {
+        if asks.asking.contains_key(name) { continue; }
+        asks.asking.insert(name.clone(), crate::proto::wall_ms());
+        let name = name.clone();
+        std::thread::spawn(move || {
+            let c = Client::new(Target::Unix(crate::proto::control_socket()), "devhub-explorer");
+            let mut lines = Vec::new();
+            let row = match hub::ask(&c, &name, "ps", "", "ps", &mut |l| {
+                lines.push(l.to_string());
+                true
+            }) {
+                // the master's name for it (nodes.conf): what routing and the lease view use
+                Ok(_) => MachineRow { name: name.clone(), ..parse_ps(&name, &lines) },
+                Err(e) => MachineRow { name: name.clone(), err: Some(e), ..MachineRow::default() },
+            };
+            let (lock, answered) = ASKS.get().expect("asks");
+            let mut asks = lock.lock().unwrap();
+            asks.asking.remove(&name);
+            asks.rows.insert(name, row);
+            answered.notify_all();
+        });
+    }
+    let asks = answered.wait_timeout_while(asks, ANSWER_WAIT, |a| names.iter().any(|n| a.asking.contains_key(n))).unwrap().0;
     let mut machines = vec![me];
-    for t in threads {
-        if let Ok(m) = t.join() {
-            machines.push(m);
-        }
+    for name in names {
+        let mut row = asks.rows.get(&name).cloned().unwrap_or_else(|| MachineRow { name: name.clone(), ..MachineRow::default() });
+        row.pending_ms = asks.asking.get(&name).copied();
+        machines.push(row);
     }
     Snapshot { machines, at_ms: crate::proto::wall_ms() }
 }

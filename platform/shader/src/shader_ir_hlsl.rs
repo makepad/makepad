@@ -132,6 +132,9 @@ pub fn hlsl_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shader
     }
 
     let mut out = String::new();
+    for b in &info.storage_buffers {
+        crate::shader_ir_compute_text::hlsl_buffer_declaration(&cx, b, &mut out);
+    }
     out.push_str("#pragma pack_matrix(row_major)\n");
     let mut done = vec![false; ir.structs.len()];
     for s in 0..ir.structs.len() {
@@ -339,7 +342,7 @@ float4 _mp_pick_sample(uint b, Texture2D tw, float4 c, float2 uv) {
 }
 ";
 
-const HLSL_HELPERS: &str = "float2 _mp_unpack2f16(float x) { uint u = asuint(x); return float2(f16tof32(u & 0xffff), f16tof32(u >> 16)); }
+pub(crate) const HLSL_HELPERS: &str = "float2 _mp_unpack2f16(float x) { uint u = asuint(x); return float2(f16tof32(u & 0xffff), f16tof32(u >> 16)); }
 float4 _mp_unpack4u8(float x) { uint u = asuint(x); return float4(float(u & 0xff), float((u >> 8) & 0xff), float((u >> 16) & 0xff), float((u >> 24) & 0xff)) * (1.0 / 255.0); }
 float2 _mp_unpack_half2x16(uint u) { return float2(f16tof32(u & 0xffff), f16tof32(u >> 16)); }
 float2 _mp_unpack_unorm2x16(uint u) { return float2(float(u & 0xffff), float(u >> 16)) * (1.0 / 65535.0); }

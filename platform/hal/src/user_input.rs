@@ -44,16 +44,17 @@ pub struct UserInput {
 }
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
-/// Desk Link viewers connected now (a person may be watching with no input for a while).
+/// Desk Link viewers showing this desktop now, not paused (a person may be watching with no
+/// input for a while); a viewer's tab not selected or its window hidden pauses it.
 static VIEWERS: AtomicU64 = AtomicU64::new(0);
 
-/// The WM says how many Desk Link viewers are connected.
+/// The WM says how many Desk Link viewers show it now (connected and not paused).
 #[makepad_relax_api::relax_api]
 pub fn set_viewers(n: usize) {
     VIEWERS.store(n as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Desk Link viewers connected now.
+/// Desk Link viewers showing this desktop now.
 #[makepad_relax_api::relax_api]
 pub fn viewers() -> u64 {
     VIEWERS.load(std::sync::atomic::Ordering::Relaxed)

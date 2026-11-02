@@ -1303,38 +1303,14 @@ impl Program {
         // modules declared before it (the preload's scan found them)
         {
             let _profile = crate::load_profile::span(self.session.runtime.profile, "crate-macro-publication", &ahead.name);
-            let table = std::sync::Arc::make_mut(&mut self.macros);
-            for d in &ahead.defs {
-                table.push(d.clone());
-            }
-            for (k, v) in &ahead.aliases {
-                table.add_alias(k.0.clone(), k.1.clone(), v.clone());
-            }
             // the extern prelude is the crate's dependencies as this load names them (every
             // loader passes them here; a preload without them -- the bring-up checker's, the
             // proc-macro host's -- gets them now): macro paths through `dep::` resolve with it
-            let mut externs: crate::fxhash::HashMap<String, String> = ahead.mods.externs.clone();
-            for (s, ci) in &self.crates[krate as usize].deps {
-                if let Some(c) = self.crates.get(*ci as usize) {
-                    let n = self.syms.str(*s);
-                    // (std / core / alloc are in every extern prelude already)
-                    if !matches!(n, "std" | "core" | "alloc") {
-                        externs.insert(n.to_string(), self.syms.str(c.name).to_string());
-                    }
-                }
-            }
-            // Resolve scopes against the loader's complete dependency imports. Do not retain
-            // a scope the prescan computed against its earlier macro table.
-            let mods = std::sync::Arc::new(crate::macros::CrateMods { root: ahead.mods.root.clone(), src: ahead.mods.src.clone(), mods: ahead.mods.mods.clone(), items: ahead.mods.items.clone(), uses: ahead.mods.uses.clone(), externs, renames: ahead.mods.renames.clone(), recursion_limit: ahead.mods.recursion_limit, ..Default::default() });
-            table.add_crate(ahead.name.clone(), mods);
-            if !ahead.macro_use.is_empty() {
-                let v = table.macro_use.entry(ahead.name.clone()).or_default();
-                for u in &ahead.macro_use {
-                    if !v.contains(u) {
-                        v.push(u.clone());
-                    }
-                }
-            }
+            let externs: Vec<_> = self.crates[krate as usize].deps.iter().filter_map(|(s, ci)| {
+                self.crates.get(*ci as usize).map(|c| (self.syms.str(*s).to_string(), self.syms.str(c.name).to_string()))
+            }).collect();
+            crate::preload::publish_macros(std::sync::Arc::make_mut(&mut self.macros), &ahead.name,
+                &ahead.defs, &ahead.aliases, &ahead.mods, &ahead.macro_use, &externs);
         }
         if let Some(pool) = &self.pool { pool.start_parsing(ci, self.macros.clone()); }
         if !ahead.prelexed.is_empty() {
@@ -1387,6 +1363,7 @@ impl Program {
         self.cur_image = false;
         r?;
         std::sync::Arc::make_mut(&mut self.macros).seal_crate(&kname);
+        if let Some(pool) = &self.pool { pool.crate_loaded(ci, self.macros.clone()); }
         Ok(krate)
     }
 
@@ -1650,9 +1627,27 @@ impl Program {
         let _profile = crate::load_profile::span(self.session.runtime.profile, "front-image-write", path);
         if !sink.file(path, pf) { return; }
         pf.sink = Some(sink.clone());
+        // Worker-parsed bodies are still exclusively owned here.
+        if let Some(mut part) = pf.part.take() {
+            let mut tail = &mut pf.ast;
+            while tail.part.get().is_some_and(|a| a.part.get().is_some()) { tail = tail.part.get_mut().unwrap(); }
+            let mut ast = tail.part.take().expect("parsed part AST");
+            sink.part(pf, &mut part, &mut ast);
+            let mut tail = &mut pf.ast;
+            while tail.part.get().is_some() { tail = tail.part.get_mut().unwrap(); }
+            assert!(tail.part.set(ast).is_ok());
+            assert!(pf.part.set(part).is_ok());
+        }
         if let (crate::arena::Arena::Mapped(src), Some(c)) = (&pf.src, self.crates.get(krate as usize)) {
             if c.context.sources().map_authored(path, &src[..pf.src_len as usize]) {
-                for c in &self.crates { c.context.release_read(path); }
+                let key = crate::vfs::ReadSnapshot::key(path);
+                // (a load's contexts share one snapshot: the distinct ones are a handful)
+                let mut reads: Vec<*const crate::vfs::ReadSnapshot> = Vec::new();
+                for c in &self.crates {
+                    let snapshot = c.context.read_snapshot();
+                    let p = std::sync::Arc::as_ptr(snapshot);
+                    if !reads.contains(&p) { reads.push(p); snapshot.release(&key); }
+                }
             }
         }
     }
@@ -1770,6 +1765,7 @@ impl Program {
             ).unwrap_or_else(|e| panic!("front verify parse {}: {:?}", path, e));
             fresh.bind_sources(path, &self.sources).expect("front verify sources");
             let fprep = prepare_file(&mut fresh, &self.crates[krate as usize].cfg);
+            if pf.part.get().is_some() { let _ = fresh.part(&self.crates[krate as usize].cfg); }
             verify(&pf, &fresh);
             assert_eq!(crate::crate_image::encode(&used), crate::crate_image::encode(&fused.unwrap()), "front MacroUse: {}", path);
             assert_eq!(crate::crate_image::encode(&prep), crate::crate_image::encode(&fprep), "front FilePrep: {}", path);

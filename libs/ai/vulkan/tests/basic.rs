@@ -67,7 +67,7 @@ fn every_kernel_compiles() {
         match library.compile(&name) {
             Err(e) => failed.push(e),
             Ok(k) => {
-                if let Some(Err(e)) = makepad_script::shader_ir_spirv::spirv_val(&k.spirv) {
+                if let Some(Err(e)) = makepad_script::shader_ir_spirv::spirv_val(k.code.as_spirv().unwrap()) {
                     failed.push(format!("{name}: spirv-val: {e}"));
                 }
             }

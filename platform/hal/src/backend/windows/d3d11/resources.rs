@@ -70,6 +70,7 @@ pub struct Texture {
     pub dev: Arc<Device>,
     pub desc: TextureObj,
     pub res: ID3D11Texture2D,
+    pub uav: Option<ID3D11UnorderedAccessView>,
     /// render-target views, one per layer (colour render targets)
     pub rtv: Vec<ID3D11RenderTargetView>,
     /// depth views, one per layer (depth targets)
@@ -104,6 +105,7 @@ impl Texture {
         if target {
             bind |= if depth { D3D11_BIND_DEPTH_STENCIL.0 as u32 } else { D3D11_BIND_RENDER_TARGET.0 as u32 };
         }
+        if desc.usage & usage::STORAGE != 0 { bind |= 0x80 as u32; }
         let mips = desc.mips.max(1);
         let shared = desc.usage & usage::SHARED != 0;
         let nv12 = desc.format == format::NV12;
@@ -137,6 +139,12 @@ impl Texture {
         unsafe { dev.device.CreateTexture2D(&td, None, Some(&mut res)) }
             .map_err(|e| hr(&format!("CreateTexture2D {}x{}x{} {} mips {}", desc.w, desc.h, layers, format::name(desc.format), mips), e))?;
         let res: ID3D11Texture2D = res.ok_or("CreateTexture2D returned nothing")?;
+        let mut uav = None;
+        if desc.usage & usage::STORAGE != 0 {
+            let mut view = D3D11_UNORDERED_ACCESS_VIEW_DESC { Format: fmt.resource, ViewDimension: D3D11_UAV_DIMENSION(4), ..Default::default() };
+            view.Anonymous.Texture2D = D3D11_TEX2D_UAV { MipSlice: 0 };
+            unsafe { dev.device.CreateUnorderedAccessView(res.as_ID3D11Resource(), Some(&view), Some(&mut uav)) }.map_err(|e| hr("storage texture UAV", e))?;
+        }
         let shared = if shared { Some(export(&res)?) } else { None };
         let target = target || shared.is_some();
         let mut rtv = Vec::new();
@@ -171,7 +179,7 @@ impl Texture {
         }
         let bytes = crate::backend::exec::texture_bytes(desc.format, desc.w, desc.h, layers, mips);
         dev.allocated.fetch_add(bytes, Ordering::Relaxed);
-        Ok(Arc::new(Texture { dev, desc, res, rtv, dsv, srv: Mutex::new(Vec::new()), bytes, cube, shared }))
+        Ok(Arc::new(Texture { dev, desc, res, uav, rtv, dsv, srv: Mutex::new(Vec::new()), bytes, cube, shared }))
     }
 
     /// Opens another process's shared texture by its wire handle.
@@ -194,7 +202,7 @@ impl Texture {
         rtv.push(v.ok_or("CreateRenderTargetView returned nothing")?);
         let desc = TextureObj { format: format::BGRA8, w: td.Width, h: td.Height, depth: 1, mips: 1, usage: usage::SAMPLED | usage::RENDER_TARGET,
             bytes: 0, imported: true, uploaded: 0, lent: None };
-        Ok(Arc::new(Texture { dev, desc, res, rtv, dsv: Vec::new(), srv: Mutex::new(Vec::new()), bytes: 0, cube: false,
+        Ok(Arc::new(Texture { dev, desc, res, uav: None, rtv, dsv: Vec::new(), srv: Mutex::new(Vec::new()), bytes: 0, cube: false,
             shared: Some(Shared { key, handle: None, mutex }) }))
     }
 
@@ -204,7 +212,7 @@ impl Texture {
         let desc = TextureObj { format: fmt, w, h, depth: 1, mips: 1, usage: usage::SAMPLED, bytes: format::level_bytes(fmt, w, h), imported: true, uploaded: 0, lent: None };
         let bytes = desc.bytes;
         dev.allocated.fetch_add(bytes, Ordering::Relaxed);
-        Arc::new(Texture { dev, desc, res, rtv: Vec::new(), dsv: Vec::new(), srv: Mutex::new(Vec::new()), bytes, cube: false, shared: None })
+        Arc::new(Texture { dev, desc, res, uav: None, rtv: Vec::new(), dsv: Vec::new(), srv: Mutex::new(Vec::new()), bytes, cube: false, shared: None })
     }
 
     /// The view a draw samples this texture by, for the shape the pipeline declares.
@@ -251,6 +259,7 @@ pub struct Buffer {
     pub buf: ID3D11Buffer,
     /// instance buffers: the word view the vertex shader reads records through
     pub words: Option<ID3D11ShaderResourceView>,
+    pub uav: Option<ID3D11UnorderedAccessView>,
     pub size: u64,
     pub bytes: u64,
     pub kind: u16,
@@ -266,26 +275,40 @@ impl Buffer {
     /// A retained buffer of `kind` (`buffer_kind`). Uniform buffers are constant buffers (sized up
     /// to 16 bytes); instance buffers are read by the vertex shader as words.
     pub fn new(dev: Arc<Device>, kind: u16, size: u64) -> Result<Arc<Buffer>, String> {
-        let bytes = match kind {
+        let bytes = match kind & buffer_kind::KIND_MASK {
             buffer_kind::UNIFORM => size.max(16).div_ceil(16) * 16,
             _ => size.max(4).div_ceil(4) * 4,
         };
         if bytes > u32::MAX as u64 {
             return Err(format!("a {bytes}-byte buffer exceeds D3D11's 4 GiB resource limit"));
         }
-        let bind = match kind {
+        let bind = match kind & buffer_kind::KIND_MASK {
+            buffer_kind::STORAGE => (0x80 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
             buffer_kind::VERTEX => D3D11_BIND_VERTEX_BUFFER.0 as u32,
             buffer_kind::INDEX => D3D11_BIND_INDEX_BUFFER.0 as u32,
             buffer_kind::UNIFORM => D3D11_BIND_CONSTANT_BUFFER.0 as u32,
             _ => D3D11_BIND_SHADER_RESOURCE.0 as u32,
         };
-        let desc = D3D11_BUFFER_DESC { ByteWidth: bytes as u32, Usage: D3D11_USAGE_DEFAULT, BindFlags: bind, CPUAccessFlags: 0, MiscFlags: 0, StructureByteStride: 0 };
+        let storage = kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE;
+        // D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, DRAWINDIRECT_ARGS.
+        let misc = if storage { 0x20 } else { 0 } | if kind & buffer_kind::INDIRECT != 0 { 0x10 } else { 0 };
+        let desc = D3D11_BUFFER_DESC { ByteWidth: bytes as u32, Usage: D3D11_USAGE_DEFAULT, BindFlags: bind, CPUAccessFlags: 0, MiscFlags: misc, StructureByteStride: 0 };
         let mut buf = None;
         unsafe { dev.device.CreateBuffer(&desc, None, Some(&mut buf)) }.map_err(|e| hr(&format!("CreateBuffer {bytes} bytes kind {kind}"), e))?;
         let buf: ID3D11Buffer = buf.ok_or("CreateBuffer returned nothing")?;
-        let words = if kind == buffer_kind::INSTANCE { Some(word_view(&dev, &buf, (bytes / 4) as u32)?) } else { None };
+        let mut uav = None;
+        let words = if storage {
+            let mut view = D3D11_SHADER_RESOURCE_VIEW_DESC { Format: DXGI_FORMAT_R32_TYPELESS, ViewDimension: D3D_SRV_DIMENSION(11), ..Default::default() };
+            view.Anonymous.BufferEx = D3D11_BUFFEREX_SRV { FirstElement: 0, NumElements: (bytes / 4) as u32, Flags: 1 };
+            let mut srv = None;
+            unsafe { dev.device.CreateShaderResourceView(buf.as_ID3D11Resource(), Some(&view), Some(&mut srv)) }.map_err(|e| hr("raw SRV", e))?;
+            let mut view = D3D11_UNORDERED_ACCESS_VIEW_DESC { Format: DXGI_FORMAT_R32_TYPELESS, ViewDimension: D3D11_UAV_DIMENSION(1), ..Default::default() };
+            view.Anonymous.Buffer = D3D11_BUFFER_UAV { FirstElement: 0, NumElements: (bytes / 4) as u32, Flags: 1 };
+            unsafe { dev.device.CreateUnorderedAccessView(buf.as_ID3D11Resource(), Some(&view), Some(&mut uav)) }.map_err(|e| hr("raw UAV", e))?;
+            srv
+        } else if kind == buffer_kind::INSTANCE { Some(word_view(&dev, &buf, (bytes / 4) as u32)?) } else { None };
         dev.allocated.fetch_add(bytes, Ordering::Relaxed);
-        Ok(Arc::new(Buffer { dev, buf, words, size, bytes, kind }))
+        Ok(Arc::new(Buffer { dev, buf, words, uav, size, bytes, kind }))
     }
 
     pub fn write(&self, off: u64, data: &[u8]) {

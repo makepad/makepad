@@ -523,7 +523,9 @@ fn record_packet(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, p: &FramePacket, 
         };
         let attr = s.ledger.get(Kind::Buffer, id.index).filter(|l| l.gen == id.gen).map(|l| l.attr).unwrap_or_default();
         strs.extend([attr.owner, attr.site, attr.label]);
-        let contents = gpu.capture_buffer(sid, id);
+        // A storage buffer can be written by the GPU. The synchronous capture hook
+        // cannot safely read mapped bytes; its contents require BufferReadback.
+        let contents = if e.val.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE { None } else { gpu.capture_buffer(sid, id) };
         if contents.is_none() {
             c.notes.push(format!("buffer {}:{}: this backend did not give its bytes", id.index, id.gen));
         }

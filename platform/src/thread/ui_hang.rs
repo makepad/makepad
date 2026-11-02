@@ -22,6 +22,16 @@ pub enum UiPhase {
     EditorAttach,
     CodeCache,
     CodeHover,
+    Beat,
+    ShaderCompile,
+    PipelineUpload,
+    GlyphWait,
+    FrameBuild,
+    ScriptGc,
+    Submit,
+    Signals,
+    PlatformOps,
+    Tasks,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -40,6 +50,16 @@ fn phase_name(id: u32) -> &'static str {
         266 => "editor-attach",
         267 => "code-cache",
         268 => "code-hover",
+        269 => "beat",
+        270 => "shader-compile",
+        271 => "pipeline-upload",
+        272 => "glyph-wait",
+        273 => "frame-build",
+        274 => "script-gc",
+        275 => "submit",
+        276 => "signals",
+        277 => "platform-ops",
+        278 => "tasks",
         id => crate::event::Event::name_from_u32(id.saturating_sub(1)),
     }
 }
@@ -75,6 +95,42 @@ pub struct UiPhaseGuard {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     traced: u64,
     _thread: PhantomData<Rc<()>>,
+}
+
+/// The UI thread waits in the event loop for input, a wake or the next frame;
+/// makepad inspect leaves this time out of a frame.
+#[must_use]
+pub struct UiIdleGuard {
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    hooks: Option<&'static relax_timeline::Hooks>,
+    _thread: PhantomData<Rc<()>>,
+}
+
+/// The UI thread waits in the event loop for input, a wake or the next frame;
+/// makepad inspect leaves this time out of a frame.
+#[inline]
+pub fn ui_idle() -> UiIdleGuard {
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    let hooks = relax_timeline::hooks();
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    if let Some(h) = hooks {
+        (h.begin)("idle".as_ptr(), "idle".len());
+    }
+    UiIdleGuard {
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        hooks,
+        _thread: PhantomData,
+    }
+}
+
+impl Drop for UiIdleGuard {
+    #[inline]
+    fn drop(&mut self) {
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        if let Some(h) = self.hooks {
+            (h.end)("idle".as_ptr(), "idle".len());
+        }
+    }
 }
 
 /// makepad inspect's timeline under `makepad run` (dlsym'd once; absent in a rustc build): the

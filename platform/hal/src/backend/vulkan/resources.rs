@@ -55,6 +55,7 @@ pub fn image_usage(t: &TextureObj) -> vk::ImageUsageFlags {
     // a depth image is sampled in DEPTH_STENCIL_READ_ONLY layout, which needs the attachment usage too
     if format::is_depth(t.format) { flags |= vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT; }
     else if t.usage & usage::RENDER_TARGET != 0 { flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT; }
+    if t.usage & usage::STORAGE != 0 { flags |= vk::ImageUsageFlags::STORAGE; }
     flags
 }
 
@@ -129,6 +130,7 @@ impl Image {
         }
         let features = dev.formats[desc.format as usize].optimal_tiling_features;
         let mut needed = if samples == vk::SampleCountFlags::TYPE_1 { vk::FormatFeatureFlags::SAMPLED_IMAGE } else { vk::FormatFeatureFlags::empty() };
+        if desc.usage & usage::STORAGE != 0 { needed |= vk::FormatFeatureFlags::STORAGE_IMAGE; }
         if format::is_depth(desc.format) { needed |= vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT; }
         if desc.usage & usage::RENDER_TARGET != 0 {
             if !format::is_depth(desc.format) { needed |= vk::FormatFeatureFlags::COLOR_ATTACHMENT; }
@@ -363,18 +365,20 @@ impl Buffer {
         let preferred = vk::MemoryPropertyFlags::DEVICE_LOCAL
             | vk::MemoryPropertyFlags::HOST_VISIBLE
             | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let allocate = |ty| {
+            let mut flags = vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+            let mut info = vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty);
+            if usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) { info = info.next_memory_allocate_flags_info(&mut flags); }
+            unsafe { dev.raw.allocate_memory(&info, None) }
+        };
         let result = (|| {
             match dev.memory_type(req.memory_type_bits, preferred) {
-                Ok(ty) => match unsafe {
-                    dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None)
-                }.map_err(error) {
+                Ok(ty) => match allocate(ty).map_err(error) {
                     Ok(memory) => return Ok::<_, String>((memory, ty)),
                     Err(why) => {
                         let fb_ty = dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
                             .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))?;
-                        let memory = unsafe {
-                            dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(fb_ty), None)
-                        }.map_err(error)?;
+                        let memory = allocate(fb_ty).map_err(error)?;
                         if !dev.rebar_fallback_logged.swap(true, std::sync::atomic::Ordering::AcqRel) {
                             let mt = dev.memory.memory_types[fb_ty as usize];
                             eprintln!(
@@ -389,9 +393,7 @@ impl Buffer {
                 Err(why) => {
                     let fb_ty = dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
                         .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))?;
-                    let memory = unsafe {
-                        dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(fb_ty), None)
-                    }.map_err(error)?;
+                    let memory = allocate(fb_ty).map_err(error)?;
                     if !dev.rebar_fallback_logged.swap(true, std::sync::atomic::Ordering::AcqRel) {
                         let mt = dev.memory.memory_types[fb_ty as usize];
                         eprintln!(

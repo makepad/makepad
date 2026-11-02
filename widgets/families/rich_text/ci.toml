@@ -8,6 +8,6 @@ work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
 
 [tests.windows]
 date = "2026-11-02"
-digest = "35c9de329e44143a17c3d7bab0612226ee8c4e839da8e12f1df0c9a7cd61a7c7"
-main = "85980f83132c6555f0343e3546f4af32c107f28f"
-work = "4f672791d60e305be9748c3bc85988225bbb56eb"
+digest = "95cc771e9bb3a3aa6e57bf61edbe47cc47b9fdcf0fbaec6bc836fb1e1a9f1fa8"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"

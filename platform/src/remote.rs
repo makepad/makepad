@@ -156,6 +156,7 @@ mod imp {
             "trace" => route_trace(p),
             // read from the runtimes' ledgers, never through the UI thread: a stuck loop is what it shows
             "net" => Answer::Text(crate::makepad_network::ledger::report()),
+            "loop" => Answer::Text(crate::os::hal::loop_watch::report()),
             "step" => route_step(p),
             "settled" => reply_to_answer(ask(Cmd::Settled, 4)),
             "uicounts" => reply_to_answer(ask(Cmd::UiCounts, 4)),
@@ -292,6 +293,7 @@ mod imp {
     fn platform_command(name: &str, p: &Params) -> Option<Answer> {
         Some(match name {
             "log" => route_log(p),
+            "cpu" => Answer::Text(crate::thread::cpu_summary()),
             "midi" => route_midi(p),
             "cap start" => route_capture_start(p),
             "cap stop" => route_capture_stop(p),
@@ -2401,9 +2403,6 @@ mod imp {
                     let _ = tx.send(Reply::Err("no capture is running".into()));
                 }
             },
-            Cmd::PoolSummary(tx) => {
-                let _ = tx.send(Reply::Text(cx.task_pool_summary()));
-            }
             Cmd::ShaderConsts { shader, tx } => {
                 let _ = tx.send(Reply::Text(shader_consts_json(cx, shader)));
             }
@@ -2865,15 +2864,10 @@ mod imp {
     }
 
     fn route_log(p: &Params) -> Answer {
-        // Asked before the ring is locked: the answer comes from the UI thread.
-        let pool = match ask(Cmd::PoolSummary, 2) {
-            Reply::Text(text) => text,
-            _ => String::new(),
-        };
-        Answer::Json(log_json(p, &pool))
+        Answer::Json(log_json(p))
     }
 
-    fn log_json(p: &Params, pool: &str) -> String {
+    fn log_json(p: &Params) -> String {
         let since = p.get(&["since"]).and_then(|v| v.parse::<u64>().ok());
         let count = p
             .get(&["n", "count", "tail"])
@@ -2886,7 +2880,7 @@ mod imp {
             Some(since) => crate::log_ring::read_since(since, usize::MAX),
             None => crate::log_ring::read_since(0, count),
         };
-        let mut out = format!("{{\"n\":{newest},\"pool\":{},\"l\":[", json_str(pool));
+        let mut out = format!("{{\"n\":{newest},\"l\":[");
         for (index, line) in lines.iter().enumerate() {
             if index > 0 {
                 out.push(',');

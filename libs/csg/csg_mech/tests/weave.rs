@@ -194,6 +194,9 @@ fn trellis_fills_a_box_standing_on_the_bed() {
     assert!(fails.is_empty(), "short of the clearances (lean, in layer, across): {fails:?}");
     // dropped, the fill holds together and its links move against each other
     let w = trellis(&wp, LeanLink::new(&wp, 60f64.to_radians()), frame, [-15.0, -15.0, 0.0], [15.0, 15.0, 20.0], 0.0, 0.0, &|_| -1.0);
+    // near upright the planes barely cross: far fewer interlocks for the same box
+    let upright = trellis(&wp, LeanLink::new(&wp, 80f64.to_radians()), frame, [-15.0, -15.0, 0.0], [15.0, 15.0, 20.0], 0.0, 0.0, &|_| -1.0);
+    assert!(upright.pairs.len() * 2 < w.pairs.len(), "{} interlocks at 80 deg vs {} at 60", upright.pairs.len(), w.pairs.len());
     let r = simulate(&w, 1.24e-3, WeaveScene::Drop, 2.0, &|| false);
     println!("{r:?}");
     assert_eq!(r.unlinked, 0);

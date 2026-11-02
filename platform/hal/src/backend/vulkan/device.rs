@@ -53,6 +53,7 @@ pub struct Device {
     pub present_wait: bool,
     /// Multiview render passes (Vulkan 1.1 `multiview`, enabled when the device has it).
     pub multiview: bool,
+    pub compute: bool,
     /// Fragment density maps (VK_EXT_fragment_density_map: a target's coarser shading where
     /// its map says, an XR runtime's foveation), enabled when the device has them.
     pub fdm: bool,
@@ -365,6 +366,18 @@ impl Device {
             (l.framebuffer_color_sample_counts & l.framebuffer_depth_sample_counts).0 & 0b1111 | 1
         } else { 1 };
         let mut fdm = vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default().fragment_density_map(has_fdm);
+        // KHR buffer-device-address works with the existing Vulkan 1.1 instance.
+        // A graphics-only 1.1 device remains usable, with compute unadvertised.
+        let supported_features = unsafe { instance.get_physical_device_features(physical) };
+        let mut address = vk::PhysicalDeviceBufferDeviceAddressFeatures::default();
+        let mut compute = supported(vk::KHR_BUFFER_DEVICE_ADDRESS_NAME) && queue.queue_flags.contains(vk::QueueFlags::COMPUTE);
+        if compute {
+            let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_buffer_device_address_features(&mut address);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+            compute = address.buffer_device_address != 0 && supported_features.shader_int64 == vk::TRUE;
+        }
+        address = vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(compute);
+        if compute { wanted.push(vk::KHR_BUFFER_DEVICE_ADDRESS_NAME); }
         wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
         wanted.dedup();
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
@@ -388,9 +401,12 @@ impl Device {
         ycbcr.p_next = std::ptr::null_mut();
         let has_ycbcr = ycbcr.sampler_ycbcr_conversion != 0 && instance.table.get_physical_device_features2.is_some();
         let mut ycbcr = vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default().sampler_ycbcr_conversion(has_ycbcr);
-        let supported_features = unsafe { instance.get_physical_device_features(physical) };
+
         let features = vk::PhysicalDeviceFeatures::default()
             .independent_blend(supported_features.independent_blend == vk::TRUE)
+            .shader_storage_image_extended_formats(supported_features.shader_storage_image_extended_formats == vk::TRUE)
+            .shader_int64(compute && supported_features.shader_int64 == vk::TRUE)
+            .draw_indirect_first_instance(supported_features.draw_indirect_first_instance == vk::TRUE)
             .texture_compression_bc(supported_features.texture_compression_bc == vk::TRUE)
             .texture_compression_astc_ldr(supported_features.texture_compression_astc_ldr == vk::TRUE)
             // line fill: frame capture's wireframe view (`Draw::WIREFRAME`)
@@ -412,6 +428,7 @@ impl Device {
         if pacing { create = create.next_physical_device_present_id_features_khr(&mut present_id)
             .next_physical_device_present_wait_features_khr(&mut present_wait); }
         if plane444.ycbcr2plane444_formats != 0 { create = create.next_physical_device_ycbcr2_plane444_formats_features_ext(&mut plane444); }
+        if compute { create = create.next_physical_device_buffer_device_address_features(&mut address); }
         if has_multiview { create = create.next_physical_device_multiview_features(&mut multiview); }
         if has_ycbcr { create = create.next_physical_device_sampler_ycbcr_conversion_features(&mut ycbcr); }
         if has_fdm { create = create.next_physical_device_fragment_density_map_features_ext(&mut fdm); }
@@ -459,7 +476,7 @@ impl Device {
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, fdm: has_fdm, msaa, life: life.clone(),
+            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, compute, fdm: has_fdm, msaa, life: life.clone(),
             video_encode,
             allocated: AtomicU64::new(0), scratch_allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
@@ -625,7 +642,7 @@ impl Device {
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
-            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
+            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, compute: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), scratch_allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: false, video_samplers: Mutex::new(Default::default()) }))
     }

@@ -197,6 +197,8 @@ pub(super) struct Batch {
     pub images: Vec<Arc<Image>>,
     pub buffers: Vec<Arc<Buffer>>,
     pub pipelines: Vec<Arc<Pipeline>>,
+    pub compute_pipelines: Vec<Arc<super::compute::Program>>,
+    pub compute_descriptors: Vec<super::compute::Descriptors>,
     pub passes: Vec<Arc<RenderPass>>,
     pub framebuffers: Vec<vk::Framebuffer>,
     /// Per layout: the pool, how many sets it holds, and whether this batch sized it (a reused
@@ -291,7 +293,7 @@ impl Batch {
         if spare.is_none() { crate::profile::count("vk batch slot made"); }
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
             query: (vk::QueryPool::null(), 0), idle_query: (vk::QueryPool::null(), 0), prof: None, prof_key: None,
-            images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
+            images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), compute_pipelines: Vec::new(), compute_descriptors: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
             descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, tap: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(),
             #[cfg(target_os = "android")] native_frame: None,
             #[cfg(target_os = "android")] native_signal: None,

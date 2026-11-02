@@ -72,6 +72,12 @@ pub struct DrawVars {
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     #[rust]
     pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    pub storage_buffers: Vec<(LiveId, crate::GpuBuffer)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    pub indirect_draw: Option<(crate::GpuBuffer, u64)>,
     #[rust([0f32; DRAW_VARS_TAIL_PAD])]
     pub dyn_instances_pad: [f32; DRAW_VARS_TAIL_PAD],
     #[rust([0f32; DRAW_CALL_DYN_INSTANCES])]
@@ -1542,6 +1548,10 @@ mod tests {
                 draw_call_uniforms: Default::default(),
                 geometry_id: None,
                 dyn_uniforms: vec![0.0; 4],
+                #[cfg(not(target_arch = "wasm32"))]
+                storage_buffers: Vec::new(),
+                #[cfg(not(target_arch = "wasm32"))]
+                indirect_draw: None,
                 texture_slots: Default::default(),
                 uniform_buffer_slots: Default::default(),
                 instance_dirty: false,
@@ -1568,6 +1578,10 @@ mod tests {
             draw_shader_id: Some(new),
             geometry_id: None,
             dyn_uniforms: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            storage_buffers: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            indirect_draw: None,
             texture_slots: Default::default(),
             uniform_buffer_slots: Default::default(),
             dyn_instances_pad: Default::default(),
@@ -1579,4 +1593,14 @@ mod tests {
         assert_eq!(call.dyn_uniforms, vec![0.0; 4], "the old call is left for the next draw");
         assert!(!call.uniforms_dirty);
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DrawVars {
+    pub fn set_storage_buffer(&mut self, name: LiveId, buffer: &crate::GpuBuffer) {
+        if let Some(slot) = self.storage_buffers.iter_mut().find(|b| b.0 == name) { slot.1 = buffer.clone(); }
+        else { self.storage_buffers.push((name, buffer.clone())); }
+    }
+    pub fn set_indirect_draw(&mut self, buffer: &crate::GpuBuffer, offset: u64) { self.indirect_draw = Some((buffer.clone(), offset)); }
+    pub fn clear_indirect_draw(&mut self) { self.indirect_draw = None; }
 }

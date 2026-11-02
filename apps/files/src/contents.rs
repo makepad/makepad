@@ -11,7 +11,7 @@
 //! selection silently moves to whatever file slid into that slot.
 
 use makepad_widgets::*;
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
+use makepad_widgets::makepad_platform::thread::{Class, TaskHandle};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -801,7 +801,7 @@ impl FileContents {
                     self.map_entry_pending = None;
                 } else {
                     let lookup = path.clone();
-                    match cx.task_pool().submit(Lane::Light, move || crate::model::entry_at(&lookup)) {
+                    match cx.task_pool().submit(Class::Visible, move || crate::model::entry_at(&lookup)) {
                         Ok(job) => {
                             self.map_entry_job = Some((path, job));
                             self.map_entry_pending = None;

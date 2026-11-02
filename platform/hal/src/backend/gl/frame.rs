@@ -159,6 +159,7 @@ impl GlBackend {
         let mut instance_words = false;
         let mut passes = Vec::new();
         for pass in &view.passes[pr] {
+            if pass.kind == pass_kind::COMPUTE { crate::compute::unsupported(); continue; }
             let draws = &view.draws[slice(pass.draws, view.draws.len()).unwrap()];
             let before = s.stats.skipped_draws;
             let missing = pick && draws.iter().any(|d| read_ids(view.arena, d.pick_tex).any(|t| self.pick_pending.contains(&(sid, t))));
@@ -255,6 +256,7 @@ impl GlBackend {
         }
         let mut prepared = Vec::new();
         for d in draws {
+            if d.storage_buffers.len != 0 || !d.indirect_buffer.is_none() { crate::compute::unsupported(); continue; }
             s.stats.draws += 1;
             if d.index[1] == 0 || d.inst.count == 0 { continue; }
             match self.prepare(s, pass, d, view.arena, pick, &colors, &depth, target_size, bytes, instance_words, now, deps) {

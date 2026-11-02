@@ -1,6 +1,7 @@
 //! Box-local dev JITs in `<work>/dev/jit`, keyed by pinned inputs. Per-id locks coalesce
-//! builds; the tree lock serializes Cargo's committed checkout. Lease holds survive hub
-//! restarts. LRU keeps six binaries plus any older ones a live lease still uses.
+//! builds; a build an earlier hub started is joined through its recorded pid. The tree lock
+//! serializes Cargo's committed checkout. Lease holds survive hub restarts. LRU keeps six
+//! binaries plus any older ones a live lease still uses.
 
 use makepad_remote::json_str;
 use makepad_strict_json::Value;
@@ -47,18 +48,16 @@ pub struct Snapshot {
     pub hits: u64,
     pub misses: u64,
     pub builds_today: u64,
-    /// Optional hint metadata; absent on boxes that have not published an input list.
-    pub inputs: Vec<String>,
     pub compiler: String,
     pub per_id: Vec<Stats>,
 }
 
 impl Snapshot {
     pub fn to_json(&self) -> String {
-        format!("{{\"ids\":[{}],\"hits\":{},\"misses\":{},\"builds_today\":{},\"inputs\":[{}],\"compiler\":{},\"per_id\":[{}]}}",
+        format!("{{\"ids\":[{}],\"hits\":{},\"misses\":{},\"builds_today\":{},\"compiler\":{},\"per_id\":[{}]}}",
             self.ids.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","),
             self.hits, self.misses, self.builds_today,
-            self.inputs.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","), json_str(&self.compiler),
+            json_str(&self.compiler),
             self.per_id.iter().map(Stats::json).collect::<Vec<_>>().join(","))
     }
 
@@ -68,7 +67,6 @@ impl Snapshot {
             hits: v.get("hits").and_then(Value::as_u64).unwrap_or(0),
             misses: v.get("misses").and_then(Value::as_u64).unwrap_or(0),
             builds_today: v.get("builds_today").and_then(Value::as_u64).unwrap_or(0),
-            inputs: v.get("inputs").and_then(Value::as_arr).unwrap_or(&[]).iter().map(|v| v.as_str().map(str::to_string)).collect::<Option<Vec<_>>>().unwrap_or_default(),
             compiler: v.get("compiler").and_then(Value::as_str).unwrap_or("").to_string(),
             per_id: v.get("per_id").and_then(Value::as_arr).unwrap_or(&[]).iter().map(Stats::parse).collect(),
         }
@@ -234,8 +232,8 @@ impl Store {
             hits: per_id.iter().map(|s| s.hits).sum(),
             misses: per_id.iter().map(|s| s.misses).sum(),
             builds_today: per_id.iter().filter(|s| s.day == today).map(|s| s.builds_today).sum(),
+            compiler: super::loaders::compiler().to_string(),
             per_id,
-            ..Default::default()
         }
     }
 

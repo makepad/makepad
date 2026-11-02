@@ -198,10 +198,21 @@ pub(crate) extern "C" fn cancel(token: usize) {
 pub(super) struct Reach {
     defs: HashSet<DefId>,
     pub unknown: bool,
+    /// it started a process (an app it drives): what that process runs is reach no capture here sees
+    pub spawned: bool,
 }
 
 impl Reach {
     pub(super) fn affected(&self, changed: &[DefId]) -> bool { changed.iter().any(|d| self.defs.contains(d)) }
+    pub(super) fn reaches(&self, d: DefId) -> bool { self.defs.contains(&d) }
+}
+
+/// std's process spawn ran (every `Command` spawn ends in its `spawn_now`).
+fn spawned(u: &Unit, defs: &HashSet<DefId>) -> bool {
+    defs.iter().any(|&d| {
+        let def = u.prog.def(d);
+        u.prog.syms.str(def.name) == "spawn_now" && u.prog.syms.str(u.prog.crates[def.krate as usize].name) == "std"
+    })
 }
 
 /// Generic instances and closure bodies belong to the edited definition, not the instance.
@@ -242,8 +253,11 @@ pub(super) fn snapshot(u: &Unit) -> (Vec<Reach>, HashSet<DefId>) {
     for thread in threads.values() { collect(&mut s, thread, false); }
     s.threads = threads;
     let tests = s.tests.iter().map(|t| match t {
-        Some(t) => Reach { defs: expand(u, &s, &t.slots.lock().unwrap()), unknown: !t.complete.load(Acquire) || t.invalid.load(Acquire) || t.active.load(Acquire) != 0 },
-        None => Reach { defs: HashSet::new(), unknown: true },
+        Some(t) => {
+            let defs = expand(u, &s, &t.slots.lock().unwrap());
+            Reach { spawned: spawned(u, &defs), defs, unknown: !t.complete.load(Acquire) || t.invalid.load(Acquire) || t.active.load(Acquire) != 0 }
+        }
+        None => Reach { defs: HashSet::new(), unknown: true, spawned: false },
     }).collect();
     (tests, expand(u, &s, &s.unattributed))
 }

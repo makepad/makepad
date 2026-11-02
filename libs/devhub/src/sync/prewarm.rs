@@ -255,7 +255,7 @@ mod node {
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        let (mut child, hold) = crate::os::lease_spawn(&mut cmd).map_err(|e| format!("{} {}: {e}", step.app, step.what))?;
+        let (mut child, hold) = crate::os::lease_spawn(&mut cmd, None).map_err(|e| format!("{} {}: {e}", step.app, step.what))?;
         let pid = child.id();
         let t0 = Instant::now();
         let stop = |child: &mut std::process::Child| {
@@ -368,7 +368,7 @@ mod node {
                 f2.store(true, Ordering::Release);
             }
             println!("[{:>4} s] {}", t0.elapsed().as_secs(), r.line);
-        }), proto::default_machine_name(), Arc::new(run_step));
+        }), makepad_devhub_conf::default_machine_name(), Arc::new(run_step));
         if let Some(s) = cancel_after {
             let end = t0 + Duration::from_secs(s);
             while pw.running() && Instant::now() < end {

@@ -323,7 +323,8 @@ impl Cx {
         // A paused window keeps its drawable and all of its producers. Offscreen work is
         // independent. Keep dirty bits so resuming cannot lose updates made while paused.
         passes_todo.retain(|id| self.pass_root_window(*id).is_none_or(|window| {
-            !self.windows[window].paint_paused || self.windows[window].paint_once
+            self.windows.is_valid(window)
+                && (!self.windows[window].paint_paused || self.windows[window].paint_once)
         }));
         for id in passes_todo.iter() {
             if let CxDrawPassParent::Window(window) = self.passes[*id].parent {
@@ -723,7 +724,7 @@ impl Cx {
         }
         self.run_view_frame_encode_in_flight = true;
         let sender = self.run_view_frame_results.sender();
-        if let Ok(task) = self.task_pool().submit_internal(crate::thread::Lane::Heavy, move || {
+        if let Ok(task) = self.task_pool().submit_internal(crate::thread::Class::Background, move || {
             let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba).and_then(
                 |(width, height, rgba)| {
                     Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {

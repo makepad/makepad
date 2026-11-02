@@ -1,5 +1,5 @@
-// KNOWN FAILING (baseline tier): the payload message of an integer division by zero is "explicit panic" under
-// Relax, rustc says "attempt to divide by zero". Found by diff_fast 2026-10-20. Move to ../diff/ when fixed.
+// The payload of an integer division by zero: "attempt to divide by zero" (&str), as rustc says. A runtime-raised
+// panic (lowered checks call the runtime, not core::panicking) used to carry "explicit panic".
 macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 fn rounds(f: fn()) {
     let ms: u64 = std::env::var("DIFF_SLEEP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);

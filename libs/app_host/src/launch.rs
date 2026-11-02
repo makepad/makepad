@@ -6,7 +6,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskHandle, TaskPool, ThreadSpawner};
+use makepad_platform::thread::{CancellationToken, Class, SignalToUI, TaskHandle, TaskPool, ThreadSpawner};
 use makepad_platform::Cx;
 
 use crate::hub::ClientId;
@@ -19,11 +19,13 @@ pub const GROUP_KILL_GRACE: std::time::Duration = std::time::Duration::from_mill
 pub const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Reap a child after its host has sent `StudioToApp::Kill`. The returned
-/// task fences a replacement launch; a busy pool returns ownership to retry.
+/// task fences a replacement launch; a closed pool returns ownership for cleanup.
 /// The owner's cleanup runs on the same worker, after the process has exited.
-pub fn reap_closed_child(mut child: Child, pool: &TaskPool, after_exit: impl FnOnce() + Send + 'static) -> Result<TaskHandle<()>, Child> {
-    let Ok(slot) = pool.reserve(Lane::Heavy) else { return Err(child) };
-    Ok(slot.submit(move || {
+pub fn reap_closed_child(child: Child, pool: &TaskPool, after_exit: impl FnOnce() + Send + 'static) -> Result<TaskHandle<()>, Child> {
+    let pending = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+    let work = pending.clone();
+    pool.submit(Class::Background, move || {
+        let mut child = work.lock().unwrap().take().unwrap();
         let wait = CancellationToken::new();
         let deadline = Cx::monotonic_now() + CLOSE_GRACE.as_secs_f64();
         loop {
@@ -48,7 +50,7 @@ pub fn reap_closed_child(mut child: Child, pool: &TaskPool, after_exit: impl FnO
         let _ = child.wait();
         after_exit();
         SignalToUI::set_ui_signal();
-    }))
+    }).map_err(|_| pending.lock().unwrap().take().unwrap())
 }
 
 /// Block until process `pid` has exited, without reaping it: its owner's
@@ -318,7 +320,7 @@ pub fn kill_group_pid(pid: u32, grace: std::time::Duration, pool: &TaskPool) {
     let pid = pid as i32;
     signal::kill_group(pid, signal::SIGTERM);
     let wait = CancellationToken::new();
-    let submitted = pool.submit(Lane::Heavy, move || {
+    let submitted = pool.submit(Class::Background, move || {
         let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
         if signal::alive(-pid) {
             signal::kill_group(pid, signal::SIGKILL);
@@ -339,37 +341,45 @@ pub fn kill_child_group(child: &mut Child, _grace: std::time::Duration, _pool: &
 /// Final slot teardown owns the child from here on. Signal and reap it wholly
 /// on a heavy pool worker; dropping a slot on the UI thread never waits for a
 /// process or decoder wrapper to exit.
-pub fn reap_child_group(mut child: Child, grace: std::time::Duration, pool: &TaskPool) {
+pub fn reap_child_group(child: Child, grace: std::time::Duration, pool: &TaskPool) {
     #[cfg(unix)]
     let pid = {
         let pid = child.id() as i32;
         signal::kill_group(pid, signal::SIGTERM);
         pid
     };
-    match pool.reserve(Lane::Heavy) {
-        Ok(slot) => slot
-            .submit(move || {
-                #[cfg(unix)]
-                {
-                    let wait = CancellationToken::new();
-                    let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
-                    if signal::alive(-pid) {
-                        signal::kill_group(pid, signal::SIGKILL);
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = grace;
-                    let _ = child.kill();
-                }
-                let _ = child.wait();
-            })
-            .detach(),
-        Err(_) => {
-            #[cfg(unix)]
-            signal::kill_group(pid, signal::SIGKILL);
-            #[cfg(not(unix))]
+    let pending = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+    let work = pending.clone();
+    match pool.submit(Class::Background, move || {
+        let mut child = work.lock().unwrap().take().unwrap();
+        #[cfg(unix)]
+        {
+            let wait = CancellationToken::new();
+            let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
+            if signal::alive(-pid) {
+                signal::kill_group(pid, signal::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = grace;
             let _ = child.kill();
+        }
+        let _ = child.wait();
+    }) {
+        Ok(task) => task.detach(),
+        Err(_) => {
+            let child = pending.lock().unwrap().take().unwrap();
+            #[cfg(unix)]
+            {
+                signal::kill_group(pid, signal::SIGKILL);
+                drop(child);
+            }
+            #[cfg(not(unix))]
+            {
+                let mut child = child;
+                let _ = child.kill();
+            }
         }
     }
 }

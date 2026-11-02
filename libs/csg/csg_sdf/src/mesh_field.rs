@@ -150,6 +150,36 @@ pub fn tri_dist(p: V3, a: V3, b: V3, c: V3) -> f32 {
     len(sub(p, closest_on_tri(p, a, b, c)))
 }
 
+/// Portable atan2, copied in mod.sdf.Eval.mesh_atan2. Only unfused f32
+/// arithmetic and comparisons: first reduce to [0, 1], then to [-tan(pi/8),
+/// tan(pi/8)]. The degree-17 alternating series has remainder < 3e-9 there;
+/// f32 rounding and quadrant reconstruction keep the angular error below 1e-6.
+/// Reciprocal comparisons distinguish signed zeros without platform intrinsics.
+pub fn mesh_atan2(y: f32, x: f32) -> f32 {
+    let yn = y < 0.0 || (y == 0.0 && 1.0 / y < 0.0);
+    let xn = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0);
+    if y == 0.0 {
+        if xn { return if yn { -3.1415927410125732 } else { 3.1415927410125732 }; }
+        return y;
+    }
+    if x == 0.0 { return if yn { -1.5707963705062866 } else { 1.5707963705062866 }; }
+    let ax = if xn { 0.0 - x } else { x };
+    let ay = if yn { 0.0 - y } else { y };
+    let swap = ay > ax;
+    let mut r = if ax == ay { 1.0 } else if swap { ax / ay } else { ay / ax };
+    let mut base = 0.0;
+    if r > 0.4142135679721832 {
+        r = (r - 1.0) / (r + 1.0);
+        base = 0.7853981852531433;
+    }
+    let z = r * r;
+    let p = -0.3333333333333333 + z * (0.2 + z * (-0.14285714285714285 + z * (0.1111111111111111 + z * (-0.09090909090909091 + z * (0.07692307692307693 + z * (-0.06666666666666667 + z * 0.058823529411764705))))));
+    let mut a = base + (r + (r * z) * p);
+    if swap { a = 1.5707963705062866 - a; }
+    if xn { a = 3.1415927410125732 - a; }
+    if yn { a * -1.0 } else { a }
+}
+
 /// The solid angle triangle `abc` spans seen from `p`, over 4 pi (Van Oosterom and
 /// Strackee): the triangle's share of the winding number at `p`.
 pub fn tri_winding(p: V3, a: V3, b: V3, c: V3) -> f32 {
@@ -157,7 +187,7 @@ pub fn tri_winding(p: V3, a: V3, b: V3, c: V3) -> f32 {
     let (lx, ly, lz) = (len(x), len(y), len(z));
     let det = dot(x, cross(y, z));
     let div = lx * ly * lz + dot(x, y) * lz + dot(x, z) * ly + dot(y, z) * lx;
-    det.atan2(div) * (1.0 / (2.0 * std::f32::consts::PI))
+    mesh_atan2(det, div) * (1.0 / (2.0 * std::f32::consts::PI))
 }
 
 #[derive(Clone, Debug)]
@@ -231,6 +261,37 @@ impl MeshField {
     /// The mesh's identity (its geometry's bits).
     pub fn key(&self) -> u64 {
         self.key
+    }
+
+    /// Immutable GPU query data, in vec4u records. Header: node count and
+    /// offsets of positions, triangles and order. A node occupies four records:
+    /// min/left, max/right, normal/leaf, center/radius. Floats retain their bits.
+    /// Median splitting with eight triangles per leaf needs at most 30 pending
+    /// nodes for a u32 triangle count; consumers provide 32 stack entries.
+    pub fn query_words(&self) -> Vec<[u32; 4]> {
+        fn depth(nodes: &[Node], i: usize) -> usize {
+            let n = &nodes[i];
+            if n.leaf { 1 } else { 1 + depth(nodes, n.left as usize).max(depth(nodes, n.right as usize)) }
+        }
+        assert!(self.nodes.is_empty() || depth(&self.nodes, 0) <= 32, "mesh query stack exceeds 32 entries");
+        let positions = 1 + self.nodes.len() * 4;
+        let triangles = positions + self.data.positions.len();
+        let order = triangles + self.data.triangles.len();
+        let count = order + self.order.len();
+        assert!(u32::try_from(count).is_ok(), "mesh query buffer exceeds u32 addressing");
+        let mut words = Vec::with_capacity(count);
+        words.push([self.nodes.len() as u32, positions as u32, triangles as u32, order as u32]);
+        let record = |v: V3, w| [v[0].to_bits(), v[1].to_bits(), v[2].to_bits(), w];
+        for n in &self.nodes {
+            words.push(record(n.min, n.left));
+            words.push(record(n.max, n.right));
+            words.push(record(n.normal, n.leaf as u32));
+            words.push(record(n.center, n.radius.to_bits()));
+        }
+        words.extend(self.data.positions.iter().map(|p| record(*p, 0)));
+        words.extend(self.data.triangles.iter().map(|t| [t[0], t[1], t[2], 0]));
+        words.extend(self.order.iter().map(|i| [*i, 0, 0, 0]));
+        words
     }
 
     fn tri(&self, t: u32) -> (V3, V3, V3) {

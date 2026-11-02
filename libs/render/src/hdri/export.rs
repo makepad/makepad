@@ -970,7 +970,7 @@ mod tests {
         for params in [HdriParams::default(), studio] {
             let env = Env::new(&params);
             let serial = env.bake(32);
-            let parallel = with_pool(|pool| env.bake_par(32, |rows, row| pool.fan_out(Lane::Heavy, rows, row)));
+            let parallel = with_pool(|pool| env.bake_par(32, |rows, row| pool.fan_out(rows, row)));
             assert_eq!((serial.width, serial.height), (32, 16));
             assert_eq!(parallel, serial, "mode {}", params.mode);
             // Sanity: the bake is finite and not black.

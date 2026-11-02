@@ -210,7 +210,7 @@ impl Wire for Layer {
 }
 
 impl Wire for PipelineDesc {
-    const SIZE: usize = 72;
+    const SIZE: usize = 92;
     fn write(&self, out: &mut Vec<u8>) {
         for r in [self.code, self.bindings, self.vertex_layout] {
             w32(out, r.off);
@@ -222,6 +222,8 @@ impl Wire for PipelineDesc {
         for v in [self.blend, self.flags, self.shader, self.name, self.source, self.instance_stride, self.varyings, self.outputs] {
             w32(out, v);
         }
+        for r in [self.storage_buffers, self.compute] { w32(out, r.off); w32(out, r.len); }
+        w32(out, self.storage_push_size);
     }
     fn read(b: &[u8]) -> Self {
         let rg = |at| Range { off: r32(b, at), len: r32(b, at + 4) };
@@ -238,6 +240,9 @@ impl Wire for PipelineDesc {
             instance_stride: r32(b, 60),
             varyings: r32(b, 64),
             outputs: r32(b, 68),
+            storage_buffers: rg(72),
+            compute: rg(80),
+            storage_push_size: r32(b, 88),
         }
     }
 }
@@ -415,6 +420,7 @@ pub fn read_domains(b: &[u8], count: u32) -> Vec<DomainInfo> {
 
 /// A parsed `PipelineCreate` blob.
 pub struct PipelineBlob<'a> {
+    pub raw: &'a [u8],
     pub desc: PipelineDesc,
     pub code: &'a [u8],
     pub bindings: Vec<u32>,
@@ -433,7 +439,7 @@ impl<'a> PipelineBlob<'a> {
             blob.get(a..a.checked_add(r.len as usize)?)
         };
         let words = |r: Range| part(r).map(|b| b.chunks_exact(4).map(|c| r32(c, 0)).collect::<Vec<u32>>());
-        Some(PipelineBlob { desc, code: part(desc.code)?, bindings: words(desc.bindings)?, vertex_layout: words(desc.vertex_layout)? })
+        Some(PipelineBlob { raw: blob, desc, code: part(desc.code)?, bindings: words(desc.bindings)?, vertex_layout: words(desc.vertex_layout)? })
     }
 }
 

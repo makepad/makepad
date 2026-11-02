@@ -156,11 +156,16 @@ pub(crate) fn const_intrinsic(prog: &Program, d: DefId) -> bool {
         && matches!(crate::cfg::tok_str(src, a.toks.lo as usize), b"rustc_const_stable" | b"rustc_const_unstable" | b"rustc_intrinsic_const_stable_indirect"))
 }
 
-fn is_live_default(prog: &Program, d: DefId) -> bool {
+/// A `#[relax_live_default]` const is made by the front (derive.rs default_consts) in live
+/// sessions, never part of the program rustc sees. Whole-crate checks skip it; it is checked
+/// on demand when a live edit adds its field.
+pub fn is_live_default(prog: &Program, d: DefId) -> bool {
     let def = prog.def(d);
     let ast = &prog.files[def.file as usize].ast;
+    // child defs share their owner's item, including anonymous consts in its type
+    let Some(item) = ast.items.get(def.item.0 as usize) else { return false };
     let src = prog.src(def.file);
-    ast.list(ast.item(def.item).attrs).iter().any(|a| crate::cfg::tok_str(src, a.toks.lo as usize) == b"relax_live_default")
+    ast.list(item.attrs).iter().any(|a| a.toks.hi > a.toks.lo && crate::cfg::tok_str(src, a.toks.lo as usize) == b"relax_live_default")
 }
 
 /// The result of const-checking one body.

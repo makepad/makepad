@@ -158,6 +158,9 @@ pub struct MpRunView {
     /// The protocol state with the child.
     #[rust(HostedApp::new(crate::host::CLOCK))]
     pub hosted: HostedApp,
+    /// The app's own first frame, as reported by the WM.
+    #[rust]
+    app_drawn: bool,
     /// `hosted.present_serial()` as the quad last took it.
     #[rust]
     quad_serial: u64,
@@ -317,6 +320,7 @@ impl MpRunView {
     /// What a changed target resets in the tile (the protocol state reset
     /// itself in `HostedApp::set_target`).
     fn target_changed(&mut self, cx: &mut Cx, had_target: bool) {
+        self.app_drawn = false;
         self.sent_focus = None;
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
@@ -536,6 +540,10 @@ impl MpRunView {
 
     pub fn has_frame(&self) -> bool {
         self.hosted.has_frame()
+    }
+
+    pub fn set_app_drawn(&mut self, drawn: bool) {
+        self.app_drawn = drawn;
     }
 
     fn local_from_area(&self, cx: &Cx, abs: Vec2d) -> Option<Vec2d> {
@@ -827,6 +835,10 @@ impl crate::tile::TileHost for MpRunView {
 
     fn has_frame(&self) -> bool {
         MpRunView::has_frame(self)
+    }
+
+    fn app_drawn(&self) -> bool {
+        self.app_drawn
     }
 
     fn arrival_fade(&self) -> f32 {

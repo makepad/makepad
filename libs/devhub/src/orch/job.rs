@@ -39,9 +39,11 @@ fn event(ctx: &Ctx, sev: Sev, line: String, j: Option<&Job>) {
 
 pub fn start(ctx: Arc<Ctx>) {
     // what a previous master ran goes on: the run lives on its node, and the lease came back with
-    // the master. A job with no run yet (its lease going or its snapshot shipping) or whose lease
-    // ended meanwhile is placed again; one still waiting for a box asks again.
-    let held = |j: &Job| super::leg::lease_held(&ctx, &j.lease);
+    // the master. So does a run it had asked for (shipped): the node may be building its JIT for
+    // it (J3752 lost two placements' JIT builds to two master restarts, 11-02). A job whose
+    // lease is still going or whose snapshot is still shipping, or whose lease ended meanwhile,
+    // is placed again; one still waiting for a box asks again.
+    let held = |j: &Job| super::leg::lease_held(&ctx, &j.lease) && (j.run_n > 0 || j.granted_ms > 0 && j.shipped_ms >= j.granted_ms);
     let (back, moved, stray): (Vec<Job>, Vec<Job>, Vec<String>) = ctx.store.update(|d| {
         let (mut back, mut moved, mut stray) = (Vec::new(), Vec::new(), Vec::new());
         for j in d.jobs.iter_mut() {
@@ -50,12 +52,12 @@ pub fn start(ctx: Arc<Ctx>) {
                     j.state = "queued".into();
                     j.attempts = j.attempts.saturating_sub(1);
                 }
-                "running" | "paused" if j.run_n > 0 && held(j) => back.push(j.clone()),
+                "running" | "paused" if held(j) => back.push(j.clone()),
                 "running" | "paused" => {
                     if j.run_n == 0 {
                         j.attempts = j.attempts.saturating_sub(1);
                     }
-                    if held(j) {
+                    if super::leg::lease_held(&ctx, &j.lease) {
                         stray.push(j.lease.clone());
                     }
                     if j.attempts < ATTEMPTS {
@@ -214,7 +216,7 @@ fn snap_paths(ctx: &Ctx, snap: &str) -> Result<(Vec<String>, Vec<String>), Strin
     let text = std::fs::read_to_string(snap_dir(ctx, snap).join("manifest.json")).map_err(|e| format!("snapshot {snap}: {e}"))?;
     let v = makepad_strict_json::parse(text.as_bytes()).map_err(|_| format!("snapshot {snap}: bad manifest"))?;
     // (an older snapshot may name what never ships)
-    let ok = |p: &String| !crate::lease::ship::never_ships(p);
+    let ok = |p: &String| !crate::lease::ship::never_ships_named(p);
     let changed = v.get("changed").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.get("path").and_then(|p| p.as_str()).map(str::to_string)).filter(ok).collect();
     let deleted = v.get("deleted").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).filter(ok).collect();
     Ok((changed, deleted))
@@ -326,11 +328,18 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
     let mut out = Out { file, first: Some(Box::new(|| {
         set(ctx, id, |j| j.first_out_ms = wall_ms());
     })) };
-    let r = held.run_at(if j.cwd.is_empty() { "." } else { &j.cwd }, &j.cmd, &mut out, &mut |n| {
-        set(ctx, id, |j| j.run_n = n);
-    });
+    let r = run_on(ctx, &held, &j, &log, &mut out);
     drop(out);
     ended(ctx, id, held, r, &log);
+}
+
+/// Asks the node for the job's run and follows it; the run's number and where its output starts
+/// in the log are noted for a restarted master.
+fn run_on(ctx: &Ctx, held: &Held, j: &Job, log: &std::path::Path, out: &mut Out) -> Result<i32, String> {
+    held.run_at(if j.cwd.is_empty() { "." } else { &j.cwd }, &j.cmd, out, &mut |n| {
+        let base = std::fs::metadata(log).map_or(0, |m| m.len());
+        set(ctx, &j.id, |j| { j.run_n = n; j.log_base = base; });
+    })
 }
 
 /// A previous master's job on the lease this master took back: its run followed from where the
@@ -353,7 +362,19 @@ fn reattach(ctx: &Arc<Ctx>, j: &Job) {
         }) as Box<dyn FnMut() + '_>
     });
     let mut out = Out { file, first };
-    let r = held.follow(j.run_n, off, &mut out);
+    // a run asked for and not noted: the node has it (followed), or is still getting it ready (the
+    // same ask answers from that: an overlay's JIT resolution goes on), or never got the ask
+    let r = match j.run_n {
+        0 => match held.has_run(1) {
+            Ok(true) => {
+                set(ctx, id, |j| { j.run_n = 1; j.log_base = off; });
+                held.follow(1, 0, &mut out)
+            }
+            Ok(false) => run_on(ctx, &held, j, &log, &mut out),
+            Err(e) => Err(e),
+        },
+        n => held.follow(n, off.saturating_sub(j.log_base), &mut out),
+    };
     drop(out);
     ended(ctx, id, held, r, &log);
 }
@@ -551,7 +572,23 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             Ok(format!("[{}]", list.join(",")))
         }
         "get" => {
-            let want = ids();
+            // `job wait` asks `get --wait`: an agent is blocked on these jobs from now until they end
+            let (waits, rest) = match rest.strip_prefix("--wait") { Some(r) => (true, r), None => (false, rest) };
+            let want: Vec<String> = rest.split([' ', ',']).filter(|s| !s.is_empty()).map(str::to_string).collect();
+            if waits {
+                let now = wall_ms();
+                let done: Vec<Job> = ctx.store.update(|d| {
+                    let mut done = Vec::new();
+                    for j in d.jobs.iter_mut().filter(|j| want.contains(&j.id)) {
+                        if !j.done() && j.waited_ms == 0 { j.waited_ms = now; }
+                        else if j.done() && j.waited_ms > 0 { done.push(j.clone()); j.waited_ms = 0; }
+                    }
+                    done
+                });
+                for j in done {
+                    crate::lease::prof::log_wait(&ctx.home, &format!("{{\"kind\":\"job\",\"lane\":{},\"id\":{},\"lease\":{},\"start_ms\":{},\"end_ms\":{}}}", json_str(&j.lane), json_str(&j.id), json_str(&j.lease), j.waited_ms, j.ended_ms.max(j.waited_ms)));
+                }
+            }
             let found: Vec<(String, Option<Job>)> = ctx.store.read(|d| want.iter().map(|id| (id.clone(), d.jobs.iter().find(|j| &j.id == id).cloned())).collect());
             let list: Vec<String> = found.iter().map(|(id, j)| j.as_ref().map_or_else(|| format!("{{\"id\":{},\"state\":\"unknown\"}}", json_str(id)), |j| live(ctx, j))).collect();
             Ok(format!("[{}]", list.join(",")))
@@ -582,6 +619,26 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                     event(ctx, Sev::Info, format!("job {id} cancelled"), Some(&j));
                 }
                 out.push(format!("{{\"id\":{},\"state\":{}}}", json_str(&id), json_str(&j.state)));
+            }
+            Ok(format!("[{}]", out.join(",")))
+        }
+        "bump" => {
+            // the manager unsticks a waiting job (or a lease by its id): the front of its queue
+            // class, and its later asks keep that place
+            let mut out = Vec::new();
+            for id in ids() {
+                if id.starts_with('L') {
+                    let lease = ctx.leases.bump(Some(&id), &|_| false)?;
+                    out.push(format!("{{\"lease\":{}}}", json_str(&lease)));
+                    continue;
+                }
+                let j = get(ctx, &id).ok_or_else(|| format!("no job {id}"))?;
+                if !matches!(j.state.as_str(), "queued" | "leasing") { return Err(format!("job {id} is {}, not waiting", j.state)); }
+                let j = set(ctx, &id, |j| j.prio = crate::lease::sched::BUMP_PRIO).unwrap_or(j);
+                let lane = if j.shadow_of.is_empty() { j.lane.clone() } else { format!("shadow-{}", j.id) };
+                let lease = ctx.leases.bump(None, &|r| r.lane == lane && r.since_ms == Some(j.asked_ms)).unwrap_or_default();
+                event(ctx, Sev::Warn, format!("job {id} bumped to the front of the queue{}", if lease.is_empty() { String::new() } else { format!(" ({lease})") }), Some(&j));
+                out.push(format!("{{\"id\":{},\"state\":{},\"lease\":{}}}", json_str(&id), json_str(&j.state), json_str(&lease)));
             }
             Ok(format!("[{}]", out.join(",")))
         }
@@ -722,6 +779,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         return Err(format!("job submit: `{}` is not a worktree", tree.display()));
     }
     let mut jobs = Vec::new();
+    let mut notes = Vec::new();
     for (i, r) in reqs.iter().enumerate() {
         let kind = s(r, "kind");
         match Kind::parse(&kind) {
@@ -733,7 +791,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             return Err(format!("job {}: no command", i + 1));
         }
         let lane = s(r, "lane");
-        if !crate::trust::valid_name(&lane) {
+        if !makepad_devhub_conf::valid_name(&lane) {
             return Err(format!("job {}: lane `{lane}` is not a name", i + 1));
         }
         let prio = r.get("prio").and_then(|p| p.as_i64()).unwrap_or(crate::lease::sched::DEFAULT_PRIO as i64) as i32;
@@ -749,6 +807,11 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         let ram_gb = r.get("ram_gb").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("ram_gb is a positive number")).transpose()?;
         let whole = r.get("whole").and_then(|v| v.as_bool()).unwrap_or(false);
         let priority = match s(r, "priority").as_str() { "" => Priority::Background, p => Priority::parse(p).ok_or("priority is interactive or background")? };
+        let (agent, rev, reason) = (s(r, "agent"), s(&v, "rev"), s(r, "native"));
+        let (os, arch) = crate::lease::native::platform(&crate::lease::sched::parse_needs(&s(r, "needs")), &s(r, "node"), &ctx.leases.nodes());
+        let gate = crate::lease::native::Ask { lane: &lane, agent: &agent, kind: Kind::parse(&kind).unwrap(), cmd: &cmd, repo_dir: &tree, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &s(r, "class"), route: &|class| { let (jit, why) = ctx.leases.test_route("test", class, false); (!jit).then_some(why) }, os: &os, arch: &arch };
+        let note = crate::lease::native::check(&ctx.home, &gate, wall_ms()).map_err(|e| format!("job {}: {e}", i + 1))?;
+        if !note.is_empty() { notes.push(note); }
         jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), only: r.get("only").and_then(|o| o.as_bool()).unwrap_or(false), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
     }
     // the base and the snapshot: one for the whole request
@@ -761,10 +824,10 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             if main_checkout && !v.get("with_uncommitted").and_then(Value::as_bool).unwrap_or(false) { left_out = changed.len() + deleted.len(); changed.clear(); deleted.clear(); }
             for p in list(&v, "also") {
                 if !crate::lease::ship::inside(&p) { return Err(format!("DEVHUB_ALSO needs a repository-relative path: {p}")); }
-                if crate::lease::ship::never_ships(&p) { return Err(format!("DEVHUB_ALSO path never ships: {p}")); }
+                if crate::lease::ship::never_ships_named(&p) { return Err(format!("DEVHUB_ALSO path never ships: {p}")); }
                 let mut entries = Vec::new();
                 crate::lease::ship::entries(&tree, &p, &mut entries)?;
-                changed.extend(entries.into_iter().map(|e| e.path).filter(|p| !crate::lease::ship::never_ships(p)));
+                changed.extend(entries.into_iter().map(|e| e.path).filter(|p| !crate::lease::ship::never_ships_named(p)));
             }
             changed.sort(); changed.dedup();
             copy_snapshot(ctx, &tree, rev, changed, deleted)?
@@ -822,7 +885,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
     }
     let ids: Vec<String> = out.iter().map(|j| json_str(&j.id)).collect();
     let list = |v: &[String]| v.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(",");
-    Ok(format!("{{\"batch\":{},\"jobs\":[{}],\"rev\":{},\"snap\":{},\"files\":{files},\"tree\":{},\"main_checkout\":{main_checkout},\"left_out\":{left_out},\"changed\":[{}],\"deleted\":[{}]}}", json_str(&batch_id), ids.join(","), json_str(&rev), json_str(&snap), json_str(&tree.to_string_lossy()), list(&changed), list(&deleted)))
+    Ok(format!("{{\"batch\":{},\"jobs\":[{}],\"rev\":{},\"snap\":{},\"files\":{files},\"tree\":{},\"main_checkout\":{main_checkout},\"left_out\":{left_out},\"changed\":[{}],\"deleted\":[{}],\"notes\":[{}]}}", json_str(&batch_id), ids.join(","), json_str(&rev), json_str(&snap), json_str(&tree.to_string_lossy()), list(&changed), list(&deleted), list(&notes)))
 }
 
 /// `rerun <id>`: the job again, exactly: its base, snapshot, command and placement wishes.

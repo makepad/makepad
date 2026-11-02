@@ -23,7 +23,7 @@
 
 pub use makepad_widgets;
 
-use makepad_devhub::tray_glyph as glyph;
+use makepad_devhub_conf::tray_glyph as glyph;
 mod graph;
 mod installed;
 mod live;
@@ -33,7 +33,8 @@ mod view;
 use makepad_devhub::explorer::{self, Snapshot};
 use makepad_devhub::glance::Glance;
 use makepad_devhub::master::Master;
-use makepad_devhub::node::{Node, NodeConf, NODE_CONF_ENV};
+use makepad_devhub::node::Node;
+use makepad_devhub_conf::{NodeConf, NODE_CONF_ENV};
 use makepad_devhub::trust::{FleetTrust, Trust};
 use makepad_devhub::lease::sched::{ordinal, Lease, State};
 use makepad_devhub::proto;
@@ -301,8 +302,8 @@ fn size_jit_cache(m: &MasterCore, machine: String, app: Option<String>) {
 }
 
 fn start_master() -> Result<MasterCore, String> {
-    let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub::trust::valid_name(n)).unwrap_or_else(|| "mac".into());
-    let master = Master::start(&name, proto::HITCH_MS, trust(&name), Arc::new(|_r| {}))?;
+    let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub_conf::valid_name(n)).unwrap_or_else(|| "mac".into());
+    let master = Master::start(&name, makepad_devhub_conf::HITCH_MS, trust(&name), Arc::new(|_r| {}))?;
     log_line(&format!("devhub: master {name} up; control {}", proto::control_socket().display()));
     let looking = Arc::new(AtomicBool::new(false));
     let snapshot = Arc::new(Mutex::new(Snapshot::default()));

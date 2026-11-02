@@ -589,24 +589,40 @@ impl Providers<'_> {
         let q = &self.tcx.queries;
         let (_, body) = q.typeck.get(&q.engine, def, &mut |def| {
             q.read_owner(self.prog, def)?;
-            let mark = crate::program::missing_mark();
-            let mut body = crate::typeck::check_fn(self.prog, self.tcx, def);
-            // run mode (no lints: `makepad run` / `test` / `live`): the unsafety and impl-soundness
-            // errors `makepad check` reports are the body's errors too, for the crates the borrow
-            // checker covers -- safe code may not dereference raw pointers or forge Send/Sync.
-            // (Errors, not a stub body: closures' layouts still read its tables.)
-            if body.errors.is_empty() && !crate::lint::enabled() && crate::borrowck::event::admit(self.prog, self.prog.def(def).krate) {
-                let mut errors: Vec<String> = crate::unsafety::run_crate_impl_errors(self.prog, self.tcx, self.prog.def(def).krate).to_vec();
-                errors.extend(crate::unsafety::run_body_errors(self.prog, self.tcx, &body));
-                for e in errors { body.errors.push(e); }
-            }
-            if !body.errors.is_empty() { body.deferred_misses = crate::program::missing_since(mark).into(); }
-            Ok((self.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), std::sync::Arc::new(body)))
+            Ok((self.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), std::sync::Arc::new(self.check_body(def))))
         }, &|id| self.force(id))?;
         // the post-boot loader's misses travel with the cached failure (Body::deferred_misses)
         if !body.deferred_misses.is_empty() { crate::program::note_misses(&body.deferred_misses); }
         if crate::memstat::enabled() { note_typeck_read(def); }
         Ok(body)
+    }
+
+    /// typeck's value of `def` when the table holds it now; else the provider's work done here
+    /// without storing the body (makepad run's background check of the bodies no build asked
+    /// for: a whole program's bodies held at once would be gigabytes). The same body and errors
+    /// as `typeck`.
+    fn typeck_unstored(&self, def: DefId) -> std::sync::Arc<crate::typeck::Body> {
+        let q = &self.tcx.queries;
+        if let Some((_, body)) = q.typeck.peek(&q.engine, &def) { return body; }
+        std::sync::Arc::new(self.check_body(def))
+    }
+
+    /// The typeck provider's work for `def`.
+    fn check_body(&self, def: DefId) -> crate::typeck::Body {
+        BODIES_CHECKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mark = crate::program::missing_mark();
+        let mut body = crate::typeck::check_fn(self.prog, self.tcx, def);
+        // run mode (no lints: `makepad run` / `test` / `live`): the unsafety and impl-soundness
+        // errors `makepad check` reports are the body's errors too, for the crates the borrow
+        // checker covers -- safe code may not dereference raw pointers or forge Send/Sync.
+        // (Errors, not a stub body: closures' layouts still read its tables.)
+        if body.errors.is_empty() && !crate::lint::enabled() && crate::borrowck::event::admit(self.prog, self.prog.def(def).krate) {
+            let mut errors: Vec<String> = crate::unsafety::run_crate_impl_errors(self.prog, self.tcx, self.prog.def(def).krate).to_vec();
+            errors.extend(crate::unsafety::run_body_errors(self.prog, self.tcx, &body));
+            for e in errors { body.errors.push(e); }
+        }
+        if !body.errors.is_empty() { body.deferred_misses = crate::program::missing_since(mark).into(); }
+        body
     }
 
     fn const_eval_resolve(&self, key: ConstEvalKey) -> Result<EvalToValTreeResult, QueryError> {
@@ -725,6 +741,10 @@ impl Providers<'_> {
     }
 }
 
+/// Bodies type-checked so far (the typeck provider's runs, stored or not): makepad run's account
+/// of what its startup checked.
+pub static BODIES_CHECKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// rustc_middle ty/util.rs typeck_root_def_id (is_typeck_child): a closure or an inline const
 /// (`const { .. }`) is type-checked with the body that holds it, never on its own: an inline
 /// const's type is that body's, never fed, so its own typeck failed `anonymous const type`.
@@ -753,6 +773,19 @@ impl Tcx {
             }
             Err(e) => panic!("typeck query: {e:?}"),
         }
+    }
+
+    /// `typeck` for a caller that wants only the verdict: the stored body when the query holds
+    /// one, else the check done without storing its body (Providers::typeck_unstored).
+    pub fn typeck_unstored(&self, prog: &Program, def: DefId) -> std::sync::Arc<crate::typeck::Body> {
+        let def = typeck_root_def_id(prog, def);
+        (Providers { tcx: self, prog }).typeck_unstored(def)
+    }
+
+    /// typeck's value of `def` when the query holds it now (nothing is checked).
+    pub fn typeck_peek(&self, prog: &Program, def: DefId) -> Option<std::sync::Arc<crate::typeck::Body>> {
+        let def = typeck_root_def_id(prog, def);
+        self.queries.typeck.peek(&self.queries.engine, &def).map(|(_, b)| b)
     }
 
     /// Nightly mir/interpret/queries.rs:58,90: retain the environment and full

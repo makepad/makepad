@@ -43,7 +43,7 @@ pub(crate) fn io_kind_for(mode: ShaderMode, io_type: ShaderIoType) -> Result<Sha
         }
         SHADER_IO_SAMPLER => ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
         SHADER_IO_SCOPE_UNIFORM => ShaderIoKind::ScopeUniform,
-        SHADER_IO_BUFFER_R | SHADER_IO_BUFFER_RW | SHADER_IO_WORKGROUP if mode != ShaderMode::Compute => {
+        SHADER_IO_BUFFER_RW | SHADER_IO_WORKGROUP if mode != ShaderMode::Compute => {
             return Err("device buffers and workgroup arrays exist only in compute kernels".to_string());
         }
         SHADER_IO_BUFFER_R => ShaderIoKind::storage_buffer(true, false),
@@ -150,7 +150,7 @@ impl IrFnCompiler {
             // The index failed to lower (its error is already reported).
             return self.err_expr();
         }
-        if output.mode == ShaderMode::Compute {
+        if output.mode == ShaderMode::Compute || matches!(self.f.exprs[instance as usize].kind, ExprKind::Global(g) if matches!(output.compiled.ir.globals[g as usize].kind, IrGlobalKind::Io(IrIo::Storage(_)))) {
             // Kernels index their buffers and arrays unclamped: an unsized
             // buffer has no length to clamp to, and a clamp per load is a
             // cost the hot loops cannot pay.
@@ -211,19 +211,25 @@ impl IrFnCompiler {
     }
 
     /// A write into a kernel's read-only buffer (`shader.buffer`) is refused.
-    pub(crate) fn check_writable(&mut self, output: &ShaderOutput, instance: ExprId) {
+    pub(crate) fn check_writable(&mut self, output: &ShaderOutput, mut instance: ExprId) {
         if instance == NO_EXPR {
             return;
         }
-        if let ExprKind::Global(g) = self.f.exprs[instance as usize].kind {
-            if output.compiled.ir.globals[g as usize].kind == IrGlobalKind::Io(IrIo::Storage(false)) {
-                let name = output.compiled.ir.globals[g as usize].name;
-                output_err_readonly(self, name);
+        loop {
+            match self.f.exprs[instance as usize].kind {
+                ExprKind::Index(base, _) | ExprKind::Field(base, _) | ExprKind::Swizzle(base, _, _) | ExprKind::Deref(base) => instance = base,
+                ExprKind::Global(g) => {
+                    if output.compiled.ir.globals[g as usize].kind == IrGlobalKind::Io(IrIo::Storage(false)) {
+                        output_err_readonly(self, output.compiled.ir.globals[g as usize].name);
+                    }
+                    break;
+                }
+                _ => break,
             }
         }
     }
 
-    fn void_nop(&mut self, vm: &ScriptVm) {
+    pub(crate) fn void_nop(&mut self, vm: &ScriptVm) {
         let n = self.nop();
         self.push(ShaderType::Pod(vm.bx.code.builtins.pod.pod_void), n);
     }
@@ -280,6 +286,7 @@ impl IrFnCompiler {
         };
         match instance_ty {
             ShaderType::Pod(pod_ty) | ShaderType::PodPtr(pod_ty) => {
+                self.check_writable(output, instance);
                 let Some(ret_ty) = vm.bx.heap.pod_field_type(pod_ty, field_id, &pods) else {
                     script_err_not_found!(
                         self.trap,
@@ -688,6 +695,16 @@ impl IrFnCompiler {
         }
         let (value, maybe_io_type) = get_io_self_field_value(vm, obj, field_id, self.trap.pass());
         if let Some(io_type) = maybe_io_type {
+            if let Some(format) = storage_texture_format(io_type) {
+                if output.mode != ShaderMode::Compute {
+                    output.push_error("storage textures exist only in compute kernels".into());
+                    return self.void_nop(vm);
+                }
+                let ty = output.compiled.ir.ty(IrTy::Texture(TextureType::Texture2d));
+                let g = output.compiled.ir.global(IrGlobalKind::StorageTexture(format), field_id, ty);
+                let e = self.expr(ExprKind::Global(g), ty);
+                return self.push(ShaderType::Texture(TextureType::Texture2d), e);
+            }
             let value_obj = value.as_object().unwrap();
             let proto = vm.bx.heap.proto(value_obj);
             let ty = type_from_value(vm, proto);
@@ -704,6 +721,11 @@ impl IrFnCompiler {
                 }
             };
             if matches!(kind, ShaderIoKind::StorageBuffer(_) | ShaderIoKind::Workgroup) {
+                if output.mode != ShaderMode::Compute && !output.use_vulkan &&
+                    !matches!(output.backend, crate::shader_backend::ShaderBackend::Metal | crate::shader_backend::ShaderBackend::Hlsl) {
+                    output.push_error("storage buffers in draw shaders need Metal, Vulkan or D3D11".into());
+                    return self.void_nop(vm);
+                }
                 let Some(elem) = concrete else {
                     script_err_shader!(self.trap, "kernel array `{}` needs an element type (f32, u32, vec4f ...)", field_id);
                     return self.void_nop(vm);

@@ -3,9 +3,9 @@
 [app.linux]
 capture = ""
 date = "2026-11-02"
-digest = "5bd4907df96e4c2a5ebe995c7cb3049d7d05ed60c691a9118c20e427275efe3c"
-main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
-work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+digest = "ecec133c02977b424246457a7c716c0c7555f67d321615e8ef10891d0760042c"
+main = "e9402925c83c1a3331b42758ffc16e0c0983d98a"
+work = "2832b1fa2882006b5c2c5a22eabc04ba83662d39"
 
 [app.windows]
 capture = ""

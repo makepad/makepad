@@ -502,6 +502,20 @@ impl ScriptVm<'_> {
         self.heap().resolve_fields(value, apply.is_eval(), fields, out)
     }
 
+    /// A live edit keeps runtime state when the old and new templates resolve the same value,
+    /// including a field set nowhere in either template.
+    #[doc(hidden)]
+    #[relax_api]
+    #[inline(never)]
+    pub fn script_derive_unchanged(&mut self, apply: &Apply, old: ScriptValue, key: LiveId, slot: ScriptValue) -> bool {
+        if !apply.is_live_edit_reload() || !old.is_object() {
+            return false;
+        }
+        let mut old_value = [ScriptValue::NOT_FOUND];
+        self.heap().resolve_fields(old, false, &[(key, 0)], &mut old_value);
+        self.heap().deep_eq(old_value[0], slot)
+    }
+
     /// One resolved field of `script_apply`: apply `slot` to the field; a field set nowhere gets,
     /// on a reload, the type's registered default (`script_reload_default`), else stays untouched.
     #[doc(hidden)]

@@ -95,14 +95,15 @@ fn transforms_rotate_x_then_y_then_z() {
 
 #[test]
 fn a_field_meshes_inside_its_bounds() {
-    struct Ball;
-    impl makepad_csg_sdf::Sdf3 for Ball {
-        fn distance(&self, p: makepad_csg_math::Vec3d) -> f64 {
-            p.length() - 10.0
-        }
-    }
+    use makepad_script::*;
+    let mut host = ScriptVmHost::new(0i32, ());
+    let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+    let field = vm.eval(ScriptMod::new("", "", "ball_field", 0, 0,
+        "use mod.math.*\nlet field = fn(p) { return length(p) - 10.0 }\n(field)", &[])).as_object().unwrap();
+    let _keep = vm.new_object_ref(field);
+    let field = makepad_csg_sdf::SdfSplashExpr::compile(&mut vm, field, makepad_csg_sdf::SplashPoint::Vec3, &[]).unwrap();
     let mut g = Graph::new();
-    let shape = SdfShape { root: SdfNode::Kernel(SdfKernel { key: 1, field: Arc::new(Ball), splash: None, bounds: Some(([-10.0; 3], [10.0; 3])) }), min: [-11.0; 3], max: [11.0; 3], materials: Vec::new() };
+    let shape = SdfShape { root: SdfNode::Kernel(SdfKernel::splash(field, Some(([-10.0; 3], [10.0; 3])))), min: [-11.0; 3], max: [11.0; 3], materials: Vec::new() };
     let f = g.push(Op::Field { shape, cell: Some(1.0) }).unwrap();
     let mut e = Evaluator::new();
     let m = e.mesh(&g, f, None).unwrap();

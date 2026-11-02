@@ -1521,7 +1521,7 @@ impl Env {
     }
 
     /// Row-parallel bake. `run(n, f)` must call f(i) for every i in 0..n
-    /// (`pool.fan_out(Lane::Heavy, n, f)` inside a submitted Heavy job; on the
+    /// (`pool.fan_out(n, f)` inside a submitted Heavy job; on the
     /// UI thread run it serially, as `render_kernels::task_pool_executor` does).
     /// A skipped row (cancelled) stays black. Equals `bake` bit for bit.
     pub fn bake_par(&self, width: usize, run: impl FnOnce(usize, &(dyn Fn(usize) + Sync))) -> EnvMap {

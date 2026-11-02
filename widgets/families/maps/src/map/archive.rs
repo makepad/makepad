@@ -96,33 +96,21 @@ impl ArchiveWorkerPool {
     }
 }
 
-/// How many jobs a light-lane staging queue may have with the pool: what it
-/// has in flight plus the workers parked right now. Jobs handed over beyond
-/// that would only sit in the pool's channel, out of reach of the queue's
-/// newest-first order and pruning.
-///
-/// Never nought: a queue with nothing in flight is pumped again only by the
-/// UI signal a completion raises, so if no worker happened to be parked at
-/// the push (a pool still starting its workers, or every worker busy with
-/// someone else's jobs) the job would stay staged until something unrelated
-/// signalled -- the archive watcher waited for ever that way. One job always
-/// goes over, and its completion's signal pumps the rest.
+/// Keep a worker-width window in the pool; excess jobs stay in the
+/// newest-first staging queue where the view can prune obsolete tiles.
 pub fn pool_window(pool: &TaskPool, in_flight: usize) -> usize {
-    (in_flight + pool.idle_workers()).max(1)
+    pool.worker_count().max(in_flight).max(1)
 }
 
 pub fn new_archive_worker_pool(cx: &mut Cx) -> ArchiveWorkerPool {
-    let pool = cx.task_pool();
-    if pool.is_open() {
-        let queue = TaskQueue::new(Lane::Light, pool.worker_count(), ARCHIVE_QUEUE_CAPACITY);
-        ArchiveWorkerPool::Threaded {
-            pool,
-            queue: Rc::new(RefCell::new(queue)),
-        }
-    } else {
-        error!("Map archive pool unavailable; file reads will be refused");
-        ArchiveWorkerPool::Serial
+    #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
+    {
+        let pool = cx.task_pool();
+        let queue = TaskQueue::new(Class::Visible, pool.worker_count(), ARCHIVE_QUEUE_CAPACITY);
+        ArchiveWorkerPool::Threaded { pool, queue: Rc::new(RefCell::new(queue)) }
     }
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+    { let _ = cx; ArchiveWorkerPool::Serial }
 }
 
 pub fn next_archive_task_token() -> ReadToken {

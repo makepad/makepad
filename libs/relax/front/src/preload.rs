@@ -77,6 +77,27 @@ pub struct CrateAhead {
     pub demand_plan: u128,
 }
 
+/// Publish against the loader's dependency imports, without the prescan's resolved scopes.
+pub(crate) fn publish_macros(table: &mut MacroTable, name: &str, defs: &[MacroRef],
+    aliases: &[((String, String), (String, String))], mods: &crate::macros::CrateMods,
+    macro_use: &[String], deps: &[(String, String)]) {
+    for d in defs { table.push(d.clone()); }
+    for (k, v) in aliases { table.add_alias(k.0.clone(), k.1.clone(), v.clone()); }
+    let mut externs = mods.externs.clone();
+    for (n, dep) in deps {
+        // std / core / alloc are in every extern prelude already.
+        if !matches!(n.as_str(), "std" | "core" | "alloc") { externs.insert(n.clone(), dep.clone()); }
+    }
+    let mods = Arc::new(crate::macros::CrateMods { root: mods.root.clone(), src: mods.src.clone(), mods: mods.mods.clone(), items: mods.items.clone(), uses: mods.uses.clone(), externs, renames: mods.renames.clone(), recursion_limit: mods.recursion_limit, ..Default::default() });
+    table.add_crate(name.to_string(), mods);
+    if !macro_use.is_empty() {
+        let v = table.macro_use.entry(name.to_string()).or_default();
+        for u in macro_use {
+            if !v.contains(u) { v.push(u.clone()); }
+        }
+    }
+}
+
 pub struct Preparsed {
     /// A lowered file parsed in the loader's scope failed; retrying cannot change it.
     pub error: Option<String>,
@@ -139,8 +160,10 @@ type ScanPriority = (usize, u64);
 struct PoolState {
     stopped: bool,
     planning: bool,
-    /// Crates whose loader has published the dependency macro imports and own definitions.
+    /// Crates whose parse scope has dependency imports and their own scan publication.
     parse_ready: HashSet<u32>,
+    /// Crates successfully collected and sealed by the loader.
+    loaded: Vec<bool>,
     images: Vec<Option<crate::crate_image::CrateImage>>,
     pending_images: Vec<Option<crate::crate_image::CrateImage>>,
     /// per crate: its record validated (restored or fingerprint only)
@@ -204,8 +227,7 @@ enum Work {
 }
 
 impl Pool {
-    /// Start this crate's parses only once the sequential loader has the macro environment
-    /// its dependencies produced (including imports emitted by macro expansions).
+    /// Set queued jobs' scope; entering the crate replaces an early snapshot with the loader's.
     pub fn start_parsing(&self, ci: u32, table: Arc<MacroTable>) {
         let mut st = self.st.lock().unwrap();
         let c = &self.crates[ci as usize];
@@ -213,6 +235,27 @@ impl Pool {
         for job in st.jobs.values_mut().filter(|j| j.krate == ci) { job.ctx = ctx.clone(); }
         st.parse_ready.insert(ci);
         self.cv.notify_all();
+    }
+
+    /// Start published crates as soon as all their dependencies have been collected.
+    pub fn crate_loaded(&self, loaded: u32, table: Arc<MacroTable>) {
+        let ready: Vec<_> = {
+            let mut st = self.st.lock().unwrap();
+            st.loaded[loaded as usize] = true;
+            if st.through.is_some() { return; }
+            self.crates.iter().enumerate().filter_map(|(ci, c)| {
+                if st.parse_ready.contains(&(ci as u32)) || !c.image_deps.iter().all(|&d| st.loaded[d]) { return None; }
+                let a = st.ahead.get(&(ci as u32))?;
+                Some((ci as u32, a.defs.clone(), a.aliases.clone(), a.mods.clone(), a.macro_use.clone()))
+            }).collect()
+        };
+        for (ci, defs, aliases, mods, macro_use) in ready {
+            let c = &self.crates[ci as usize];
+            let mut table = table.clone();
+            publish_macros(Arc::make_mut(&mut table), &c.name, &defs, &aliases, &mods, &macro_use, &c.deps);
+            self.start_parsing(ci, table);
+            if trace() { eprintln!("boot-trace: early parse {} after {}", c.name, self.crates[loaded as usize].name); }
+        }
     }
 
     pub fn context(&self, ci: u32) -> Arc<crate::source_context::Context> { self.contexts[ci as usize].clone() }
@@ -672,7 +715,11 @@ fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool) -
             None
         }
     };
-    let prep = parsed.as_mut().map(|(pf, _)| crate::program::prepare_file(pf, &ctx.cfg));
+    let prep = parsed.as_mut().map(|(pf, _)| {
+        let prep = crate::program::prepare_file(pf, &ctx.cfg);
+        if pf.lazy.is_some() { let _ = pf.part(&ctx.cfg); }
+        prep
+    });
     let verify = ctx.cfg.session.runtime.parse_verify.then(|| VERIFY.get().copied()).flatten();
     ((krate, path), Preparsed { parsed, prep, mod_path, src_len, verify, error })
 }
@@ -1358,6 +1405,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         stopped: false,
         planning,
         parse_ready: Default::default(),
+        loaded: vec![false; n],
         images: restored,
         pending_images,
         valid,

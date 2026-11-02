@@ -100,19 +100,18 @@ pub fn was_preempted(id: &str) -> bool {
 }
 
 /// Why background work must not ask (or keep asking) for a box now; `mine`: its queued request.
-pub fn background_block(lm: &crate::lease::master::LeaseMaster, mine: Option<&str>, needs: &[(String, String)]) -> Option<String> {
+pub fn background_block(lm: &crate::lease::master::LeaseMaster, mine: Option<&str>, needs: &[(String, String)], pin: Option<&str>) -> Option<String> {
     use crate::lease::sched::State;
     let view = lm.view();
     let nodes = lm.nodes();
     let other = |id: &str| mine != Some(id);
-    // a box both could use: lane work holds background work back only from the boxes it could
-    // take itself (a waiting macOS request never holds back Linux shards)
+    // lane work holds background work back only on boxes both could use, including the asking request's --only pin
     let usable = |want: &[(String, String)], pin: Option<&str>, n: &crate::lease::sched::NodeView| n.up && n.dev && !n.role().users() && pin.is_none_or(|p| p == n.name) && super::fits(want, n.caps.as_ref());
-    let shared = |l: &crate::lease::sched::Lease| nodes.iter().any(|n| usable(needs, None, n) && usable(&l.req.needs, l.req.node.as_deref(), n));
+    let shared = |l: &crate::lease::sched::Lease| nodes.iter().any(|n| usable(needs, pin, n) && usable(&l.req.needs, l.req.node.as_deref(), n));
     // lane work goes first, and a box beyond what it waits for is not taken from it
     let waiting: Vec<_> = view.iter().filter(|l| l.state == State::Queued && l.req.kind != Kind::Ci && !l.lane_capped() && l.req.prio < BACKGROUND_PRIO && !is_background(l) && other(&l.id) && shared(l)).collect();
     if let Some(l) = waiting.first() {
-        let free = nodes.iter().filter(|n| usable(needs, None, n) && !n.draining && !view.iter().any(|l| matches!(l.state, State::Granted | State::Starting) && l.node.as_deref() == Some(n.name.as_str()) && !matches!(l.req.kind, Kind::Ci | Kind::Inspect))).count();
+        let free = nodes.iter().filter(|n| usable(needs, pin, n) && !n.draining && !view.iter().any(|l| matches!(l.state, State::Granted | State::Starting) && l.node.as_deref() == Some(n.name.as_str()) && !matches!(l.req.kind, Kind::Ci | Kind::Inspect))).count();
         if free <= waiting.len() {
             return Some(format!("lane work waits for a box this could take ({} of {}; {} waiting, {free} free)", l.id, l.req.lane, waiting.len()));
         }
@@ -210,7 +209,9 @@ impl Held {
         req.only = spec.only;
         req.repo_dir = Some(spec.repo_dir.clone());
         req.rev = Some(crate::lease::pin_revs(std::path::Path::new(&spec.repo_dir), &spec.rev)?);
-        // (no holder pid: the master's restart keeps these, whatever its new pid)
+        // the master's own ask (no holder pid): a restart keeps it once granted, and asks again
+        // for it while queued (Sched::restore drops the dead ask)
+        req.master = true;
         req.agent = Some(spec.agent.clone());
         req.since_ms = Some(spec.since_ms.unwrap_or_else(crate::proto::wall_ms));
         if spec.agent == "devhub-show" { req.priority = crate::lease::Priority::Interactive; }
@@ -228,7 +229,7 @@ impl Held {
             // background work asks only while no lane work waits and it holds under N-2 boxes;
             // owed, only the cap holds it back, and it asks ahead of new lane leases
             if let (true, Some(lm)) = (background, &lm) {
-                while let Some(why) = if owed() { (spec.agent != "devhub-verify").then(|| background_cap(lm, None)).flatten() } else { background_block(lm, None, &req.needs) } {
+                while let Some(why) = if owed() { (spec.agent != "devhub-verify").then(|| background_cap(lm, None)).flatten() } else { background_block(lm, None, &req.needs, req.node.as_deref().filter(|_| req.only)) } {
                     let line = format!("held back: {why}");
                     if line != last {
                         on_wait(&line);
@@ -293,7 +294,7 @@ impl Held {
                     continue 'ask;
                 }
                 if let (true, false, Some(lm), "queued") = (background, owed(), &lm, s(&v, "state").as_str()) {
-                    if background_block(lm, Some(&id), &req.needs).is_some() {
+                    if background_block(lm, Some(&id), &req.needs, req.node.as_deref().filter(|_| req.only)).is_some() {
                         let _ = ask(&ctl, None, "release", &id);
                         continue 'ask;
                     }
@@ -305,6 +306,12 @@ impl Held {
 
     fn node_call(&self, service: &str, line: &str) -> Result<Value, String> {
         first(ask(&self.ctl, Some(&self.node), service, line), service).map_err(|e| format!("{}: {e}", self.node))
+    }
+
+    /// Use the pinned sources without any lane edits.
+    pub fn ship_nothing(&self) -> Result<(), String> {
+        let b64 = makepad_network::digest::base64_encode(br#"{"shipped":[],"deleted":[],"bases":{}}"#);
+        self.node_call("ship-done", &format!("ship-done {} {b64}", self.id)).map(|_| ())
     }
 
     /// A lease this process took before its exec (the same pid holds it): held again.
@@ -434,6 +441,11 @@ impl Held {
     }
 
     /// Runs `argv` and returns what it printed (short commands: `git rev-parse`).
+    /// KILLs one process of this lease's runs (`lease-kill`: an overlay lease runs no `kill`).
+    pub fn kill(&self, pid: u32) -> Result<(), String> {
+        self.node_call("lease-kill", &format!("lease-kill {} {pid}", self.id)).map(|_| ())
+    }
+
     pub fn output(&self, argv: &[&str]) -> Result<(i32, String), String> {
         let mut buf = Vec::new();
         let argv: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
@@ -446,7 +458,7 @@ impl Held {
     /// disk; a short or malformed transfer fails instead of leaving usable partial evidence.
     pub fn get(&self, lane: &str, rel: &str, dst: &Path) -> Result<BTreeSet<PathBuf>, String> {
         let inside = |p: &str| !p.is_empty() && !p.contains(['\r', '\n', '\0', '\\']) && Path::new(p).components().all(|c| matches!(c, Component::Normal(_)));
-        if !crate::trust::valid_name(lane) || !inside(rel) {
+        if !makepad_devhub_conf::valid_name(lane) || !inside(rel) {
             return Err(format!("get: invalid lane or path {rel}"));
         }
         let lines = ask(&self.ctl, Some(&self.node), "get-ls", &format!("get-ls {lane} {} {rel}", self.id)).map_err(|e| format!("{}: {e}", self.node))?;

@@ -4248,17 +4248,13 @@ fn release_uploaded_staging(cx: &mut Cx2d, state: &TileLoadState) {
         .chain(stalk_template_geometry.iter())
         .chain(stoplight_template_geometry.iter())
     {
-        if !pool.is_open() {
-            break;
-        }
         let Some((indices, vertices)) = geometry.take_cpu_buffers_if_uploaded(cx.cx) else {
             continue;
         };
-        match pool.submit(Lane::Light, move || drop((indices, vertices))) {
+        match pool.submit(Class::Visible, move || drop((indices, vertices))) {
             Ok(handle) => handle.detach(),
             Err(_) => {
-                // The pool is full: keep the staging until a later frame
-                // can hand it over.
+                // Shutdown stops further retirement submissions.
                 break;
             }
         }
@@ -4579,7 +4575,7 @@ pub struct MapView {
     /// Tile parses/bakes staged newest-first in front of the runtime pool's
     /// light lane; a re-request replaces the staged job for its key and a pan
     /// prunes what has not been handed over yet.
-    #[rust(TaskQueue::new(Lane::Light, 1, 1024))]
+    #[rust(TaskQueue::new(Class::Visible, 1, 1024))]
     tile_queue: TaskQueue<TileKey>,
     #[rust]
     local_requested_tiles: HashMap<TileKey, f64>,
@@ -9055,13 +9051,16 @@ impl MapView {
                 });
             }
         };
-        let pool = cx.task_pool();
-        if pool.is_open() {
+        #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
+        {
+            let pool = cx.task_pool();
             let window = self.bake_window(cx, &pool);
             self.tile_queue.set_in_flight_limit(window);
             self.tile_queue
                 .push(&pool, key, true, QueueOrder::Lifo, guarded_job)
-        } else {
+        }
+        #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+        {
             // Pure parsing/tessellation has an explicit serial fallback when
             // wasm was built without atomics.
             guarded_job();
@@ -13665,7 +13664,7 @@ mod tests {
         for _ in 0..thread_count {
             let reached = reached.clone();
             let release = release.clone();
-            pool.submit(Lane::Light, move || {
+            pool.submit(Class::Visible, move || {
                 reached.wait();
                 release.wait();
             })

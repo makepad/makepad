@@ -25,7 +25,7 @@ pub type EnsureRev = Arc<dyn Fn(&str, &str, &Path, &super::RevPin) -> Result<Str
 /// The nodes the master dials: (name, address).
 pub type Hosts = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 
-pub const SERVICES: [&str; 17] = ["lease", "beat", "release", "cancel", "leases", "why-queued", "nodes", "node-dev", "linspect", "evict", "stop", "unblock", "override", "blocked", "jit", "stats", "prof"];
+pub const SERVICES: [&str; 18] = ["lease", "beat", "release", "cancel", "leases", "why-queued", "nodes", "node-dev", "linspect", "evict", "stop", "unblock", "override", "blocked", "jit", "stats", "prof", "native"];
 const NODE_BEAT_MS: u64 = 5_000;
 /// How long a commit sent to a node's store counts as there without asking again.
 #[cfg(feature = "checkout")]
@@ -68,11 +68,23 @@ pub struct LeaseMaster {
     changes: (Mutex<u64>, std::sync::Condvar),
     /// the last text written to `leases.live` ([`Self::persist`])
     saved: Mutex<String>,
+    /// (node, call) of the beat and caps calls in flight: a hub that stops answering holds only
+    /// its own call (105 out of memory on 2026-11-02 held one loop over all nodes, and every
+    /// node ended its leases after 60 s without a beat)
+    calling: Mutex<std::collections::HashSet<(String, &'static str)>>,
+    /// lease-ends a node could not take while its hub restarted: (node, line), sent with the
+    /// node's next beats until it answers (its new hub took the lease back from its ledger)
+    ends_later: Mutex<Vec<(String, String)>>,
 }
+
+/// How long a lease's start waits for its box's hub to come back (a restart for its update takes
+/// seconds) before the lease goes back to the queue.
+const START_GRACE: Duration = Duration::from_secs(45);
 
 /// A node call that failed because the node's hub could not be reached (not a refusal).
 pub fn unreachable(e: &str) -> bool {
-    ["link lost", "cannot reach", "Connection refused", "not connected", "no route to"].iter().any(|w| e.contains(w))
+    // (a hub that exits for its self-update closes its links mid-call: "connection closed")
+    ["link lost", "cannot reach", "Connection refused", "not connected", "no route to", "connection closed", "Connection reset", "Broken pipe"].iter().any(|w| e.contains(w))
 }
 
 /// A lane's node dirs (`lane/<lane>/src`, its target) hold the tree of ONE Mac worktree: a lease
@@ -181,7 +193,7 @@ fn write_desk_links(home: &Path, nodes: &[NodeView]) {
 }
 
 fn read_blocked(home: &Path) -> Vec<String> {
-    std::fs::read_to_string(home.join("blocked")).unwrap_or_default().lines().map(str::trim).filter(|l| crate::trust::valid_name(l)).map(str::to_string).collect()
+    std::fs::read_to_string(home.join("blocked")).unwrap_or_default().lines().map(str::trim).filter(|l| makepad_devhub_conf::valid_name(l)).map(str::to_string).collect()
 }
 
 fn write_blocked(home: &Path, list: &[String]) {
@@ -346,6 +358,8 @@ impl LeaseMaster {
             cleaned: std::sync::Condvar::new(),
             changes: (Mutex::new(0), std::sync::Condvar::new()),
             saved: Mutex::new(String::new()),
+            calling: Mutex::new(Default::default()),
+            ends_later: Mutex::new(Vec::new()),
         }
     }
 
@@ -412,6 +426,10 @@ impl LeaseMaster {
     }
 
     /// See [`Sched::timed_series`].
+    pub fn lane_seen_ms(&self, name: &str, dir: &std::path::Path) -> u64 {
+        self.sched.lock().unwrap().lane_seen_ms(name, dir)
+    }
+
     pub fn timed_series(&self, dir: &str) -> Option<String> {
         let now = self.now();
         self.sched.lock().unwrap().timed_series(dir, now)
@@ -472,15 +490,17 @@ impl LeaseMaster {
                         let kind = v.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                         let peak = v.get("peak_ram_gb").and_then(super::num);
                         let cores = v.get("cpu_seconds").and_then(super::num).map(|cpu| cpu * 1000.0 / wall);
-                        records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), wall as u64, peak, cores));
+                        let run = v.get("run_ms").and_then(super::num).filter(|ms| ms.is_finite() && *ms > 0.0).map(|ms| ms as u64);
+                        records.push((class.to_string(), kind.to_string(), v.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string(), wall as u64, peak, cores, run));
                     }
                 }
             }
         }
         let mut sched = self.sched.lock().unwrap();
-        for (class, kind, node, wall, peak, cores) in records {
+        for (class, kind, node, wall, peak, cores, run) in records {
             sched.record_node_cost(&class, &kind, &node, wall);
             sched.record_resources(&class, &kind, peak, cores);
+            if let Some(run) = run { sched.record_run(&class, &kind, run); }
         }
     }
 
@@ -544,6 +564,7 @@ impl LeaseMaster {
                     #[cfg(not(feature = "checkout"))]
                     let _ = (leases, note);
                 }
+                Action::Capture { id, node, why } => self.spawn(move |m| m.capture(&id, &node, &why)),
                 Action::Reclaim { node, need_gb } => self.spawn(move |m| {
                     if let Err(e) = m.ask1(&node, "disk", &format!("disk need {need_gb:.0}")) {
                         m.event(Sev::Warn, format!("node {node}: disk reclaim failed: {e}"));
@@ -551,6 +572,52 @@ impl LeaseMaster {
                 }),
             }
         }
+    }
+
+    /// A stalled lease's JITs say where they are: each captures its state (stacks with tier,
+    /// compile queue, waits, flight recording) into one report on its box, and its likely cause
+    /// and `<node>:<path>` go to the inbox as an ERR. A run with no JIT under it stays the warning.
+    fn capture(&self, id: &str, node: &str, why: &str) {
+        let pids: Vec<u64> = match self.ask1(node, "lease-jits", &format!("lease-jits {id}")) {
+            Ok(v) => v.get("pids").and_then(|p| p.as_arr()).map(|a| a.iter().filter_map(super::num).map(|n| n as u64).collect()).unwrap_or_default(),
+            // an older hub without the verb, or the lease gone meanwhile
+            Err(e) => return self.event(Sev::Info, format!("{id} on {node} stalled: no JIT capture ({e})")),
+        };
+        let ask = format!("{{\"cmd\":\"capture\",\"why\":{}}}", makepad_remote::json_str(&format!("devhub: {why}")));
+        for pid in pids {
+            let answer = (self.ask)(&format!("{node}:{pid}"), "cmd", &ask).and_then(|lines| {
+                let v = lines.iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok().filter(|v| v.get("cause").is_some() || v.get("err").is_some())).ok_or("no answer")?;
+                if let Some(e) = v.get("err").and_then(|e| e.as_str()) { return Err(e.to_string()); }
+                Ok((v.get("cause").and_then(|c| c.as_str()).unwrap_or("").to_string(), v.get("path").and_then(|c| c.as_str()).unwrap_or("").to_string()))
+            });
+            match answer {
+                Ok((cause, path)) => self.event(Sev::Err, format!("{id} on {node} stalled ({why}): JIT {pid}: {cause} ({node}:{path})")),
+                Err(e) if e.contains("unknown command") => self.event(Sev::Info, format!("{id} on {node} stalled: JIT {pid} has no capture yet (an older JIT build)")),
+                Err(e) => self.event(Sev::Warn, format!("{id} on {node} stalled: JIT {pid}'s capture failed: {e}")),
+            }
+        }
+    }
+
+    /// A live session's call ended and none runs: its box is charged its resident share
+    /// ([`Sched::live_room`]); the freed cores go to what waits.
+    pub fn live_idle(self: &Arc<Self>, id: &str) {
+        if self.sched.lock().unwrap().live_idle.insert(id.to_string()) {
+            self.pump();
+        }
+    }
+
+    /// A live session's call starts: its full charge again, if its box has room (`Err`: why
+    /// not; `force`: taken anyway, a call that cannot wait).
+    pub fn live_admit(&self, id: &str, force: bool) -> Result<(), String> {
+        let mut s = self.sched.lock().unwrap();
+        if !s.live_idle.contains(id) {
+            return Ok(());
+        }
+        if !force {
+            s.live_room(id)?;
+        }
+        s.live_idle.remove(id);
+        Ok(())
     }
 
     /// A parked live job has copied its last answer. Teardown runs off the caller's thread.
@@ -566,7 +633,18 @@ impl LeaseMaster {
         let Some(l) = self.sched.lock().unwrap().get(id).cloned() else { return };
         let t0 = std::time::Instant::now();
         let mut ship = 0u64;
-        let r = self.start_on(&l, node, &mut ship);
+        // a hub restarting for its update is back in seconds (it built its new self first): the
+        // lease waits it out on its box instead of going elsewhere or failing
+        let mut r = self.start_on(&l, node, &mut ship);
+        // (inline: tests, whose node calls answer at once)
+        let grace = if self.inline { Duration::ZERO } else { START_GRACE };
+        while r.as_ref().is_err_and(|e| unreachable(e) || e.contains("restarting: ")) && t0.elapsed() < grace {
+            std::thread::sleep(Duration::from_secs(2));
+            if self.sched.lock().unwrap().get(id).is_none_or(|x| x.node.as_deref() != Some(node) || x.state != State::Starting) {
+                break;
+            }
+            r = self.start_on(&l, node, &mut ship);
+        }
         let setup = t0.elapsed().as_millis() as u64;
         let now = self.now();
         self.sched.lock().unwrap().phase(id, "sync", l.granted_ms.unwrap_or(now.saturating_sub(setup)), now);
@@ -621,7 +699,8 @@ impl LeaseMaster {
             }
         };
         let needs: Vec<String> = l.req.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
-        let line = format!("lease-start {{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{}}},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.cost.cores, l.cost.ram_gb, needs.join(","));
+        let warms = l.req.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
+        let line = format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{}}},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.cost.cores, l.cost.ram_gb, needs.join(","));
         let lines = (self.ask)(node, "lease-start", &line)?;
         let first = lines.into_iter().next().ok_or("lease-start: no answer")?;
         let v = makepad_strict_json::parse(first.as_bytes()).map_err(|_| "lease-start: bad answer".to_string())?;
@@ -677,7 +756,8 @@ impl LeaseMaster {
                 }
                 let payload = if parts.is_empty() { String::new() } else { format!(" {{{}}}", parts.join(",")) };
                 let t0 = std::time::Instant::now();
-                let answer = self.ask1(node, "lease-end", &format!("lease-end {id} {wire_how}{payload}"));
+                let end_line = format!("lease-end {id} {wire_how}{payload}");
+                let answer = self.ask1(node, "lease-end", &end_line);
                 teardown = t0.elapsed().as_millis() as u64;
                 let class = answer.as_ref().ok().and_then(|v| v.get("class")).and_then(|v| v.as_str()).unwrap_or("");
                 run_class = class.to_string();
@@ -706,6 +786,13 @@ impl LeaseMaster {
                         if let Some(path) = v.get("recovered").and_then(|r| r.as_str()) {
                             self.fetch_recovered(node, path, l);
                         }
+                    }
+                    // its hub restarts: the new one takes the lease back from its ledger, and
+                    // the end goes to it with the node's next beats
+                    Err(e) if unreachable(&e) || e.contains("restarting: ") => {
+                        self.event(Sev::Info, format!("{} of {}: cleanup on {node} waits for its hub to answer again ({e})", l.tag(), l.req.lane));
+                        self.ends_later.lock().unwrap().push((node.to_string(), end_line));
+                        summary = format!("{{\"cleanup\":{}}}", json_str(&format!("deferred on {node}: its hub restarts")));
                     }
                     Err(e) => {
                         self.event(Sev::Warn, format!("{} of {}: cleanup on {node} failed: {e}", l.tag(), l.req.lane));
@@ -829,62 +916,104 @@ impl LeaseMaster {
     pub fn refresh(self: &Arc<Self>, hosts: &[(String, String)]) {
         self.sync_hosts(hosts);
         for (name, _) in hosts {
-            let caps = (self.ask)(name, "caps", "caps").ok().and_then(|l| l.into_iter().next()).filter(|l| !l.starts_with("{\"err\":")).and_then(|l| Caps::parse(&l));
-            let now = self.now();
-            match caps {
-                Some(c) => {
-                    self.ledger_jit_builds(name, &c, now);
-                    let asked = c.dev_req;
-                    let up = self.sched.lock().unwrap().set_caps(name, c, now);
-                    // a flip made on the node itself: the master takes it (saved, pushed; the push clears it there)
-                    if let Some(want) = asked {
-                        if self.sched.lock().unwrap().dev(name) != want {
-                            let _ = self.set_dev(name, want);
-                        } else {
-                            self.pushed.lock().unwrap().remove(name);
-                        }
-                    }
-                    let on = self.sched.lock().unwrap().dev(name);
-                    if up || self.pushed.lock().unwrap().get(name) != Some(&on) {
-                        self.push_policy(name, on);
-                    }
-                }
-                None => self.sched.lock().unwrap().caps_missed(name, now),
-            }
+            let node = name.clone();
+            self.per_node(name, "caps", move |m| m.refresh_node(&node));
         }
         write_desk_links(&self.home, &self.nodes());
         self.pump();
     }
 
-    /// `lease-beat` to every node with live leases; the ones it does not know are lost.
+    /// Runs one node's call on its own thread unless the same call to it is still in flight.
+    fn per_node(self: &Arc<Self>, node: &str, call: &'static str, f: impl FnOnce(&Arc<Self>) + Send + 'static) {
+        let key = (node.to_string(), call);
+        if !self.calling.lock().unwrap().insert(key.clone()) { return; }
+        self.spawn(move |m| {
+            f(m);
+            m.calling.lock().unwrap().remove(&key);
+        });
+    }
+
+    fn refresh_node(self: &Arc<Self>, name: &str) {
+        let caps = (self.ask)(name, "caps", "caps").ok().and_then(|l| l.into_iter().next()).filter(|l| !l.starts_with("{\"err\":")).and_then(|l| Caps::parse(&l));
+        let now = self.now();
+        match caps {
+            Some(c) => {
+                self.ledger_jit_builds(name, &c, now);
+                let asked = c.dev_req;
+                let up = self.sched.lock().unwrap().set_caps(name, c, now);
+                // a flip made on the node itself: the master takes it (saved, pushed; the push clears it there)
+                if let Some(want) = asked {
+                    if self.sched.lock().unwrap().dev(name) != want {
+                        let _ = self.set_dev(name, want);
+                    } else {
+                        self.pushed.lock().unwrap().remove(name);
+                    }
+                }
+                let on = self.sched.lock().unwrap().dev(name);
+                if up || self.pushed.lock().unwrap().get(name) != Some(&on) {
+                    self.push_policy(name, on);
+                }
+            }
+            None => self.sched.lock().unwrap().caps_missed(name, now),
+        }
+    }
+
+    /// `lease-beat` to every node with live leases, each on its own thread; the ones it does not
+    /// know are lost.
     pub fn beat_nodes(self: &Arc<Self>) {
         let nodes = self.sched.lock().unwrap().nodes_with_leases();
         for node in nodes {
-            let ids = self.sched.lock().unwrap().live_on(&node);
-            if ids.is_empty() {
-                continue;
-            }
-            let Ok(v) = self.ask1(&node, "lease-beat", &format!("lease-beat {}", ids.join(" "))) else { continue };
-            let now = self.now();
-            if let Some(makepad_strict_json::Value::Obj(info)) = v.get("info") {
-                let mut s = self.sched.lock().unwrap();
-                for (id, i) in info {
-                    s.set_info(id, &i.to_json());
-                }
-            }
-            for id in strs(v.get("unknown")) {
-                if ids.contains(&id) {
-                    self.sched.lock().unwrap().release(&id, "lost", now);
-                }
-            }
+            let n = node.clone();
+            self.per_node(&node, "lease-beat", move |m| m.beat_node(&n));
+        }
+        let later: std::collections::BTreeSet<String> = self.ends_later.lock().unwrap().iter().map(|(n, _)| n.clone()).collect();
+        for node in later {
+            let n = node.clone();
+            self.per_node(&node, "lease-end-later", move |m| m.end_later(&n));
         }
         self.pump();
     }
 
-    /// The lease loop: places every second, beats the nodes every 5 s, their caps every 10 s. The
-    /// beats have their own thread: a caps round that waits on slow or down boxes (a just-started
-    /// master's links coming up) must not starve the beats, or the nodes end their leases after
-    /// 60 s without one (a master restart ended L8158 on a node, 2026-10-30).
+    /// The deferred lease-ends of a node whose hub restarted, once it answers again.
+    fn end_later(self: &Arc<Self>, node: &str) {
+        let lines: Vec<String> = self.ends_later.lock().unwrap().iter().filter(|(n, _)| n == node).map(|(_, l)| l.clone()).collect();
+        for line in lines {
+            match self.ask1(node, "lease-end", &line) {
+                Err(e) if unreachable(&e) || e.contains("restarting: ") => return,
+                r => {
+                    let id = line.split_whitespace().nth(1).unwrap_or("");
+                    self.event(Sev::Info, format!("{id}: cleaned up on {node} after its hub came back{}", r.err().map_or(String::new(), |e| format!(" ({e})"))));
+                    self.ends_later.lock().unwrap().retain(|(n, l)| !(n == node && *l == line));
+                }
+            }
+        }
+    }
+
+    fn beat_node(self: &Arc<Self>, node: &str) {
+        let ids = self.sched.lock().unwrap().live_on(node);
+        if ids.is_empty() {
+            return;
+        }
+        let Ok(v) = self.ask1(node, "lease-beat", &format!("lease-beat {}", ids.join(" "))) else { return };
+        let now = self.now();
+        if let Some(makepad_strict_json::Value::Obj(info)) = v.get("info") {
+            let mut s = self.sched.lock().unwrap();
+            for (id, i) in info {
+                s.set_info(id, &i.to_json());
+            }
+        }
+        for id in strs(v.get("unknown")) {
+            if ids.contains(&id) {
+                self.sched.lock().unwrap().release(&id, "lost", now);
+            }
+        }
+    }
+
+    /// The lease loop: places every second, beats the nodes every 5 s, their caps every 10 s. Each
+    /// node's beat and caps call runs on its own thread: a slow, down or silent box (a just-started
+    /// master's links coming up, a hub out of memory) must not starve the other boxes' beats, or
+    /// the nodes end their leases after 60 s without one (a master restart ended L8158 on a node,
+    /// 2026-10-30; 105's silent hub ended leases fleet-wide on 2026-11-02).
     pub fn start(self: &Arc<Self>, hosts: Hosts) {
         self.resume_starts();
         let m = self.clone();
@@ -904,13 +1033,18 @@ impl LeaseMaster {
         });
     }
 
-    /// Informational self-update progress in `nodes`; placement continues unchanged.
-    pub fn set_updating(&self, node: &str, why: Option<&str>) {
+    /// Informational self-update progress in `nodes`; placement continues unchanged, except
+    /// `drain`: an older hub (protocol < 6) with its update ready takes no new lease until it
+    /// restarts. Ending the progress ends the drain.
+    pub fn set_updating(self: &Arc<Self>, node: &str, why: Option<&str>, drain: bool) {
         let mut s = self.sched.lock().unwrap();
         match why {
             Some(w) => s.updating.insert(node.to_string(), w.to_string()),
             None => s.updating.remove(node),
         };
+        if drain && why.is_some() { s.update_drain.insert(node.to_string()); } else { s.update_drain.remove(node); }
+        drop(s);
+        if !drain { self.pump(); }
     }
 
     pub fn view(&self) -> Vec<Lease> {
@@ -919,6 +1053,47 @@ impl LeaseMaster {
 
     pub fn nodes(&self) -> Vec<NodeView> {
         self.sched.lock().unwrap().node_view()
+    }
+
+    /// Routing for the master's JIT-first gate: `class` is the JIT class, without `native:`.
+    /// Compares run-phase medians (the command's own time, its build included; not the dev JIT build).
+    /// A cargo run of `native:<class>` is routing's own pick when this answers false.
+    pub fn test_route(&self, kind: &str, class: &str, own: bool) -> (bool, String) {
+        let (jit, cargo) = {
+            let s = self.sched.lock().unwrap();
+            (s.class_run_median(class, kind), s.class_run_median(&format!("native:{class}"), kind))
+        };
+        super::client::test_route(own, jit, cargo)
+    }
+
+    #[cfg(feature = "checkout")]
+    pub(crate) fn jit_compilers(&self) -> Vec<String> {
+        self.sched.lock().unwrap().jit_compilers()
+    }
+
+    #[cfg(feature = "checkout")]
+    pub(crate) fn note_warm(&self, lane: &str, node: &str) {
+        self.sched.lock().unwrap().note_warm(lane, node);
+    }
+
+    #[cfg(feature = "checkout")]
+    pub(crate) fn forget_warm(&self, lane: &str, node: &str) {
+        self.sched.lock().unwrap().forget_warm(lane, node);
+    }
+
+    /// The manager's bump of a queued lease (by id, or the first queued one `pick` matches):
+    /// the front of its queue class. Its id.
+    pub fn bump(self: &Arc<Self>, id: Option<&str>, pick: &dyn Fn(&super::sched::Req) -> bool) -> Result<String, String> {
+        let r = {
+            let mut sched = self.sched.lock().unwrap();
+            let id = match id {
+                Some(id) => id.to_string(),
+                None => sched.view().into_iter().find(|l| l.state == super::sched::State::Queued && pick(&l.req)).map(|l| l.id).ok_or("no queued lease")?,
+            };
+            sched.bump(&id).map(|_| id)
+        };
+        if r.is_ok() { self.pump(); }
+        r
     }
 
     /// The user's switch: saved in nodes.conf, pushed to the node, the scheduler told.
@@ -945,6 +1120,20 @@ impl LeaseMaster {
         match service {
             "lease" => match Req::parse(line).and_then(|req| bind_lane(&self.home, &req).map(|_| req)) {
                 Ok(req) => {
+                    #[cfg(feature = "checkout")]
+                    let req = {
+                        let mut req = req;
+                        if req.src == super::Src::Overlay && req.on_node() && req.hint.is_empty() {
+                            if let (Some(pin), Some(repo_dir)) = (req.rev.as_deref().and_then(super::Pin::of_rev), req.repo_dir.as_deref()) {
+                                let compilers = self.sched.lock().unwrap().jit_compilers();
+                                match super::loaders::commit_ids(Path::new(repo_dir), &pin.makepad, &compilers) {
+                                    Ok(ids) => req.hint = ids,
+                                    Err(e) => self.event(Sev::Info, format!("lane {}: JIT placement hint: {e}", req.lane)),
+                                }
+                            }
+                        }
+                        req
+                    };
                     let id = self.sched.lock().unwrap().request(req, now);
                     self.persist();
                     self.pump();
@@ -995,8 +1184,8 @@ impl LeaseMaster {
             "jit" => match line.split_whitespace().collect::<Vec<_>>().as_slice() {
                 ["misses", ..] => match crate::jit_misses::serve(&self.home, line, now, &|action, value| {
                     let id = value.get("id").and_then(makepad_strict_json::Value::as_str).unwrap_or("");
-                    let line = if action == "closed" { format!("JIT miss {id} closed; the next devhub test tries the JIT again") } else { crate::jit_misses::notice(value) };
-                    (self.publish)(hub_record(&self.machine, "", 0, "jit_miss", if action == "closed" { Sev::Info } else { Sev::Warn }, line, value.to_json()));
+                    let line = if action == "closed" { format!("JIT miss {id} closed; the next devhub test tries the JIT again") } else if action == "retried" { format!("JIT miss {id} retried: the JIT changed since it last failed there; the next devhub test runs the JIT") } else { crate::jit_misses::notice(value) };
+                    (self.publish)(hub_record(&self.machine, "", 0, "jit_miss", if matches!(action, "closed" | "retried") { Sev::Info } else { Sev::Warn }, line, value.to_json()));
                 }) {
                     Ok(v) => out.push(v),
                     Err(e) => out.push(err(&e)),
@@ -1007,7 +1196,17 @@ impl LeaseMaster {
                 },
                 _ => out.push(err("jit stats [--day] | misses [--all] | misses close <id>")),
             },
+            #[cfg(feature = "checkout")]
+            "native" => match super::native::serve(&self.home, line, now, &self.nodes(), &|class| { let (jit, why) = self.test_route("test", class, false); (!jit).then_some(why) }) {
+                Ok(v) => out.push(v),
+                Err(e) => out.push(err(&e)),
+            },
             "stats" => match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["class", kind, classes @ ..] if !classes.is_empty() => {
+                    let s = self.sched.lock().unwrap();
+                    let runs = classes.iter().map(|class| format!("{}:{}", json_str(class), s.class_run_median(class, kind).map_or("null".into(), |ms| ms.to_string()))).collect::<Vec<_>>().join(",");
+                    out.push(format!("{{\"runs\":{{{runs}}}}}"));
+                }
                 ["queue"] | ["queue", "--hour"] => {
                     let leases = {
                         let s = self.sched.lock().unwrap();
@@ -1015,12 +1214,12 @@ impl LeaseMaster {
                         leases.extend(s.recent_ended(usize::MAX));
                         leases
                     };
-                    match queue_stats(&self.home.join("leases.jsonl"), &leases, now) {
+                    match queue_stats(&self.home.join("leases.jsonl"), &leases, now).and_then(|t| Ok(super::prof::agent(&self.home, &leases, 1, None, now, false)? + &t)) {
                         Ok(text) => out.push(format!("{{\"text\":{}}}", json_str(&text))),
                         Err(e) => out.push(err(&e)),
                     }
                 }
-                _ => out.push(err("stats queue [--hour]")),
+                _ => out.push(err("stats queue [--hour] | class <kind> <class>...")),
             },
             "prof" => {
                 let summary = line == "--summary";
@@ -1054,7 +1253,7 @@ impl LeaseMaster {
             "linspect" => self.linspect(line, out),
             "evict" => {
                 let who = line.trim();
-                if !crate::trust::valid_name(who) {
+                if !makepad_devhub_conf::valid_name(who) {
                     return out.push(err("evict <lane|agent>"));
                 }
                 let ids = self.sched.lock().unwrap().evict(who, now);
@@ -1065,7 +1264,7 @@ impl LeaseMaster {
             }
             "stop" => {
                 let lane = line.trim();
-                if !crate::trust::valid_name(lane) {
+                if !makepad_devhub_conf::valid_name(lane) {
                     return out.push(err("stop <lane>"));
                 }
                 let ids = self.sched.lock().unwrap().stop(lane, now);
@@ -1310,6 +1509,20 @@ mod tests {
         let mut out = Vec::new();
         m.serve(svc, line, &mut out);
         out.join("\n")
+    }
+
+    #[test]
+    fn routing_cost_excludes_the_dev_jit_build() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-run-cost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, ..) = master(&dir);
+        std::fs::write(dir.join("costs.jsonl"), "{\"class\":\"test:pkg\",\"kind\":\"test\",\"wall_ms\":500000,\"jit_ms\":480000,\"run_ms\":20000}\n{\"class\":\"test:pkg\",\"kind\":\"test\",\"wall_ms\":500000}\n{\"class\":\"test:pkg\",\"kind\":\"test\",\"wall_ms\":500000,\"run_ms\":0}\n").unwrap();
+        m.refresh_costs();
+        assert_eq!(m.sched.lock().unwrap().class_run_median("test:pkg", "test"), Some(20000), "only a positive run phase contributes");
+        assert_eq!(m.sched.lock().unwrap().class_median("test:pkg", "test"), Some(500000), "scheduling still uses the wall");
+        assert_eq!(serve(&m, "stats", "class test test:pkg native:test:pkg"), "{\"runs\":{\"test:pkg\":20000,\"native:test:pkg\":null}}", "routing stats expose run medians");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

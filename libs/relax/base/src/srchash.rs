@@ -1,13 +1,13 @@
-//! Source identity of a provided crate and its library dependency closure (proc macros
-//! included, build dependencies excluded). Path packages read Cargo.toml, optional build.rs,
-//! the Rust files under src/, and literal include_str!/include_bytes!/include! targets named by
-//! src/ Rust sources, following included .rs files transitively. Only the Rust files of src/ count
-//! (never hidden entries, `target`, nested packages such as a fuzz folder, or other files there unless
-//! a literal include names them). Unreferenced scripts, tests,
-//! examples and documentation do not count. Registry/git packages use name@version.
+//! Compiled path-package inputs and provided library identities, shared with build scripts.
+//! Compiled inputs are Cargo.toml, Rust files throughout the package, and literal
+//! include!/include_str!/include_bytes! targets, following include! .rs targets transitively.
+//! Walks skip hidden entries, target, nested packages and top-level tests/benches/examples.
+//! Library identity retains its narrower src/ Rust files, Cargo.toml and optional build.rs
+//! (only src/ Rust files and included .rs targets are scanned for includes). Unreferenced
+//! scripts, assets and documentation do not count. Registry/git identities use name@version.
 //! Features retain Cargo host-side and host-shims normalization. The loader embeds the hash
 //! and a per-file manifest; a registered crate mismatch identifies the inputs of a loader update.
-//! Shared with build scripts through #[path]: std only, with reads through crate::vfs.
+//! Std only, with reads through super::vfs so #[path] can mount this module at any depth.
 
 /// One package of the graph: `deps` index the same slice.
 pub struct SrcPkg {
@@ -46,9 +46,9 @@ fn immutable(dir: &str) -> bool {
     dir.contains("/.cargo/registry/") || dir.contains("/.cargo/git/")
 }
 
-/// General source-tree walk for provenance and reload tracking, not library identity.
+/// General source-tree walk for std and non-provided reload tracking, not compiled inputs.
 pub fn files(dir: &std::path::Path, rel: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
-    let Ok(rd) = crate::vfs::read_dir(dir) else { return };
+    let Ok(rd) = super::vfs::read_dir(dir) else { return };
     for (name, is_dir) in rd {
         if name.starts_with('.') {
             continue;
@@ -56,11 +56,11 @@ pub fn files(dir: &std::path::Path, rel: &str, out: &mut Vec<(String, std::path:
         let p = dir.join(&name);
         let r = if rel.is_empty() { name.clone() } else { format!("{}/{}", rel, name) };
         if is_dir {
-            if name == "target" || crate::vfs::is_file(p.join("Cargo.toml")) {
+            if name == "target" || super::vfs::is_file(p.join("Cargo.toml")) {
                 continue;
             }
             files(&p, &r, out);
-        } else if crate::vfs::is_file(&p) {
+        } else if super::vfs::is_file(&p) {
             out.push((r, p));
         }
     }
@@ -164,7 +164,8 @@ fn tokens(source: &str) -> Vec<Token> {
     out
 }
 
-fn includes(source: &str) -> Vec<(String, bool)> {
+/// Literal include targets and whether they come from include! (rather than a data include).
+pub fn includes(source: &str) -> Vec<(String, bool)> {
     let ts = tokens(source);
     let mut out = Vec::new();
     for (i, t) in ts.iter().enumerate() {
@@ -202,42 +203,34 @@ fn relative(root: &std::path::Path, path: &std::path::Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
-/// Library identity inputs and hashes, including transitive includes. Retain hashes, not
-/// asset contents; only the current file needs to stay in memory.
-pub fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
-    use std::collections::{BTreeMap, BTreeSet};
-    // The Rust sources of the crate's src/ tree. Not what cargo does not compile: hidden entries,
-    // `target`, a nested package (a folder with its own Cargo.toml: a fuzz or example package),
-    // and files that are not Rust (a stale Cargo.lock, artifacts, notes): a non-Rust file the
-    // crate reads is named by an include and followed below.
-    fn walk(dir: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
-        if let Ok(entries) = crate::vfs::read_dir(dir) {
-            for (name, is_dir) in entries {
-                if name.starts_with('.') { continue; }
-                let p = dir.join(&name);
-                if is_dir {
-                    if name == "target" || crate::vfs::is_file(p.join("Cargo.toml")) { continue; }
-                    walk(&p, paths);
-                } else if name.ends_with(".rs") && crate::vfs::is_file(&p) { paths.push(p); }
-            }
+// The starting tree differs for compiled inputs and provided library identities.
+fn rust_files(dir: &std::path::Path, package_root: bool, paths: &mut Vec<std::path::PathBuf>) {
+    if let Ok(entries) = super::vfs::read_dir(dir) {
+        for (name, is_dir) in entries {
+            if name.starts_with('.') { continue; }
+            let p = dir.join(&name);
+            if is_dir {
+                if name == "target" || super::vfs::is_file(p.join("Cargo.toml")) || (package_root && matches!(name.as_str(), "tests" | "benches" | "examples")) { continue; }
+                rust_files(&p, false, paths);
+            } else if name.ends_with(".rs") && super::vfs::is_file(&p) { paths.push(p); }
         }
     }
-    let root = normalize(dir);
-    let mut paths = Vec::new();
-    walk(&root.join("src"), &mut paths);
-    let mut pending: Vec<_> = paths.into_iter().map(|p| { let rust = p.extension().is_some_and(|x| x == "rs"); (p, rust) }).collect();
-    pending.push((root.join("Cargo.toml"), false));
-    if crate::vfs::is_file(root.join("build.rs")) { pending.push((root.join("build.rs"), false)); }
+}
+
+// Keep only the caller's value per file, not asset contents. A file first seen as data can
+// later be reached as Rust; scan it then, without adding or hashing it twice.
+fn follow_includes<T>(mut pending: Vec<(std::path::PathBuf, bool)>, mut value: impl FnMut(&std::path::Path, Option<&[u8]>) -> T) -> std::collections::BTreeMap<std::path::PathBuf, T> {
+    use std::collections::{BTreeMap, BTreeSet};
     let mut contents = BTreeMap::new();
     let mut scanned = BTreeSet::new();
     while let Some((path, rust)) = pending.pop() {
         let path = normalize(&path);
         // A missing literal target is absent in the manifest, so deletion is reported as removed.
-        if !crate::vfs::is_file(&path) { continue; }
+        if !super::vfs::is_file(&path) { continue; }
         if contents.contains_key(&path) && (!rust || scanned.contains(&path)) { continue; }
-        let bytes = crate::vfs::read(&path).unwrap_or_else(|e| panic!("source identity {}: {e}", path.display()));
-        contents.entry(path.clone()).or_insert_with(|| { let mut h = H(0x5eed); h.bytes(&bytes); h.0 });
-        if rust && scanned.insert(path.clone()) {
+        let bytes = rust.then(|| super::vfs::read(&path).unwrap_or_else(|e| panic!("source identity {}: {e}", path.display())));
+        contents.entry(path.clone()).or_insert_with(|| value(&path, bytes.as_deref()));
+        if let Some(bytes) = bytes.filter(|_| scanned.insert(path.clone())) {
             // `include!`, `include_str!` and `include_bytes!` are identifier tokens: a file that
             // does not contain the bytes has none (invalid UTF-8 takes the lexer as before)
             if std::str::from_utf8(&bytes).is_ok_and(|s| !s.contains("include")) { continue; }
@@ -248,7 +241,35 @@ pub fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
             }
         }
     }
-    contents.into_iter().map(|(p, hash)| (relative(&root, &p), hash)).collect()
+    contents
+}
+
+/// All compiled files of a path package, sorted by relative name (outside includes use ../).
+pub fn compiled_files(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    let root = normalize(dir);
+    let mut paths = Vec::new();
+    rust_files(if root.as_os_str().is_empty() { std::path::Path::new(".") } else { &root }, true, &mut paths);
+    let mut pending: Vec<_> = paths.into_iter().map(|p| (p, true)).collect();
+    pending.push((root.join("Cargo.toml"), false));
+    let mut out: Vec<_> = follow_includes(pending, |_, _| ()).into_keys().map(|p| (relative(&root, &p), p)).collect();
+    out.sort();
+    out
+}
+
+/// Library identity inputs and hashes, including transitive includes. Retain hashes, not
+/// asset contents; only the current file needs to stay in memory.
+pub fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
+    let root = normalize(dir);
+    let mut paths = Vec::new();
+    rust_files(&root.join("src"), false, &mut paths);
+    let mut pending: Vec<_> = paths.into_iter().map(|p| (p, true)).collect();
+    pending.push((root.join("Cargo.toml"), false));
+    if super::vfs::is_file(root.join("build.rs")) { pending.push((root.join("build.rs"), false)); }
+    follow_includes(pending, |path, bytes| {
+        let bytes = bytes.map(std::borrow::Cow::Borrowed).unwrap_or_else(|| std::borrow::Cow::Owned(
+            super::vfs::read(path).unwrap_or_else(|e| panic!("source identity {}: {e}", path.display()))));
+        let mut h = H(0x5eed); h.bytes(&bytes); h.0
+    }).into_iter().map(|(p, hash)| (relative(&root, &p), hash)).collect()
 }
 
 /// Sorted data records: (package including host role and version, relative file or metadata,

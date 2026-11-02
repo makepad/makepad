@@ -374,14 +374,14 @@ impl FrameBuilder {
         id
     }
 
-    fn buffer_create(&mut self, kind: u16, size: u64, origin: Attr) -> Id {
+    pub(crate) fn buffer_create(&mut self, kind: u16, size: u64, origin: Attr) -> Id {
         let id = self.bufs.alloc();
         self.w.buffer_create(id, kind, size, origin);
         self.stats.buffer_creates += 1;
         id
     }
 
-    fn buffer_destroy(&mut self, id: Id) {
+    pub(crate) fn buffer_destroy(&mut self, id: Id) {
         self.w.buffer_destroy(id);
         self.bufs.release(id);
     }
@@ -408,6 +408,9 @@ impl FrameBuilder {
     /// (the retained ones' draw items are returned: they upload on their next draw); render
     /// targets keep their ids and are painted again. Frames the old device dropped count as done.
     pub(crate) fn device_reset(&mut self, reupload: impl Fn(usize, u64) -> bool) -> Vec<(usize, usize)> {
+        for pipe in &mut self.pipes {
+            if pipe.first_shader == usize::MAX { pipe.ready = false; pipe.failed = false; }
+        }
         let slots: Vec<usize> = self.tex.iter().filter(|(slot, r)| reupload(**slot, r.gen)).map(|(slot, _)| *slot).collect();
         for slot in slots {
             self.texture_destroy(slot);
@@ -446,6 +449,23 @@ impl FrameBuilder {
     }
 
     // ---- pipelines
+
+    pub(crate) fn compute_pipeline(&mut self, name: &str, blob: &[u8]) -> Id {
+        let id = Id::new(self.pipes.len() as u32, 1);
+        let label = self.intern(name);
+        self.w.pipeline_create(id, self.info.dialect, Attr { label, ..Default::default() }, blob);
+        self.pipes.push(PipeRec { id, first_shader: usize::MAX, ready: false, drawn_unready: false, failed: false, pick: None });
+        id
+    }
+    pub(crate) fn owned_texture_update(&mut self, id: Id, rect: [u32; 4], bytes: Vec<u8>) {
+        self.staging.push(bytes);
+        self.w.texture_update(id, 0, rect, 0, self.staging.last().unwrap());
+    }
+
+    pub(crate) fn owned_buffer_update(&mut self, id: Id, offset: u64, bytes: Vec<u8>) {
+        self.staging.push(bytes);
+        self.w.buffer_update(id, offset, self.staging.last().unwrap());
+    }
 
     /// Whether the app paints again: a draw was built before the pipeline was ready (the HAL
     /// skipped it), or the HAL says it is ready again, which it does when the state for another
@@ -516,6 +536,7 @@ impl FrameBuilder {
 pub(crate) fn hal_format(pixel: &TexturePixel) -> Option<u32> {
     Some(match pixel {
         TexturePixel::BGRAu8 => format::BGRA8,
+        TexturePixel::RGBAu8 => format::RGBA8,
         TexturePixel::RGBAf16 => format::RGBA16F,
         TexturePixel::RGBAf32 => format::RGBA32F,
         TexturePixel::Ru8 => format::R8,
@@ -846,7 +867,7 @@ impl Cx {
         let Some(alloc) = tex.alloc.clone() else { return Id::NONE };
         let Some(fmt) = hal_format(&alloc.pixel) else { return Id::NONE };
         let layers = if matches!(alloc.category, TextureCategory::RenderCube) { 6 } else { views.max(1) };
-        let mut flags = usage::RENDER_TARGET;
+        let mut flags = if matches!(tex.format, TextureFormat::Storage { .. }) { usage::STORAGE } else { usage::RENDER_TARGET };
         if !depth || matches!(alloc.category, TextureCategory::DepthBufferSampled) {
             flags |= usage::SAMPLED;
         }
@@ -871,6 +892,9 @@ impl Cx {
             }
         }
         let format = &self.textures[id].format;
+        if let TextureFormat::Storage { width, height, .. } = *format {
+            return self.fb_attachment(fb, id, width, height, false);
+        }
         if format.is_vec() {
             return self.fb_vec_texture(fb, id);
         }
@@ -1037,6 +1061,7 @@ impl Cx {
                 layout.extend([input.byte_offset as u32, input.attr_format as u32, input.slots as u32]);
             }
             let desc = PipelineDesc {
+                storage_push_size: mapping.storage_push_size,
                 color_formats: [pipeline_color_format(mapping.color_format), 0, 0, 0],
                 blend: (if mapping.blend_op == DrawShaderBlendOp::Max { pipeline_blend::MAX } else { 0 })
                     | (if matches!(mapping.color_format, DrawShaderColorFormat::Bgra8NoBlend | DrawShaderColorFormat::Rf16 | DrawShaderColorFormat::Ru8) { pipeline_blend::RAW } else { 0 }),
@@ -1051,7 +1076,8 @@ impl Cx {
                 varyings: mapping.varying_total_slots as u32,
                 ..Default::default()
             };
-            let blob = CmdWriter::pipeline_blob(desc, code_bytes, &bindings, &layout);
+            let storage: Vec<_> = mapping.storage_buffers.iter().map(|b| makepad_hal::StorageBinding { index: b.index, offset: b.offset, writable: 0 }).collect();
+            let blob = CmdWriter::draw_pipeline_blob(desc, code_bytes, &bindings, &layout, &storage);
             let pipe = fb.pipes.len();
             let id = Id::new(pipe as u32, 1);
             // Cx emits the dialect the HAL advertised. Headless accepts the MSL fallback.
@@ -1071,7 +1097,7 @@ impl Cx {
                 let mut pick_desc = desc;
                 pick_desc.color_formats = std::array::from_fn(|i| if desc.outputs & (1 << i) != 0 { format::BGRA8 } else { 0 });
                 pick_desc.blend = pipeline_blend::RAW;
-                let pick_blob = CmdWriter::pipeline_blob(pick_desc, code, &bindings, &layout);
+                let pick_blob = CmdWriter::draw_pipeline_blob(pick_desc, code, &bindings, &layout, &storage);
                 fb.w.pipeline_create(pick_id, dialect, attr, &pick_blob);
                 fb.pipes.push(PipeRec { id: pick_id, first_shader: index, ready: false, drawn_unready: false, failed: false, pick: None });
                 fb.pipes[pipe].pick = Some(pick_index);
@@ -1090,6 +1116,10 @@ impl Cx {
     pub(crate) fn fb_build(&mut self, fb: &mut FrameBuilder, passes: &[DrawPassId], time_now: f32, input_ns: u64) -> Vec<u64> {
         self.draw_owners_follow_profiler();
         let mut built = Vec::new();
+        if !self.compute_prepare(fb, None) { return built; }
+        if self.hal.compute.has_unattached() {
+            built.extend(self.compute_encode(fb, None));
+        }
         for &pass_id in passes {
             let uniforms_gen = self.next_uniform_gen();
             self.passes[pass_id].set_time(time_now, uniforms_gen);
@@ -1097,6 +1127,7 @@ impl Cx {
                 built.push(serial);
             }
         }
+        self.hal_compute_readbacks(fb);
         self.fb_sweep(fb);
         if !built.is_empty() {
             self.draw_owners_frame_done();
@@ -1155,6 +1186,7 @@ impl Cx {
     /// One pass into one FramePacket. None when the pass paints nothing now.
     fn fb_pass(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId, input_ns: u64) -> Option<u64> {
         let picking = self.pick.paint.is_some();
+        if !picking && !self.compute_prepare(fb, Some(pass_id)) { return None; }
         let build_start = makepad_hal::clock_ns();
         let Some(list_id) = self.passes[pass_id].main_draw_list_id else {
             // a frozen texture: its producer detached and dropped its list
@@ -1305,6 +1337,7 @@ impl Cx {
         let g = self.next_uniform_gen();
         self.passes[pass_id].set_dpi_factor(dpi, g);
 
+        if !picking { self.compute_encode(fb, Some(pass_id)); }
         let serial = self.textures.1.serials.submit();
 
         let mut pass = Pass { color: [Id::NONE; 4], depth: Id::NONE, ..Default::default() };
@@ -1624,6 +1657,7 @@ impl Cx {
             self.passes[pass_id].repaint_next = true;
         }
         let slots = sh.mapping.instances.total_slots;
+        let indirect = self.draw_lists[list_id].draw_items[item_id].kind.draw_call().is_some_and(|c| c.indirect_draw.is_some());
 
         // the paint-order counter: update the call's zbias uniform, then step
         let z = *zbias;
@@ -1644,7 +1678,7 @@ impl Cx {
                 item.instances.as_ref().map_or(0, |v| v.len() / slots)
             };
         }
-        if instances == 0 || slots == 0 {
+        if (instances == 0 || slots == 0) && !(indirect && slots == 0) {
             // nothing to draw, nothing owed: the content is consumed as it is
             let (list, _) = self.draw_lists.list_and_upload_budget(list_id);
             let item = list.draw_items.binding_mut(item_id);
@@ -1745,16 +1779,15 @@ impl Cx {
         }
 
         // the instances: inline floats, a retained publication's buffer, or a shared block's
-        let inst = match self.fb_instances(fb, list_id, item_id, slots, instances, serial) {
-            Some(inst) => inst,
-            None => return,
+        let inst = if indirect && slots == 0 { Inst::inline(Slice::EMPTY, 1) } else {
+            match self.fb_instances(fb, list_id, item_id, slots, instances, serial) { Some(inst) => inst, None => return }
         };
 
         // the instance ranges, clamped to what is resident
         let (list, _) = self.draw_lists.list_and_upload_budget(list_id);
         let item = list.draw_items.binding_mut(item_id);
         let mut inst_ranges = makepad_hal::Range::default();
-        if !item.instance_ranges.is_empty() {
+        if !indirect && !item.instance_ranges.is_empty() {
             fb.ranges.clear();
             let count = instances as u32;
             for r in &item.instance_ranges {
@@ -1797,7 +1830,11 @@ impl Cx {
             flags |= Draw::INDEX_U32;
         }
         let scissor = call.options.scissor.map_or([f32::NAN; 4], |s| s.map(|v| v as f32));
+        let storage: Vec<_> = sh.mapping.storage_buffers.iter().map(|binding| call.storage_buffers.iter().find(|b| b.0 == binding.name).map_or(Id::NONE, |b| b.1.hal_id())).collect();
+        let storage_buffers = fb.w.put_ids(&storage);
+        let (indirect_buffer, indirect_offset) = call.indirect_draw.as_ref().map_or((Id::NONE, 0), |b| (b.0.hal_id(), b.1));
         let draw = Draw {
+            storage_buffers, indirect_buffer, indirect_offset,
             pipeline: fb.pipes[pipe_index].id,
             vb,
             ib,
@@ -1821,7 +1858,7 @@ impl Cx {
             list: list_id.index() as u32,
             item: item_id as u32,
             list_name,
-            bounds: instance_bounds(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px),
+            bounds: if indirect { [f32::NAN; 4] } else { instance_bounds(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px) },
         };
         if dump || sh.mapping.flags.debug_draw {
             let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()).unwrap_or(&[]);
@@ -1988,6 +2025,7 @@ impl Cx {
     /// Release CPU `Vec` backing of `discard_cpu_after_upload` textures and retired pool slots
     /// once `hal_submit` has consumed any slices encoded in `fb.w`.
     pub(crate) fn fb_after_submit(&mut self) {
+        self.compute_after_submit();
         let discard = std::mem::take(&mut self.hal.frames.post_submit_discard_textures);
         for id in discard {
             if self.textures.0.is_live_generation(id.0, id.generation()) {
@@ -2162,6 +2200,10 @@ mod tests {
             draw_call_uniforms: DrawCallUniforms::default(),
             geometry_id: None,
             dyn_uniforms: vec![0.0; 4],
+            #[cfg(not(target_arch = "wasm32"))]
+            storage_buffers: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            indirect_draw: None,
             texture_slots: Default::default(),
             uniform_buffer_slots: Default::default(),
             instance_dirty: true,

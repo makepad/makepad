@@ -382,7 +382,7 @@ const LOCKS: usize = 64;
 pub struct Types {
     image: Option<collected::MappedTypes>,
     lists: list::Lists,
-    pub(crate) consts: relax_session::sync::Mutex<crate::consts::ConstInterner>,
+    pub(crate) consts: crate::consts::ConstInterner,
     regions: Regions,
     free_regions: std::sync::atomic::AtomicBool,
     chunks: Box<[std::sync::atomic::AtomicPtr<Entry>]>,
@@ -433,7 +433,7 @@ impl Types {
         let t = Types {
             image: None,
             lists: list::Lists::new(),
-            consts: relax_session::sync::Mutex::new(crate::consts::ConstInterner::default()),
+            consts: crate::consts::ConstInterner::default(),
             regions: Regions::default(),
             free_regions: std::sync::atomic::AtomicBool::new(false),
             chunks: (0..MAX_CHUNKS).map(|_| std::sync::atomic::AtomicPtr::new(std::ptr::null_mut())).collect(),

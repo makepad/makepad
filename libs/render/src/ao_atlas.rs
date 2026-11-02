@@ -35,7 +35,7 @@
 
 use makepad_draw::{
     makepad_math::*,
-    makepad_platform::thread::{Lane, TaskPool},
+    makepad_platform::thread::{TaskPool},
     Cx,
 };
 
@@ -713,7 +713,7 @@ fn bake_into_authored_inner(
                 let _ = tx.send((ci, bytes));
             };
             match pool {
-                Some(pool) => pool.fan_out(Lane::Heavy, charts.len(), work),
+                Some(pool) => pool.fan_out(charts.len(), work),
                 None => (0..charts.len()).for_each(work),
             }
             drop(tx);

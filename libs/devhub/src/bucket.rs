@@ -104,9 +104,11 @@ fn range(repo: &Path, base: &str, tip: &str) -> Result<HashSet<String>, String> 
     crate::orch::git(repo, &["rev-list", &format!("{base}..{tip}")]).map(|s| s.lines().map(str::to_string).collect())
 }
 
+/// The landings between two tips: a commercial-only landing moves main, not work.
 fn landings(repo: &Path, base: &Pair, tip: &Pair, entries: &[Entry]) -> Result<Vec<Entry>, String> {
     let work = range(repo, &base.work, &tip.work)?;
-    Ok(entries.iter().filter(|e| entry_pair(&e.landed).is_some_and(|p| work.contains(&p.work))).cloned().collect())
+    let main = range(&repo.join("apps/commercial"), &base.main, &tip.main)?;
+    Ok(entries.iter().filter(|e| entry_pair(&e.landed).is_some_and(|p| work.contains(&p.work) || main.contains(&p.main))).cloned().collect())
 }
 
 fn attribute(repo: &Path, entries: &[Entry], failing: &[String]) -> (Vec<Vec<String>>, bool) {
@@ -144,7 +146,7 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
     let name = name.to_string();
     let thread = std::thread::Builder::new().name(format!("devhub-bucket-{name}"));
     if let Err(e) = thread.spawn(move || {
-        let machine = crate::proto::default_machine_name();
+        let machine = makepad_devhub_conf::default_machine_name();
         let store = Store::open_quiet(&home, "");
         let latest = ledger(&home, usize::MAX).iter().find_map(|line| {
             let v = makepad_strict_json::parse(line.as_bytes()).ok()?;
@@ -271,11 +273,14 @@ pub fn fast(repo: PathBuf, proofs: Arc<crate::gateproof::Store>) -> Run {
     })
 }
 
-/// Boots the apps the landings touched on the hot Mac's warm JIT, right after each landing.
+/// Boots the apps the landings touched on a Linux node's warm JIT (one that presents), right
+/// after each landing. The Macs take only work that requires macOS.
 pub fn hot(repo: PathBuf) -> Run {
     Arc::new(move |base, tip, log| {
         let base = base.expect("hot bucket needs a base");
-        let lease = ["lease", "test", "--needs", "role=hot,os=macos", "--cost", "small", "--priority", "interactive", "--lane", "landq-hot", "--rev", &tip.rev(), "--"];
+        // a warm boot of one or two apps needs far less than a test lease's default 6 cores / 7 GB
+        let needs = format!("{GATE_NEEDS},gui=1");
+        let lease = ["lease", "test", "--needs", &needs, "--cost", "small", "--cores", "3", "--ram-gb", "5", "--priority", "interactive", "--lane", "landq-hot", "--rev", &tip.rev(), "--"];
         let gate = ["bash", "tools/run/fixture/land_gate.sh", "hot", &base.work, &base.main];
         let (status, text) = lease_run(&repo, &lease, &gate, &[], log, base, tip);
         verdict(status, &text, log)

@@ -18,7 +18,10 @@ use crate::shader_output::*;
 
 use makepad_live_id::{id, LiveId};
 
-/// What the platform binds a draw shader's resources by.
+/// What the platform binds a draw shader's resources by. Plain data that crosses the
+/// provided-crate boundary in `DrawSpirvView` (`IrDrawSpirvResult::view`): no Vec or String
+/// here, or JIT code cannot read it. The storage buffers are the output's
+/// (`ShaderOutput::storage_buffers`), which the platform binds by.
 #[relax_api(plain)]
 #[derive(Clone, Debug, Default)]
 pub struct IrDrawInfo {
@@ -518,7 +521,7 @@ pub fn build_draw_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl
                 }
                 next += 1;
             }
-            ShaderIoKind::StorageBuffer(_) => next += 1,
+            ShaderIoKind::StorageBuffer(_) => {},
             _ => {}
         }
     }
@@ -1411,6 +1414,7 @@ fn gl_assign_reconstructed(b: &mut Bld, types: &impl crate::shader_types::Shader
 /// What the HLSL printer needs beyond the IR.
 #[derive(Clone, Debug, Default)]
 pub struct HlslDrawInfo {
+    pub storage_buffers: Vec<crate::shader_ir_compute::ComputeBufferBinding>,
     pub instance_slots: usize,
     /// The semantic of each `vertex_main` input (D3D11's input layout names
     /// geometry `GEOM<letter><chunk>`, one letter per geometry input).
@@ -1460,6 +1464,7 @@ pub fn index_to_semantic(index: usize) -> String {
 /// colour).
 pub fn build_hlsl_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl crate::shader_types::ShaderTypes) -> HlslDrawInfo {
     let mut info = HlslDrawInfo::default();
+    info.storage_buffers = output.storage_buffers.clone();
     let mut instance = Vec::new();
     let mut offset = 0;
     for rust in [false, true] {
@@ -1820,6 +1825,7 @@ impl IrDrawInfo {
 #[relax_api(plain)]
 #[derive(Clone, Debug, Default)]
 pub struct MetalDrawInfo {
+    pub storage_buffers: Vec<crate::shader_ir_compute::ComputeBufferBinding>,
     /// Words of one instance record (`buffer(1)`).
     pub instance_words: usize,
     /// Words of one vertex (`buffer(0)`, the geometry's packed layout).
@@ -1834,6 +1840,7 @@ pub struct MetalDrawInfo {
 /// backend. No XR variant and no depth clip.
 pub fn build_metal_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl crate::shader_types::ShaderTypes) -> MetalDrawInfo {
     let mut info = MetalDrawInfo::default();
+    info.storage_buffers = output.storage_buffers.clone();
     let mut geometry = Vec::new();
     let mut offset = 0;
     for (i, io) in output.io.iter().enumerate() {

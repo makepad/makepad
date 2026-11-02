@@ -24,7 +24,7 @@ fn every_command_round_trips() {
     let expected = sample_cmds(&mut w);
     assert_eq!(expected.len(), CMD_TABLE.len());
     assert_eq!(w.cmds().len(), CMD_TABLE.len());
-    // 57 core (including ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
+    // 58 core (including BufferReadback, ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
     // timer start/stop counted separately), 6 embedded, 4 domains, 9 media, 3 native layers, 2 accessibility, 3 fonts, 9 direct display/input
     // (incl. DirectDisplayArrangement, DirectDisplayPacing, DirectTapToClick, DirectDisplayVirtual tag 153), 2 GL interop, 3 mobile system UI (MobileUi,
     // SelectionHandles, Haptic), 1 system back (BackUnhandled), 1 font touch (GlyphTouch, tag 150), 3 tray (TraySet,
@@ -38,7 +38,7 @@ fn every_command_round_trips() {
     assert_eq!(media, 9);
     assert_eq!(fonts, 3);
     assert!(media <= 15, "the media section is budgeted at 15 commands, it has {media}");
-    assert_eq!(CMD_TABLE.len(), 57 + 6 + 4 + media + fonts + 9 + 2 + 4 + 1 + 3 + 3 + 2 + 3 + 1 + 4 + 1 + 1 + 1 + 1);
+    assert_eq!(CMD_TABLE.len(), 58 + 6 + 4 + media + fonts + 9 + 2 + 4 + 1 + 3 + 3 + 2 + 3 + 1 + 4 + 1 + 1 + 1 + 1);
     for ((cmd, want), (tag, name, _)) in w.cmds().iter().zip(&expected).zip(CMD_TABLE) {
         assert_eq!(cmd.tag, *tag, "{name}");
         let got = cmd.decode(w.arena()).unwrap_or_else(|| panic!("{name} does not decode"));

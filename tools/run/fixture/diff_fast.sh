@@ -39,7 +39,7 @@ verify=; [ "${DIFF_VERIFY:-1}" = 0 ] || verify=MAKEPAD_RUN_VERIFY_PASSES=1
 [ "${1:-}" = "--job" ] || { work=$(mktemp -d "${TMPDIR:-/tmp}/diff_fast.XXXXXX") || exit 2; }
 mkdir -p "$cache"
 progs=${DIFF_PROGRAMS:-$(cd "$here/diff" && ls *.rs | sed 's/\.rs$//')}
-known=${DIFF_KNOWN:-$(cd "$here/known" && ls *.rs | sed 's/\.rs$//')}
+known=${DIFF_KNOWN:-$(ls "$here/known" 2>/dev/null | sed -n 's/\.rs$//p')}
 rv=$(rustc -V)
 export M here root cache work sleepms rv verify
 # one job: native build (cached) + native run, or a tier run. $1 = program, $2 = native|base|o3

@@ -412,6 +412,20 @@ fn preboot_alongside(ctx: &Arc<Ctx>, x: Show, work: String, main: String) {
 /// The newest JIT inputs a prewarm was started for.
 static PREWARMED: Mutex<String> = Mutex::new(String::new());
 
+/// The Mac's own prewarm build running now (the group its cargo leads), and whether a master
+/// restart stopped it: the restart's build waits on the same cargo lock (17 min behind three
+/// prewarms, the master down meanwhile, 11-02).
+static PREWARM: Mutex<(Option<u32>, bool)> = Mutex::new((None, false));
+
+/// Stops the Mac's prewarm build for a master restart (`roll::restart_master`, which holds its
+/// lock: no prewarm starts until the master has exec'd). The next landing prewarms again.
+pub fn stop_mac_prewarm() -> bool {
+    let mut p = PREWARM.lock().unwrap();
+    let Some(pid) = p.0 else { return false };
+    p.1 = true;
+    makepad_remote::group::signal(pid, false)
+}
+
 /// A landing that changes the JIT's sources: built here and on each Mac devbox now, in the
 /// background, so that a show finds it ready. A box that is busy gets it when it is free.
 fn prewarm_jit(ctx: &Arc<Ctx>, work: &str) {
@@ -420,7 +434,7 @@ fn prewarm_jit(ctx: &Arc<Ctx>, work: &str) {
     if std::mem::replace(&mut *PREWARMED.lock().unwrap(), key.clone()) == key {
         return;
     }
-    let local = ctx.clone();
+    let (local, mine) = (ctx.clone(), key.clone());
     let _ = std::thread::Builder::new().name("devhub-show-prewarm".into()).spawn(move || {
         // the user's own machine: a prewarm waits until the person has left the keyboard and mouse
         // for 2 min, then builds in the background QoS class at the lowest priority on 2 jobs
@@ -428,10 +442,31 @@ fn prewarm_jit(ctx: &Arc<Ctx>, work: &str) {
         while hid_idle_s().is_some_and(|s| s < 120) {
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
-        let t = std::time::Instant::now();
         let mut build = if cfg!(target_os = "macos") { let mut c = makepad_remote::group::command("taskpolicy"); c.args(["-b", "nice", "-n", "19"]); c } else { let mut c = makepad_remote::group::command("nice"); c.args(["-n", "19"]); c };
-        let built = build.arg(cargo()).args(["build", "--profile", "host", "-q", "-j2", "-p", "makepad-run", "--bin", "makepad"]).current_dir(&local.repo).env("CARGO_INCREMENTAL", "0").stdin(std::process::Stdio::null()).output();
+        build.arg(cargo()).args(["build", "--profile", "host", "-q", "-j2", "-p", "makepad-run", "--bin", "makepad"]).current_dir(&local.repo).env("CARGO_INCREMENTAL", "0").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        makepad_remote::group::detach(&mut build);
+        // not while the master restarts; one at a time; the newest landing's only (three
+        // queued behind each other on the cargo lock, 11-02)
+        let child = loop {
+            {
+                let _restart = super::roll::RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
+                let mut p = PREWARM.lock().unwrap();
+                if *PREWARMED.lock().unwrap() != mine {
+                    return;
+                }
+                if p.0.is_none() {
+                    let child = build.spawn();
+                    *p = (child.as_ref().ok().map(|c| c.id()), false);
+                    break child;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        };
+        let t = std::time::Instant::now();
+        let built = child.and_then(|c| c.wait_with_output());
+        let stopped = std::mem::replace(&mut *PREWARM.lock().unwrap(), (None, false)).1;
         match built {
+            _ if stopped => event(&local, Sev::Info, "show: the JIT's prewarm on the Mac gave way to the master's restart; the next landing prewarms again".to_string(), None),
             Ok(o) if o.status.success() => event(&local, Sev::Info, format!("show: the JIT is prewarmed on the Mac in {} s", t.elapsed().as_secs()), None),
             Ok(o) => event(&local, Sev::Warn, format!("show: the JIT's prewarm on the Mac failed: {}", String::from_utf8_lossy(&o.stderr).lines().find(|l| l.starts_with("error")).unwrap_or("")), None),
             Err(e) => event(&local, Sev::Warn, format!("show: the JIT's prewarm on the Mac: {e}"), None),
@@ -442,7 +477,7 @@ fn prewarm_jit(ctx: &Arc<Ctx>, work: &str) {
     for node in macs {
         let (ctx, rev, key) = (ctx.clone(), rev.clone(), key.clone());
         let _ = std::thread::Builder::new().name("devhub-show-prewarm".into()).spawn(move || {
-            let spec = super::leg::Spec { since_ms: None, only: true, lane: "show-prewarm".into(), agent: "devhub-show".into(), kind: crate::lease::Kind::Build, needs: String::new(), prio: super::leg::BACKGROUND_PRIO, rev, repo_dir: ctx.repo.to_string_lossy().into_owned(), node: Some(node.clone()) };
+            let spec = super::leg::Spec { since_ms: None, only: true, lane: "show-prewarm".into(), agent: "devhub-show".into(), kind: crate::lease::Kind::Build, needs: "os=macos".into(), prio: super::leg::BACKGROUND_PRIO, rev, repo_dir: ctx.repo.to_string_lossy().into_owned(), node: Some(node.clone()) };
             // (a newer landing's prewarm takes over)
             let stale = || *PREWARMED.lock().unwrap() != key;
             let Ok(held) = super::leg::Held::acquire(&spec, &mut |_| {}, &stale) else { return };
@@ -790,8 +825,14 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             // a registry name (`calculator`, what the dock calls it) is its package
             // (`makepad-app-calculator`): `makepad run` takes packages
             let app = makepad_app_registry::find(&app).map_or(app, |a| a.package.to_string());
-            let dev = device(ctx, &s("on"))?;
             let after: Vec<String> = v.get("after").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+            // nothing starts on a device for a name no Cargo.toml has, landed or in a branch the
+            // show waits for (`show 518` started a pre-boot on the Mac)
+            if package_dir(ctx, &app, "work", "main").is_none() && !after.iter().any(|b| package_dir(ctx, &app, b, b).is_some()) {
+                let branches = if after.is_empty() { String::new() } else { format!(" or {}", after.join(", ")) };
+                return Err(format!("show: no package `{app}` at work or commercial main{branches} (an inbox event: `devhub show <its id=>`)"));
+            }
+            let dev = device(ctx, &s("on"))?;
             let cond = if after.is_empty() { Cond::None } else { super::after::parse_cond(ctx, &after.iter().map(String::as_str).collect::<Vec<_>>())? };
             let replace = v.get("replace").and_then(|x| x.as_bool()).unwrap_or(false);
             let pin = v.get("pin").and_then(|x| x.as_bool()).unwrap_or(false);
@@ -903,9 +944,15 @@ mod tests {
         g(&["config", "user.name", "t"]);
         g(&["commit", "-q", "--allow-empty", "-m", "base"]);
         g(&["branch", "rc-x"]);
+        std::fs::create_dir_all(repo.join("apps/fab")).unwrap();
+        std::fs::write(repo.join("apps/fab/Cargo.toml"), "[package]\nname = \"makepad-fab\"\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "fab"]);
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
         let ctx = Arc::new(Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)), leases, machine: "mymac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: repo.clone(), home: home.clone() });
         let add = |on: &str| serve(&ctx, &format!("show add {{\"app\":\"makepad-fab\",\"on\":\"{on}\",\"after\":[\"landed\",\"rc-x\"],\"by\":\"t\"}}"));
+        // a name no Cargo.toml has starts nothing (`devhub show 518`)
+        assert!(serve(&ctx, "show add {\"app\":\"518\",\"on\":\"mac\",\"by\":\"t\"}").unwrap_err().contains("no package `518`"));
         let r = add("mymac").unwrap();
         assert!(r.contains("\"device\":\"mac\"") && r.contains("\"state\":\"waiting\""), "{r}");
         assert!(add("nowhere").unwrap_err().contains("no device nowhere"));

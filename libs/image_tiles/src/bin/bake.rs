@@ -11,7 +11,7 @@
 //! made to be called from (and customised by) your own tools.
 
 use makepad_image_tiles::bake::{bake, parse_manifest, BakeOptions};
-use makepad_widgets_core::makepad_platform::thread::Lane;
+use makepad_widgets_core::makepad_platform::thread::Class;
 use makepad_widgets_core::Cx;
 use std::path::PathBuf;
 
@@ -52,7 +52,7 @@ fn main() {
     let bake_pool = pool.clone();
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
     let task = pool
-        .submit(Lane::Heavy, move || {
+        .submit(Class::Background, move || {
             let result = bake(&root, &sources, &options, &mut |line| println!("{line}"), &bake_pool);
             let _ = result_tx.send(result);
         })

@@ -17,7 +17,7 @@
 
 use crate::{roll, still};
 use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
+use makepad_widgets::makepad_platform::thread::{Class, TaskHandle};
 use makepad_widgets::makepad_platform::video::{camera_upright_quarter_turns, CameraBgraFrame, VideoFormat, VideoInputDesc};
 use makepad_widgets::*;
 use std::path::PathBuf;
@@ -413,7 +413,7 @@ impl CameraView {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_millis())
             .unwrap_or(0);
-        let job = cx.task_pool().submit(Lane::Heavy, move || {
+        let job = cx.task_pool().submit(Class::Background, move || {
             let picture = still::develop(&frame, turns)?;
             let jpeg = still::encode_jpeg(&picture, still::JPEG_QUALITY)?;
             let path = roll::save_shot(&roll::roll_dir(), &time, millis, &jpeg)?;

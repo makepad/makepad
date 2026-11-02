@@ -229,6 +229,8 @@ pub fn ensure_default_font() {}
 
 pub fn music_font() -> &'static MusicFont {
     MUSIC_FONT.get_or_init(|| {
+        // Document and spacing callers can resolve the font before a widget is created.
+        ensure_default_font();
         let font = load_music_font();
         // One line, whichever way it went: a missing font is a degraded look,
         // never a failed start.

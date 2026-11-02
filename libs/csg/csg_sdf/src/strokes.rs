@@ -39,7 +39,8 @@
 //! brick or more away from all of its points (the same rule as the program's grid).
 
 use crate::shape::P3;
-use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// The index's brick edge (mm): the paint program's grid cell (eight paint samples at 0.4 mm).
 pub const BRICK: f64 = 3.2;
@@ -49,6 +50,248 @@ pub const MAGIC: [u8; 8] = *b"FABSTRK1";
 pub const VERSION: u32 = 1;
 const HEADER: usize = 80;
 const RECORD: usize = 28;
+const CHUNK: usize = 256;
+// A u64 hash has at most thirteen five-bit trie levels.
+const TRIE_LEVELS: usize = 13;
+
+#[derive(Clone)]
+struct ChunkVec<T: Clone> {
+    chunks: Vec<Arc<Vec<T>>>,
+    len: usize,
+}
+
+impl<T: Clone> Default for ChunkVec<T> {
+    fn default() -> Self {
+        Self { chunks: Vec::new(), len: 0 }
+    }
+}
+
+impl<T: Clone> ChunkVec<T> {
+    fn push(&mut self, value: T) {
+        if self.len % CHUNK == 0 {
+            let mut chunk = Vec::with_capacity(CHUNK);
+            chunk.push(value);
+            self.chunks.push(Arc::new(chunk));
+        } else {
+            Arc::make_mut(self.chunks.last_mut().unwrap()).push(value);
+        }
+        self.len += 1;
+    }
+
+    fn get(&self, i: usize) -> Option<&T> {
+        if i < self.len { Some(&self.chunks[i / CHUNK][i % CHUNK]) } else { None }
+    }
+
+    fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        if i < self.len { Some(&mut Arc::make_mut(&mut self.chunks[i / CHUNK])[i % CHUNK]) } else { None }
+    }
+
+    fn last(&self) -> Option<&T> {
+        self.len.checked_sub(1).and_then(|i| self.get(i))
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn truncate(&mut self, len: usize) {
+        if len >= self.len {
+            return;
+        }
+        self.chunks.truncate(len.div_ceil(CHUNK));
+        if len % CHUNK != 0 {
+            Arc::make_mut(self.chunks.last_mut().unwrap()).truncate(len % CHUNK);
+        }
+        self.len = len;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        self.chunks.iter().flat_map(|chunk| chunk.iter())
+    }
+}
+
+#[derive(Clone, Default)]
+struct PMap {
+    root: Option<Arc<PNode>>,
+    len: usize,
+}
+
+#[derive(Clone)]
+enum PNode {
+    Leaf { key: u64, value: Arc<Vec<Entry>> },
+    Branch { bitmap: u32, children: Vec<Arc<PNode>> },
+}
+
+fn index_hash(key: u64) -> u64 {
+    key.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+fn index_bit(hash: u64, shift: u32) -> u32 {
+    // High bits spread the packed brick coordinates across the root.
+    1u32 << ((hash << shift) >> 59)
+}
+
+impl PNode {
+    fn leaf(key: u64, update: impl FnOnce(&mut Vec<Entry>)) -> Arc<Self> {
+        let mut value = Vec::new();
+        update(&mut value);
+        Arc::new(Self::Leaf { key, value: Arc::new(value) })
+    }
+
+    fn join(a: Arc<Self>, ah: u64, b: Arc<Self>, bh: u64, shift: u32) -> Arc<Self> {
+        let abit = index_bit(ah, shift);
+        let bbit = index_bit(bh, shift);
+        let children = if abit == bbit {
+            vec![Self::join(a, ah, b, bh, shift + 5)]
+        } else if abit < bbit {
+            vec![a, b]
+        } else {
+            vec![b, a]
+        };
+        Arc::new(Self::Branch { bitmap: abit | bbit, children })
+    }
+
+    fn update(node: &mut Arc<Self>, key: u64, hash: u64, shift: u32, update: impl FnOnce(&mut Vec<Entry>)) -> bool {
+        match Arc::make_mut(node) {
+            Self::Leaf { key: stored, value } if *stored == key => {
+                update(Arc::make_mut(value));
+                false
+            }
+            Self::Leaf { key: stored, .. } => {
+                let old_hash = index_hash(*stored);
+                *node = Self::join(node.clone(), old_hash, Self::leaf(key, update), hash, shift);
+                true
+            }
+            Self::Branch { bitmap, children } => {
+                let bit = index_bit(hash, shift);
+                let i = (*bitmap & (bit - 1)).count_ones() as usize;
+                if *bitmap & bit == 0 {
+                    children.insert(i, Self::leaf(key, update));
+                    *bitmap |= bit;
+                    true
+                } else {
+                    Self::update(&mut children[i], key, hash, shift + 5, update)
+                }
+            }
+        }
+    }
+
+    /// Retain entries at one key, returning whether this node is empty.
+    fn retain(node: &mut Arc<Self>, key: u64, hash: u64, shift: u32, len: &mut usize, keep: &mut impl FnMut(&Entry) -> bool) -> bool {
+        match Arc::make_mut(node) {
+            Self::Leaf { key: stored, value } => {
+                if *stored != key {
+                    return false;
+                }
+                Arc::make_mut(value).retain(keep);
+                if value.is_empty() {
+                    *len -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::Branch { bitmap, children } => {
+                let bit = index_bit(hash, shift);
+                if *bitmap & bit == 0 {
+                    return false;
+                }
+                let i = (*bitmap & (bit - 1)).count_ones() as usize;
+                if Self::retain(&mut children[i], key, hash, shift + 5, len, keep) {
+                    children.remove(i);
+                    *bitmap &= !bit;
+                }
+                if children.is_empty() {
+                    return true;
+                }
+                // A leaf can move up; a branch must keep its hash-bit level.
+                if children.len() == 1 && matches!(children[0].as_ref(), Self::Leaf { .. }) {
+                    *node = children[0].clone();
+                }
+                false
+            }
+        }
+    }
+}
+
+impl PMap {
+    fn get(&self, key: u64) -> Option<&Arc<Vec<Entry>>> {
+        let mut node = self.root.as_deref()?;
+        let mut hash = index_hash(key);
+        loop {
+            match node {
+                PNode::Leaf { key: stored, value } => return (*stored == key).then_some(value),
+                PNode::Branch { bitmap, children } => {
+                    let bit = 1u32 << (hash >> 59);
+                    if bitmap & bit == 0 {
+                        return None;
+                    }
+                    node = children[(bitmap & (bit - 1)).count_ones() as usize].as_ref();
+                    hash <<= 5;
+                }
+            }
+        }
+    }
+
+    fn update(&mut self, key: u64, update: impl FnOnce(&mut Vec<Entry>)) {
+        if let Some(root) = &mut self.root {
+            self.len += PNode::update(root, key, index_hash(key), 0, update) as usize;
+        } else {
+            self.root = Some(PNode::leaf(key, update));
+            self.len = 1;
+        }
+    }
+
+    fn retain(&mut self, key: u64, mut keep: impl FnMut(&Entry) -> bool) {
+        if let Some(root) = &mut self.root {
+            if PNode::retain(root, key, index_hash(key), 0, &mut self.len, &mut keep) {
+                self.root = None;
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn iter(&self) -> PMapIter<'_> {
+        PMapIter { next: self.root.as_deref(), stack: std::array::from_fn(|_| [].iter()), depth: 0 }
+    }
+}
+
+struct PMapIter<'a> {
+    next: Option<&'a PNode>,
+    stack: [std::slice::Iter<'a, Arc<PNode>>; TRIE_LEVELS],
+    depth: usize,
+}
+
+impl<'a> Iterator for PMapIter<'a> {
+    type Item = (u64, &'a Arc<Vec<Entry>>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(node) = self.next.take() {
+                match node {
+                    PNode::Leaf { key, value } => return Some((*key, value)),
+                    PNode::Branch { children, .. } => {
+                        self.stack[self.depth] = children.iter();
+                        self.depth += 1;
+                    }
+                }
+            }
+            while self.depth > 0 {
+                if let Some(child) = self.stack[self.depth - 1].next() {
+                    self.next = Some(child.as_ref());
+                    break;
+                }
+                self.depth -= 1;
+            }
+            if self.next.is_none() {
+                return None;
+            }
+        }
+    }
+}
 
 /// What a stroke does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -143,8 +386,7 @@ pub struct Stroke {
     pub op: StrokeOp,
     pub radius: f64,
     pub strength: f64,
-    /// Its points in [`Strokes::points`].
-    pub first: u32,
+    /// The number of points in [`Strokes::stroke_points`].
     pub points: u32,
 }
 
@@ -159,13 +401,13 @@ pub struct Entry {
 #[derive(Clone, Default)]
 pub struct Strokes {
     pub palette: Vec<Swatch>,
-    strokes: Vec<Stroke>,
+    strokes: ChunkVec<Stroke>,
     /// Every stroke's points (quantised, in mm).
-    points: Vec<P3>,
+    points: ChunkVec<Arc<Vec<P3>>>,
     cursor: u32,
-    index: HashMap<u64, Vec<Entry>>,
+    index: PMap,
     /// Per stroke: the hash of the log up to and including it.
-    hashes: Vec<u64>,
+    hashes: ChunkVec<u64>,
 }
 
 impl std::fmt::Debug for Strokes {
@@ -194,6 +436,11 @@ fn key(b: [i32; 3]) -> u64 {
 fn unkey(k: u64) -> [i32; 3] {
     let f = |v: u64| ((v & ((1 << 21) - 1)) as i64 - (1 << 20)) as i32;
     [f(k >> 42), f(k >> 21), f(k)]
+}
+
+fn box_bricks(lo: P3, hi: P3) -> impl Iterator<Item = u64> {
+    let (a, b) = (brick_of(lo.map(|v| v - BRICK)), brick_of(hi.map(|v| v + BRICK)));
+    (a[2]..=b[2]).flat_map(move |z| (a[1]..=b[1]).flat_map(move |y| (a[0]..=b[0]).map(move |x| key([x, y, z]))))
 }
 
 fn quant(v: f64) -> i32 {
@@ -246,20 +493,19 @@ impl Strokes {
         self.strokes.len()
     }
     pub fn stroke(&self, i: usize) -> &Stroke {
-        &self.strokes[i]
+        self.strokes.get(i).unwrap()
     }
     pub fn stroke_points(&self, i: usize) -> &[P3] {
-        let s = &self.strokes[i];
-        &self.points[s.first as usize..(s.first + s.points) as usize]
+        self.points.get(i).unwrap().as_slice()
     }
     /// The applied strokes.
     pub fn applied(&self) -> impl Iterator<Item = (usize, &Stroke)> {
-        self.strokes[..self.cursor as usize].iter().enumerate()
+        self.strokes.iter().take(self.cursor as usize).enumerate()
     }
 
     /// What the applied log is: equal logs, equal keys.
     pub fn key(&self) -> u64 {
-        if self.cursor == 0 { 0x5ee0 } else { self.hashes[self.cursor as usize - 1] }
+        if self.cursor == 0 { 0x5ee0 } else { *self.hashes.get(self.cursor as usize - 1).unwrap() }
     }
 
     /// The palette slot for a colour (added when new).
@@ -299,10 +545,10 @@ impl Strokes {
     /// Start a stroke (redo past the cursor is dropped). Returns its id.
     pub fn begin(&mut self, op: StrokeOp, radius: f64, strength: f64) -> usize {
         self.truncate();
-        let first = self.points.len() as u32;
         // as the file keeps them (f32): a reloaded log has the same key
         let (radius, strength) = (radius as f32 as f64, strength as f32 as f64);
-        self.strokes.push(Stroke { op, radius, strength, first, points: 0 });
+        self.strokes.push(Stroke { op, radius, strength, points: 0 });
+        self.points.push(Arc::new(Vec::new()));
         self.hashes.push(self.hashes.last().copied().unwrap_or(0xcbf2_9ce4_8422_2325));
         self.cursor = self.strokes.len() as u32;
         self.strokes.len() - 1
@@ -312,49 +558,43 @@ impl Strokes {
     /// it adds, grown by the radius: what they can change.
     pub fn extend(&mut self, points: &[P3]) -> Vec<(P3, P3)> {
         let Some(si) = self.strokes.len().checked_sub(1) else { return Vec::new() };
-        let prev = (self.strokes[si].points > 0).then(|| self.points[self.points.len() - 1]);
+        let stroke = *self.stroke(si);
+        let prev = self.stroke_points(si).last().copied();
         let mut all: Vec<P3> = prev.into_iter().collect();
         all.extend_from_slice(points);
         let q = Self::quantise(&all);
         let skip = prev.is_some() as usize;
         let new: Vec<P3> = q[skip..].iter().map(|v| v.map(|x| x as f64 * QUANT)).collect();
-        let mut h = self.hashes[si];
-        if self.strokes[si].points == 0 {
-            let (op, slot) = self.strokes[si].op.code();
+        let mut h = *self.hashes.get(si).unwrap();
+        if stroke.points == 0 {
+            let (op, slot) = stroke.op.code();
             h = fnv(h, &[op, slot]);
-            h = fnv(h, &self.strokes[si].radius.to_bits().to_le_bytes());
-            h = fnv(h, &self.strokes[si].strength.to_bits().to_le_bytes());
+            h = fnv(h, &stroke.radius.to_bits().to_le_bytes());
+            h = fnv(h, &stroke.strength.to_bits().to_le_bytes());
         }
         for v in &q[skip..] {
             for c in v {
                 h = fnv(h, &c.to_le_bytes());
             }
         }
-        self.hashes[si] = h;
-        let start = self.strokes[si].points as usize;
-        self.points.extend(new);
-        self.strokes[si].points += (q.len() - skip) as u32;
-        let n = self.strokes[si].points as usize;
+        *self.hashes.get_mut(si).unwrap() = h;
+        let start = stroke.points as usize;
+        Arc::make_mut(self.points.get_mut(si).unwrap()).extend(new);
+        self.strokes.get_mut(si).unwrap().points += (q.len() - skip) as u32;
+        let n = self.stroke(si).points as usize;
         // the capsules the new points close (a lone first point: a sphere)
         let from = start.saturating_sub(1);
         let segs: Vec<u32> = if n == 1 { vec![0] } else { (from..n - 1).map(|s| s as u32).collect() };
         let mut boxes = Vec::with_capacity(segs.len());
-        let reach = self.strokes[si].reach();
+        let reach = stroke.reach();
         for s in segs {
             let (lo, hi) = self.seg_box(si, s as usize, reach);
             boxes.push((lo, hi));
-            let grow = BRICK;
-            let (a, b) = (brick_of(lo.map(|v| v - grow)), brick_of(hi.map(|v| v + grow)));
-            for z in a[2]..=b[2] {
-                for y in a[1]..=b[1] {
-                    for x in a[0]..=b[0] {
-                        let list = self.index.entry(key([x, y, z])).or_default();
-                        match list.last_mut() {
-                            Some(e) if e.stroke == si as u32 && e.seg + e.segs >= s => e.segs = e.segs.max(s + 1 - e.seg),
-                            _ => list.push(Entry { stroke: si as u32, seg: s, segs: 1 }),
-                        }
-                    }
-                }
+            for k in box_bricks(lo, hi) {
+                self.index.update(k, |list| match list.last_mut() {
+                    Some(e) if e.stroke == si as u32 && e.seg + e.segs >= s => e.segs = e.segs.max(s + 1 - e.seg),
+                    _ => list.push(Entry { stroke: si as u32, seg: s, segs: 1 }),
+                });
             }
         }
         boxes
@@ -379,9 +619,9 @@ impl Strokes {
     pub fn boxes(&self, range: std::ops::Range<usize>) -> Vec<(P3, P3)> {
         let mut out = Vec::new();
         for si in range {
-            let n = self.strokes[si].points as usize;
+            let n = self.stroke(si).points as usize;
             for s in 0..n.saturating_sub(1).max(1) {
-                out.push(self.seg_box(si, s, self.strokes[si].reach()));
+                out.push(self.seg_box(si, s, self.stroke(si).reach()));
             }
         }
         out
@@ -393,11 +633,11 @@ impl Strokes {
     /// as it is and a paint stroke the shape.
     pub fn changed_boxes(&self, other: &Strokes, paint: bool) -> Vec<(P3, P3)> {
         let n = self.cursor.min(other.cursor) as usize;
-        let common = (0..n).take_while(|&k| self.hashes[k] == other.hashes[k]).count();
+        let common = (0..n).take_while(|&k| self.hashes.get(k) == other.hashes.get(k)).count();
         let mut out = Vec::new();
         for (log, end) in [(self, self.cursor as usize), (other, other.cursor as usize)] {
             for si in common..end {
-                if log.strokes[si].op.is_paint() == paint {
+                if log.stroke(si).op.is_paint() == paint {
                     out.extend(log.boxes(si..si + 1));
                 }
             }
@@ -437,14 +677,23 @@ impl Strokes {
         if c == self.strokes.len() {
             return;
         }
-        let first = self.strokes.get(c).map_or(self.points.len(), |s| s.first as usize);
+        let mut bricks = HashSet::new();
+        for si in c..self.strokes.len() {
+            let stroke = self.stroke(si);
+            if stroke.points == 0 {
+                continue;
+            }
+            for s in 0..(stroke.points as usize).saturating_sub(1).max(1) {
+                let (lo, hi) = self.seg_box(si, s, stroke.reach());
+                bricks.extend(box_bricks(lo, hi));
+            }
+        }
+        for k in bricks {
+            self.index.retain(k, |e| (e.stroke as usize) < c);
+        }
         self.strokes.truncate(c);
         self.hashes.truncate(c);
-        self.points.truncate(first);
-        self.index.retain(|_, list| {
-            list.retain(|e| (e.stroke as usize) < c);
-            !list.is_empty()
-        });
+        self.points.truncate(c);
     }
 
     /// The paint strokes at `p` (model mm), the last applied one holding it deciding: what it
@@ -452,7 +701,7 @@ impl Strokes {
     /// the distance to the nearest edge (at least the brick floor).
     pub fn sample(&self, p: P3) -> Hit {
         let mut dist = floor_of(p);
-        let Some(list) = self.index.get(&key(brick_of(p))) else { return Hit { paint: None, dist } };
+        let Some(list) = self.index.get(key(brick_of(p))) else { return Hit { paint: None, dist } };
         let mut i = list.len();
         while i > 0 {
             let stroke = list[i - 1].stroke;
@@ -465,11 +714,11 @@ impl Strokes {
             if stroke >= self.cursor {
                 continue;
             }
-            let s = &self.strokes[stroke as usize];
+            let s = self.stroke(stroke as usize);
             if !s.op.is_paint() {
                 continue;
             }
-            let pts = &self.points[s.first as usize..(s.first + s.points) as usize];
+            let pts = self.stroke_points(stroke as usize);
             let mut d = f64::MAX;
             for e in runs {
                 for seg in e.seg..e.seg + e.segs {
@@ -517,7 +766,7 @@ impl Strokes {
     /// indexed to `p`'s brick applied in order (`smin` is the field's smooth minimum).
     /// Strokes a brick or more away bound it by the brick floor.
     pub fn sculpt(&self, p: P3, mut d: f64, smin: fn(f64, f64, f64) -> f64) -> f64 {
-        let list = self.index.get(&key(brick_of(p))).map_or(&[][..], |v| v.as_slice());
+        let list = self.index.get(key(brick_of(p))).map_or(&[][..], |v| v.as_slice());
         let mut i = 0;
         while i < list.len() {
             let stroke = list[i].stroke;
@@ -530,9 +779,9 @@ impl Strokes {
             if stroke >= self.cursor {
                 continue;
             }
-            let s = &self.strokes[stroke as usize];
+            let s = self.stroke(stroke as usize);
             let Some(t) = s.tube() else { continue };
-            let pts = &self.points[s.first as usize..(s.first + s.points) as usize];
+            let pts = self.stroke_points(stroke as usize);
             let mut c = f64::MAX;
             for e in runs {
                 for seg in e.seg..e.seg + e.segs {
@@ -559,10 +808,10 @@ impl Strokes {
         let cells = (0..3).map(|k| (b[k] as f64 - a[k] as f64 + 1.0).max(0.0)).product::<f64>();
         if cells > self.index.len() as f64 {
             // a box past the strokes: every brick of the index
-            for (k, list) in &self.index {
-                let c = unkey(*k);
+            for (k, list) in self.index.iter() {
+                let c = unkey(k);
                 if (0..3).all(|j| c[j] >= a[j] && c[j] <= b[j]) {
-                    for e in list {
+                    for e in list.iter() {
                         segs.entry(e.stroke).or_default().extend(e.seg..e.seg + e.segs);
                     }
                 }
@@ -571,7 +820,7 @@ impl Strokes {
             for z in a[2]..=b[2] {
                 for y in a[1]..=b[1] {
                     for x in a[0]..=b[0] {
-                        for e in self.index.get(&key([x, y, z])).map_or(&[][..], |v| v.as_slice()) {
+                        for e in self.index.get(key([x, y, z])).map_or(&[][..], |v| v.as_slice()) {
                             segs.entry(e.stroke).or_default().extend(e.seg..e.seg + e.segs);
                         }
                     }
@@ -583,9 +832,9 @@ impl Strokes {
             if stroke >= self.cursor {
                 continue;
             }
-            let s = &self.strokes[stroke as usize];
+            let s = self.stroke(stroke as usize);
             let Some(t) = s.tube() else { continue };
-            let pts = &self.points[s.first as usize..(s.first + s.points) as usize];
+            let pts = self.stroke_points(stroke as usize);
             let caps = set.into_iter().map(|seg| (pts[(seg as usize).min(pts.len() - 1)], pts[(seg as usize + 1).min(pts.len() - 1)])).collect();
             out.push((t, caps));
         }
@@ -594,7 +843,7 @@ impl Strokes {
 
     /// The strokes indexed in the brick holding `p` (applied ones, in log order, each once).
     pub fn near(&self, p: P3) -> impl Iterator<Item = usize> + '_ {
-        let list = self.index.get(&key(brick_of(p))).map_or(&[][..], |v| v.as_slice());
+        let list = self.index.get(key(brick_of(p))).map_or(&[][..], |v| v.as_slice());
         let cursor = self.cursor;
         list.iter().enumerate().filter(move |(k, e)| e.stroke < cursor && (*k == 0 || list[k - 1].stroke != e.stroke)).map(|(_, e)| e.stroke as usize)
     }
@@ -632,13 +881,13 @@ impl Strokes {
         while log.len() % 8 != 0 {
             log.push(0);
         }
-        if self.strokes.is_empty() {
+        if self.strokes.len() == 0 {
             (lo, hi) = ([0; 3], [0; 3]);
         }
-        let mut keys: Vec<u64> = self.index.keys().copied().collect();
-        keys.sort_unstable();
-        let entries: usize = self.index.values().map(Vec::len).sum();
-        let mut out = Vec::with_capacity(HEADER + self.palette.len() * 16 + log.len() + keys.len() * 16 + entries * 12);
+        let mut bricks: Vec<_> = self.index.iter().collect();
+        bricks.sort_unstable_by_key(|(k, _)| *k);
+        let entries: usize = bricks.iter().map(|(_, list)| list.len()).sum();
+        let mut out = Vec::with_capacity(HEADER + self.palette.len() * 16 + log.len() + bricks.len() * 16 + entries * 12);
         out.extend_from_slice(&MAGIC);
         for v in [VERSION, HEADER as u32] {
             out.extend_from_slice(&v.to_le_bytes());
@@ -648,7 +897,7 @@ impl Strokes {
         for c in lo.iter().chain(&hi) {
             out.extend_from_slice(&c.to_le_bytes());
         }
-        for v in [self.strokes.len() as u32, self.cursor, self.palette.len() as u32, log.len() as u32, keys.len() as u32, entries as u32, 0, 0] {
+        for v in [self.strokes.len() as u32, self.cursor, self.palette.len() as u32, log.len() as u32, bricks.len() as u32, entries as u32, 0, 0] {
             out.extend_from_slice(&v.to_le_bytes());
         }
         debug_assert_eq!(out.len(), HEADER);
@@ -659,18 +908,18 @@ impl Strokes {
             out.extend_from_slice(&s.filament.unwrap_or(0).to_le_bytes());
         }
         out.extend_from_slice(&log);
-        for k in &keys {
+        for (k, _) in &bricks {
             out.extend_from_slice(&k.to_le_bytes());
         }
         let mut first = 0u32;
-        for k in &keys {
-            let n = self.index[k].len() as u32;
+        for (_, list) in &bricks {
+            let n = list.len() as u32;
             out.extend_from_slice(&first.to_le_bytes());
             out.extend_from_slice(&n.to_le_bytes());
             first += n;
         }
-        for k in &keys {
-            for e in &self.index[k] {
+        for (_, list) in &bricks {
+            for e in list.iter() {
                 for v in [e.stroke, e.seg, e.segs] {
                     out.extend_from_slice(&v.to_le_bytes());
                 }
@@ -737,6 +986,6 @@ impl Strokes {
 
     /// Every index brick (for tools that walk them).
     pub fn bricks(&self) -> impl Iterator<Item = [i32; 3]> + '_ {
-        self.index.keys().map(|k| unkey(*k))
+        self.index.iter().map(|(k, _)| unkey(k))
     }
 }

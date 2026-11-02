@@ -297,7 +297,11 @@ impl Script {
 impl Script {
     /// Reads and parses a script file; the error names the file and the line.
     pub fn load(path: &std::path::Path) -> Result<Script, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let bytes = match crate::read_virtual(&path.to_string_lossy()) {
+            Some(read) => read,
+            None => std::fs::read(path),
+        };
+        let text = bytes.and_then(|b| String::from_utf8(b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         Script::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 }

@@ -658,23 +658,69 @@ pub fn keep_sources() -> bool {
 /// it; read, never changed): texture samples, transcendental calls, loops, size. One line, e.g.
 /// `samples 9, transcendentals 14 (pow 5, sin 2, sqrt 5, exp 2), loops 0, 412 lines`.
 pub fn source_stats(source: &str) -> String {
-    let count = |pat: &str| source.matches(pat).count();
-    let samples = count(".sample(") + count(".sample_compare(") + count(".read(") + count("texture(") + count("texelFetch(");
-    let mut tr: Vec<(&str, usize)> = ["pow(", "exp(", "exp2(", "log(", "log2(", "sin(", "cos(", "tan(", "sqrt(", "rsqrt(", "inversesqrt(", "atan(", "atan2(", "acos(", "asin("]
-        .iter()
-        .map(|p| (p.trim_end_matches('('), count(&format!(" {p}")) + count(&format!("({p}")) + count(&format!("::{p}")) + count(&format!(",{p}"))))
-        .filter(|x| x.1 > 0)
-        .collect();
+    use std::fmt::Write;
+
+    let mut tr = [("pow", 0usize), ("exp", 0), ("exp2", 0), ("log", 0), ("log2", 0), ("sin", 0), ("cos", 0), ("tan", 0), ("sqrt", 0), ("rsqrt", 0), ("inversesqrt", 0), ("atan", 0), ("atan2", 0), ("acos", 0), ("asin", 0)];
+    // Only the '(' prefix can overlap itself: `(sqrt(sqrt(` shares a parenthesis.
+    // Each pattern's matches advance independently, including the other three prefixes.
+    let mut paren_end = [0usize; 15];
+    let (mut samples, mut loops, mut branches, mut lines) = (0usize, 0usize, 0usize, 0usize);
+    let bytes = source.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        let tail = &bytes[i..];
+        match b {
+            b'.' => samples += (tail.starts_with(b".sample(") || tail.starts_with(b".sample_compare(") || tail.starts_with(b".read(")) as usize,
+            b't' => samples += (tail.starts_with(b"texture(") || tail.starts_with(b"texelFetch(")) as usize,
+            b'f' => loops += (tail.starts_with(b"for (") || tail.starts_with(b"for(")) as usize,
+            b'w' => loops += (tail.starts_with(b"while (") || tail.starts_with(b"while(")) as usize,
+            b'i' => branches += (tail.starts_with(b"if (") || tail.starts_with(b"if(")) as usize,
+            b'\n' => lines += 1,
+            _ => {}
+        }
+        let call = match b {
+            b' ' | b'(' | b',' => &tail[1..],
+            b':' if tail.get(1) == Some(&b':') => &tail[2..],
+            _ => continue,
+        };
+        let k = match call.first() {
+            Some(b'p') if call.starts_with(b"pow(") => 0,
+            Some(b'e') if call.starts_with(b"exp(") => 1,
+            Some(b'e') if call.starts_with(b"exp2(") => 2,
+            Some(b'l') if call.starts_with(b"log(") => 3,
+            Some(b'l') if call.starts_with(b"log2(") => 4,
+            Some(b's') if call.starts_with(b"sin(") => 5,
+            Some(b'c') if call.starts_with(b"cos(") => 6,
+            Some(b't') if call.starts_with(b"tan(") => 7,
+            Some(b's') if call.starts_with(b"sqrt(") => 8,
+            Some(b'r') if call.starts_with(b"rsqrt(") => 9,
+            Some(b'i') if call.starts_with(b"inversesqrt(") => 10,
+            Some(b'a') if call.starts_with(b"atan(") => 11,
+            Some(b'a') if call.starts_with(b"atan2(") => 12,
+            Some(b'a') if call.starts_with(b"acos(") => 13,
+            Some(b'a') if call.starts_with(b"asin(") => 14,
+            _ => continue,
+        };
+        if b == b'(' {
+            if i < paren_end[k] {
+                continue;
+            }
+            paren_end[k] = i + tr[k].0.len() + 2;
+        }
+        tr[k].1 += 1;
+    }
+    lines += (!bytes.is_empty() && bytes.last() != Some(&b'\n')) as usize;
     tr.sort_by(|a, b| b.1.cmp(&a.1));
     let total: usize = tr.iter().map(|x| x.1).sum();
-    let loops = count("for (") + count("for(") + count("while (") + count("while(");
-    let branches = count("if (") + count("if(");
-    let list = tr.iter().take(4).map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", ");
-    format!(
-        "samples {samples}, transcendentals {total}{}, branches {branches}, loops {loops}, {} lines",
-        if list.is_empty() { String::new() } else { format!(" ({list})") },
-        source.lines().count()
-    )
+    let mut out = format!("samples {samples}, transcendentals {total}");
+    for (k, (name, count)) in tr.iter().take(4).take_while(|x| x.1 > 0).enumerate() {
+        out.push_str(if k == 0 { " (" } else { ", " });
+        let _ = write!(out, "{name} {count}");
+    }
+    if total != 0 {
+        out.push(')');
+    }
+    let _ = write!(out, ", branches {branches}, loops {loops}, {lines} lines");
+    out
 }
 
 // ------------------------------------------------------------------ the stream
@@ -1025,4 +1071,65 @@ pub fn dispatch(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> boo
         Err(e) => out.err(&e),
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    fn source_stats_reference(source: &str) -> String {
+        let count = |pat: &str| source.matches(pat).count();
+        let samples = count(".sample(") + count(".sample_compare(") + count(".read(") + count("texture(") + count("texelFetch(");
+        let mut tr: Vec<(&str, usize)> = ["pow(", "exp(", "exp2(", "log(", "log2(", "sin(", "cos(", "tan(", "sqrt(", "rsqrt(", "inversesqrt(", "atan(", "atan2(", "acos(", "asin("]
+            .iter()
+            .map(|p| (p.trim_end_matches('('), count(&format!(" {p}")) + count(&format!("({p}")) + count(&format!("::{p}")) + count(&format!(",{p}"))))
+            .filter(|x| x.1 > 0)
+            .collect();
+        tr.sort_by(|a, b| b.1.cmp(&a.1));
+        let total: usize = tr.iter().map(|x| x.1).sum();
+        let loops = count("for (") + count("for(") + count("while (") + count("while(");
+        let branches = count("if (") + count("if(");
+        let list = tr.iter().take(4).map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", ");
+        format!(
+            "samples {samples}, transcendentals {total}{}, branches {branches}, loops {loops}, {} lines",
+            if list.is_empty() { String::new() } else { format!(" ({list})") },
+            source.lines().count()
+        )
+    }
+
+    #[test]
+    fn source_stats_matches_reference() {
+        let check = |s: &str| assert_eq!(super::source_stats(s), source_stats_reference(s), "{s:?}");
+        for s in [
+            "", "\n", "\n\n", "\r", "\r\n", "x\r\ny\r", "x\n", "λ\u{2028}雪\n",
+            "fragment float4 shade(texture2d<float> tex, sampler smp) {\n    float x = metal::sqrt(4.0) + rsqrt(4.0);\n    if (x > 0.0) return tex.sample(smp, float2(x));\n    return tex.read(uint2(0));\n}\n",
+            "void main() {\nfor(int i=0; i<2; i++) { float v = exp2(1.0) + exp(1.0); }\nfor (int j=0; j<2; j++) while(false) {}\nwhile (false) if(true) {}\ncolor = texture(tex, uv) + texelFetch(tex, ivec2(0), 0);\n}\n",
+            "sqrt( rsqrt( inversesqrt( exp( exp2( (sqrt(rsqrt(inversesqrt(,sqrt(,rsqrt(,inversesqrt(",
+            "(sqrt(sqrt(sqrt(sqrt( (sin(sin( (exp(exp( (exp2(exp2(",
+            " asin( acos( atan2( atan( inversesqrt( rsqrt( sqrt( tan( cos( sin( log2( log( exp2( exp( pow(",
+            "pow(\nsin(\tcos( xpow( ::pow( :::pow(,pow( (pow( pow(",
+            ".sample(.sample_compare(.read(texture(texelFetch(for(for (while(while (if(if (",
+        ] {
+            check(s);
+        }
+        for p in ["pow(", "exp(", "exp2(", "log(", "log2(", "sin(", "cos(", "tan(", "sqrt(", "rsqrt(", "inversesqrt(", "atan(", "atan2(", "acos(", "asin("] {
+            for prefix in [" ", "(", "::", ","] {
+                let pat = format!("{prefix}{p}");
+                // All proper prefix/suffix matches: only the parenthesis can be shared.
+                for n in 1..pat.len() {
+                    assert_eq!(pat.as_bytes()[..n] == pat.as_bytes()[pat.len() - n..], prefix == "(" && n == 1, "{pat:?}");
+                }
+                check(&pat);
+                check(&format!("{pat}{pat}"));
+                check(&format!("{pat}{p}{p}{p}"));
+                check(&format!("λ{pat}x\r\n雪{pat}"));
+            }
+        }
+        for pat in [".sample(", ".sample_compare(", ".read(", "texture(", "texelFetch(", "for (", "for(", "while (", "while(", "if (", "if("] {
+            for n in 1..pat.len() {
+                assert_ne!(pat.as_bytes()[..n], pat.as_bytes()[pat.len() - n..], "{pat:?}");
+            }
+            check(pat);
+            check(&format!("{pat}{pat}"));
+            check(&format!("{pat}x\n{pat}"));
+        }
+    }
 }

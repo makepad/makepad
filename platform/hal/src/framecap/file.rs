@@ -5,7 +5,7 @@
 use super::*;
 
 const MAGIC: &[u8; 4] = b"MKFC";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 struct W(Vec<u8>);
 
@@ -113,6 +113,9 @@ impl<'a> R<'a> {
 }
 
 fn desc_w(w: &mut W, d: &PipelineDesc) {
+    w.range(d.storage_buffers);
+    w.u32(d.storage_push_size);
+    w.range(d.compute);
     w.range(d.code);
     w.range(d.bindings);
     w.range(d.vertex_layout);
@@ -124,6 +127,9 @@ fn desc_w(w: &mut W, d: &PipelineDesc) {
 
 fn desc_r(r: &mut R) -> Res<PipelineDesc> {
     Ok(PipelineDesc {
+        storage_buffers: r.range()?,
+        storage_push_size: r.u32()?,
+        compute: r.range()?,
         code: r.range()?,
         bindings: r.range()?,
         vertex_layout: r.range()?,

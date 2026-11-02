@@ -2,6 +2,7 @@
 //! Shift refines, Ctrl snaps, modifiers and limits re-anchor; Escape restores.
 //! Changed follows live edits; Ended marks each completed gesture. Track mode
 //! retains absolute pointer mapping. Tab opens the next field in draw order.
+//! Refused values can pulse a red outline inside the field without changing layout.
 
 use crate::{
     badge::advance, focus_order, makepad_derive_widget::*, makepad_draw::{event::TouchState, *},
@@ -58,6 +59,7 @@ script_mod! {
             color_hover: uniform(theme.prop_field_hover)
             color_drag: uniform(theme.prop_field_active)
             color_focus: uniform(theme.color_focus)
+            color_invalid: uniform(theme.color_error)
             color_marked: uniform(theme.color_focus)
             fill_color: uniform(theme.color_u_3)
             radius: uniform(theme.prop_radius)
@@ -88,7 +90,10 @@ script_mod! {
                 sdf.fill_keep(vec4(self.color_marked.rgb, self.color_marked.a * self.marked * 0.18))
                 if self.focus > 0.5 {
                     // SDF strokes take a half-width.
-                    sdf.stroke(self.color_focus, hairline * 0.5)
+                    sdf.stroke_keep(self.color_focus, hairline * 0.5)
+                }
+                if self.invalid > 0.0 {
+                    sdf.stroke(vec4(self.color_invalid.rgb, self.color_invalid.a * self.invalid), 1.5)
                 }
                 return sdf.result
             }
@@ -184,6 +189,7 @@ script_mod! {
 
 const DRAG_THRESHOLD: f64 = 3.0;
 const TRACK_INSET: f64 = 1.0;
+const INVALID_SECS: f64 = 0.7;
 
 pub fn track_span(width: f64) -> (f64, f64) {
     (TRACK_INSET, (width - TRACK_INSET).max(TRACK_INSET + 1.0))
@@ -277,6 +283,7 @@ pub struct DrawValueInput {
     #[live] round_top: f32,
     #[live] round_bottom: f32,
     #[live] flat: f32,
+    #[live] invalid: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -329,6 +336,9 @@ pub struct ValueInput {
     #[rust] drag: Option<DragState>,
     #[rust] track_press_value: f64,
     #[rust] editor_layout: Option<(f64, f64, f64, f64)>,
+    #[rust] invalid_at: f64,
+    #[rust] invalid_level: f32,
+    #[rust] invalid_frame: NextFrame,
 }
 
 impl ValueInput {
@@ -384,6 +394,32 @@ impl ValueInput {
             self.value = value;
             self.draw_bg.redraw(cx);
         }
+    }
+
+    /// Flash a red outline inside the field that fades out over a fraction of a second (a value
+    /// the caller could not take). Each call restarts it; the layout never changes.
+    pub fn pulse_invalid(&mut self, cx: &mut Cx) {
+        // The clock starts with the next frame event, so the fade never mixes two clocks.
+        self.invalid_at = f64::NAN;
+        self.invalid_level = 1.0;
+        self.draw_bg.invalid = 1.0;
+        self.invalid_frame = cx.new_next_frame();
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Hold `value` without an action or pulse, leaving a drag in progress alone.
+    pub fn hold(&mut self, cx: &mut Cx, value: f64) {
+        if !value.is_finite() { return; }
+        self.value = self.normalize(value);
+        self.mixed = false;
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Restore `value` after the published value was refused, without an action, and pulse red.
+    /// The drag is left alone: the next move follows the pointer again.
+    pub fn refuse(&mut self, cx: &mut Cx, value: f64) {
+        self.hold(cx, value);
+        self.pulse_invalid(cx);
     }
 
     fn commit(&mut self, cx: &mut Cx, uid: WidgetUid, value: f64) {
@@ -557,6 +593,7 @@ impl Widget for ValueInput {
         self.draw_bg.hover = (self.hovered && !self.read_only) as u8 as f32;
         self.draw_bg.drag = self.drag.is_some_and(|drag| drag.engaged) as u8 as f32;
         self.draw_bg.focus = self.editing as u8 as f32;
+        self.draw_bg.invalid = self.invalid_level;
         self.draw_bg.marked = self.marked as u8 as f32;
         (self.draw_bg.round_top, self.draw_bg.round_bottom) = match self.join {
             ValueInputJoin::None => (0.0, 0.0), ValueInputJoin::Top => (1.0, 0.0),
@@ -642,6 +679,17 @@ impl Widget for ValueInput {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Some(ne) = self.invalid_frame.is_event(event) {
+            if self.invalid_at.is_nan() { self.invalid_at = ne.time; }
+            let p = ((ne.time - self.invalid_at) / INVALID_SECS).clamp(0.0, 1.0);
+            self.invalid_level = ((1.0 - p) * (1.0 - p)) as f32;
+            self.draw_bg.redraw(cx);
+            if p < 1.0 {
+                self.invalid_frame = cx.new_next_frame();
+            } else {
+                self.invalid_level = 0.0;
+            }
+        }
         if !self.visible { return; }
         self.sync_read_only(cx);
         if self.read_only { return; }
@@ -834,6 +882,15 @@ impl ValueInputRef {
     }
     pub fn begin_edit(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() { inner.begin_edit(cx); }
+    }
+    pub fn pulse_invalid(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() { inner.pulse_invalid(cx); }
+    }
+    pub fn hold(&self, cx: &mut Cx, value: f64) {
+        if let Some(mut inner) = self.borrow_mut() { inner.hold(cx, value); }
+    }
+    pub fn refuse(&self, cx: &mut Cx, value: f64) {
+        if let Some(mut inner) = self.borrow_mut() { inner.refuse(cx, value); }
     }
 }
 

@@ -24,7 +24,7 @@ use makepad_ai_services::wire::ToolResult;
 use makepad_image_tiles::library::ItemId;
 use makepad_image_tiles::{Library, TileGrid, TileGridAction};
 #[cfg(not(target_arch = "wasm32"))]
-use makepad_widgets::makepad_platform::thread::Lane;
+use makepad_widgets::makepad_platform::thread::Class;
 use makepad_widgets::makepad_platform::thread::TaskHandle;
 use makepad_widgets::hosted_view::{HostedFace, HostedTransition};
 use makepad_widgets::*;
@@ -438,7 +438,7 @@ impl PhotosView {
             // that failed before (a phone without a frame codec yet) is tried
             // again. A library someone baked from the web keeps its failures.
             let retry_failed = root == library::home_root().join(library::DEFAULT_COLLECTION);
-            let job = pool.submit(Lane::Heavy, move || {
+            let job = pool.submit(Class::Background, move || {
                 let options = BakeOptions { fetch_threads: 2, encode_threads: 2, retry_failed };
                 let mut last_error = None;
                 let summary = bake(
@@ -665,7 +665,7 @@ impl PhotosView {
             let pool = cx.task_pool();
             let bake_pool = pool.clone();
             let done = pool
-                .submit(Lane::Heavy, move || {
+                .submit(Class::Background, move || {
                     // One picture: one fetch, one encode. The library's own
                     // failed items stay failed — an add is about this file.
                     let options = BakeOptions { fetch_threads: 1, encode_threads: 1, retry_failed: false };

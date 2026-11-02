@@ -924,6 +924,10 @@ pub struct CxDrawShaderMapping {
     pub dyn_uniforms: DrawShaderInputs,
     pub geometries: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub storage_buffers: Vec<crate::makepad_script::shader_ir_compute::ComputeBufferBinding>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub storage_push_size: u32,
     pub uniform_buffers: Vec<DrawShaderUniformBufferInput>,
     pub samplers: Vec<ShaderSampler>,
     pub texture_sampler_indices: Vec<usize>,
@@ -1480,6 +1484,10 @@ impl CxDrawShaderMapping {
         }
 
         CxDrawShaderMapping {
+            #[cfg(not(target_arch = "wasm32"))]
+            storage_buffers: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            storage_push_size: 0,
             source,
             code,
             pick_code: None,
@@ -1727,6 +1735,10 @@ impl CxDrawShaderMapping {
         }
 
         CxDrawShaderMapping {
+            #[cfg(not(target_arch = "wasm32"))]
+            storage_buffers: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            storage_push_size: 0,
             const_table,
             uses_time: draw_shader_def.uses_time.get(),
             flags: draw_shader_def.flags,

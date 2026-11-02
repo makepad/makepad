@@ -517,6 +517,11 @@ impl Command {
 
     fn spawn_now(&mut self, default: Stdio, exec: bool) -> io::Result<Child> {
         let mut self_exec = self.self_exec_args();
+        // the program again: what this process compiled goes to the disk cache first, so the new
+        // process starts from it (Relax run.rs relax_self_spawn)
+        if self_exec.is_some() {
+            unsafe { __relax_self_spawn() };
+        }
         // replacing this process with the program again (an exec, not a spawn) continues the
         // live session: the `--silent` Relax added for re-runs (it ends live editing) goes
         if let Some(v) = self_exec.as_mut().filter(|_| exec && crate::env::var_os("MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED").is_some()) {
@@ -843,6 +848,12 @@ struct ForkLoader {
     precompile: Option<extern "C" fn(usize) -> u64>,
     fork_exec: Option<extern "C" fn() -> sys::pid_t>,
     fork_exec_done: Option<extern "C" fn(sys::pid_t) -> u32>,
+}
+
+extern "C" {
+    /// Relax run.rs relax_self_spawn: the disk cache written before this program spawns or execs
+    /// itself again.
+    fn __relax_self_spawn();
 }
 
 #[cfg(not(target_os = "android"))]

@@ -13,6 +13,7 @@ pub mod shader_ir_hlsl;
 pub mod shader_ir_metal;
 pub mod shader_ir_rust;
 pub mod shader_ir_compute;
+pub mod shader_ir_compute_text;
 pub mod shader_ir_spirv;
 pub mod shader_ir_text;
 pub mod shader_ir_wgsl;

@@ -462,6 +462,10 @@ pub fn low_bits_only(options: &relax_session::Options, f: &Func) -> Vec<bool> {
         }
     }
     let mut ok: Vec<bool> = (0..nv).map(|v| bits[v] != 0 && ndef[v] == 1 && f.vregs[v] == Cls::I).collect();
+    // no narrow single-definition result: the fixed point below can only clear (most cold code)
+    if !ok.contains(&true) {
+        return ok;
+    }
     let narrow_wrap = |op: IOp| matches!(op, IOp::Add | IOp::Sub | IOp::Mul);
     // And / Or / Xor results are never re-extended (their operands' upper bits pass through to
     // the result: 64-bit forms on x64): an operand of one reads only its low bits when the result

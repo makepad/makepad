@@ -146,7 +146,6 @@ pub struct GiStats {
     pub resident_bytes: usize,
     pub uploads_bytes: usize,
     pub building: bool,
-    pub waiting_for_worker: bool,
     pub rejected_scene: bool,
 }
 
@@ -385,20 +384,19 @@ impl FastGi {
         if self.voxel_job.is_some()||(!self.has_scene&&self.pending_scene.is_none()){return;}
         let windows_changed=self.voxels.as_ref().is_none_or(|w|w.windows.iter().zip(&self.requested).any(|(a,b)|*a!=Some(*b)));
         if self.pending_scene.is_none()&&!windows_changed{return;}
-        let Ok(slot)=cx.task_pool().reserve(makepad_platform::thread::Lane::Heavy) else {
-            if !self.stats.waiting_for_worker{log!("fast GI: worker queue busy; retrying next frame");}
-            self.stats.waiting_for_worker=true;return;
-        };
-        self.stats.waiting_for_worker=false;self.stats.building=true;
+        self.stats.building=true;
         // The first world (its 4.7 MB mirror) is allocated on the worker.
         let world=self.voxels.take();let settle=c.settle;
         let scene=self.pending_scene.take();self.has_scene=true;
         let windows=self.requested.clone();let generation=self.generation;
-        self.voxel_job=Some(slot.submit(move||{
+        match cx.task_pool().submit(makepad_platform::thread::Class::Visible, move||{
             let mut world=world.unwrap_or_else(||Box::new(VoxelWorld::new(layout)));
             world.track_needed=settle;
             let update=world.update(scene,&windows);(generation,world,update)
-        }));
+        }) {
+            Ok(job) => self.voxel_job=Some(job),
+            Err(error) => { self.stats.building=false; log!("fast GI: {error}"); }
+        }
     }
 
     fn ensure_capacity(&mut self,cx:&mut Cx,rows:usize) {

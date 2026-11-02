@@ -1,0 +1,4 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[ci]
+os = "macos"

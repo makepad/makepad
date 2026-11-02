@@ -152,55 +152,62 @@ impl App {
         }
         for Adopted { client, pid, crate_name, launched, test_lane } in adopted {
             if launched {
-                // the first time, or a restarted image of the same process (exec) asking again:
-                // the same client, so the same tile
-                let again = self.state_mut().clients.get(&client).is_some_and(|s| s.ready);
-                log!("wm: {crate_name} (pid {pid}), launched as client {client}, asked for its window{}", if again { " again (a restart in place: the same tile)" } else { "" });
-                continue;
+                // A restarted image keeps its tile only while the launch's slot still exists.
+                if let Some(slot) = self.state_mut().clients.get(&client) {
+                    let again = slot.ready;
+                    log!("wm: {crate_name} (pid {pid}), launched as client {client}, asked for its window{}", if again { " again (a restart in place: the same tile)" } else { "" });
+                    continue;
+                }
+                log!("wm: {crate_name} (pid {pid}), launched as client {client}, asked for its window but its launch slot was gone; adopting it anew");
             }
-            // The same process asking again (a detached app reattaching after its hub connect
-            // failed): its earlier admission is void, and its tile with it.
-            let earlier: Vec<ClientId> = self.state_mut().clients.iter()
-                .filter(|(id, slot)| **id != client && slot.external == Some(pid))
-                .map(|(id, _)| *id)
-                .collect();
-            for id in earlier {
-                log!("wm: pid {pid} asked again; client {id} was its earlier admission");
-                self.remove_client(cx, id);
-            }
-            let entry = makepad_app_registry::apps().iter().find(|a| a.package == crate_name);
-            let (app, label) = entry.map_or((crate_name.clone(), crate_name.clone()), |e| (e.id.to_string(), e.label.to_string()));
-            // The node's AI Hub app, started by this WM or an earlier one (hub_app): a service
-            // with a tray and a dropdown (dropdown.rs), no tile. Its run view takes the GPU
-            // descriptor channel; nothing lays it out.
-            #[cfg(not(target_arch = "wasm32"))]
-            if (app == clients::HUB_SERVICE_APP && hub_app::is_hub_pid(pid)) || (app == clients::DEVHUB_SERVICE_APP && hub_app::is_service_pid(&hub_app::DEVHUB, pid)) {
-                log!("wm: {label} (pid {pid}) came to the WM by itself as this node's service; client {client}: no tile");
-                hub_app::note_adopted(pid);
-                self.state_mut().clients.insert(client, clients::ClientSlot::adopted_service(client, &app, pid));
-                let hub_port = self.state_mut().hub_port;
-                self.desk(cx)
-                    .borrow_mut::<WmDesk>()
-                    .map(|mut d| d.with_run_view(cx, client, |cx, v| v.set_run_target(cx, client, 0, hub_port)));
-                continue;
-            }
-            log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}{}", test_lane.as_ref().map_or(String::new(), |l| format!(" (TEST instance of lane {l})")));
-            let mut slot = clients::ClientSlot::adopted(client, &app, pid);
-            if let Some(lane) = test_lane {
-                slot.test_lane = Some(lane);
-                slot.set_title(&label);
-            }
-            let area = self.desk_area(cx);
-            let state = self.state_mut();
-            state.clients.insert(client, slot);
-            let gap = state.gap;
-            state.layout_mut().insert(client, area, gap);
-            let hub_port = state.hub_port;
+            self.adopt_client(cx, client, pid, crate_name, test_lane);
+        }
+    }
+
+    /// A fresh admission or a vanished launch slot needs the same tile and run target.
+    fn adopt_client(&mut self, cx: &mut Cx, client: ClientId, pid: u32, crate_name: String, test_lane: Option<String>) {
+        // The same process asking again (a detached app reattaching after its hub connect
+        // failed): its earlier admission is void, and its tile with it.
+        let earlier: Vec<ClientId> = self.state_mut().clients.iter()
+            .filter(|(id, slot)| **id != client && slot.external == Some(pid))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in earlier {
+            log!("wm: pid {pid} asked again; client {id} was its earlier admission");
+            self.remove_client(cx, id);
+        }
+        let entry = makepad_app_registry::apps().iter().find(|a| a.package == crate_name);
+        let (app, label) = entry.map_or((crate_name.clone(), crate_name.clone()), |e| (e.id.to_string(), e.label.to_string()));
+        // The node's AI Hub app, started by this WM or an earlier one (hub_app): a service
+        // with a tray and a dropdown (dropdown.rs), no tile. Its run view takes the GPU
+        // descriptor channel; nothing lays it out.
+        #[cfg(not(target_arch = "wasm32"))]
+        if (app == clients::HUB_SERVICE_APP && hub_app::is_hub_pid(pid)) || (app == clients::DEVHUB_SERVICE_APP && hub_app::is_service_pid(&hub_app::DEVHUB, pid)) {
+            log!("wm: {label} (pid {pid}) came to the WM by itself as this node's service; client {client}: no tile");
+            hub_app::note_adopted(pid);
+            self.state_mut().clients.insert(client, clients::ClientSlot::adopted_service(client, &app, pid));
+            let hub_port = self.state_mut().hub_port;
             self.desk(cx)
                 .borrow_mut::<WmDesk>()
                 .map(|mut d| d.with_run_view(cx, client, |cx, v| v.set_run_target(cx, client, 0, hub_port)));
-            self.activate_client(cx, client);
-            self.redraw_all(cx);
+            return;
         }
+        log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}{}", test_lane.as_ref().map_or(String::new(), |l| format!(" (TEST instance of lane {l})")));
+        let mut slot = clients::ClientSlot::adopted(client, &app, pid);
+        if let Some(lane) = test_lane {
+            slot.test_lane = Some(lane);
+            slot.set_title(&label);
+        }
+        let area = self.desk_area(cx);
+        let state = self.state_mut();
+        state.clients.insert(client, slot);
+        let gap = state.gap;
+        state.layout_mut().insert(client, area, gap);
+        let hub_port = state.hub_port;
+        self.desk(cx)
+            .borrow_mut::<WmDesk>()
+            .map(|mut d| d.with_run_view(cx, client, |cx, v| v.set_run_target(cx, client, 0, hub_port)));
+        self.activate_client(cx, client);
+        self.redraw_all(cx);
     }
 }

@@ -10,9 +10,9 @@ work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
 [app.windows]
 capture = ""
 date = "2026-11-02"
-digest = "a857ef28c75e5d4c05d4d67cd8b0b27ec1a514c569209e7c221e247af3473bdb"
-main = "397b658a8bf5cfbb05644da6c00591325a079101"
-work = "628527fcd4f9b89ec0203bce6b2266b7d8e8fe55"
+digest = "890b965ecd8b2a4d559f2dfaa27bb6266d5fb371a9302fb1972a9cd427b07e91"
+main = "e9402925c83c1a3331b42758ffc16e0c0983d98a"
+work = "2832b1fa2882006b5c2c5a22eabc04ba83662d39"
 
 [tests.linux]
 date = "2026-11-02"

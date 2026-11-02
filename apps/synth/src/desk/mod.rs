@@ -807,7 +807,7 @@ impl Desk {
         // background (every engine's presets: no hitch when it opens).
         if !self.index_asked {
             self.index_asked = true;
-            match cx.task_pool().submit(Lane::Heavy, || makepad_score_live::browse::set_index(makepad_score_live::browse::build())) {
+            match cx.task_pool().submit(Class::Background, || makepad_score_live::browse::set_index(makepad_score_live::browse::build())) {
                 Ok(job) => job.detach(),
                 Err(error) => log!("preset index: {error:?}"),
             }

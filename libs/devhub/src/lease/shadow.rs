@@ -191,7 +191,7 @@ fn entry(ctx: &Ctx, tree: &Job, overlay: &Job) -> Result<String, String> {
     let args = super::loaders::cargo_run_args(&tree.cmd).ok_or("shadow tree has no JIT command")?;
     let pkg = args.get(1).map_or("", String::as_str);
     let target = args.iter().take_while(|s| s.as_str() != "--").enumerate().find_map(|(i, a)| match a.as_str() {
-        "--lib" => Some("lib".to_string()), "--tests" => Some("tests".to_string()), "--test" => Some(format!("test:{}", args.get(i + 1).map_or("", String::as_str))), _ => None,
+        "--lib" => Some("lib".to_string()), "--tests" => Some("tests".to_string()), "--bin" => Some(format!("bin:{}", args.get(i + 1).map_or("", String::as_str))), "--test" => Some(format!("test:{}", args.get(i + 1).map_or("", String::as_str))), _ => None,
     }).unwrap_or_else(|| "default".into());
     Ok(format!("{{\"lane\":{},\"pkg\":{},\"target\":{},\"tree_exit\":{},\"overlay_exit\":{},\"equal\":{},\"first_diff\":{},\"tree_job\":{},\"overlay_job\":{},\"ended_ms\":{},\"jit_error\":{}}}",
         json_str(&tree.lane), json_str(pkg), json_str(&target), tree.exit.map_or("null".into(), |n| n.to_string()), overlay.exit.map_or("null".into(), |n| n.to_string()), first.is_none(), first.as_deref().map_or("null".into(), json_str), json_str(&tree.id), json_str(&overlay.id), crate::proto::wall_ms(), json_str(&jit_error)))

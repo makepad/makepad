@@ -111,6 +111,10 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
 
     // The invocation's state.
     out.push_str("struct Mp {\n    uint _mp_iter;\n");
+    for b in &info.storage_buffers {
+        let IrTy::Array(elem, _) = ir.get(ir.globals[b.global as usize].ty) else { unreachable!() };
+        writeln!(out, "    const device {} *{};", cx.ty_name(*elem), cx.plain_global_name(b.global)).ok();
+    }
     if has[0] {
         out.push_str("    constant MpUniforms *u;\n");
     }
@@ -160,6 +164,10 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
 
     // Entry points: the resources both take, and how they fill `_mp`.
     let mut resources = String::new();
+    for b in &info.storage_buffers {
+        let IrTy::Array(elem, _) = ir.get(ir.globals[b.global as usize].ty) else { unreachable!() };
+        write!(resources, ",\n    const device {} *{} [[buffer({})]]", cx.ty_name(*elem), cx.plain_global_name(b.global), b.index).ok();
+    }
     if has[0] {
         resources.push_str(",\n    constant MpUniforms *u [[buffer(2)]]");
     }
@@ -179,6 +187,10 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
         }
     }
     let mut fill = String::from("    Mp _mp;\n    _mp._mp_iter = 0u;\n");
+    for b in &info.storage_buffers {
+        let name = cx.plain_global_name(b.global);
+        writeln!(fill, "    _mp.{name} = {name};").ok();
+    }
     if has[0] {
         fill.push_str("    _mp.u = u;\n");
     }
@@ -394,7 +406,7 @@ fn sampler_decls(output: &ShaderOutput, out: &mut String) {
     }
 }
 
-const METAL_HELPERS: &str = "inline float2 _mp_unpack2f16(float x) { half2 h = as_type<half2>(as_type<uint>(x)); return float2(h.x, h.y); }
+pub(crate) const METAL_HELPERS: &str = "inline float2 _mp_unpack2f16(float x) { half2 h = as_type<half2>(as_type<uint>(x)); return float2(h.x, h.y); }
 inline float4 _mp_unpack4u8(float x) { uint u = as_type<uint>(x); return float4(float(u & 0xffu), float((u >> 8) & 0xffu), float((u >> 16) & 0xffu), float((u >> 24) & 0xffu)) * (1.0 / 255.0); }
 inline float4x4 _mp_inverse(float4x4 m) {
     float a00 = m[0][0]; float a01 = m[0][1]; float a02 = m[0][2]; float a03 = m[0][3];

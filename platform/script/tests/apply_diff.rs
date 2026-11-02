@@ -332,7 +332,7 @@ fn transcript() -> String {
         }
     }
 
-    // apply_state / visible preserve runtime state on reapply
+    // apply_state / visible preserve runtime state on reapply; without a source, Reload still applies them.
     let state_doc = obj(vm, state_api, &[(id!(kept), 2.0.into()), (id!(vis), false.into()), (id!(plain), 6.0.into())]);
     for apply in applies() {
         let mut s = State { kept: 9.0, vis: true, plain: 9.0 };
@@ -364,4 +364,5 @@ fn apply_transcript() {
     }
     // the rules every codegen keeps
     assert!(t.contains("derived New partial: Derived { base: Base { x: -1.0, mode: Fixed"), "missing fields untouched:\n{t}");
+    assert!(t.contains("state Reload: State { kept: 2.0, vis: false, plain: 6.0 }"), "state fields without a source still apply on Reload:\n{t}");
 }

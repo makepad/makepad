@@ -8,9 +8,13 @@
 //! the save to the patch and to the first frame after it. `live act` runs any inspect command in
 //! the app (ui, key, click, grab, test hooks); `live wait patched|verdict|settled|frame` blocks on the
 //! JIT. A parked panic pauses the live job (act and resume through it). It ends on release, when
-//! its app exits, after 10 min with no edit or call, or to give a waiting whole/timed lease
-//! its box once the current call answers. Tests keep one job per lane, target and args;
+//! its app exits, after 10 min with no edit or call, when its lane starts a fourth (the least
+//! recently used idle one goes), when its lane landed, or to give a waiting whole/timed lease its
+//! box once the current call answers. Tests keep one job per lane, target and args;
 //! their saves only queue, and a test call ships and waits for that patch's test group.
+//! Between calls a session is charged only its resident share of its box (one core and its
+//! memory); a call takes its full charge back, admitted like a lease (it waits up to 30 s for
+//! room, then runs).
 
 use super::leg::{Held, Spec};
 use super::Ctx;
@@ -25,8 +29,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// A live job with no edit or act this long ends.
+/// A live job with no edit or call this long ends (tests too: an idle session's box waits for it).
 pub const IDLE_MS: u64 = 10 * 60 * 1000;
+/// Live sessions a lane keeps at once: a new one ends the lane's least recently used idle one.
+pub const LANE_SESSIONS: usize = 3;
+/// How often live jobs are checked for a lane that is gone (a lease beat).
+const ORPHAN_LOOK: Duration = Duration::from_secs(30);
 /// Saves closer together than this ship together.
 const DEBOUNCE: Duration = Duration::from_millis(30);
 
@@ -67,6 +75,7 @@ struct Call<'a>(&'a Ctx, &'a str, Arc<Running>);
 impl Drop for Call<'_> {
     fn drop(&mut self) {
         self.2.calls.lock().unwrap().count -= 1;
+        idle_charge(self.0, &self.2);
         park_ready(self.0, self.1, &self.2);
     }
 }
@@ -78,7 +87,9 @@ fn call<'a>(ctx: &'a Ctx, id: &'a str) -> Result<Option<Call<'a>>, String> {
         if let Some(note) = &calls.park { return Err(format!("{id}: {note}")); }
         calls.count += 1;
     }
-    Ok(Some(Call(ctx, id, r)))
+    let call = Call(ctx, id, r);
+    admit(ctx, &call.2, true);
+    Ok(Some(call))
 }
 
 fn begin_call(r: &Running) -> bool {
@@ -91,7 +102,32 @@ fn finish_call(ctx: &Ctx, id: &str, r: &Running) {
         let _calls = r.calls.lock().unwrap();
         r.inflight.store(false, std::sync::atomic::Ordering::SeqCst);
     }
+    idle_charge(ctx, r);
     park_ready(ctx, id, r);
+}
+
+/// How long a call waits for room on its box before it runs anyway (an agent waits on it).
+const ADMIT_WAIT: Duration = Duration::from_secs(30);
+
+/// A call takes its session's full charge back, admitted like a lease: it waits up to
+/// [`ADMIT_WAIT`] for room on its box (`wait`), then runs.
+fn admit(ctx: &Ctx, r: &Running, wait: bool) {
+    let t = Instant::now();
+    while wait && t.elapsed() < ADMIT_WAIT {
+        if ctx.leases.live_admit(&r.lease, false).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let _ = ctx.leases.live_admit(&r.lease, true);
+}
+
+/// No call runs and no edit is on its way: the session's box charges it its resident share.
+fn idle_charge(ctx: &Ctx, r: &Running) {
+    let idle = r.calls.lock().unwrap().count == 0 && !r.inflight.load(std::sync::atomic::Ordering::SeqCst);
+    if idle {
+        ctx.leases.live_idle(&r.lease);
+    }
 }
 
 fn accepting(id: &str) -> bool {
@@ -150,14 +186,21 @@ fn set_patch(ctx: &Ctx, id: &str, p: &LivePatch) -> Option<Live> {
 }
 
 fn set_test_patch(ctx: &Ctx, id: &str, run: &Live, p: &LivePatch) -> Option<Live> {
-    let mut saved = false;
+    let (mut saved, mut first_verdict) = (false, false);
     let x = set(ctx, id, |s| {
         if s.run_n == run.run_n && s.pid == run.pid && s.state == "running" && s.patch.as_ref().is_some_and(|old| old.edit_ms == p.edit_ms) {
+            first_verdict = p.verdict_ms != 0 && s.patch.as_ref().is_some_and(|old| old.verdict_ms == 0);
             s.patch = Some(p.clone());
             saved = true;
         }
     });
     let x = x.filter(|_| saved);
+    // an agent's save -> verdict: shipped (sync), patched (JIT), tests (run)
+    if first_verdict && p.edit_ms > 0 {
+        let at = |t: u64| if t == 0 { p.verdict_ms } else { t.clamp(p.edit_ms, p.verdict_ms) };
+        let (shipped, patched) = (at(p.shipped_ms), at(p.outcome_ms).max(at(p.shipped_ms)));
+        crate::lease::prof::log_wait(&ctx.home, &format!("{{\"kind\":\"live\",\"lane\":{},\"id\":{},\"start_ms\":{},\"end_ms\":{},\"sync_ms\":{},\"jit_ms\":{},\"run_ms\":{}}}", json_str(&run.lane), json_str(id), p.edit_ms, p.verdict_ms, shipped - p.edit_ms, patched - shipped, p.verdict_ms.saturating_sub(patched)));
+    }
     if let Some(x) = &x { super::live_shadow::sample(ctx, x); }
     x
 }
@@ -228,7 +271,12 @@ pub fn start(ctx: Arc<Ctx>) {
         }
     }));
     let c = ctx.clone();
+    let mut looked = Instant::now();
     let _ = std::thread::Builder::new().name("devhub-live-ship".into()).spawn(move || loop {
+        if looked.elapsed() >= ORPHAN_LOOK {
+            looked = Instant::now();
+            release_orphans(&c);
+        }
         let list: Vec<(String, Arc<Running>)> = RUNNING.lock().unwrap().as_ref().map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
         for (id, r) in list {
             // Only the test caller ships its source state and owns the resulting verdict.
@@ -247,6 +295,7 @@ pub fn start(ctx: Arc<Ctx>) {
                 let (c2, id2) = (c.clone(), id.clone());
                 let _ = std::thread::Builder::new().name("devhub-live-patch".into()).spawn(move || {
                     let _inflight = Inflight(&c2, &id2, &r);
+                    admit(&c2, &r, false);
                     let _ = ship_edit(&c2, &id2, &r, files.into_iter().collect(), edit_ms, None);
                 });
             }
@@ -256,6 +305,7 @@ pub fn start(ctx: Arc<Ctx>) {
         let idle: Vec<Live> = c.store.read(|d| d.lives.iter().filter(|x| x.active() && !x.lease.is_empty() && now.saturating_sub(x.touched_ms) >= IDLE_MS).cloned().collect());
         for x in idle {
             let Some(r) = running(&x.id) else { continue };
+            // (a test session's saves wait for its next call: one within the timeout keeps it)
             if r.test && r.pending.lock().unwrap().2.is_some_and(|t| t.elapsed() < Duration::from_millis(IDLE_MS)) { continue; }
             {
                 let mut calls = r.calls.lock().unwrap();
@@ -272,6 +322,60 @@ fn end_lease(id: &str) {
     if let Some(r) = running(id) {
         let _ = ask(&ctl(), None, "release", &r.lease);
     }
+}
+
+/// Ends a live job: its lease goes (its app with it), or, not placed, it is marked ended.
+fn release(ctx: &Ctx, id: &str, note: &str) -> Result<(), String> {
+    let x = get(ctx, id).ok_or_else(|| format!("no live job {id}"))?;
+    set(ctx, id, |s| s.note = note.into());
+    if running(id).is_some() {
+        end_lease(id);
+    } else if x.active() {
+        set(ctx, id, |s| {
+            s.state = "ended".into();
+            s.ended_ms = wall_ms();
+        });
+    }
+    Ok(())
+}
+
+/// No live job outlives its lane: one whose worktree is gone, or whose pinned commit no longer
+/// resolves, is released, with an inbox line.
+fn release_orphans(ctx: &Ctx) {
+    let lives: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active()).cloned().collect());
+    for x in lives.into_iter().filter(|x| !x.tree.is_empty()) {
+        let why = if !Path::new(&x.tree).join(".git").exists() {
+            format!("its worktree {} is gone", x.tree)
+        } else if let Some(sha) = crate::lease::Pin::of_rev(&x.rev).map(|p| p.makepad).filter(|sha| super::git(&ctx.repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_err_and(|e| e.starts_with("git cat-file"))) {
+            format!("its commit {} no longer resolves", super::short(&sha))
+        } else if let Some(head) = lane_landed(ctx, &x) {
+            format!("its lane landed ({} in work, its worktree clean) and it had no call for {} min", super::short(&head), DONE_IDLE_MS / 60_000)
+        } else {
+            continue;
+        };
+        event(ctx, Sev::Warn, format!("live {} ({}) of lane {}: released, {why}", x.id, x.app, x.lane), Some(&x));
+        let _ = release(ctx, &x.id, if why.starts_with("its lane landed") { "released: its lane landed" } else { "released: its lane is gone" });
+    }
+}
+
+/// A session idle this long whose lane landed ends ([`lane_landed`]).
+const DONE_IDLE_MS: u64 = 5 * 60 * 1000;
+
+/// The session's lane is done with it: no call for [`DONE_IDLE_MS`] and none in flight, and its
+/// worktree is clean at a commit of its own (past the session's base) that work holds. Its agent
+/// landed and stopped; the session would hold its box until its idle end (an idle one held a bench
+/// box 22 min after its verdict, 11-02). Some: the worktree's commit.
+fn lane_landed(ctx: &Ctx, x: &Live) -> Option<String> {
+    if wall_ms().saturating_sub(x.touched_ms) < DONE_IDLE_MS || running(&x.id).is_some_and(|r| r.calls.lock().unwrap().count > 0 || r.inflight.load(std::sync::atomic::Ordering::SeqCst)) {
+        return None;
+    }
+    let tree = Path::new(&x.tree);
+    let head = super::git(tree, &["rev-parse", "HEAD"]).ok()?;
+    let clean = super::git(tree, &["status", "--porcelain", "--untracked-files=no"]).is_ok_and(|s| s.trim().is_empty());
+    let base = crate::lease::Pin::of_rev(&x.rev).map(|p| p.makepad).unwrap_or_default();
+    // (a lane that never committed sits at its base: its agent may still be looking)
+    let own = !base.is_empty() && super::git(&ctx.repo, &["merge-base", "--is-ancestor", &head, &base]).is_err();
+    (clean && own && super::git(&ctx.repo, &["merge-base", "--is-ancestor", &head, "refs/heads/work"]).is_ok()).then_some(head)
 }
 
 /// The JIT's frame count from its `live` answer (a header line comes first).
@@ -302,7 +406,9 @@ fn event_cursor(v: &Value) -> String {
     v.to_json()
 }
 
-/// Bytes of this run, not an asynchronously followed local log.
+/// Bytes of this run, not an asynchronously followed local log: its text from `off` on, and the
+/// offset after its last whole line, where the next window starts (the JIT's unbuffered stderr
+/// writes a line in pieces; a window cut between them lost "makepad live:   struct ", 11-02).
 fn run_log(r: &Running, run: u64, mut off: u64) -> Result<(u64, String), String> {
     let mut bytes = Vec::new();
     loop {
@@ -313,8 +419,14 @@ fn run_log(r: &Running, run: u64, mut off: u64) -> Result<(u64, String), String>
         let end = chunk.is_empty();
         off = v.get("off").and_then(Value::as_u64).unwrap_or(off + chunk.len() as u64);
         bytes.extend(chunk);
-        if end { return Ok((off, String::from_utf8_lossy(&bytes).into_owned())); }
+        if end { return Ok((whole_lines_end(off, &bytes), String::from_utf8_lossy(&bytes).into_owned())); }
     }
+}
+
+/// The offset after the last whole line of `bytes`, which end at `end`.
+fn whole_lines_end(end: u64, bytes: &[u8]) -> u64 {
+    let partial = bytes.iter().rposition(|b| *b == b'\n').map_or(bytes.len(), |i| bytes.len() - i - 1);
+    end.saturating_sub(partial as u64)
 }
 
 fn jit_fault(line: &str) -> bool {
@@ -359,22 +471,33 @@ fn recover(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch, stop: bool) {
         r.restart.store(true, std::sync::atomic::Ordering::SeqCst);
         event(ctx, Sev::Info, format!("live {id}: restarting its JIT warm on {}: {}", x.node, p.reason), Some(x));
     }
-    if stop { stop_run(ctx, &r, x); }
+    if stop && !stop_run(ctx, &r, x) && p.outcome == "recovering" {
+        // no restart comes: the edit's answer is that, not a wait for one
+        p.outcome = "failed".into();
+        p.reason = format!("its JIT could not be restarted: pid {} did not stop ({})", x.pid, p.reason);
+        p.verdict_ms = wall_ms();
+        r.restart.store(false, std::sync::atomic::Ordering::SeqCst);
+        set_test_patch(ctx, id, x, p);
+    }
 }
 
-fn stop_run(ctx: &Ctx, r: &Running, x: &Live) {
-    if x.pid == 0 { return; }
+/// Stops the run's JIT for its restart; false when it could not.
+fn stop_run(ctx: &Ctx, r: &Running, x: &Live) -> bool {
+    if x.pid == 0 { return true; }
     let _ = inspect(&x.node, x.pid, "quit");
     let asked = Instant::now();
     while asked.elapsed() < Duration::from_secs(2) {
-        if get(ctx, &x.id).is_none_or(|s| s.pid != x.pid || s.run_n != x.run_n) { return; }
+        if get(ctx, &x.id).is_none_or(|s| s.pid != x.pid || s.run_n != x.run_n) { return true; }
         std::thread::sleep(Duration::from_millis(20));
     }
     // The original run is still followed; only its recorded pid is stopped.
-    let windows = ctx.leases.nodes().iter().any(|n| n.name == r.node && n.caps.as_ref().is_some_and(|c| c.os == "windows"));
-    let pid = x.pid.to_string();
-    let command = if windows { vec!["taskkill", "/F", "/PID", pid.as_str()] } else { vec!["kill", "-KILL", pid.as_str()] };
-    if let Err(e) = r.held.output(&command) { event(ctx, Sev::Warn, format!("live {}: stopping pid {}: {e}", x.id, x.pid), Some(x)); }
+    match r.held.kill(x.pid) {
+        Ok(()) => true,
+        Err(e) => {
+            event(ctx, Sev::Warn, format!("live {}: stopping pid {}: {e}", x.id, x.pid), Some(x));
+            false
+        }
+    }
 }
 
 /// The failed tests' captured output in this verdict's log interval.
@@ -671,17 +794,29 @@ fn capture(tree: &Path, changed: &[String], deleted: &[String], old: &BTreeMap<S
 /// Ships saved files to the box; the JIT's verdict and the first frame after it are the result.
 /// Test callers supply the manifest they just read, including saves the monitor has not heard.
 /// Returns a note when the shipped edit cannot reach the target; tests keep their last verdict.
+/// The files under a run's `DEVHUB_ALSO` paths: they ship although `local/` never does.
+fn also_files(tree: &Path, also: &[String]) -> Result<Vec<String>, String> {
+    let mut entries = Vec::new();
+    for p in also {
+        crate::lease::ship::entries(tree, p, &mut entries)?;
+    }
+    Ok(entries.into_iter().map(|e| e.path).filter(|p| !crate::lease::ship::never_ships_named(p)).collect())
+}
+
 fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64, current: Option<(Vec<String>, Vec<String>)>) -> Option<String> {
     let Some(x) = get(ctx, id).filter(|x| x.active() && x.pid > 0) else { return None };
     let mut frames0 = 0;
     let mut note = None;
-    let mut p = LivePatch { edit_ms: edit_ms.max(x.patch.as_ref().map_or(0, |p| p.edit_ms + 1)), ..Default::default() };
+    let mut p = LivePatch { edit_ms: edit_ms.max(x.patch.as_ref().map_or(0, |p| p.edit_ms + 1)), called_ms: wall_ms(), ..Default::default() };
     let shipped = (|| -> Result<bool, String> {
         let pin = crate::lease::Pin::of_rev(&x.rev).ok_or("live: missing pin")?;
         let (mut changed, mut deleted) = match current {
             Some(paths) => paths,
             None => crate::lease::ship::uncommitted(&r.tree, &pin)?,
         };
+        changed.extend(also_files(&r.tree, &x.also)?);
+        changed.sort();
+        changed.dedup();
         let selected: BTreeSet<&String> = files.iter().collect();
         if x.test {
             changed.retain(|p| selected.contains(p));
@@ -731,7 +866,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
             if x.test {
                 if !x.patch.as_ref().is_some_and(terminal) { return Err("live: no previous test verdict".into()); }
                 let target = x.test_args.iter().take_while(|a| a.as_str() != "--").cloned().collect::<Vec<_>>().join(" ");
-                let target = if target.is_empty() { "--lib" } else { &target };
+                let target = if target.is_empty() { "its default target" } else { &target };
                 note = Some(format!("edit does not reach {} {target}: {} is not one of its sources", x.app, p.files[0]));
             } else {
                 note = Some(format!("edit does not reach {}: {} is not one of its sources", x.app, p.files[0]));
@@ -810,6 +945,11 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
     }
     let Some(x) = set_patch(ctx, id, &p) else { return None };
     if matches!(p.outcome.as_str(), "none" | "failed") { unapplied(ctx, &x, &p); }
+    // an agent's save -> patched (-> frame), beside the test sessions' save -> verdict
+    if p.edit_ms > 0 && p.outcome_ms >= p.edit_ms {
+        let (shipped, patched, end) = (p.shipped_ms.clamp(p.edit_ms, p.outcome_ms), p.outcome_ms, p.frame_ms.max(p.outcome_ms));
+        crate::lease::prof::log_wait(&ctx.home, &format!("{{\"kind\":\"live\",\"lane\":{},\"id\":{},\"start_ms\":{},\"end_ms\":{end},\"sync_ms\":{},\"jit_ms\":{},\"run_ms\":{}}}", json_str(&x.lane), json_str(id), p.edit_ms, shipped - p.edit_ms, patched - shipped, end - patched));
+    }
     let after = |t: u64| if t == 0 { "-".to_string() } else { format!("{} ms", t.saturating_sub(p.edit_ms)) };
     event(
         ctx,
@@ -886,7 +1026,7 @@ fn reattach(ctx: &Arc<Ctx>, x: &Live) {
     let off = std::fs::metadata(&x.log).map_or(0, |m| m.len()).saturating_sub(x.run_log_start);
     if x.patch.as_ref().is_some_and(|p| p.outcome == "recovering") {
         r.restart.store(true, std::sync::atomic::Ordering::SeqCst);
-        stop_run(ctx, &r, x);
+        if !stop_run(ctx, &r, x) { r.restart.store(false, std::sync::atomic::Ordering::SeqCst); }
     }
     let res = run_processes(ctx, &x.id, &r, Some((x.run_n, off)));
     finished(ctx, &x.id, &r, res);
@@ -940,7 +1080,10 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         let mut rev = format!("{}@{head}", x.lane);
         if tree.join("apps/commercial/.git").exists() { rev.push_str(&format!(",{}@{}", x.lane, ctx.monitor.dirty(&tree.join("apps/commercial"))?.head)); }
         let pin = crate::lease::Pin::of_rev(&rev).ok_or("live: missing pin")?;
-        let (changed, deleted) = crate::lease::ship::uncommitted(&tree, &pin)?;
+        let (mut changed, deleted) = crate::lease::ship::uncommitted(&tree, &pin)?;
+        changed.extend(also_files(&tree, &x.also)?);
+        changed.sort();
+        changed.dedup();
         if changed.is_empty() && deleted.is_empty() { Ok((rev, String::new(), 0)) }
         else { super::job::copy_snapshot(ctx, &tree, rev, changed, deleted) }
     })();
@@ -1016,7 +1159,9 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         // into that folder: such a run is live only when asked (run.rs store_live). Without it
         // the app never watches its sources and no edit patches in.
         let live: &[&str] = if x.test { &[] } else { &["MAKEPAD_RUN_STORE_LIVE=1"] };
-        let mut argv: Vec<String> = ["env"].iter().chain(hide).chain(live).chain(&["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--"]).map(|s| s.to_string()).collect();
+        let mut argv = vec!["env".to_string()];
+        argv.extend(x.env.iter().map(|(k, v)| format!("{k}={v}")));
+        argv.extend(hide.iter().chain(live).chain(&["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--"]).map(|s| s.to_string()));
         argv.extend(if x.test { vec!["test".into(), "--live".into(), x.app.clone()] } else { vec!["run".into(), x.app.clone()] });
         argv.extend(x.test_args.iter().cloned());
         let file = std::fs::OpenOptions::new().append(true).create(true).open(&x.log).map_err(|e| e.to_string())?;
@@ -1064,13 +1209,14 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
                 p.jit_error = ctx.store.event_seq("jit_error", Sev::Err, p.reason.clone(), None);
                 set_patch(ctx, id, &p);
             } else if let Some(reason) = fault {
-                if begin_call(r) { r.resuming.store(true, std::sync::atomic::Ordering::SeqCst); }
+                if begin_call(r) { r.resuming.store(true, std::sync::atomic::Ordering::SeqCst); admit(ctx, r, false); }
                 p.tests = None;
                 p.reason = reason;
                 recover(ctx, id, &x, &mut p, false);
             } else if !terminal(&p) {
                 p.outcome = if !crate::jit_misses::compile_errors(&log).is_empty() { "compile_error" } else { "failed" }.into();
-                p.reason = if log.is_empty() { format!("live test ended without a verdict: {res:?}") } else { log };
+                p.reason = format!("live test ended without a verdict: {res:?}");
+                if !log.is_empty() { p.reason.push('\n'); p.reason.push_str(&log); }
                 p.verdict_ms = wall_ms();
                 set_patch(ctx, id, &p);
             }
@@ -1136,9 +1282,32 @@ mod owner_tests {
         assert!(super::refuse("W257", "fablook3", "FabLook3").is_ok());
         assert!(super::refuse("W1", "", "x").is_ok());
     }
+
+    #[test]
+    fn a_log_window_ends_after_its_last_whole_line() {
+        // read from 100 to 140: the next window starts where the half-written line does
+        let bytes = b"test a ... ok\nverdict\nmakepad live:   struct ";
+        assert_eq!(super::whole_lines_end(100 + bytes.len() as u64, bytes), 100 + 22);
+        assert_eq!(super::whole_lines_end(120, b"no newline yet"), 106);
+        assert_eq!(super::whole_lines_end(120, b"done\n"), 120);
+    }
 }
 
-/// `live start {"app","repo_dir","tree"?,"lane","agent","needs","visible","test","test_args"}`, `live act <id> <cmd>`,
+/// Shared by the CLI and the master; source and visibility settings belong to devhub.
+pub(super) fn validate_env(k: &str, v: &str) -> Result<(), String> {
+    if k.is_empty() || k.as_bytes()[0].is_ascii_digit() || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err("live start: --env name must use ASCII letters, digits and _, and not start with a digit".into());
+    }
+    if v.contains(['\n', '\r']) { return Err("live start: --env value must not contain a newline".into()); }
+    // Lease argv is NUL-separated; a value must remain one argument.
+    if v.contains('\0') { return Err("live start: --env value must not contain NUL".into()); }
+    if matches!(k, "MAKEPAD_RUN_VFS" | "MAKEPAD_RUN_WORKSPACE" | "MAKEPAD_RUN_EDITS" | "MAKEPAD_RUN_HOME" | "CARGO_TARGET_DIR" | "MAKEPAD_HIDE_WINDOWS" | "MAKEPAD_RUN_STORE_LIVE") {
+        return Err(format!("live start: --env {k} is managed by devhub"));
+    }
+    Ok(())
+}
+
+/// `live start {"app","repo_dir","tree"?,"lane","agent","needs","visible","test","test_args","env"?}`, `live act <id> <cmd>`,
 /// `live wait <id> patched|verdict|settled|frame [timeout_s]`, `live sync|release|get <id>`, `live list [all]`.
 pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
     // `live --as <lane> <verb> ..`: the calling lane (see [`owned`])
@@ -1159,6 +1328,21 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
         "start" | "test" => {
             let starting = STARTING.lock().unwrap();
             let v = makepad_strict_json::parse(rest.as_bytes()).map_err(|_| "live start: bad request")?;
+            let mut env = Vec::new();
+            if let Some(value) = v.get("env") {
+                let malformed = "live start: env must be an array of [key, value] string pairs";
+                for pair in value.as_arr().ok_or(malformed)? {
+                    let [k, v] = pair.as_arr().ok_or(malformed)? else { return Err(malformed.into()) };
+                    let (k, v) = (k.as_str().ok_or(malformed)?, v.as_str().ok_or(malformed)?);
+                    validate_env(k, v)?;
+                    env.push((k.to_string(), v.to_string()));
+                }
+            }
+            // `DEVHUB_ALSO`: named paths ship with every patch, `local/` included
+            let also: Vec<String> = v.get("also").and_then(Value::as_arr).unwrap_or(&[]).iter().map(|a| a.as_str().map(str::to_string).ok_or("live: also must be strings")).collect::<Result<_, _>>()?;
+            if let Some(p) = also.iter().find(|p| !crate::lease::ship::inside(p) || crate::lease::ship::never_ships_named(p)) {
+                return Err(format!("DEVHUB_ALSO path never ships: {p}"));
+            }
             let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
             // Older clients sent the path as `tree`; new clients reserve it for the opt-out.
             let tree = v.get("repo_dir").and_then(Value::as_str).or_else(|| v.get("tree").and_then(Value::as_str)).unwrap_or("").to_string();
@@ -1169,8 +1353,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if !test && !test_args.is_empty() { return Err("live: test_args needs test=true".into()); }
             if test {
                 let select = &test_args[..test_args.iter().position(|a| a == "--").unwrap_or(test_args.len())];
-                if !select.is_empty() && !matches!(select, [f] if f == "--lib") && !matches!(select, [f, t] if f == "--test" && !t.is_empty() && !t.starts_with('-')) {
-                    return Err("live: select --lib or --test T before the libtest -- arguments".into());
+                if !select.is_empty() && !matches!(select, [f] if f == "--lib") && !matches!(select, [f, t] if (f == "--bin" || f == "--test") && !t.is_empty() && !t.starts_with('-')) {
+                    return Err("live: select --lib, --bin B or --test T before the libtest -- arguments".into());
                 }
             }
             if test && test_args.last().is_some_and(|a| a == "--") { test_args.pop(); }
@@ -1182,17 +1366,29 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if !Path::new(&tree).join(".git").exists() {
                 return Err(format!("live: `{tree}` is not a worktree"));
             }
-            if !crate::trust::valid_name(&lane) {
+            if !makepad_devhub_conf::valid_name(&lane) {
                 return Err(format!("live: lane `{lane}` is not a name"));
             }
             if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| x.active() && x.lane == lane && x.app == app && x.test == test && (!test || x.test_args == test_args) && accepting(&x.id)).cloned()) {
                 if verb == "test" {
                     if old.tree != tree { return Err(format!("{} belongs to worktree {}", old.id, old.tree)); }
                     if old.src != src.as_str() { return Err(format!("{} uses {}; live release {} before changing its source mode", old.id, old.src, old.id)); }
+                    if old.also != also { return Err(format!("{} ships DEVHUB_ALSO `{}`; live release {} before changing it", old.id, old.also.join(" "), old.id)); }
                     drop(starting);
                     return match test_call(ctx, &old.id)? { Some(answer) => Ok(answer), None => serve(ctx, line) };
                 }
                 return Err(format!("{} already runs {app} for lane {lane} on {} (live release {} first)", old.id, old.node, old.id));
+            }
+            // a lane keeps LANE_SESSIONS: the new one ends its least recently used idle one
+            // (lanes held 7 and 8 sessions past the lane cap, 11-02)
+            let mine: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && x.lane == lane).cloned().collect());
+            if mine.len() >= LANE_SESSIONS {
+                let idle = |x: &Live| running(&x.id).is_none_or(|r| r.calls.lock().unwrap().count == 0 && !r.inflight.load(std::sync::atomic::Ordering::SeqCst));
+                let Some(lru) = mine.iter().filter(|x| idle(x)).min_by_key(|x| x.touched_ms) else {
+                    return Err(format!("lane {lane} runs {} live sessions, all busy (at most {LANE_SESSIONS} per lane): wait for one, or `live release <id>`", mine.len()));
+                };
+                event(ctx, Sev::Info, format!("live {} ({}) of lane {lane}: released for its lane's new session (at most {LANE_SESSIONS} per lane)", lru.id, lru.app), Some(lru));
+                release(ctx, &lru.id, &format!("released: lane {lane}'s new session took its place (at most {LANE_SESSIONS} per lane)"))?;
             }
             // the monitor follows the tree from now (its saves ship to the box)
             let _ = ctx.monitor.dirty(Path::new(&tree));
@@ -1206,7 +1402,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if verb == "test" && ((!cost.is_empty() && cost != "small") || est_min.is_some()) { return Err("test --live uses small cost on a hot box".into()); }
             let x = ctx.store.update(|d| {
                 d.lives_next += 1;
-                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, class: s("class"), app: app.clone(), test, test_args, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), visible: v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false), state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
+                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, class: s("class"), app: app.clone(), test, test_args, env, also, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), visible: v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false), state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
                 d.lives.push(x.clone());
                 x
             });
@@ -1227,6 +1423,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             }
             set(ctx, id, |s| s.touched_ms = wall_ms());
             let t = Instant::now();
+            // a grab's file: (node, lease, path under the lease's dir), for `live look` to fetch
+            let mut png = None;
             let lines = match arg.split_whitespace().next() {
                 // images come from the app's frames, answered by a client on its box (the `cmd`
                 // service has nothing for them): the file stays there, in the lease's tmp
@@ -1242,7 +1440,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
                     let tmp = format!("/tmp/{}/", r.lease);
                     if let Some(rel) = lines.iter().find_map(|l| l.split('"').find(|w| w.contains(&tmp) && w.ends_with(".png")).and_then(|w| w.split(&tmp).nth(1)).map(str::to_string)) {
-                        lines.push(format!("copy it here: makepad devhub get {} tmp/{rel} <dir> --node {} --lease {}", x.lane, x.node, r.lease));
+                        lines.push(format!("copy it here: makepad devhub get {} tmp/{rel} <dir> --node {} --lease {} (or `live look {id}`)", x.lane, x.node, r.lease));
+                        png = Some(format!("{{\"node\":{},\"lease\":{},\"rel\":{}}}", json_str(&x.node), json_str(&r.lease), json_str(&format!("tmp/{rel}"))));
                     }
                     lines
                 }
@@ -1255,7 +1454,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                     }
                 });
             }
-            Ok(format!("{{\"ms\":{},\"lines\":[{}]}}", t.elapsed().as_millis(), lines.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(",")))
+            Ok(format!("{{\"ms\":{},\"png\":{},\"lines\":[{}]}}", t.elapsed().as_millis(), png.as_deref().unwrap_or("null"), lines.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(",")))
         }
         "wait" => {
             let mut _call = call(ctx, id)?;
@@ -1268,10 +1467,13 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if what == "verdict" && !x.test { return Err(format!("{id}: verdict needs a live test job (--test)")); }
             loop {
                 if _call.is_none() { _call = call(ctx, id)?; }
-                let quiet = if let Some(r) = running(id) {
+                // a test session ships its saves on its next call (`live sync`), never on a wait:
+                // waiting for them waited to the timeout; the answer says they are there
+                let (quiet, unshipped) = if let Some(r) = running(id) {
                     let pending = r.pending.lock().unwrap();
-                    pending.0.is_empty() && !r.inflight.load(std::sync::atomic::Ordering::SeqCst)
-                } else { true };
+                    let inflight = r.inflight.load(std::sync::atomic::Ordering::SeqCst);
+                    if r.test { (!inflight, pending.0.len()) } else { (pending.0.is_empty() && !inflight, 0) }
+                } else { (true, 0) };
                 let x = get(ctx, id).ok_or_else(|| format!("no live job {id}"))?;
                 if !x.active() {
                     return Ok(crate::state::live_value(&x).to_json());
@@ -1288,7 +1490,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                     w => return Err(format!("live wait: `{w}` (patched verdict settled frame)")),
                 };
                 if done || x.state == "paused" {
-                    return Ok(crate::state::live_value(&x).to_json());
+                    let answer = crate::state::live_value(&x).to_json();
+                    return Ok(match answer.strip_suffix('}') { Some(head) if unshipped > 0 => format!("{head},\"unshipped\":{unshipped}}}"), _ => answer });
                 }
                 if t.elapsed() > timeout {
                     return Err(format!("live wait {id} {what}: not within {} s", timeout.as_secs()));
@@ -1319,17 +1522,18 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             Ok(format!("{{\"id\":{},\"queued\":{n}}}", json_str(id)))
         }
         "release" => {
-            let x = get(ctx, id).ok_or_else(|| format!("no live job {id}"))?;
-            set(ctx, id, |s| s.note = "released".into());
-            if running(id).is_some() {
-                end_lease(id);
-            } else if x.active() {
-                set(ctx, id, |s| {
-                    s.state = "ended".into();
-                    s.ended_ms = wall_ms();
-                });
-            }
+            release(ctx, id, "released")?;
             Ok(format!("{{\"id\":{},\"state\":\"released\"}}", json_str(id)))
+        }
+        // `devhub clean <lane>`: the lane is done, so are its live jobs
+        "end-lane" => {
+            if !makepad_devhub_conf::valid_name(rest) { return Err(format!("live end-lane: `{rest}` is not a lane")); }
+            let ids: Vec<String> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && x.lane == rest).map(|x| x.id.clone()).collect());
+            for id in &ids {
+                event(ctx, Sev::Info, format!("live {id} of lane {rest}: released, the lane was cleaned"), get(ctx, id).as_ref());
+                release(ctx, id, "released: its lane was cleaned")?;
+            }
+            Ok(format!("{{\"released\":[{}]}}", ids.iter().map(|i| json_str(i)).collect::<Vec<_>>().join(",")))
         }
         "get" => get(ctx, id).map(|x| crate::state::live_value(&x).to_json()).ok_or_else(|| format!("no live job {id}")),
         "list" => {
@@ -1337,7 +1541,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let list: Vec<String> = ctx.store.read(|d| d.lives.iter().filter(|x| all || x.active()).map(|x| crate::state::live_value(x).to_json()).collect());
             Ok(format!("[{}]", list.join(",")))
         }
-        _ => Err(format!("live: unknown word `{verb}` (start act wait sync release get list)")),
+        _ => Err(format!("live: unknown word `{verb}` (start act wait sync release end-lane get list)")),
     }
 }
 
@@ -1365,6 +1569,7 @@ fn test_call(ctx: &Arc<Ctx>, id: &str) -> Result<Option<String>, String> {
         if let Some(r) = running(id) {
             if begin_call(&r) {
                 let _inflight = Inflight(ctx, id, &r);
+                admit(ctx, &r, true);
                 let x = get(ctx, id).ok_or("live job disappeared")?;
                 let mut note = None;
                 let fault = r.fault.lock().unwrap().clone();
@@ -1398,6 +1603,7 @@ fn test_call(ctx: &Arc<Ctx>, id: &str) -> Result<Option<String>, String> {
                     let current = crate::lease::ship::uncommitted(&r.tree, &pin)?;
                     files.extend(current.0.iter().chain(&current.1).cloned());
                     files.retain(|p| !crate::lease::ship::never_ships(p));
+                    files.extend(also_files(&r.tree, &x.also)?);
                     if !files.is_empty() { note = ship_edit(ctx, id, &r, files.into_iter().collect(), edit_ms, Some(current)); }
                 }
                 let mut x = set(ctx, id, |s| s.touched_ms = wall_ms()).ok_or("live job disappeared")?;
@@ -1419,7 +1625,10 @@ pub fn verdict(p: &LivePatch) -> String {
     let Some(t) = &p.tests else {
         return format!("verdict {}{}\n", if p.outcome.is_empty() { "pending" } else { &p.outcome }, if p.reason.is_empty() { String::new() } else { format!(": {}", p.reason) });
     };
-    let mut out = format!("verdict {}/{} passed, {} failed (save -> shipped {}, -> patched {}, -> verdict {})\n", t.passed, t.ran, t.failed, after(p.shipped_ms), after(p.outcome_ms), after(p.verdict_ms));
+    // a save made long before its call (a test session ships on the call) says so: that wait was
+    // the caller's, not the ship's (162 s "save -> shipped" was an agent's 161 s before its sync, 11-02)
+    let called = if p.called_ms > p.edit_ms + 1000 { format!("save -> call {}, ", after(p.called_ms)) } else { String::new() };
+    let mut out = format!("verdict {}/{} passed, {} failed ({called}save -> shipped {}, -> patched {}, -> verdict {})\n", t.passed, t.ran, t.failed, after(p.shipped_ms), after(p.outcome_ms), after(p.verdict_ms));
     for name in &t.failures { out.push_str(&format!("  {name}\n")); }
     out.push_str(&p.output);
     out
@@ -1429,6 +1638,7 @@ pub fn verdict(p: &LivePatch) -> String {
 /// file(s) patched, save → frame 38 ms`.
 pub fn render(x: &Live) -> String {
     let mut out = format!("{} {} {} on {} pid {}{}\n", x.id, x.state, x.app, if x.node.is_empty() { "-" } else { &x.node }, x.pid, if x.note.is_empty() { String::new() } else { format!(" ({})", x.note) });
+    if !x.env.is_empty() { out.push_str(&format!("  env: {}\n", x.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(","))); }
     if let Some(p) = &x.patch {
         let after = |t: u64| if t == 0 { "-".to_string() } else { format!("{} ms", t.saturating_sub(p.edit_ms)) };
         if x.test {

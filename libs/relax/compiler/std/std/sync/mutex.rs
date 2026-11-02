@@ -6,6 +6,7 @@ use core::fmt;
 use core::ops::{Deref, DerefMut};
 use core::time::Duration;
 
+use super::held_lock::HeldLock;
 use super::poison::{self, LockResult, PoisonError, TryLockError, TryLockResult};
 use super::raw::{RawCondvar, RawMutex};
 use crate::time::Instant;
@@ -23,6 +24,7 @@ unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 pub struct MutexGuard<'a, T: ?Sized + 'a> {
     lock: &'a Mutex<T>,
     poison: poison::Guard,
+    _held: HeldLock,
 }
 
 unsafe impl<'a, T: ?Sized + Sync> Sync for MutexGuard<'a, T> {}
@@ -35,12 +37,14 @@ impl<T: ?Sized> Mutex<T> {
     }
 
     #[rustc_should_not_be_called_on_const_items]
+    #[track_caller]
     pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
         self.inner.lock();
         MutexGuard::new(self)
     }
 
     #[rustc_should_not_be_called_on_const_items]
+    #[track_caller]
     pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
         if self.inner.try_lock() {
             match MutexGuard::new(self) {
@@ -130,8 +134,10 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for Mutex<T> {
 }
 
 impl<'a, T: ?Sized> MutexGuard<'a, T> {
+    #[track_caller]
     fn new(lock: &'a Mutex<T>) -> LockResult<MutexGuard<'a, T>> {
-        poison::map_result(lock.poison.guard(), |guard| MutexGuard { lock, poison: guard })
+        let held = HeldLock::new();
+        poison::map_result(lock.poison.guard(), |guard| MutexGuard { lock, poison: guard, _held: held })
     }
 }
 
@@ -186,6 +192,8 @@ impl Condvar {
     }
 
     #[rustc_should_not_be_called_on_const_items]
+    // Keep the guard registered across the raw wait: this thread cannot checkpoint
+    // while blocked, and the same guard holds the mutex again before any user code runs.
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> LockResult<MutexGuard<'a, T>> {
         let poisoned = unsafe {
             let lock = guard.lock;

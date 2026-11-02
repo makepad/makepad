@@ -22,6 +22,7 @@ const PROVIDED: &[&str] = &[
     "makepad-script-compute",
     "makepad-shader",
     "makepad-tween-script",
+    "makepad-cpu-budget",
     "makepad-script-audio-aot",
     "makepad-hal",
 ];
@@ -64,8 +65,9 @@ fn main() {
         for i in g.closure(root) {
             let p = &g.pkgs[i];
             if p.dir.contains("/.cargo/registry/") || p.dir.contains("/.cargo/git/") { continue; }
-            // Directory watches catch additions, including an initially absent build.rs.
-            println!("cargo:rerun-if-changed={}", p.dir);
+            // Source-directory watches catch additions without watching unrelated root files.
+            let src = PathBuf::from(&p.dir).join("src");
+            if src.is_dir() { println!("cargo:rerun-if-changed={}", src.display()); }
             let key = format!("{}@{}", p.name.replace('-', "_"), p.version);
             for ((package, path), _) in &manifest {
                 if (package == &key || package == &format!("host:{key}")) && !path.starts_with('\0') {

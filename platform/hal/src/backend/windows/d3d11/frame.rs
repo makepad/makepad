@@ -111,6 +111,8 @@ struct Prepared {
     depth_state: usize,
     cull: usize,
     scissor: RECT,
+    storage: Vec<(u32, Option<ID3D11ShaderResourceView>)>,
+    indirect: Option<(ID3D11Buffer, u32)>,
     index_first: u32,
     index_count: u32,
 }
@@ -429,6 +431,7 @@ impl D3d11 {
             s.bad();
             return None;
         }
+        if !self.compute_ready(sid, &view.passes[pr.clone()], view) { return None; }
         s.frame = packet.frame;
         s.font_frames.submitted(packet.frame);
         s.stats.max_frame_ns = s.stats.max_frame_ns.max(packet.meta.build_end_ns.saturating_sub(packet.meta.build_start_ns));
@@ -495,7 +498,7 @@ impl D3d11 {
         let split_pass = if native && !records.is_empty() {
             let inside = |p: &Pass| records.iter().all(|g| g.kind != Layer::DRAWS
                 || (g.draws.off >= p.draws.off && g.draws.off as u64 + g.draws.len as u64 <= p.draws.off as u64 + p.draws.len as u64));
-            let found = view.passes[pr.clone()].iter().position(|p| p.color.iter().all(|c| c.is_none()) && inside(p));
+            let found = view.passes[pr.clone()].iter().position(|p| p.kind == crate::types::pass_kind::DRAW && p.color.iter().all(|c| c.is_none()) && inside(p));
             if found.is_none() {
                 eprintln!("[hal-d3d11] window {sid}:{}: native layer records outside the window pass", target.index);
                 s.bad();
@@ -520,7 +523,9 @@ impl D3d11 {
             if let (Some(q), Some(t)) = (stamps, &timer) {
                 unsafe { self.dev.ctx.End(t.stamp(q).as_ID3D11Asynchronous()) };
             }
-            let encoded = if split_pass == Some(pass_index) {
+            let encoded = if pass.kind == crate::types::pass_kind::COMPUTE {
+                self.encode_compute(s, pass, view).map(|_| None)
+            } else if split_pass == Some(pass_index) {
                 self.encode_split(s, target, pass, records, view, now, &mut deps).map(|(image, sp)| { split = Some(sp); image })
             } else {
                 self.encode_pass(s, target, is_window, pick, pass, draws, view, now, &mut deps)
@@ -532,9 +537,14 @@ impl D3d11 {
                 let timed = stamps.is_some() && encoded.is_ok();
                 let v = pass.viewport;
                 let (pipes, session): (_, &Session) = (&self.pipe, s);
-                let pi = gpu_prof::record_pass(key, session, sid, pass.name, pick, v[2] as u32, v[3] as u32, &rec.attach, rec.bytes, &rec.records, timed, |pipeline| {
+                let pi = if pass.kind == crate::types::pass_kind::COMPUTE {
+                    gpu_prof::with_frame(key, |b| {
+                        if timed { b.expect(1); } else { b.untimed(1); }
+                        b.pass(session.string(pass.name).unwrap_or("compute"), makepad_gpu_trace::kind::COMPUTE, 0, 0, "", 0)
+                    })
+                } else { gpu_prof::record_pass(key, session, sid, pass.name, pick, v[2] as u32, v[3] as u32, &rec.attach, rec.bytes, &rec.records, timed, |pipeline| {
                     pipes.get(&(sid, pipeline.index)).map(|p| ShaderFacts { name: gpu_prof::shader_name(session, &p.state.src.desc), stats: None, source: None })
-                });
+                }) };
                 if let (Some(pi), Some(q), Some((_, passes))) = (pi.filter(|_| timed), stamps, timer.as_mut().and_then(|t| t.prof.as_mut())) {
                     passes.push((pi, q));
                 }
@@ -730,7 +740,7 @@ impl D3d11 {
         sc.clear();
         for d in draws {
             s.stats.draws += 1;
-            if d.index[1] == 0 || d.inst.count == 0 {
+            if d.indirect_buffer.is_none() && (d.index[1] == 0 || d.inst.count == 0) {
                 continue;
             }
             match self.prepare(s, pass, d, view.arena, pick, &colors, &depth, target_size, &mut sc, now, deps) {
@@ -826,6 +836,19 @@ impl D3d11 {
                         None => self.word_arena.words.clone(),
                     };
                     ctx.VSSetShaderResources(slot, Some(&[view]));
+                }
+                for (slot, srv) in &p.storage {
+                    ctx.VSSetShaderResources(*slot, Some(std::slice::from_ref(srv)));
+                    ctx.PSSetShaderResources(*slot, Some(std::slice::from_ref(srv)));
+                }
+                if let Some((buffer, offset)) = &p.indirect {
+                    if p.program.instance_slot().is_some() {
+                        if let Some((_, _, base)) = sc.ranges[p.ranges.clone()].first() {
+                            ctx1.VSSetConstantBuffers1(INST_BASE_SLOT, 1, Some(&arena as *const _), Some(base as *const u32), Some(&WINDOW_CONSTANTS as *const u32));
+                        }
+                    }
+                    ctx.DrawIndexedInstancedIndirect(buffer, *offset);
+                    continue;
                 }
                 for (_, count, base_cb) in &sc.ranges[p.ranges.clone()] {
                     if p.program.instance_slot().is_some() {
@@ -1046,8 +1069,23 @@ impl D3d11 {
             s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
         }
         let index_format = if width == 4 { DXGI_FORMAT_R32_UINT } else { DXGI_FORMAT_R16_UINT };
+        crate::compute::validate_draw(s, d, arena, &program.storage)?;
+        if d.storage_buffers.len as usize != program.storage.len() { return Err("draw storage count mismatch".into()); }
+        let mut storage = Vec::new();
+        for (i, binding) in program.storage.iter().enumerate() {
+            let id = id_at(arena, d.storage_buffers, i);
+            let b = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale draw storage buffer")?;
+            storage.push((binding.index, b.buf.words.clone()));
+            s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
+        }
+        let indirect = if d.indirect_buffer.is_none() { None } else {
+            let id = d.indirect_buffer;
+            let b = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale draw indirect buffer")?;
+            if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(20).is_none_or(|n| n > b.buf.size) { return Err("invalid indirect draw offset".into()); }
+            Some((b.buf.buf.clone(), d.indirect_offset as u32))
+        };
         Ok(Some(Prepared {
-            program,
+            storage, indirect, program,
             vb: vb.map(|b| b.buf.clone()),
             ib: ib.buf.clone(),
             index_format,

@@ -33,6 +33,16 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "each session's pump turns and wake causes, totals and per second since the last call",
     ),
     (
+        "hal pace",
+        "",
+        "the WM-hosted shell's frame pacing: frame asked and not granted, Tick open, Ticks/TickDones/requests and requests sent mid-Tick, per window requested/awaiting/in flight",
+    ),
+    (
+        "hal shell",
+        "",
+        "the shell backend, WM connection and windows, without asking the shell thread",
+    ),
+    (
         "gpu diff",
         "<a> <b|now>",
         "byte growth by owner and new/freed handles",
@@ -111,7 +121,9 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     if req.cmd == "hal" {
         match req.pos.first().map(String::as_str) {
             Some("pump") => pump(out),
-            _ => out.err("hal pump"),
+            Some("pace") => pace(out),
+            Some("shell") => out.line(&crate::backend::shell::line()),
+            _ => out.err("hal pump|pace|shell"),
         }
         return true;
     }
@@ -285,6 +297,18 @@ fn diff(req: &Req, out: &mut Out) {
 
 /// The last `hal pump` answer, for the rates of the next one.
 static PUMP_LAST: Mutex<Option<(std::time::Instant, Vec<(u32, crate::PumpCounts)>)>> = Mutex::new(None);
+
+fn pace(out: &mut Out) {
+    #[cfg(target_os = "linux")]
+    {
+        let lines = crate::backend::linux::wm::pace_lines();
+        if !lines.is_empty() {
+            for line in lines { out.line(&line); }
+            return;
+        }
+    }
+    out.line("{\"pace\":\"no WM-hosted window in this process\"}");
+}
 
 fn pump(out: &mut Out) {
     let now = std::time::Instant::now();

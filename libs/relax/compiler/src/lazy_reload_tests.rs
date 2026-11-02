@@ -672,7 +672,7 @@ fn gandalf_scope_uses_package_source_and_project_boundaries() {
 fn app_scope_live_layout_edits() {
     const CHILD: &str = "MAKEPAD_RUN_APP_LAYOUT_TEST";
     let Ok(case) = std::env::var(CHILD) else {
-        for case in ["app_lib", "path_crate", "framework", "embedded", "generic_embedded", "pointer", "bound_template", "bound_template_embedded"] {
+        for case in ["app_lib", "path_crate", "framework", "embedded", "generic_embedded", "pointer", "bound_template", "bound_template_embedded", "derive_default"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::app_scope_live_layout_edits", "--nocapture", "--test-threads=1"])
                 .env(CHILD, case).output().unwrap();
@@ -695,7 +695,9 @@ fn app_scope_live_layout_edits() {
         pub fn name(out: &mut &str) { *out = std::any::type_name::<State>(); }
     "#;
     std::fs::write(&path, before).unwrap();
-    let session = Arc::new(crate::Session::default());
+    let mut session = crate::Session::default();
+    if case == "derive_default" { session.options.live = true; }
+    let session = Arc::new(session);
     let (mut prog, core, lib) = crate::load_with_std(&session, path.to_str().unwrap(), "app_lib", false).unwrap();
     let cfg = crate::cfg::CfgSet::host(&session, &[]);
     let bin_path = dir.join("main.rs");
@@ -759,6 +761,23 @@ fn app_scope_live_layout_edits() {
     let name = entry(&mut u, name);
     let layout = u.layout_of(ty).clone();
     assert_eq!(layout.ext.is_some(), case != "framework");
+    if case == "derive_default" {
+        let after = before.replace("pub value: u64 }", "pub value: u64, #[rust(make(vm))] pub later: u64 }")
+            .replace("State { value: 41 }", "State { value: 41, later: 5 }")
+            + "\nfn make(_: u32) -> u64 { 5 }\n";
+        let restart = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: after.as_bytes().to_vec() }]) };
+        assert_eq!(restart.rung, Rung::Restart, "{:?}", restart.lines);
+        assert!(restart.lines.iter().any(|l| l.contains("#[rust(..)]") && l.contains("restart the app")), "{:?}", restart.lines);
+        let after = after.replace("make(vm)", "make(3)");
+        let patch = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: after.as_bytes().to_vec() }]) };
+        assert_eq!(patch.rung, Rung::Patch, "{:?}", patch.lines);
+        let after = after + "\npub struct Fresh { #[rust(make(vm))] pub n: u64 }\n";
+        let patch = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: after.into_bytes() }]) };
+        assert_eq!(patch.rung, Rung::Patch, "{:?}", patch.lines);
+        std::mem::forget(u);
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
     let mut old_value = vec![0u64; (layout.size as usize + 7) / 8];
     let call = |entry, arg| unsafe { jit::call_jit(up, entry, arg) }.unwrap_or_else(|p| panic!("JIT: {}", p.message));
     call(init, old_value.as_mut_ptr() as u64);

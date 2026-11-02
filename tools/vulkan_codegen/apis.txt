@@ -858,3 +858,13 @@ value VkVideoEncodeIntraRefreshModeFlagsKHR PER_PICTURE_PARTITION
 value VkVideoEncodeIntraRefreshModeFlagsKHR BLOCK_BASED
 value VkVideoEncodeIntraRefreshModeFlagsKHR BLOCK_ROW_BASED
 value VkVideoEncodeIntraRefreshModeFlagsKHR BLOCK_COLUMN_BASED
+
+# Render HAL compute and indirect work.
+type VkPhysicalDeviceBufferDeviceAddressFeatures
+const VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME
+value VkDescriptorType STORAGE_IMAGE
+value VkBufferUsageFlags INDIRECT_BUFFER
+value VkImageUsageFlags STORAGE
+value VkFormatFeatureFlags STORAGE_IMAGE
+device vkCmdDispatchIndirect
+device vkCmdDrawIndexedIndirect

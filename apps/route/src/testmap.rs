@@ -316,7 +316,7 @@ impl TestMapBuild {
         options.paths = self.paths.clone();
         let done = self.rx.sender();
         let rejected = done.clone();
-        match cx.task_pool().submit(Lane::Heavy, move || {
+        match cx.task_pool().submit(Class::Background, move || {
             // NoFetch: the extract is on disk before this thread starts —
             // downloading is the window's job, where progress comes free.
             //

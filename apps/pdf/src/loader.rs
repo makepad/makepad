@@ -21,7 +21,7 @@
 
 use makepad_pdf_parse::{content::parse_content_stream, document::PdfDocument, PdfPage};
 use makepad_widgets::makepad_platform::thread::{
-    CancellationToken, Lane, SubmitError, TaskHandle, TaskPool, ToUISender,
+    CancellationToken, Class, SubmitError, TaskHandle, TaskPool, ToUISender,
 };
 use makepad_widgets::{CachedPage, Cx};
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ pub fn spawn_load(
     generation: u64,
     cancel: CancellationToken,
 ) -> Result<TaskHandle<()>, SubmitError> {
-    pool.submit(Lane::Heavy, move || {
+    pool.submit(Class::Background, move || {
         let started = Cx::monotonic_now();
 
         if cancel.is_cancelled() {

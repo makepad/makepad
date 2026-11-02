@@ -27,6 +27,8 @@ pub mod jit;
 pub mod disk;
 pub mod exec;
 pub mod master;
+#[cfg(feature = "checkout")]
+pub mod native;
 pub mod prof;
 pub mod sched;
 pub mod ship;
@@ -36,6 +38,12 @@ pub mod user;
 pub mod wt;
 
 use makepad_remote::json_str;
+
+/// Leases that warm a box's dev JIT store, code cache or native lane target using idle CPU.
+pub const WARM_LANE_PREFIX: &str = "warm-";
+
+/// The master's per-box dev JIT prebuild of the landed tip: lane-priority, one per box.
+pub const PREBUILD_LANE_PREFIX: &str = "prebuild-";
 
 /// What a lease guards (DESIGN.md §10.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -220,6 +228,9 @@ pub struct Caps {
     pub cpu_pct: Option<f64>,
     /// a display / WM session the node can show windows on
     pub display: Option<String>,
+    /// what a WM of ours there answered on another hosted wire (its probe): it hosts no app of
+    /// today, so the box takes no screen or gui lease until that WM restarts; empty: none such
+    pub wm_wire: String,
     /// percent and charging, on devices with a battery
     pub battery: Option<(u32, bool)>,
     pub role: Option<Role>,
@@ -308,9 +319,13 @@ impl UserSense {
 
 /// The master-node protocol this build speaks: raised when the master starts sending a node word
 /// older hubs lack (2: overlay sources and base blobs; 3: per-lane native trees; 4: detachable
-/// live runs). Only requests needing a newer facility wait for its self-update; other leases
-/// keep using the hub.
-pub const HUB_PROTO: u32 = 4;
+/// live runs; 5: compiled-file dev JIT inputs, a dep-info mismatch never fails; 6: its restart
+/// ends nothing, so it restarts for its update at once; 7: warm leases use another lane's native
+/// tree and target). Only requests needing a newer facility wait for its self-update; other
+/// leases keep using the hub.
+pub const HUB_PROTO: u32 = 7;
+/// The first protocol whose hub restarts at once for its update (a restart ends nothing).
+pub const HANDOVER_PROTO: u32 = 6;
 
 impl Caps {
     pub fn role(&self) -> Role {
@@ -333,7 +348,7 @@ impl Caps {
             .collect();
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"sick\":{},\"hub_rev\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
+            "{{\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"sick\":{},\"wm_wire\":{},\"hub_rev\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -361,6 +376,7 @@ impl Caps {
             json_str(&self.tree),
             json_str(&self.deploy),
             json_str(&self.sick),
+            json_str(&self.wm_wire),
             json_str(&self.hub_rev),
             self.hub_proto,
             format!(",\"native\":[{}],\"native_trees\":{}{}", self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json()))),
@@ -400,6 +416,7 @@ impl Caps {
             deploy: s("deploy"),
             hub_rev: s("hub_rev"),
             sick: s("sick"),
+            wm_wire: s("wm_wire"),
             rustc: s("rustc"),
             hub_proto: f("hub_proto") as u32,
             jit_store: v.get("jit_store").filter(|v| !v.is_null()).map(|v| std::sync::Arc::new(jitstore::Snapshot::parse(v))),
@@ -601,6 +618,7 @@ mod tests {
             rustc: "1.97.1".into(),
             hub_rev: "b".repeat(40),
             sick: String::new(),
+            wm_wire: "makepad-wm-0 answered \"makepad-wm mismatch 0123\"".into(),
             hub_proto: HUB_PROTO,
             jit_store: None,
             services: vec![("ai-hub".into(), 1_700_000_000_000)],

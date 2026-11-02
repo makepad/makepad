@@ -1,6 +1,8 @@
 //! Backends: what a session's commands execute against. A backend is chosen at `hal_open`.
 
 pub mod exec;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod shell;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod main_lag;
 pub mod headless;

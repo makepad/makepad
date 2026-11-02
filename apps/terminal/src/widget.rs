@@ -247,6 +247,8 @@ script_mod! {
         draw_cell_bg +: {}
         draw_underline +: {}
         draw_cursor +: {}
+        // a host's mark, centred under everything the terminal draws (`watermark_width`)
+        draw_watermark +: {}
         draw_bell +: {
             bell: instance(0.0)
             pixel: fn() {
@@ -441,6 +443,15 @@ pub struct MpTerm {
     draw_cursor: DrawTermCursor,
     #[live]
     draw_bell: DrawQuad,
+    /// A host's mark (`draw_watermark.svg`), centred in the terminal under the cells, the
+    /// text and the selection, still while the text scrolls, in the text colour at
+    /// `watermark_alpha`; at most half the terminal wide. 0 (the default) draws none.
+    #[live]
+    draw_watermark: DrawSvg,
+    #[live]
+    watermark_width: f64,
+    #[live(0.05)]
+    watermark_alpha: f32,
     #[live(10.0)]
     font_size: f64,
     #[live(6.0)]
@@ -1502,6 +1513,16 @@ impl MpTerm {
         self.draw_bg.draw_abs(cx, self.rect);
     }
 
+    fn draw_watermark(&mut self, cx: &mut Cx2d, fg: Rgb) {
+        let side = self.watermark_width.min(self.rect.size.x * 0.5).min(self.rect.size.y);
+        if side <= 0.0 {
+            return;
+        }
+        self.draw_watermark.color = Self::rgb_to_vec4(fg, self.watermark_alpha);
+        let pos = self.rect.pos + (self.rect.size - dvec2(side, side)) * 0.5;
+        self.draw_watermark.draw_abs(cx, Rect { pos, size: dvec2(side, side) });
+    }
+
     fn draw_terminal(&mut self, cx: &mut Cx2d) {
         // The session moves out of self for the draw so cached-glyph and
         // selection helpers can borrow self freely.
@@ -1543,6 +1564,7 @@ impl MpTerm {
             default_bg
         };
         self.draw_terminal_background(cx, bg_fill, global_inverse);
+        self.draw_watermark(cx, if global_inverse { default_bg } else { default_fg });
 
         let screen = session.terminal.screen();
         let rows = screen.rows;

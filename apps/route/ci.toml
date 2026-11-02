@@ -3,9 +3,16 @@
 [app.linux]
 capture = ""
 date = "2026-11-02"
-digest = "d307b57fab66a36bbf719999b8ccbcd399a936c0ca3b1bcfdba98964c9fabdf1"
-main = "0457952ac4ced822960bca8eb361cb4ce2939602"
-work = "01480d769c143b6aa4fc837b1e675b7aa1ac6d05"
+digest = "2b3a1dddec4cae25c4c1bff64cc16e4dce599d469d4aa09e2cd3870374ce7586"
+main = "e9402925c83c1a3331b42758ffc16e0c0983d98a"
+work = "2832b1fa2882006b5c2c5a22eabc04ba83662d39"
+
+[app.macos]
+capture = ""
+date = "2026-11-02"
+digest = "a4e4246f24e08dd68956cebc7b4054780f25302b210455dbb6bc2856016776f0"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
 
 [app.windows]
 capture = ""

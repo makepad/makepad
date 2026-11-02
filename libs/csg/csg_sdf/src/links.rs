@@ -130,6 +130,12 @@ impl Links {
         Links { loops, radius, clip, min, max, key, cell, origin, dims, starts, cell_segs, segs }
     }
 
+    /// Borrow the acceleration grid used by `distance_slot`, in segment traversal order.
+    /// Segments store loop indices; their material slots live in `loops`.
+    pub fn grid(&self) -> (f64, P3, [usize; 3], &[u32], &[u32], &[(P3, P3, u32)]) {
+        (self.cell, self.origin, self.dims, &self.starts, &self.cell_segs, &self.segs)
+    }
+
     /// The same links with the slots `slot(centre of the loop's points)` picks (None: unchanged).
     pub fn with_slots(&self, slot: impl Fn(P3) -> Option<u8>) -> Links {
         let loops = self

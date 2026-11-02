@@ -4,7 +4,7 @@ use crate::{
     draw_pass::DrawPassId,
     frame_build::FrameBuilder,
     texture::{ReadbackCompletion, ReadbackError, ReadbackRequest, Texture, TextureId},
-    thread::{Lane, TaskHandle},
+    thread::{Class, TaskHandle},
     window::WindowId,
 };
 use std::{
@@ -30,19 +30,29 @@ pub(crate) struct Readbacks {
     raw: HashMap<u32, (Texture, usize, usize, usize, RawCallback)>,
     jobs: VecDeque<Box<dyn FnOnce() + Send>>,
     raw_worker: Option<TaskHandle<()>>,
+    texture_pending: Vec<(makepad_hal::Id, u32, usize, usize)>,
+    buffer_pending: Vec<(makepad_hal::Id, u32, u64, u64)>,
+    buffers: HashMap<u32, (crate::GpuBuffer, usize, Box<dyn FnOnce(Result<Arc<[u8]>, ReadbackError>) + Send>)>,
 }
 
 impl Cx {
-    /// Read the current render allocation without blocking Cx or the HAL main thread.
+    /// Read the current render or storage allocation without blocking Cx or the HAL main thread.
     /// The callback runs on the worker pool. UNORM8 is BGRA; other formats keep their
     /// native packed texels (for example R32F is little-endian f32). The texture stays alive
-    /// through completion. Requests must be made after the target has rendered once.
+    /// through completion. Storage reads follow pending compute producers; render
+    /// targets must have rendered once before requesting a read.
     pub fn read_render_texture(
         &mut self,
         texture: &Texture,
         done: impl FnOnce(Result<(usize, usize, Arc<[u8]>), ReadbackError>) + Send + 'static,
     ) -> Result<(), ReadbackError> {
         let id = texture.texture_id();
+        let storage = matches!(self.textures[id].format, crate::TextureFormat::Storage { .. });
+        if let crate::TextureFormat::Storage { width, height, .. } = self.textures[id].format {
+            let mut fb = std::mem::take(&mut self.hal.frames);
+            self.fb_attachment(&mut fb, id, width, height, false);
+            self.hal.frames = fb;
+        }
         let tex = &self.textures[id];
         if !tex.format.is_render() {
             return Err(ReadbackError::UnsupportedFormat);
@@ -63,16 +73,40 @@ impl Cx {
             .ok_or(ReadbackError::NotRendered)?;
         let req = self.hal_readback_request();
         self.hal.event_arena_min = self.hal.event_arena_min.max(bytes);
-        self.hal
-            .frames
-            .w
-            .texture_readback(hal, req, [0, 0, width as u32, height as u32]);
+        if storage && self.hal.compute.has_pending() {
+            self.hal.readbacks.texture_pending.push((hal, req, width, height));
+        } else {
+            self.hal.frames.w.texture_readback(hal, req, [0, 0, width as u32, height as u32]);
+        }
         self.hal
             .readbacks
             .raw
             .insert(req, (texture.clone(), width, height, bytes, Box::new(done)));
         crate::thread::SignalToUI::set_internal_signal();
         Ok(())
+    }
+
+    pub fn read_gpu_buffer(&mut self, buffer: &crate::GpuBuffer, offset: u64, len: u64,
+        done: impl FnOnce(Result<Arc<[u8]>, ReadbackError>) + Send + 'static) -> Result<(), ReadbackError> {
+        if buffer.hal_id().is_none() || offset.checked_add(len).is_none_or(|n| n > buffer.size()) { return Err(ReadbackError::InvalidSize); }
+        let req = self.hal_readback_request();
+        self.hal.event_arena_min = self.hal.event_arena_min.max(len as usize);
+        if self.hal.compute.has_pending() {
+            self.hal.readbacks.buffer_pending.push((buffer.hal_id(), req, offset, len));
+        } else { self.hal.frames.w.buffer_readback(buffer.hal_id(), req, offset, len); }
+        self.hal.readbacks.buffers.insert(req, (buffer.clone(), len as usize, Box::new(done)));
+        crate::thread::SignalToUI::set_internal_signal();
+        Ok(())
+    }
+
+    pub(crate) fn hal_compute_readbacks(&mut self, fb: &mut FrameBuilder) {
+        if self.hal.compute.has_pending() { return; }
+        for (id, req, width, height) in self.hal.readbacks.texture_pending.drain(..) {
+            fb.w.texture_readback(id, req, [0, 0, width as u32, height as u32]);
+        }
+        for (id, req, offset, len) in self.hal.readbacks.buffer_pending.drain(..) {
+            fb.w.buffer_readback(id, req, offset, len);
+        }
     }
 
     pub(crate) fn hal_readback_request(&mut self) -> u32 {
@@ -198,6 +232,12 @@ impl Cx {
 
     pub(crate) fn hal_readback(&mut self, req: u32, status: u32, rect: [u32; 4], pixels: &[u8]) {
         self.hal.readbacks.active.remove(&req);
+        if let Some((_buffer, len, done)) = self.hal.readbacks.buffers.remove(&req) {
+            let result = if status == makepad_hal::readback::OK && pixels.len() == len { Ok(Arc::from(pixels)) } else { Err(ReadbackError::Failed) };
+            self.hal.readbacks.jobs.push_back(Box::new(move || done(result)));
+            self.hal_poll_readback_images();
+            return;
+        }
         if self.hal_encoder_readback(req, status, rect, pixels) {
             return;
         }
@@ -372,30 +412,18 @@ impl Cx {
             self.hal.readbacks.raw_worker = None;
         }
         if self.hal.readbacks.raw_worker.is_none() && !self.hal.readbacks.jobs.is_empty() {
-            match self.task_pool().reserve(Lane::Heavy) {
-                Ok(slot) => {
-                    let job = self.hal.readbacks.jobs.pop_front().unwrap();
-                    self.hal.readbacks.raw_worker = Some(slot.submit(job));
-                }
-                Err(_) => {
-                    crate::warning!("HAL readback callback queue full; retrying next turn");
-                    crate::thread::SignalToUI::set_internal_signal();
-                }
+            let pool = self.task_pool();
+            if pool.is_open() {
+                let job = self.hal.readbacks.jobs.pop_front().unwrap();
+                self.hal.readbacks.raw_worker = pool.submit(Class::Visible, job).ok();
             }
         }
         while let Some((ids, ..)) = self.hal.readbacks.images.front() {
-            // A remote grab's pixels only go to its encoder: short work, on the light lane. On
-            // the heavy lane it waited behind that lane's jobs, which a big scene re-recorded
-            // every frame keeps busy (Fab's 761-link chainmail sim: no grab came back in 10 s
-            // while it ran). Studio's ids are PNG-encoded here: heavy.
-            let lane = if crate::remote::grab_ids_only(ids) { Lane::Light } else { Lane::Heavy };
-            let Ok(slot) = self.task_pool().reserve(lane) else {
-                crate::warning!("HAL capture worker queue full; retaining image for the next turn");
-                crate::thread::SignalToUI::set_internal_signal();
-                break;
-            };
+            let class = if crate::remote::grab_ids_only(ids) { Class::Interactive } else { Class::Visible };
+            let pool = self.task_pool();
+            if !pool.is_open() { break; }
             let (ids, width, height, pixels) = self.hal.readbacks.images.pop_front().unwrap();
-            self.hal.readbacks.workers.push(slot.submit(move || {
+            if let Ok(handle) = pool.submit(class, move || {
                 let ids = crate::remote::deliver_grab_pixels(
                     ids,
                     width,
@@ -427,7 +455,7 @@ impl Cx {
                         crate::remote::fail_grabs(&ids, "HAL screenshot PNG encoding failed");
                     }
                 }
-            }));
+            }) { self.hal.readbacks.workers.push(handle); }
         }
     }
 }

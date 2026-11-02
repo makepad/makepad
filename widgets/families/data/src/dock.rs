@@ -3004,6 +3004,20 @@ impl DockRef {
         false
     }
 
+    /// Whether the current layout contains a tab, tab set, or splitter.
+    pub fn contains_item(&self, id: LiveId) -> bool {
+        self.borrow().is_some_and(|dock| dock.dock_items.contains_key(&id))
+    }
+
+    /// The alignment of one splitter in the current layout.
+    pub fn splitter_align(&self, id: LiveId) -> Option<SplitterAlign> {
+        let dock = self.borrow()?;
+        match dock.dock_items.get(&id)? {
+            DockItem::Splitter { align, .. } => Some(*align),
+            _ => None,
+        }
+    }
+
     pub fn clone_state(&self) -> Option<HashMap<LiveId, DockItem>> {
         if let Some(dock) = self.borrow() {
             return Some(dock.dock_items.clone());

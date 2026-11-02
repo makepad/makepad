@@ -5,7 +5,7 @@
 
 use crate::master::Master;
 use crate::proto::Sev;
-use crate::tray_glyph::Glyph;
+use makepad_devhub_conf::tray_glyph::Glyph;
 
 /// Recent events the menu lists.
 pub const EVENTS: usize = 4;

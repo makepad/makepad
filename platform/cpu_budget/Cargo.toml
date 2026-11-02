@@ -1,0 +1,15 @@
+[package]
+name = "makepad-cpu-budget"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Shared process CPU admission budget"
+
+[lib]
+name = "makepad_cpu_budget"
+
+[dependencies]
+makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0" }
+
+[features]
+host-shims = []

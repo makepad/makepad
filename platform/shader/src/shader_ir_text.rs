@@ -30,6 +30,7 @@ pub enum Dialect {
 /// What a module printer decides for the shared printer.
 pub struct TextCx<'a> {
     pub m: &'a IrModule,
+    pub compute: Option<&'a crate::shader_ir_compute::ComputeLayout>,
     pub dialect: Dialect,
     /// XR variant: the pass matrices select by the view.
     pub xr: bool,
@@ -89,6 +90,7 @@ impl<'a> TextCx<'a> {
     pub fn new(m: &'a IrModule, dialect: Dialect, xr: bool) -> Self {
         TextCx {
             m,
+            compute: None,
             dialect,
             xr,
             needs_inverse: false,
@@ -275,6 +277,30 @@ impl<'a> TextCx<'a> {
     }
 
     pub fn global_name(&self, g: GlobalId) -> String {
+        if let Some(layout) = self.compute {
+            if let Some(slot) = layout.slots.iter().find(|s| s.global == g) {
+                if let crate::shader_ir_compute::ComputeSlotKind::Param { scalar, lanes } = slot.kind {
+                    let parts: Vec<_> = (0..lanes).map(|i| {
+                        let byte = slot.offset + i * scalar.width();
+                        let word = byte / 4;
+                        let bits = if self.metal() { format!("_mp.kp[{word}]") }
+                            else { format!("kp[{}][{}]", word / 4, word % 4) };
+                        match (self.metal(), scalar) {
+                            (true, IrScalar::F32) => format!("as_type<float>({bits})"),
+                            (true, IrScalar::I32) => format!("as_type<int>({bits})"),
+                            (false, IrScalar::F32) => format!("asfloat({bits})"),
+                            (false, IrScalar::I32) => format!("asint({bits})"),
+                            (true, IrScalar::F16) => format!("as_type<half2>({bits})[{}]", (byte % 4) / 2),
+                            (false, IrScalar::F16) => format!("f16tof32(({bits} >> {}u) & 65535u)", (byte % 4) * 8),
+                            _ => bits,
+                        }
+                    }).collect();
+                    return if lanes == 1 { parts[0].clone() } else {
+                        format!("{}({})", self.ty_name(self.m.globals[g as usize].ty), parts.join(", "))
+                    };
+                }
+            }
+        }
         if self.metal() {
             let glob = &self.m.globals[g as usize];
             let n = lid(glob.name);
@@ -306,9 +332,9 @@ impl<'a> TextCx<'a> {
                 IrIo::FragmentOutput(i) => format!("frag_fb{}", i),
                 IrIo::FragmentDepth => "frag_depth_out".to_string(),
                 IrIo::Texture(_) => format!("tex_{}", n),
-                // Compute kernels print only to SPIR-V.
                 IrIo::Storage(_) | IrIo::Workgroup => format!("kernel_{}", n),
             },
+            IrGlobalKind::StorageTexture(_) => format!("image_{}", n),
             IrGlobalKind::VertexPosition => "vtx_pos".to_string(),
             IrGlobalKind::IterCounter => "_mp_iter".to_string(),
             IrGlobalKind::ViewId => {
@@ -430,6 +456,16 @@ impl<'a> TextCx<'a> {
         }
         let ex = &f.exprs[e as usize];
         let ty = ex.ty;
+        if self.hlsl() {
+            if let Some((g, offset)) = self.raw_buffer_place(f, e) {
+                return self.raw_buffer_load(g, &offset, ty);
+            }
+        }
+        if let ExprKind::Builtin(op, args) = &ex.kind {
+            if self.metal() || self.hlsl() {
+                if let Some(s) = self.compute_builtin(f, *op, args, ty) { return s; }
+            }
+        }
         let glsl = self.glsl();
         if self.hlsl() {
             if let Some(s) = self.hlsl_expr(f, e) {
@@ -1539,6 +1575,8 @@ impl<'a> TextCx<'a> {
                 }
             }
             Stmt::Assign(p, v) => {
+                if self.hlsl() && self.raw_buffer_store(f, *p, None, *v, indent, out) { return; }
+                if self.hlsl() && self.compute.is_some() && self.vector_lane_store(f, *p, None, *v, indent, out) { return; }
                 if self.hlsl() && self.hlsl_assign(f, *p, *v, indent, out) {
                     return;
                 }
@@ -1567,6 +1605,8 @@ impl<'a> TextCx<'a> {
                 writeln!(out, "{} = {};", p, v).ok();
             }
             Stmt::CompoundAssign(p, op, v) => {
+                if self.hlsl() && self.raw_buffer_store(f, *p, Some(*op), *v, indent, out) { return; }
+                if self.hlsl() && self.compute.is_some() && self.vector_lane_store(f, *p, Some(*op), *v, indent, out) { return; }
                 let pt = f.exprs[*p as usize].ty;
                 let place = self.expr(f, *p);
                 let mut val = self.expr(f, *v);
@@ -1594,6 +1634,18 @@ impl<'a> TextCx<'a> {
             Stmt::Expr(e) => {
                 if matches!(f.exprs[*e as usize].kind, ExprKind::Nop | ExprKind::Error) {
                     return;
+                }
+                if self.hlsl() && self.m.precise {
+                    if let ExprKind::Builtin(Builtin::StorageTextureWrite, args) = &f.exprs[*e as usize].kind {
+                        let tex = self.expr(f, args[0]);
+                        let coord = self.expr(f, args[1]);
+                        let value = self.expr(f, args[2]);
+                        let ty = f.exprs[args[2] as usize].ty;
+                        let precise = if self.m.scalar_of(ty).is_some_and(|s| s.is_float()) { "precise " } else { "" };
+                        Self::pad(out, indent);
+                        writeln!(out, "{{ uint2 _coord = {coord}; {precise}{} _texel = {value}; {tex}[_coord] = _texel; }}", self.ty_name(ty)).ok();
+                        return;
+                    }
                 }
                 let ty = f.exprs[*e as usize].ty;
                 let v = self.expr(f, *e);
@@ -1647,7 +1699,14 @@ impl<'a> TextCx<'a> {
             Stmt::Loop(body) => {
                 Self::pad(out, indent);
                 if self.hlsl() {
-                    out.push_str("[loop] while (true) {\n");
+                    if let Some(count) = self.compute.and_then(|_| bounded_induction_loop(f, body)) {
+                        // FXC fails convergence analysis for a varying rolled
+                        // helper loop before a barrier. This is a proven upper
+                        // bound, not an iteration limit: no work is truncated.
+                        writeln!(out, "[unroll({count})] while (true) {{").ok();
+                    } else {
+                        out.push_str("[loop] while (true) {\n");
+                    }
                 } else if glsl {
                     out.push_str("while (true) {\n");
                 } else {
@@ -1681,6 +1740,179 @@ impl<'a> TextCx<'a> {
                 }
             }
         }
+    }
+
+    /// Byte location within an HLSL raw buffer, including vector lanes.
+    fn raw_buffer_place(&mut self, f: &IrFunction, e: ExprId) -> Option<(GlobalId, String)> {
+        match f.exprs[e as usize].kind {
+            ExprKind::Index(base, index) => {
+                if let ExprKind::Global(g) = f.exprs[base as usize].kind {
+                    if matches!(self.m.globals[g as usize].kind, IrGlobalKind::Io(IrIo::Storage(_))) {
+                        let ty = f.exprs[e as usize].ty;
+                        let (size, align) = ir_layout(self.m, ty);
+                        let stride = round_up(size, align);
+                        return Some((g, format!("({}) * {stride}u", self.expr(f, index))));
+                    }
+                }
+                let (g, off) = self.raw_buffer_place(f, base)?;
+                let size = self.m.scalar_of(f.exprs[e as usize].ty)?.width();
+                Some((g, format!("({off}) + ({}) * {size}u", self.expr(f, index))))
+            }
+            ExprKind::Swizzle(base, lanes, 1) => {
+                let (g, off) = self.raw_buffer_place(f, base)?;
+                let size = self.m.scalar_of(f.exprs[e as usize].ty)?.width();
+                Some((g, format!("({off}) + {}u", lanes[0] as u32 * size)))
+            }
+            _ => None,
+        }
+    }
+
+    fn raw_buffer_load(&self, g: GlobalId, offset: &str, ty: TyId) -> String {
+        let name = self.plain_global_name(g);
+        let scalar = self.m.scalar_of(ty).unwrap();
+        let lanes = self.m.lanes(ty).max(1);
+        if scalar == IrScalar::F16 {
+            let parts: Vec<_> = (0..lanes).map(|lane| format!("_mp_load_half_{name}(({offset}) + {}u)", lane * 2)).collect();
+            return if lanes == 1 { parts[0].clone() } else { format!("{}({})", self.ty_name(ty), parts.join(", ")) };
+        }
+        let suffix = if lanes == 1 { String::new() } else { lanes.to_string() };
+        let load = format!("{name}.Load{suffix}({offset})");
+        return match scalar { IrScalar::F32 => format!("asfloat({load})"), IrScalar::I32 => format!("asint({load})"), _ => load };
+    }
+
+    fn vector_lane_store(&mut self, f: &IrFunction, p: ExprId, op: Option<BinOp>, v: ExprId, indent: usize, out: &mut String) -> bool {
+        let ExprKind::Index(base, index) = f.exprs[p as usize].kind else { return false };
+        let IrTy::Vec(lanes, _) = self.m.get(f.exprs[base as usize].ty) else { return false };
+        if !matches!(f.exprs[base as usize].kind, ExprKind::Local(_) | ExprKind::Param(_)) || matches!(f.exprs[index as usize].kind, ExprKind::Lit(_)) {
+            return false;
+        }
+        // DXBC has no dynamically indexed vector destination. Leaving this
+        // to FXC can force unrolling an enclosing runtime-bounded loop.
+        let base = self.expr(f, base);
+        let index = self.expr(f, index);
+        let mut value = self.expr(f, v);
+        if let Some(op) = op { value = format!("({base}[_lane] {} {value})", op.text()); }
+        Self::pad(out, indent);
+        let ty = f.exprs[p as usize].ty;
+        let precise = if self.m.precise && self.m.scalar_of(ty).is_some_and(|s| s.is_float()) { "precise " } else { "" };
+        writeln!(out, "{{ uint _lane = {index}; {precise}{} _value = {value};", self.ty_name(ty)).ok();
+        for lane in 0..*lanes {
+            let component = ['x', 'y', 'z', 'w'][lane as usize];
+            writeln!(out, "if (_lane == {lane}u) {base}.{component} = _value;").ok();
+        }
+        Self::pad(out, indent);
+        out.push_str("}\n");
+        true
+    }
+
+    fn raw_buffer_store(&mut self, f: &IrFunction, p: ExprId, op: Option<BinOp>, v: ExprId, indent: usize, out: &mut String) -> bool {
+        if let ExprKind::Swizzle(base, components, count) = f.exprs[p as usize].kind {
+            if count > 1 {
+                if let Some((g, offset)) = self.raw_buffer_place(f, base) {
+                    let ty = f.exprs[p as usize].ty;
+                    let scalar = self.m.scalar_of(ty).unwrap();
+                    let name = self.plain_global_name(g);
+                    let mut value = self.expr(f, v);
+                    if let Some(op) = op {
+                        let suffix: String = components[..count as usize].iter().map(|c| ['x', 'y', 'z', 'w'][*c as usize]).collect();
+                        let old = self.raw_buffer_load(g, "_off", f.exprs[base as usize].ty);
+                        value = format!("(({old}).{suffix} {} {value})", op.text());
+                    }
+                    Self::pad(out, indent);
+                    let precise = if self.m.precise && scalar.is_float() { "precise " } else { "" };
+                    writeln!(out, "{{ uint _off = {offset}; {precise}{} _value = {value};", self.ty_name(ty)).ok();
+                    for (i, component) in components[..count as usize].iter().enumerate() {
+                        let off = *component as u32 * scalar.width();
+                        if scalar == IrScalar::F16 {
+                            writeln!(out, "_mp_store_half_{name}(_off + {off}u, _value[{i}]);").ok();
+                        } else {
+                            writeln!(out, "{name}.Store(_off + {off}u, asuint(_value[{i}]));").ok();
+                        }
+                    }
+                    Self::pad(out, indent);
+                    out.push_str("}\n");
+                    return true;
+                }
+            }
+        }
+        let Some((g, offset)) = self.raw_buffer_place(f, p) else { return false };
+        let ty = f.exprs[p as usize].ty;
+        let scalar = self.m.scalar_of(ty).unwrap();
+        let lanes = self.m.lanes(ty).max(1);
+        let name = self.plain_global_name(g);
+        let mut value = self.expr(f, v);
+        if let Some(op) = op { value = format!("({} {} {value})", self.raw_buffer_load(g, "_off", ty), op.text()); }
+        // Evaluate the address and value once (including compound assignments).
+        Self::pad(out, indent);
+        let precise = if self.m.precise && scalar.is_float() { "precise " } else { "" };
+        writeln!(out, "{{ uint _off = {offset}; {precise}{} _value = {value};", self.ty_name(ty)).ok();
+        if scalar == IrScalar::F16 {
+            for lane in 0..lanes {
+                let val = if lanes == 1 { "_value".into() } else { format!("_value[{lane}]") };
+                writeln!(out, "_mp_store_half_{name}(_off + {}u, {val});", lane * 2).ok();
+            }
+        } else {
+            let suffix = if lanes == 1 { String::new() } else { lanes.to_string() };
+            let val = if scalar == IrScalar::U32 { "_value" } else { "asuint(_value)" };
+            writeln!(out, "{name}.Store{suffix}(_off, {val});").ok();
+        }
+        Self::pad(out, indent);
+        out.push_str("}\n");
+        true
+    }
+
+    fn compute_builtin(&mut self, f: &IrFunction, op: Builtin, args: &[ExprId], ty: TyId) -> Option<String> {
+        let metal = self.metal();
+        if op == Builtin::StorageTextureWrite {
+            let tex = self.expr(f, args[0]);
+            let coord = self.expr(f, args[1]);
+            let mut value = self.expr(f, args[2]);
+            if metal {
+                let t = f.exprs[args[2] as usize].ty;
+                if self.m.lanes(t) <= 1 {
+                    value = format!("{}4({value}, 0, 0, 0)", if t == TY_U32 { "uint" } else { "float" });
+                }
+                return Some(format!("{tex}.write({value}, {coord})"));
+            }
+            return Some(format!("{tex}[{coord}] = {value}"));
+        }
+        let field = match op {
+            Builtin::GlobalId => Some("global_id"), Builtin::LocalId => Some("local_id"),
+            Builtin::GroupId => Some("group_id"), Builtin::GroupCount => Some("group_count"),
+            Builtin::LocalIndex => Some("local_index"), Builtin::SubgroupSize => Some("subgroup_size"),
+            Builtin::SubgroupLane => Some("subgroup_lane"), Builtin::SubgroupId => Some("subgroup_id"),
+            _ => None,
+        };
+        if let Some(field) = field {
+            if !metal && op == Builtin::GroupCount {
+                let offset = self.compute.unwrap().group_count_offset.unwrap() / 16;
+                return Some(format!("kp[{offset}].xyz"));
+            }
+            return Some(format!("{}_{field}", if metal { "_mp." } else { "_mp" }));
+        }
+        if op == Builtin::Barrier {
+            return Some(if metal { "threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup)" }
+                else { "AllMemoryBarrierWithGroupSync()" }.into());
+        }
+        if op == Builtin::AtomicAdd {
+            let value = self.expr(f, args[1]);
+            let (g, off) = self.raw_buffer_place(f, args[0]).expect("atomic buffer place");
+            if metal {
+                let scalar = if ty == TY_I32 { "int" } else { "uint" };
+                let buffer = self.global_name(g);
+                return Some(format!("atomic_fetch_add_explicit(reinterpret_cast<device atomic_{scalar}*>({buffer}) + (({off}) / 4u), {value}, memory_order_relaxed)"));
+            }
+            return Some(format!("_mp_atomic_{}({off}, {value})", self.plain_global_name(g)));
+        }
+        let name = match op {
+            Builtin::SubgroupAdd => "simd_sum", Builtin::SubgroupMin => "simd_min",
+            Builtin::SubgroupMax => "simd_max", Builtin::SubgroupShuffle => "simd_shuffle",
+            Builtin::SubgroupShuffleXor => "simd_shuffle_xor", Builtin::SubgroupFirst => "simd_broadcast_first",
+            Builtin::ExtractBits => "_mp_extract_bits", Builtin::Dot4U8 => "_mp_dot4_u8",
+            Builtin::PackHalf2 => "_mp_pack_half2",
+            _ => return None,
+        };
+        Some(self.call_text(f, name, args))
     }
 
     /// A function's text (not an entry point).
@@ -1730,6 +1962,35 @@ impl<'a> TextCx<'a> {
         self.stmts(f, &f.body, 1, out);
         out.push_str("}\n\n");
     }
+}
+
+fn bounded_induction_loop(f: &IrFunction, body: &[Stmt]) -> Option<u32> {
+    let Stmt::If(test, yes, no) = body.first()? else { return None };
+    if !no.is_empty() || !matches!(yes.as_slice(), [Stmt::Break]) { return None; }
+    let ExprKind::Unary(UnOp::Not, cond) = f.exprs[*test as usize].kind else { return None };
+    let ExprKind::Binary(BinOp::Lt, left, right) = f.exprs[cond as usize].kind else { return None };
+    let ExprKind::Local(var) = f.exprs[left as usize].kind else { return None };
+    if f.locals[var as usize].ty != TY_U32 { return None; }
+    let ExprKind::Lit(IrLit::U32(bound)) = f.exprs[right as usize].kind else { return None };
+    let Stmt::CompoundAssign(place, BinOp::Add, step) = body.last()? else { return None };
+    if !matches!(f.exprs[*place as usize].kind, ExprKind::Local(l) if l == var) { return None; }
+    let ExprKind::Lit(IrLit::U32(step)) = f.exprs[*step as usize].kind else { return None };
+    if step == 0 || bound == 0 || bound.checked_add(step - 1).is_none() { return None; }
+    fn modifies(f: &IrFunction, stmts: &[Stmt], var: LocalId) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::Assign(p, _) | Stmt::CompoundAssign(p, _, _) => matches!(f.exprs[*p as usize].kind, ExprKind::Local(l) if l == var),
+            Stmt::Local(l, _) | Stmt::For(l, _, _, _) if *l == var => true,
+            Stmt::For(_, _, _, body) | Stmt::Loop(body) => modifies(f, body, var),
+            Stmt::If(_, a, b) => modifies(f, a, var) || modifies(f, b, var),
+            Stmt::Continue => true,
+            _ => false,
+        })
+    }
+    if modifies(f, &body[..body.len() - 1], var) || f.exprs.iter().any(|e|
+        matches!(e.kind, ExprKind::AddrOf(p) if matches!(f.exprs[p as usize].kind, ExprKind::Local(l) if l == var))) {
+        return None;
+    }
+    Some((bound + step - 1) / step)
 }
 
 pub fn pass_matrix_name(which: PassMatrix) -> &'static str {

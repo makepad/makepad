@@ -18,7 +18,7 @@
 //!
 //! What is checked where comes from the tree: the apps (`apps/<x>/Cargo.toml`), their
 //! `ci.splash` (`ci.check_targets({packages, targets})`), the workspace members, the commercial
-//! `slices.json`. The run's state is [`crate::state::Ci`]; [`gate`] is what `devhub verify` runs.
+//! `slices.json`. The run's state is [`crate::state::Ci`]; [`ci`] runs it for the CI bucket.
 //!
 //! A master restart resumes both slots: each follows its steps on the leases that came back,
 //! from the logs of its own run. Later pairs read passes from each crate's committed `ci.toml`;
@@ -69,8 +69,7 @@ const HEAR: Duration = Duration::from_secs(120);
 /// A shard with no box of its kind here waits this long for one to come back, once nothing else is
 /// left to run (a box updating or restarting is back in minutes).
 const NO_BOX_WAIT: Duration = Duration::from_secs(15 * 60);
-/// A run in which no shard got a box this long gives up, saying what its asks wait for (verify goes
-/// on with it later, what passed standing).
+/// A run with no shard progress this long reports what its asks wait for.
 const STALLED: Duration = Duration::from_secs(30 * 60);
 
 /// A run no shard of which ended for [`STALLED`]: what runs and what the waiting ones wait for.
@@ -789,6 +788,8 @@ pub struct CiConf {
     pub cores: Option<f64>,
     /// `test_features = "a,b"`: the features the sweep tests the crate with
     pub test_features: Vec<String>,
+    /// `os = "linux,windows"`: the OSes its tests run on (empty: every OS)
+    pub os: Vec<Os>,
 }
 
 impl CiConf {
@@ -807,6 +808,9 @@ impl CiConf {
         if !self.test_features.is_empty() {
             out.push(("test_features", self.test_features.join(",")));
         }
+        if !self.os.is_empty() {
+            out.push(("os", self.os.iter().map(|os| os.as_str()).collect::<Vec<_>>().join(",")));
+        }
         out
     }
 }
@@ -821,7 +825,13 @@ pub fn read_conf(text: &str) -> Result<CiConf, String> {
             "box" if v == "whole" => c.whole = true,
             "cores" => c.cores = Some(v.parse::<f64>().ok().filter(|n| *n > 0.0).ok_or_else(|| format!("ci.toml: [ci] cores = {v:?}: a positive number"))?),
             "test_features" => c.test_features = v.split(',').map(str::trim).filter(|f| !f.is_empty()).map(str::to_string).collect(),
-            _ => return Err(format!("ci.toml: [ci] {k} = {v:?}: unknown (box = \"whole\", cores, test_features)")),
+            "os" => {
+                c.os = v.split(',').map(str::trim).filter(|os| !os.is_empty()).map(Os::of).collect();
+                if c.os.contains(&Os::Any) {
+                    return Err(format!("ci.toml: [ci] os = {v:?}: linux, macos or windows"));
+                }
+            }
+            _ => return Err(format!("ci.toml: [ci] {k} = {v:?}: unknown (box = \"whole\", cores, test_features, os)")),
         }
     }
     Ok(c)
@@ -830,6 +840,14 @@ pub fn read_conf(text: &str) -> Result<CiConf, String> {
 /// A crate's settings at this tree (none: defaults).
 pub fn conf_at(tree: &Tree, dir: &str) -> CiConf {
     tree.read(&join(dir, "ci.toml")).and_then(|t| read_conf(&t).ok()).unwrap_or_default()
+}
+
+fn runs_on(conf: &CiConf, os: Os) -> bool {
+    conf.os.is_empty() || conf.os.contains(&os)
+}
+
+fn crate_runs_on(tree: &Tree, dir: &str, os: Os) -> bool {
+    runs_on(&conf_at(tree, dir), os)
 }
 
 /// The features a crate's tests run with: its defaults plus its `test_features`, and the
@@ -1144,6 +1162,13 @@ pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidat
 pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64) -> Vec<Shard> {
     let (_apps, scripts) = discover(tree);
     let m = matrix(tree, &scripts);
+    let own = jit_own_dirs(tree);
+    let test_step = |dir: &str, args: &[&str]| {
+        if !own.contains(dir) { return jit(args); }
+        let mut step = argv(&["cargo", "test", "--release", "-p", args[1]]);
+        step.extend(args[2..].iter().map(|a| a.to_string()));
+        step
+    };
     let mut shards = Vec::new();
     let est = |id: &str, guess: f64| timing(id).unwrap_or(guess);
     // a package's dir (a package not found keeps its shard to its own pair)
@@ -1209,17 +1234,17 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
             let long = timing(&id).is_some_and(|secs| secs > WINDOWS_TEST_MAX);
             // a target with no test that runs on an OS gets no shard there (it would pass on nothing)
             let files = test_files(tree, &k, &target);
-            if has_tests(tree, files.as_deref(), Os::Linux, &feats) {
-                push(id, Kind::Test, Os::Linux, false, vec![jit(&args)], Judge::Tests, 20.0, Some(vec![k.dir.clone()]));
+            if crate_runs_on(tree, &k.dir, Os::Linux) && has_tests(tree, files.as_deref(), Os::Linux, &feats) {
+                push(id, Kind::Test, Os::Linux, false, vec![test_step(&k.dir, &args)], Judge::Tests, 20.0, Some(vec![k.dir.clone()]));
             }
-            if (tests + rotation) % 3 == 0 && !long && has_tests(tree, files.as_deref(), Os::Windows, &feats) {
-                push(format!("wtest:{}:{target}", k.package), Kind::Test, Os::Windows, false, vec![jit(&args)], Judge::Tests, 60.0, Some(vec![k.dir.clone()]));
+            if (tests + rotation) % 3 == 0 && !long && crate_runs_on(tree, &k.dir, Os::Windows) && has_tests(tree, files.as_deref(), Os::Windows, &feats) {
+                push(format!("wtest:{}:{target}", k.package), Kind::Test, Os::Windows, false, vec![test_step(&k.dir, &args)], Judge::Tests, 60.0, Some(vec![k.dir.clone()]));
             }
             tests += 1;
         }
     }
     // every other crate of the workspace with tests (the commercial apps, libs, tools): its
-    // `makepad test`, one step per crate, the crates batched into shards of about
+    // `makepad test` (cargo for JIT-own crates), one step per crate, batched into shards of about
     // [`GROUP_SECS`] by their measured times; a GPU box only for crates that reach the HAL or a
     // GPU runtime; a rotating third of the batches on Windows too
     let mut extra: Vec<Shard> = Vec::new();
@@ -1233,12 +1258,12 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
         with_of.insert(k.package.clone(), with);
         let targets: Vec<String> = k.lib.then(|| "lib".to_string()).into_iter().chain(k.tests.iter().cloned()).collect();
         let files: Vec<Option<Vec<String>>> = targets.iter().map(|t| test_files(tree, k, t)).collect();
-        let on = |os: Os| files.iter().any(|f| has_tests(tree, f.as_deref(), os, &feats));
+        let on = |os: Os| crate_runs_on(tree, &k.dir, os) && files.iter().any(|f| has_tests(tree, f.as_deref(), os, &feats));
         let item = (k.package.clone(), k.dir.clone(), timing(&format!("test:{}", k.package)).unwrap_or(GUESS_CRATE_SECS), on(Os::Linux), on(Os::Windows));
         let gpu = gpu_dirs.contains(&k.dir);
         if timing(&format!("failing:{}", k.package)).is_some() {
             // alone, under its own name
-            let step = vec![jit(&args.iter().map(String::as_str).collect::<Vec<_>>())];
+            let step = vec![test_step(&k.dir, &args.iter().map(String::as_str).collect::<Vec<_>>())];
             if item.3 {
                 extra.push(Shard { id: format!("test:{}", k.package), kind: Kind::Test, os: Os::Linux, gui: false, gpu, steps: step.clone(), judge: Judge::Tests, est: item.2, dirs: Some(vec![k.dir.clone()]), whole: false, cores: None });
             }
@@ -1256,7 +1281,7 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
                 }
                 let steps = g.iter().map(|p| {
                     let args: Vec<String> = [vec!["test".to_string(), p.clone()], with_of[p].clone()].concat();
-                    jit(&args.iter().map(String::as_str).collect::<Vec<_>>())
+                    test_step(&est[p].0, &args.iter().map(String::as_str).collect::<Vec<_>>())
                 }).collect();
                 let secs: f64 = g.iter().map(|p| est[p].1).sum();
                 let dirs = g.iter().map(|p| est[p].0.clone()).collect();
@@ -1762,6 +1787,23 @@ const JIT_DIR: &str = "tools/run";
 /// Not read by any shard through the JIT.
 const NOT_JIT: [&str; 2] = ["libs/devhub", "apps/devhub"];
 
+/// Crates compiled only into the JIT binary: closure(JIT_DIR) minus the union of the
+/// closures of workspace members outside it that do not embed the JIT. Shared dependencies still test under the JIT.
+pub fn jit_own_dirs(tree: &Tree) -> BTreeSet<String> {
+    let read = |p: &str| tree.read(p);
+    let jit = super::roll::crate_dirs_from(JIT_DIR, &read);
+    let mut shared = BTreeSet::new();
+    for k in workspace_crates(tree) {
+        // Closures are transitive: a member already reached adds nothing.
+        if !jit.contains(&k.dir) && !shared.contains(&k.dir) {
+            let closure = super::roll::crate_dirs_from(&k.dir, &read);
+            if closure.contains(JIT_DIR) { continue; }
+            shared.extend(closure);
+        }
+    }
+    jit.difference(&shared).cloned().collect()
+}
+
 /// Which shards' inputs a range of landings left alone.
 pub(crate) struct Inputs {
     changed: Vec<String>,
@@ -1822,10 +1864,9 @@ fn arm_plan(tree: &Tree, shards: &mut Vec<Shard>, arm: &super::arm::Decision) ->
     skipped
 }
 
-/// Resume preflights and sweeps in their own slots before accepting requests. Verify resumes its
-/// gate when it asks for the pair again ([`gate`]).
+/// Resume all existing runs in their own slots before accepting requests.
 pub fn start(ctx: &Arc<Ctx>) {
-    let runs = ctx.store.read(|d| d.ci.run.iter().filter(|r| r.dry).chain(d.ci.sweep_run.iter()).cloned().collect::<Vec<_>>());
+    let runs = ctx.store.read(|d| d.ci.run.iter().chain(d.ci.sweep_run.iter()).cloned().collect::<Vec<_>>());
     let mut slots = Vec::new();
     for run in runs {
         let (held, slot) = std::sync::mpsc::channel();
@@ -1835,24 +1876,46 @@ pub fn start(ctx: &Arc<Ctx>) {
             // a run stopped before the restart only finishes what runs (nothing new starts)
             run_stop(run.sweep).store(run.stopping, std::sync::atomic::Ordering::SeqCst);
             let _ = held.send(());
-            let _ = gate_held(one, &c, &run.pair, run.dry, run.sweep, None, Arc::new(|| false), !run.checkout.is_empty());
+            let _ = gate_held(one, &c, &run.pair, run.dry, run.sweep, !run.checkout.is_empty());
         });
         slots.push(slot);
     }
     for slot in slots { let _ = slot.recv(); }
 }
 
-/// Runs the shards of `pair` over the free boxes (`only`: those of these ids, behind everything
-/// else); the verdict and the shards as verify legs. `stop` gives the run up (shards running finish
-/// their lease; nothing new starts).
-pub fn gate(ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, only: Option<&[String]>, stop: Arc<dyn Fn() -> bool + Send + Sync>) -> (Verdict, Vec<crate::state::Leg>) {
-    gate_for(ctx, pair, dry, sweep, only, stop, false)
+/// One full CI run on the bucket's tip, waiting for any manual or resumed run first.
+pub fn ci(repo: PathBuf) -> crate::bucket::Run {
+    Arc::new(move |_, tip, log| {
+        let Some(ctx) = super::ctx() else {
+            return crate::bucket::Outcome { ok: false, failing: vec!["CI: master not started".into()], log: String::new(), summary: "CI incomplete: master not started".into() };
+        };
+        let ctx = calling_ctx(ctx, repo.clone());
+        // The shared slot stays locked through the verdict and proof publication.
+        let (verdict, legs) = gate_for(&ctx, tip, false, false, false);
+        let ok = legs.iter().filter(|l| l.state == "ok").count();
+        let fail = legs.iter().filter(|l| l.state == "fail").count();
+        let word = match verdict { Verdict::Ok => "ok", Verdict::Fail => "fail", Verdict::Incomplete => "incomplete" };
+        let mut summary = format!("{} shards: {ok} ok, {fail} fail, {} incomplete; {word}", legs.len(), legs.len() - ok - fail);
+        let mut failing: Vec<String> = legs.iter().filter(|l| l.state != "ok").map(|l| l.name.clone()).collect();
+        if verdict != Verdict::Ok && failing.is_empty() {
+            failing.push(format!("CI {word}: see ci events"));
+        }
+        let mut text = format!("CI {}: {summary}\n", tip.short());
+        for leg in &legs {
+            text.push_str(&format!("{} {}: {} ({})\n", leg.state, leg.name, leg.summary, leg.log));
+            for error in &leg.errors { text.push_str(&format!("{error}\n")); }
+        }
+        if let Err(e) = std::fs::write(log, text) {
+            summary.push_str(&format!("; log: {e}"));
+        }
+        crate::bucket::Outcome { ok: verdict == Verdict::Ok, failing, log: log.display().to_string(), summary }
+    })
 }
 
-fn gate_for(ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, only: Option<&[String]>, stop: Arc<dyn Fn() -> bool + Send + Sync>, calling: bool) -> (Verdict, Vec<crate::state::Leg>) {
+fn gate_for(ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool) -> (Verdict, Vec<crate::state::Leg>) {
     let one = run_slot(sweep).lock().unwrap_or_else(|e| e.into_inner());
     run_stop(sweep).store(false, std::sync::atomic::Ordering::SeqCst);
-    gate_held(one, ctx, pair, dry, sweep, only, stop, calling)
+    gate_held(one, ctx, pair, dry, sweep, calling)
 }
 
 /// Keep a matching run in its slot while planning; archive only that slot's superseded run.
@@ -1877,8 +1940,8 @@ fn prune_runs(ctx: &Ctx) {
     }
 }
 
-/// [`gate`] with its run's slot in hand.
-fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, only: Option<&[String]>, stop: Arc<dyn Fn() -> bool + Send + Sync>, calling: bool) -> (Verdict, Vec<crate::state::Leg>) {
+/// Runs the shards of `pair` with its slot held through proof publication.
+fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool) -> (Verdict, Vec<crate::state::Leg>) {
     let checkout = if calling { ctx.repo.to_string_lossy().into_owned() } else { String::new() };
     let prior_lock = ctx.store.read(|d| d.ci.slot(sweep).as_ref().filter(|r| r.pair == *pair && r.dry == dry && r.sweep == sweep && Path::new(&r.checkout) == Path::new(&checkout)).map(|r| ctx.logs("ci").join(&r.id).join("Cargo.lock")));
     let lock = prior_lock.and_then(|p| std::fs::read_to_string(p).ok()).or_else(|| std::fs::read_to_string(ctx.repo.join("Cargo.lock")).ok());
@@ -1978,9 +2041,6 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     if sweep || calling {
         shards = batch_tests(shards, &mut why_lines, &timing_of);
     }
-    if let Some(only) = only {
-        shards.retain(|s| only.contains(&s.id));
-    }
     let state: Vec<CiShard> = shards
         .iter()
         .map(|s| CiShard { id: s.id.clone(), state: "wait".into(), log: dir.join(format!("{}.log", safe(&s.id))).to_string_lossy().into_owned(), sig: s.sig(), ..Default::default() })
@@ -2050,8 +2110,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     let word = if going.is_some() { "goes on" } else { "started" };
     ctx.store.event("ci", Sev::Info, format!("ci {} {word}: {n} shards, {kept} kept, {} on their boxes (run {id})", pair.short(), back.len()), None);
     let max_active = boxes(ctx).len().saturating_sub(if sweep { 2 } else { 0 }).max(1);
-    let prio = if !sweep && only.is_some() { super::verify::OLD_PAIR_PRIO } else { PRIO };
-    let pool = Arc::new((Mutex::new(Pool { proofs_collected: false, reserved: vec![None; n], shards, state, stopped: false, prio, max_active, overdue: vec![false; n], run_id: id.clone(), sweep }), Condvar::new()));
+    let pool = Arc::new((Mutex::new(Pool { proofs_collected: false, reserved: vec![None; n], shards, state, stopped: false, prio: PRIO, max_active, overdue: vec![false; n], run_id: id.clone(), sweep }), Condvar::new()));
     let master_t0 = Instant::now();
     let mut nothing_left: Option<Instant> = None;
     let mut last_ran = Instant::now();
@@ -2082,7 +2141,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         {
             let (p, cv) = &*pool;
             let mut g = p.lock().unwrap();
-            if stop() || run_stop(sweep).load(std::sync::atomic::Ordering::SeqCst) {
+            if run_stop(sweep).load(std::sync::atomic::Ordering::SeqCst) {
                 g.stopped = true;
             }
             if g.all_done() || g.stopped {
@@ -3123,7 +3182,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
         status(&root)?;
         let c = calling_ctx(ctx, root);
         // The service owns this request until the gate ends, including proof write-back.
-        let (verdict, legs) = gate_for(&c, &pair, true, false, None, Arc::new(|| false), true);
+        let (verdict, legs) = gate_for(&c, &pair, true, false, true);
         let word = match verdict { Verdict::Ok => "ok", Verdict::Fail => "fail", Verdict::Incomplete => "incomplete" };
         return Ok(obj(vec![("verdict", s(word)), ("pair", s(pair.short())), ("shards", Value::Int(legs.len() as i64))]).to_json());
     }
@@ -3171,7 +3230,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 };
                 SWEEP_STOP.store(false, std::sync::atomic::Ordering::SeqCst);
                 let _ = held.send(true);
-                let _ = gate_held(one, &c, &p, true, true, None, Arc::new(|| false), false);
+                let _ = gate_held(one, &c, &p, true, true, false);
             }).map_err(|e| format!("sweep: {e}"))?;
             if !slot.recv().map_err(|e| format!("sweep: {e}"))? {
                 return Err("a sweep is going (makepad ci stop --sweep)".into());
@@ -3457,6 +3516,49 @@ mod tests {
         assert_eq!(check_specs("ci.check_targets({packages: [ci.target.package] targets: ci.host.targets})", Some("p")), vec![(vec!["p".to_string()], None)]);
     }
 
+    fn jit_tree() -> Tree {
+        Tree::mem(vec![
+            ("Cargo.toml", "[workspace]\nmembers = [\"tools/run\", \"tools/run/android_host\", \"libs/relax/*\", \"libs/devhub\"]\n"),
+            ("tools/run/Cargo.toml", "[package]\nname = \"makepad-run\"\n[dependencies]\nrelax-compiler = { path = \"../../libs/relax/compiler\" }\n"),
+            ("tools/run/src/lib.rs", "#[test]\nfn a() {}\n"),
+            ("tools/run/android_host/Cargo.toml", "[package]\nname = \"makepad-android-host\"\n[dependencies]\nmakepad-run = { path = \"..\" }\n"),
+            ("tools/run/android_host/src/lib.rs", "#[test]\nfn a() {}\n"),
+            ("libs/relax/compiler/Cargo.toml", "[package]\nname = \"relax-compiler\"\n[dependencies]\nrelax-base = { path = \"../base\" }\n[features]\nchecks = []\n"),
+            ("libs/relax/compiler/ci.toml", "[ci]\ntest_features = \"checks\"\n"),
+            ("libs/relax/compiler/src/lib.rs", "#[cfg(feature = \"checks\")]\n#[test]\nfn a() {}\n"),
+            ("libs/relax/base/Cargo.toml", "[package]\nname = \"relax-base\"\n"),
+            ("libs/relax/base/src/lib.rs", "#[test]\nfn a() {}\n"),
+            ("libs/devhub/Cargo.toml", "[package]\nname = \"makepad-devhub\"\n[dependencies]\nrelax-base = { path = \"../relax/base\" }\n"),
+            ("libs/devhub/src/lib.rs", "#[test]\nfn a() {}\n"),
+        ])
+    }
+
+    #[test]
+    fn jit_own_dirs_exclude_shared_crates() {
+        let own = jit_own_dirs(&jit_tree());
+        assert_eq!(own, ["tools/run", "libs/relax/compiler"].into_iter().map(str::to_string).collect());
+        assert!(!own.contains("tools/run/android_host"));
+    }
+
+    #[test]
+    fn jit_own_tests_use_cargo() {
+        let t = jit_tree();
+        for failing in [false, true] {
+            let p = sweep_plan(&t, &|id| (failing && id == "failing:relax-compiler").then_some(1.0), 0);
+            let compiler = argv(&["cargo", "test", "--release", "-p", "relax-compiler", "--features", "checks"]);
+            for os in [Os::Linux, Os::Windows] {
+                let steps: Vec<_> = p.iter().filter(|s| s.kind == Kind::Test && s.os == os).flat_map(|s| &s.steps).collect();
+                assert!(steps.contains(&&argv(&["cargo", "test", "--release", "-p", "makepad-run"])), "loader on {os:?}");
+                assert!(steps.contains(&&jit(&["test", "relax-base"])), "shared dependency on {os:?}");
+                assert!(steps.contains(&&jit(&["test", "makepad-devhub", "--lib"])), "other member on {os:?}");
+                assert_eq!(steps.contains(&&compiler), !failing || os == Os::Linux, "compiler on {os:?}, failing={failing}");
+            }
+            if failing {
+                assert_eq!(p.iter().find(|s| s.id == "test:relax-compiler").unwrap().steps, vec![compiler]);
+            }
+        }
+    }
+
     #[test]
     fn the_sweep_has_every_kind_of_shard_on_the_right_os() {
         let t = tree();
@@ -3550,6 +3652,7 @@ mod tests {
         assert_eq!(judge(Judge::Exit, "x", 1, "").0, false);
         assert!(!judge(Judge::Tests, "x", 0, "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured\n").0);
         assert!(judge(Judge::Tests, "x", 0, "test result: ok. 0 passed; 0 failed\ntest result: ok. 3 passed; 0 failed\n").0);
+        assert!(!judge(Judge::Tests, "cargo test --release -p x", 101, "test result: ok. 3 passed; 0 failed\nerror: could not compile `x`\n").0);
         assert_eq!(judge(Judge::Report, "x", 3, "a\nlive_replay: app pass rate 90.0%\n"), (true, "live_replay: app pass rate 90.0%".to_string()));
         assert_eq!(judge(Judge::Report, "x", 1, "").0, false);
         assert!(judge(Judge::Cargo, "x", 0, "warning: unused manifest key\n    Finished").0);

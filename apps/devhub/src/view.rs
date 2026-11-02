@@ -369,6 +369,7 @@ impl DevhubView {
         let title = format!("{}{}{role}", m.name, if m.local { " (this Mac)" } else { "" });
         self.d.label(cx, rect(row.pos.x + 36.0, row.pos.y, 220.0, row.size.y), true, tok.font.body_small, fg, HAlign::Left, &title);
         let tail = match (&m.err, &node) {
+            _ if m.pending_ms.is_some() => format!("pending: asked {} s ago, no answer yet", makepad_devhub::proto::wall_ms().saturating_sub(m.pending_ms.unwrap_or(0)) / 1000),
             (Some(e), _) => format!("down: {}", e.chars().take(60).collect::<String>()),
             (None, Some(n)) => format!("{} \u{b7} {jits} JITs \u{b7} {} leases{}", n.state_word(), n.leases, if n.waiting > 0 { format!(", {} waiting", n.waiting) } else { String::new() }),
             (None, None) => format!("{jits} JITs"),

@@ -5,12 +5,8 @@ use makepad_remote::json_str;
 use makepad_strict_json::Value;
 use std::path::PathBuf;
 
-/// The node's fleet TLS listener (master and peer connections).
-pub const NODE_PORT: u16 = 8797;
 /// The nodes' UDP beacon (node to node only; the master never listens for it).
 pub const BEACON_PORT: u16 = 41832;
-/// Hitches shorter than this are not worth a line (the JIT reports from 50 ms).
-pub const HITCH_MS: f64 = 500.0;
 /// A field of an event line is cut to this (the detail blob keeps the whole event).
 pub const MAX_FIELD: usize = 300;
 /// A record (with its detail) longer than this is cut: events are data from programs.
@@ -27,52 +23,6 @@ pub fn home() -> PathBuf {
 /// tools) reach the same master; MAKEPAD_HOME moves it with the rest of devhub's state (tests).
 pub fn control_socket() -> PathBuf {
     home().join("devhub.sock")
-}
-
-/// This machine's first private IPv4 address (the LAN address a node binds), if any.
-pub fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
-    // a UDP connect sends nothing: it only asks the routing table for the source address of a
-    // TEST-NET-1 destination (routed, so it never counts as touching the local network)
-    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("192.0.2.1:9").ok()?;
-    match s.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(v4) if v4.is_private() => Some(v4),
-        _ => None,
-    }
-}
-
-/// The default machine name: a node is called by the last octet of its LAN address (`217`), the
-/// way the fleet is spoken of; a machine without one by its host name.
-pub fn default_machine_name() -> String {
-    if let Some(ip) = lan_ipv4() {
-        return ip.octets()[3].to_string();
-    }
-    host_name()
-}
-
-/// `/etc/hostname`, else the OS's, cleaned to `a-z 0-9 - _`.
-pub fn host_name() -> String {
-    let raw = std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).unwrap_or_else(os_hostname);
-    let clean: String = raw.split('.').next().unwrap_or("").chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).take(48).collect();
-    if clean.is_empty() { "machine".into() } else { clean }
-}
-
-#[cfg(unix)]
-fn os_hostname() -> String {
-    extern "C" {
-        fn gethostname(name: *mut u8, len: usize) -> i32;
-    }
-    let mut buf = [0u8; 256];
-    if unsafe { gethostname(buf.as_mut_ptr(), buf.len()) } != 0 {
-        return String::new();
-    }
-    let n = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..n]).into_owned()
-}
-
-#[cfg(not(unix))]
-fn os_hostname() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
 /// Program text made safe for one terminal line: control characters escaped, cut at `max` bytes.
@@ -268,12 +218,20 @@ pub fn from_jit_event(machine: &str, app: &str, pid: u32, json: &str, hitch_ms: 
 pub fn from_hot(h: &makepad_remote::hot::Record) -> Record {
     use makepad_remote::hot::Outcome;
     let (kind, sev) = match h.outcome {
+        Outcome::FirstFrameTimeout => ("first_frame_timeout", Sev::Err),
+        Outcome::NoWindow => ("no_window", Sev::Err),
         Outcome::RestartFailed => ("jit_error", Sev::Err),
         o if o.failure() => ("patch_failed", Sev::Warn),
         _ => ("jit_hot", Sev::Info),
     };
+    let line = match h.outcome {
+        Outcome::FirstFrameTimeout | Outcome::NoWindow => format!("{}: {} on {}: {}",
+            if h.outcome == Outcome::FirstFrameTimeout { "first-frame timeout" } else { "no window" },
+            clean(&h.app, MAX_FIELD), clean(&h.node, MAX_FIELD), clean(&h.reason, MAX_FIELD)),
+        _ => format!("{kind}: {} {}: {}", h.app, h.outcome.name(), clean(&h.reason, MAX_FIELD)),
+    };
     Record { id: h.id.clone(), at_ms: h.at_ms, machine: h.node.clone(), app: h.app.clone(), pid: h.pid,
-        kind: kind.into(), sev, line: format!("{kind}: {} {}: {}", h.app, h.outcome.name(), clean(&h.reason, MAX_FIELD)),
+        kind: kind.into(), sev, line,
         detail: h.to_json(), untrusted: false }
 }
 
@@ -288,6 +246,7 @@ pub fn hub_record(machine: &str, app: &str, pid: u32, kind: &str, sev: Sev, line
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_devhub_conf::HITCH_MS;
 
     #[test]
     fn panic_event_becomes_an_answer_first_line() {

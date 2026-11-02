@@ -421,7 +421,7 @@ impl MilkdropView {
     /// done (a later load wins over an earlier one still in flight).
     pub fn load_preset(&mut self, cx: &mut Cx, path: &Path) {
         let owned = path.to_path_buf();
-        match cx.task_pool().submit(Lane::Light, move || std::fs::read(&owned).map(|bytes| Preset::parse(&bytes))) {
+        match cx.task_pool().submit(Class::Visible, move || std::fs::read(&owned).map(|bytes| Preset::parse(&bytes))) {
             Ok(handle) => {
                 self.loading.clear();
                 self.loading.push((path.to_path_buf(), handle));

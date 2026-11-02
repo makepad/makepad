@@ -75,6 +75,7 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `key k=press c=KeyA` | Key input; down/up are also supported |
 | `text t=TEXT`, `key t=TEXT` | Text/IME input |
 | `drop path=ABSOLUTE_PATH x=X y=Y` | One file through native drag, drop, and drag-end events |
+| `cpu` | Shared CPU budget and app pool: classes, queues, waits, running jobs and checkpoint warnings |
 | `log [n=50] [since=N]` | App log tail; `n` in the reply is the latest sequence |
 | `step [frames=K] [fps=60]` | Run K virtual-clock frames (needs `--virtual-clock`), see below |
 | `settled` | Whether anything is still pending: `{"settled":bool,"reasons":[...]}` |

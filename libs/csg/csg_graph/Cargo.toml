@@ -15,3 +15,4 @@ makepad-csg-sdf = { path = "../csg_sdf" }
 
 [dev-dependencies]
 makepad-csg-boolean = { path = "../csg_boolean" }
+makepad-script = { path = "../../../platform/script", version = "1.0.0" }

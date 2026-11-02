@@ -144,6 +144,21 @@ pub fn report_failed(error: &str, code: i32) {
     report("exit", &code.to_string());
 }
 
+/// A failed run discovered off the main thread (the first-frame watchdog): the launcher hears why,
+/// the exit work every exit does runs (exit report, cache write, the session log's tee drained to
+/// the terminal: _exit alone lost the watchdog's last lines in the pipe), then the process ends.
+/// exit() would run the process's static destructors on this thread while main and the GPU
+/// driver's threads still run (a segfault in the driver on a node).
+pub(crate) fn failed_run(why: &str) -> ! {
+    use std::io::Write;
+    report("error", why);
+    crate::tui::exit_code(1);
+    finish_run("failed run", Some(1));
+    if !crate::preempt::is_stopped() { crate::tui::finish(false); }
+    let _ = std::io::stdout().flush();
+    crate::os::thread::exit_now(1)
+}
+
 pub(crate) fn reporting() -> bool {
     REPORT_FILE.lock().unwrap().is_some()
 }
@@ -282,6 +297,12 @@ pub(crate) enum ResolveFor {
 /// `finish_window`.
 static PENDING_WINDOW: relax_session::sync::Mutex<Option<std::io::Result<std::thread::JoinHandle<Result<(), String>>>>> = relax_session::sync::Mutex::new(None);
 
+/// The run's app will be hosted by the HAL (HAL_RUN, known once finish_window joins): its host
+/// window is opening and the host is not domain zero.
+fn hal_window_pending() -> bool {
+    PENDING_WINDOW.lock().unwrap().is_some() && MAIN_HOST.get().is_some_and(|h| !h.domain_zero)
+}
+
 /// Waits for the host window the resolve started to open (it opens beside the load, which does not
 /// need it), and says whether the run is hosted (HAL_RUN).
 fn finish_window() -> Result<(), String> {
@@ -324,10 +345,11 @@ impl From<crate::provided::SourceCheckError> for ResolveError {
 }
 
 /// A boot that cannot bind its provided libraries keeps the run window for the update offer.
-fn offer_boot_update(change: crate::provided::ProvidedChange) -> i32 {
+fn offer_boot_update(package: &str, change: crate::provided::ProvidedChange) -> i32 {
     if let Err(e) = finish_window() {
         report_failed(&e, 1);
         eprintln!("makepad-run: {e}");
+        crate::first_frame::no_window(package, &e);
         return 1;
     }
     crate::reload::host::offer_provided(change, None);
@@ -777,6 +799,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         driver_options.live = true;
     }
     LIVE_SESSION.store(driver_options.live, Ordering::Release);
+    // a live run parks a call of code that does not compile until a live edit fixes it (jit.rs
+    // PARK_COMPILE_ERRORS); a test, a check and a run nothing can patch keep the error fatal
+    jit::PARK_COMPILE_ERRORS.store(driver_options.live && !live_tests && !check && !harness && plain_test.is_none(), Ordering::Relaxed);
     // `--cfg <name>` / `--cfg=<name>` among the cargo flags (`makepad run <pkg> --cfg custom`) or
     // before the package: extra cfgs for the program's crates, not cargo flags
     let mut cargo_flags_in: Vec<String> = Vec::new();
@@ -946,7 +971,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
 
     let Resolved { units, g, order, cfgs, live_inputs } = match resolve_package(sess, &workspace, &package, &cargo_flags, &units_json, &target_dir, &std_dir, ResolveFor::Boot, check) {
         Ok(r) => r,
-        Err(ResolveError::ProvidedChanged(change)) => return offer_boot_update(change),
+        Err(ResolveError::ProvidedChanged(change)) => return offer_boot_update(&package, change),
         Err(ResolveError::Failed(e)) => {
             if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&e, "resolve")); }
             eprintln!("makepad-run: {e}");
@@ -1369,7 +1394,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         Vec::new()
     };
     if live_tests && test_subjects.len() != 1 {
-        eprintln!("makepad test --live: select exactly one target (--lib or --test <name>)");
+        eprintln!("makepad test --live: select exactly one target (--lib, --bin <name> or --test <name>)");
         return 2;
     }
     // Every test target is a binary of its own (cargo builds and runs each apart), and a process
@@ -1597,7 +1622,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     {
         let t = Instant::now();
         match crate::provided::finish_sources() {
-            Err(crate::provided::SourceCheckError::Changed(change)) => return offer_boot_update(change),
+            Err(crate::provided::SourceCheckError::Changed(change)) => return offer_boot_update(&package, change),
             Err(crate::provided::SourceCheckError::Invalid(e)) => {
                 if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&e, "resolve")); }
                 eprintln!("makepad-run: {e}");
@@ -1665,6 +1690,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     }
     phase("image", t);
     drop(mem_g);
+    // the files the boot's selection skipped, before any check or the post-boot loader loads them
+    // (the type checks' verdict keys, check.rs BOOT_SKIPPED)
+    let _ = crate::check::BOOT_SKIPPED.set(crate::check::boot_skipped(&u.prog));
+    let mut app_check = None;
     if !test_subjects.is_empty() {
         let t_check = Instant::now();
         // after the cache is open: a body whose stored verdict is clean is not checked again
@@ -1680,6 +1709,50 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         // a `harness = false` target is a program: a compile error it reaches ends it (rustc rejects it)
         if plain_test.is_some() {
             jit::COMPILE_ERRORS_FATAL.store(true, Ordering::Relaxed);
+        }
+    } else if !harness && !exports_mode && hal_window_pending() {
+        // an app the HAL hosts: its own crates are type-checked whole beside main (the lookups and
+        // the skipped files' loads here); its first window frame waits for that check and an error
+        // ends the run before it (check.rs start_app_check). Every body is still checked before it
+        // first runs: a lazy compile checks its body, and a compile error ends the run.
+        let t_check = Instant::now();
+        let app = crate::check::app_crates(&u.prog, root);
+        app_check = crate::check::prepare_check(&mut *u, &app);
+        phase("app check lookups", t_check);
+        if app_check.is_some() {
+            // (the cache's: on the owner)
+            let t_graph = Instant::now();
+            let upn: *const Unit = &*u;
+            let upn = upn as usize;
+            crate::owner::call(crate::owner::Class::Program, || {
+                let u = unsafe { &*(upn as *const Unit) };
+                if let Some(c) = u.cache.as_ref() { unsafe { &mut *c.get() }.build_item_graph(u); }
+            });
+            phase("item graph", t_graph);
+        }
+    } else if !harness {
+        // the app's own crates -- the code being worked on -- are type-checked whole before they run
+        // (a crate whose clean verdict is stored under its fingerprint is not): a type error there
+        // refuses the run, as cargo's build would, and never meets the program at run time. The
+        // dependencies are checked as their bodies are reached, and all of them in the background
+        // after the first frame (typeck_bg.rs).
+        let t_check = Instant::now();
+        let app = crate::check::app_crates(&u.prog, root);
+        let errors = crate::check::run_check_crates(&mut *u, &app);
+        phase("app check", t_check);
+        verbose!("makepad-run: app check: {} of {} app crates checked ({} body owners), {} errors; verdict lookup {:.0} ms, skipped files' load {:.0} ms",
+            crate::check::RUN_CHECK[0].load(Ordering::Relaxed), app.len(), crate::check::RUN_CHECK[1].load(Ordering::Relaxed), errors.len(),
+            crate::check::RUN_CHECK[3].load(Ordering::Relaxed) as f64 / 1e6, crate::check::RUN_CHECK[4].load(Ordering::Relaxed) as f64 / 1e6);
+        if !errors.is_empty() {
+            for e in &errors {
+                if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(e, "typeck")); }
+                report("error", e);
+                eprintln!("{}", e);
+            }
+            eprintln!("error: could not compile `{}` due to {} previous error{}: not started (`makepad run` checks the app's own crates whole before they run, as cargo builds them)",
+                u.prog.syms.str(u.prog.crates[root as usize].name), errors.len(), if errors.len() == 1 { "" } else { "s" });
+            std::mem::forget(u);
+            return 101;
         }
     }
     // after the cache is open: a validated warm start with the program's clean verdict stored skips the check
@@ -1718,6 +1791,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     unsafe { RUN_UNIT = up };
     if let Err(e) = finish_window() {
         eprintln!("makepad-run: {e}");
+        crate::first_frame::no_window(&package, &e);
         return 1;
     }
     if !HAL_RUN.load(Ordering::Acquire) { crate::domain::register_boot(&package, u.syms.dom0()); }
@@ -1807,11 +1881,31 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         domain_inputs = if HAL_RUN.load(Ordering::Acquire) { live_inputs.as_ref().map(crate::zone_alloc::kept_clone) } else { None };
         crate::reload::start_watcher(up, live_inputs.unwrap_or_default());
     }
+    if !HARNESS_RUN.load(Ordering::Acquire) && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none() {
+        jit::start_cpu_budget();
+    }
     jit::start_completion(up, runtime);
+    // the dependencies' bodies no build asked for are type-checked after the first frame
+    if !harness { crate::typeck_bg::start(up, root, main_def, runtime); }
     let platform = u.prog.crates.iter().any(|c| u.prog.syms.str(c.name) == "makepad_platform");
     jit::live_needs_present(!live_tests && platform);
     // a test harness never presents, nor does a program without the platform: no startup to wait out
     jit::startup_main(runtime, platform && !HARNESS_RUN.load(Ordering::Acquire));
+    if HAL_RUN.load(Ordering::Acquire) && platform && !HARNESS_RUN.load(Ordering::Acquire) && !live_tests {
+        crate::first_frame::arm(&package);
+    }
+    if let Some(p) = app_check.take() {
+        let name = u.prog.syms.str(u.prog.crates[root as usize].name).to_string();
+        crate::check::start_app_check(up, p, crate::zone_alloc::kept_clone(runtime), Box::new(move |errors: &[String]| {
+            for e in errors {
+                if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(e, "typeck")); }
+                report("error", e);
+                eprintln!("{}", e);
+            }
+            eprintln!("error: could not compile `{}` due to {} previous error{}: stopped before its first frame (`makepad run` checks the app's own crates whole beside main, as cargo builds them)",
+                name, errors.len(), if errors.len() == 1 { "" } else { "s" });
+        }));
+    }
     relax_codegen::fncost::mark("boot done, calling main");
     let main_ms = crate::clock::ms_since_start();
     MAIN_START_MS.store(main_ms as u64, Ordering::Relaxed);
@@ -2157,6 +2251,8 @@ fn run_apart(exe: &std::path::Path, base: &[String], sel: &[String], tail: &[Str
 /// test that reaches it (a test whose body did not compile used to fail alone at run time while
 /// the others passed). Prints the errors as `makepad check` does; returns their count.
 pub(crate) fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], harness: bool) -> usize {
+    use crate::borrowck::lazy::StoredVerdict;
+    let t0 = Instant::now();
     u.tcx.check_coherence_of(&u.prog, Some(subjects));
     let mut pre: Vec<String> = Vec::new();
     let derive = crate::macro_reg::derive_failures();
@@ -2165,8 +2261,37 @@ pub(crate) fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], har
         pre.extend(crate::check::own_errors(&u.prog, k, &u.tcx.errors, "typeck"));
         pre.extend(crate::check::own_errors(&u.prog, k, &derive, "macro"));
     }
+    // subjects whose every input -- their every file, their dependencies, the Relax build and its
+    // options -- is a clean check's (cache.rs crate_check_key) are not checked again: a test's run
+    // of its own binary (each child of a test that spawns itself), a run after an edit elsewhere.
+    // Not with a command-line lint level (not in the key). A clean test check prints nothing.
+    let mode = if harness { 2 } else { 1 };
+    let keys: Option<Vec<u128>> = match u.cache.as_ref() {
+        Some(c) if crate::check::BOOT_SKIPPED.get().is_some() && !relax_types::lint::cmdline_set() => {
+            let c = unsafe { &mut *c.get() };
+            subjects.iter().map(|&k| c.crate_check_key(k, crate::check::skipped_text_hash(k), mode)).collect()
+        }
+        _ => None,
+    };
+    let t1 = Instant::now();
+    let files = u.prog.files.len();
     unsafe { jit::load_skipped_of(&mut *u, subjects) };
-    crate::check::check_subjects(u, root, subjects, pre, harness)
+    let t2 = Instant::now();
+    let stored = pre.is_empty() && keys.as_ref().zip(u.cache.as_ref()).is_some_and(|(keys, c)| {
+        let c = unsafe { &*c.get() };
+        keys.iter().all(|&k| matches!(c.borrowck_stored(k), Some(StoredVerdict::Clean)))
+    });
+    let n = if stored { 0 } else { crate::check::check_subjects(u, root, subjects, pre, harness) };
+    verbose!("makepad-run: test check: coherence {:.0} ms, skipped files' load {:.0} ms ({} files), check {:.0} ms{}",
+        (t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, u.prog.files.len() - files, t2.elapsed().as_secs_f64() * 1e3,
+        if stored { " (its crates' clean verdicts are stored)" } else { "" });
+    if n == 0 && !stored {
+        if let (Some(keys), Some(c)) = (keys, u.cache.as_ref()) {
+            let c = unsafe { &mut *c.get() };
+            for k in keys { c.record_borrowck(k, StoredVerdict::Clean); }
+        }
+    }
+    n
 }
 static HAL_RUN: AtomicBool = AtomicBool::new(false);
 static APP_DOMAIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -2683,6 +2808,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
             let now = monitor_activity();
             if now == activity { still = still.saturating_add(1) } else { (activity, still) = (now, 0) }
             crate::lifeline::beat();
+            jit::poll_cpu_budget();
             if let Some(file) = present.as_mut() {
                 use std::io::{Read, Write};
                 let _ = file.read_to_end(&mut present_bytes);
@@ -3261,6 +3387,9 @@ pub(crate) extern "C" fn relax_quit_started() {
     if crate::domain::current_app_domain().and_then(crate::domain::info).is_some_and(|i| i.parent.is_some()) {
         return;
     }
+    // an app quitting before its first frame still has its app check's verdict: an error it finds
+    // ends the run as a compile error (check.rs start_app_check)
+    crate::check::wait_app_check();
     quit_mark();
 }
 
@@ -3293,6 +3422,20 @@ fn quit_mark() {
         crate::cache::write_trace();
     });
     }
+}
+
+/// `__relax_self_spawn` (Relax std process.rs, before a spawn or an exec that runs this program
+/// again: a test's child, a re-exec): what this process compiled so far is written to the disk
+/// cache, so the new process -- the same program, under the same cache -- starts from it rather
+/// than cold (a self-spawning test's first child type-checked and compiled the whole test crate
+/// again while its parent's code sat unwritten: 20 s of relax-compiler's 37 s first run).
+pub(crate) extern "C" fn relax_self_spawn() {
+    static ONE: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
+    if unsafe { RUN_UNIT }.is_null() || crate::forkexec::exec_child() { return; }
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let t = Instant::now();
+    let r = mid_flush(true, true);
+    verbose!("makepad-run cache: written before a run of this program again: {:?} (entries, front images) in {:.1} ms", r, t.elapsed().as_secs_f64() * 1e3);
 }
 
 /// A write of the disk cache while the program runs (front images, code, borrowck verdicts):

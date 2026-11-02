@@ -1,4 +1,4 @@
-//! Splash compute kernels, compiled to SPIR-V.
+//! Splash compute kernels, compiled to SPIR-V, MSL or HLSL cs_5_0.
 //!
 //! A kernel is a Splash object with a `main: fn() { ... }` body:
 //!
@@ -18,8 +18,8 @@
 //!
 //! Variants are prototypes: `Scale{workgroup_size: 128}` compiles the same
 //! body with another constant. `workgroup_size_y` / `workgroup_size_z`
-//! default to 1. Buffers are reached by device address, so the host binds a
-//! kernel only through its push constants (`ComputeLayout`).
+//! default to 1. `ComputeLayout` describes the common parameter byte block
+//! and every target resource binding; no backend infers offsets from source.
 
 pub use makepad_shader::shader_ir_compute::*;
 use makepad_shader::shader_ir::CooperativeMatrix;
@@ -42,18 +42,33 @@ pub struct CompiledKernelResult {
 }
 
 #[relax_api]
-pub fn compile_compute_kernel_result(vm: &mut ScriptVm, kernel: ScriptObject) -> CompiledKernelResult {
-    CompiledKernelResult { result: compile_compute_kernel(vm, kernel) }
+pub fn compile_compute_kernel_result(vm: &mut ScriptVm, kernel: ScriptObject, target: ComputeTarget) -> CompiledKernelResult {
+    CompiledKernelResult { result: compile_compute_kernel(vm, kernel, target) }
 }
 
 #[relax_api]
 impl CompiledKernelResult {
-    /// The kernel's SPIR-V and layout as plain data, or the error.
+    /// Target code and complete binding/layout reflection as plain data, or the error.
     #[relax_api]
     pub fn view(&self) -> CompiledKernelView<'_> {
         match &self.result {
-            Ok(k) => CompiledKernelView { error: None, spirv: &k.spirv, slots: &k.layout.slots, cooperative_matrices: &k.layout.cooperative_matrices,
-                push_size: k.layout.push_size, workgroup: k.layout.workgroup, shared_bytes: k.layout.shared_bytes },
+            Ok(k) => CompiledKernelView {
+                error: None,
+                target: k.layout.target,
+                spirv: k.code.as_spirv().unwrap_or(&[]),
+                text: k.code.as_text().unwrap_or(""),
+                buffers: &k.layout.buffers,
+                storage_textures: &k.layout.storage_textures,
+                param_binding: k.layout.param_binding,
+                param_binding_size: k.layout.param_binding_size,
+                group_count_offset: k.layout.group_count_offset,
+                precise_math: k.layout.precise_math,
+                slots: &k.layout.slots,
+                cooperative_matrices: &k.layout.cooperative_matrices,
+                push_size: k.layout.push_size,
+                workgroup: k.layout.workgroup,
+                shared_bytes: k.layout.shared_bytes,
+            },
             Err(e) => CompiledKernelView { error: Some(e), ..Default::default() },
         }
     }
@@ -66,6 +81,14 @@ impl CompiledKernelResult {
 pub struct CompiledKernelView<'a> {
     pub error: Option<&'a str>,
     pub spirv: &'a [u32],
+    pub target: ComputeTarget,
+    pub text: &'a str,
+    pub buffers: &'a [ComputeBufferBinding],
+    pub storage_textures: &'a [StorageTextureBinding],
+    pub param_binding: Option<u32>,
+    pub param_binding_size: u32,
+    pub group_count_offset: Option<u32>,
+    pub precise_math: bool,
     pub slots: &'a [ComputeSlot],
     pub cooperative_matrices: &'a [CooperativeMatrix],
     pub push_size: u32,
@@ -79,17 +102,51 @@ impl CompiledKernelView<'_> {
         if let Some(error) = self.error {
             return Err(error.to_string());
         }
-        Ok(CompiledKernel { spirv: self.spirv.to_vec(), layout: ComputeLayout { slots: self.slots.to_vec(), push_size: self.push_size,
-            workgroup: self.workgroup, shared_bytes: self.shared_bytes, cooperative_matrices: self.cooperative_matrices.to_vec() } })
+        Ok(CompiledKernel {
+            code: match self.target {
+                ComputeTarget::Spirv => KernelCode::Spirv(self.spirv.to_vec()),
+                ComputeTarget::Msl => KernelCode::Msl(self.text.into()),
+                ComputeTarget::Hlsl => KernelCode::Hlsl(self.text.into()),
+            },
+            layout: ComputeLayout {
+                target: self.target,
+                buffers: self.buffers.to_vec(),
+                storage_textures: self.storage_textures.to_vec(),
+                param_binding: self.param_binding,
+                param_binding_size: self.param_binding_size,
+                group_count_offset: self.group_count_offset,
+                precise_math: self.precise_math,
+                slots: self.slots.to_vec(),
+                push_size: self.push_size,
+                workgroup: self.workgroup,
+                shared_bytes: self.shared_bytes,
+                cooperative_matrices: self.cooperative_matrices.to_vec(),
+            },
+        })
     }
 }
 
-/// A compiled kernel: its SPIR-V (entry point `kernel_main`) and the
-/// push-constant layout its host fills.
+/// A compiled kernel, entry point `kernel_main`, and its complete host ABI.
 #[derive(Clone, Debug)]
 pub struct CompiledKernel {
-    pub spirv: Vec<u32>,
+    pub code: KernelCode,
     pub layout: ComputeLayout,
+}
+
+#[derive(Clone, Debug)]
+pub enum KernelCode {
+    Spirv(Vec<u32>),
+    Msl(String),
+    Hlsl(String),
+}
+
+impl KernelCode {
+    pub fn as_spirv(&self) -> Option<&[u32]> {
+        if let Self::Spirv(words) = self { Some(words) } else { None }
+    }
+    pub fn as_text(&self) -> Option<&str> {
+        match self { Self::Msl(text) | Self::Hlsl(text) => Some(text), _ => None }
+    }
 }
 
 fn size_field(vm: &ScriptVm, kernel: ScriptObject, name: LiveId) -> Result<u32, String> {
@@ -103,8 +160,8 @@ fn size_field(vm: &ScriptVm, kernel: ScriptObject, name: LiveId) -> Result<u32, 
     }
 }
 
-/// Compiles `kernel` (an object with a `main` fn) to SPIR-V for Vulkan.
-pub fn compile_compute_kernel(vm: &mut ScriptVm, kernel: ScriptObject) -> Result<CompiledKernel, String> {
+/// Compiles `kernel` (an object with a `main` fn) to the explicit target.
+pub fn compile_compute_kernel(vm: &mut ScriptVm, kernel: ScriptObject, target: ComputeTarget) -> Result<CompiledKernel, String> {
     let workgroup = [
         size_field(vm, kernel, id!(workgroup_size))?,
         size_field(vm, kernel, id!(workgroup_size_y))?,
@@ -127,8 +184,14 @@ pub fn compile_compute_kernel(vm: &mut ScriptVm, kernel: ScriptObject) -> Result
     output.compiled.ir.refresh_struct_names(&vm.bx.heap);
     let ir = &mut output.compiled.ir;
     ir.workgroup = workgroup;
+    ir.precise = vm.bx.heap.value(kernel, id!(precise_math).into(), NoTrap).as_bool().unwrap_or(false);
     let entry = build_compute_entry(ir, main);
-    let layout = compute_layout(ir)?;
-    let spirv = makepad_shader::shader_ir_spirv::ir_to_spirv(ir, entry, false)?;
-    Ok(CompiledKernel { spirv, layout })
+    let layout = compute_target_layout(ir, target)?;
+    makepad_shader::shader_ir_precise::lower_precise(ir, target != ComputeTarget::Msl);
+    let code = match target {
+        ComputeTarget::Spirv => KernelCode::Spirv(makepad_shader::shader_ir_spirv::ir_to_spirv(ir, entry, false)?),
+        ComputeTarget::Msl => KernelCode::Msl(makepad_shader::shader_ir_compute_text::compute_text(ir, entry, &layout)?),
+        ComputeTarget::Hlsl => KernelCode::Hlsl(makepad_shader::shader_ir_compute_text::compute_text(ir, entry, &layout)?),
+    };
+    Ok(CompiledKernel { code, layout })
 }

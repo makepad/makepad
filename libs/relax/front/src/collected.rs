@@ -566,6 +566,8 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> FromIterator<(K, V)> 
 }
 impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> std::ops::Index<&K> for ImageMap<K, V> {
     type Output = V;
+    // (the caller's position in the panic: an internal error names the lookup that missed)
+    #[track_caller]
     fn index(&self, k: &K) -> &V { self.get(k).expect("key in collected table") }
 }
 impl<'a, K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> IntoIterator for &'a ImageMap<K, V> {

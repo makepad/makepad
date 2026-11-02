@@ -4,6 +4,7 @@ use core::cell::UnsafeCell;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
 
+use super::held_lock::HeldLock;
 use super::poison::{self, LockResult, PoisonError, TryLockError, TryLockResult};
 use super::raw::RawRwLock;
 
@@ -19,11 +20,13 @@ unsafe impl<T: ?Sized + Send + Sync> Sync for RwLock<T> {}
 #[rustc_diagnostic_item = "RwLockReadGuard"]
 pub struct RwLockReadGuard<'a, T: ?Sized + 'a> {
     lock: &'a RwLock<T>,
+    _held: HeldLock,
 }
 
 #[rustc_diagnostic_item = "RwLockWriteGuard"]
 pub struct RwLockWriteGuard<'a, T: ?Sized + 'a> {
     lock: &'a RwLock<T>,
+    _held: HeldLock,
     poison: poison::Guard,
 }
 
@@ -58,9 +61,10 @@ impl<T> RwLock<T> {
 // library/std/src/sync/poison/rwlock.rs: the locking methods are for unsized `T` too
 impl<T: ?Sized> RwLock<T> {
     #[rustc_should_not_be_called_on_const_items]
+    #[track_caller]
     pub fn read(&self) -> LockResult<RwLockReadGuard<'_, T>> {
         self.inner.read();
-        let g = RwLockReadGuard { lock: self };
+        let g = RwLockReadGuard { lock: self, _held: HeldLock::new() };
         if self.poison.get() {
             Err(PoisonError::new(g))
         } else {
@@ -69,9 +73,10 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     #[rustc_should_not_be_called_on_const_items]
+    #[track_caller]
     pub fn try_read(&self) -> TryLockResult<RwLockReadGuard<'_, T>> {
         if self.inner.try_read() {
-            let g = RwLockReadGuard { lock: self };
+            let g = RwLockReadGuard { lock: self, _held: HeldLock::new() };
             if self.poison.get() {
                 Err(TryLockError::Poisoned(PoisonError::new(g)))
             } else {
@@ -83,15 +88,19 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     #[rustc_should_not_be_called_on_const_items]
+    #[track_caller]
     pub fn write(&self) -> LockResult<RwLockWriteGuard<'_, T>> {
         self.inner.write();
-        poison::map_result(self.poison.guard(), |guard| RwLockWriteGuard { lock: self, poison: guard })
+        let held = HeldLock::new();
+        poison::map_result(self.poison.guard(), |guard| RwLockWriteGuard { lock: self, poison: guard, _held: held })
     }
 
     #[rustc_should_not_be_called_on_const_items]
+    #[track_caller]
     pub fn try_write(&self) -> TryLockResult<RwLockWriteGuard<'_, T>> {
         if self.inner.try_write() {
-            match poison::map_result(self.poison.guard(), |guard| RwLockWriteGuard { lock: self, poison: guard }) {
+            let held = HeldLock::new();
+            match poison::map_result(self.poison.guard(), |guard| RwLockWriteGuard { lock: self, poison: guard, _held: held }) {
                 Ok(g) => Ok(g),
                 Err(e) => Err(TryLockError::Poisoned(e)),
             }
@@ -178,9 +187,10 @@ impl<'rwlock, T: ?Sized> RwLockWriteGuard<'rwlock, T> {
     pub fn downgrade(s: Self) -> RwLockReadGuard<'rwlock, T> {
         let lock = s.lock;
         lock.poison.done(&s.poison);
+        let held = unsafe { core::ptr::read(&s._held) };
         core::mem::forget(s);
         unsafe { lock.inner.downgrade() };
-        RwLockReadGuard { lock }
+        RwLockReadGuard { lock, _held: held }
     }
 }
 

@@ -1092,7 +1092,7 @@ impl ThemeAi {
             return;
         }
         if self.pack_task.is_none() {
-            match cx.task_pool().submit(Lane::Light, user_presets::scan_pack) {
+            match cx.task_pool().submit(Class::Visible, user_presets::scan_pack) {
                 Ok(task) => self.pack_task = Some(task),
                 Err(e) => {
                     error!("amp ai: cannot index the presets: {e:?}");
@@ -1188,7 +1188,7 @@ impl ThemeAi {
             } else {
                 let complete = std::fs::read(&shot.path).ok().filter(|b| b.len() > 64 && b[b.len() - 8..b.len() - 4] == *b"IEND");
                 if let Some(bytes) = complete {
-                    let task = cx.task_pool().submit(Lane::Light, move || {
+                    let task = cx.task_pool().submit(Class::Visible, move || {
                         let decoded = decode_image_from_data(&bytes).map_err(|e| format!("{e}"))?;
                         let mut rgba = Vec::with_capacity(decoded.width * decoded.height * 4);
                         for p in &decoded.data[..decoded.width * decoded.height] {

@@ -283,6 +283,7 @@ workspace.members = [
     "tools/map_bake",
     "libs/remote",
     "libs/devhub",
+    "libs/devhub_conf",
     "libs/stack",
     "tools/service_host",
     "tools/agents",
@@ -325,6 +326,7 @@ workspace.members = [
     "platform/script/test",
     "platform/script/audio_aot",
     "platform/hal",
+    "platform/cpu_budget",
     "platform/script/compute",
     "platform/script/imports",
     "platform/script/compute_sched",
@@ -479,6 +481,7 @@ unicode-segmentation = { path = "libs/unicode/unicode-segmentation" }
 # Paths of Relax's JIT libraries (libs/relax), the host crates (tools/run), and their makepad dependencies:
 # members say `name = { workspace = true }`.
 [workspace.dependencies]
+makepad-cpu-budget = { path = "platform/cpu_budget", version = "1.0.0" }
 relax-lex = { path = "libs/relax/lex", version = "0.1.0" }
 makepad-relax = { path = "libs/relax/attr", version = "1.0.0" }
 relax-base = { path = "libs/relax/base", version = "0.1.0" }

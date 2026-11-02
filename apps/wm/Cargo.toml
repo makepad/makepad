@@ -86,7 +86,9 @@ makepad-xkb-keymap = { path = "../../libs/xkb_keymap" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-remote = { path = "../../libs/remote" }
-makepad-devhub = { path = "../../libs/devhub" }
+# the hub it supervises: its settings file and tray glyph only, never devhub itself (a devhub
+# landing would relink, and so restart, every idle node's WM)
+makepad-devhub-conf = { path = "../../libs/devhub_conf" }
 # Serving Desk Link (listener, TLS, fleet credentials): native desktops only
 makepad-desk-link = { path = "../../libs/desk_link", features = ["server", "tiles"] }
 makepad-hal = { path = "../../platform/hal" }

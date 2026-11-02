@@ -53,7 +53,7 @@ impl Service {
             #[cfg(not(target_arch = "wasm32"))]
             Service::Devhub => {
                 // the app's Off glyph (hollow pupil) at half strength: dim like the AI Hub's
-                use makepad_devhub::tray_glyph::{alpha, Glyph, SIZE};
+                use makepad_devhub_conf::tray_glyph::{alpha, Glyph, SIZE};
                 let dim: Vec<u8> = alpha(Glyph::Off).iter().map(|a| a / 2).collect();
                 makepad_shell_kit::ui::glyph_texture(cx, SIZE, SIZE, &dim)
             }

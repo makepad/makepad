@@ -671,6 +671,9 @@ pub struct Live {
     pub test: bool,
     /// target selection and libtest arguments, including `--`
     pub test_args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// paths the run names in `DEVHUB_ALSO`: they ship with every patch, `local/` included
+    pub also: Vec<String>,
     pub lane: String,
     pub src: String,
     pub cost: String,
@@ -722,7 +725,7 @@ impl Live {
         let Some(p) = &x.patch else { return format!("devhub test: {} {}: {}\n", x.app, x.state, x.note) };
         if p.outcome == "jit_error" { return jit_error_verdict(p); }
         let Some(t) = &p.tests else { return format!("{}\n{}", if p.reason.is_empty() { &x.note } else { &p.reason }, p.output) };
-        let mut out = format!("devhub test: {} {}/{} ran ({} skipped, selected {}) in {seconds:.3} s (ship {} ms, patch {:.0} ms, tests {:.0} ms) on {} [live {}]\n", x.app, t.passed, t.ran, t.skipped, if t.selected == "affected" { "affected" } else { "all" }, p.shipped_ms.saturating_sub(p.edit_ms), t.compile_ms, t.ms, x.node, x.id);
+        let mut out = format!("devhub test: {} {}/{} ran ({} skipped, selected {}) in {seconds:.3} s (ship {} ms, patch {:.0} ms, tests {:.0} ms) on {} [live {}]\n", x.app, t.passed, t.ran, t.skipped, if t.selected == "affected" { "affected" } else { "all" }, p.shipped_ms.saturating_sub(p.edit_ms.max(p.called_ms)), t.compile_ms, t.ms, x.node, x.id);
         for name in &t.failures { out.push_str(&format!("  {name}\n")); }
         out.push_str(&p.output);
         out
@@ -750,6 +753,9 @@ pub struct LivePatch {
     pub seq: u64,
     pub cursor: String,
     pub edit_ms: u64,
+    /// when the call that shipped it came (a test session ships on its call: a save the agent
+    /// made minutes before it is no ship time)
+    pub called_ms: u64,
     pub shipped_ms: u64,
     /// Patch state, including `recovering` and terminal `jit_error`.
     pub outcome: String,
@@ -792,6 +798,9 @@ pub struct Job {
     pub id: String,
     /// its run on its lease: a restarted master follows it from there
     pub run_n: u64,
+    /// its log's bytes before that run's output (the node's waits it noted: `L1 104: selecting`),
+    /// so a restarted master follows the run from where the log stands
+    pub log_base: u64,
     /// the batch it came in (`B<n>`), or empty
     pub batch: String,
     pub lane: String,
@@ -861,6 +870,9 @@ pub struct Job {
     pub panic: Option<JobPanic>,
     /// when an agent last acted on it while paused (inspect, resume): the idle timeout counts from it
     pub touched_ms: u64,
+    /// when a `job wait` first asked for it while it ran (an agent is blocked on it); 0 once its
+    /// wait went to the agent-wait ledger
+    pub waited_ms: u64,
     pub note: String,
 }
 
@@ -1306,7 +1318,7 @@ pub fn live_tests_from(v: &Value) -> Option<LiveTests> {
 
 pub fn live_value(x: &Live) -> Value {
     let patch = x.patch.as_ref().map_or(Value::Null, |p| {
-        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)), ("reason", s(&p.reason)), ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output", s(&p.output)), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error))])
+        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)), ("reason", s(&p.reason)), ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output", s(&p.output)), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error))])
     });
     obj(vec![
         ("id", s(&x.id)),
@@ -1316,6 +1328,8 @@ pub fn live_value(x: &Live) -> Value {
         ("app", s(&x.app)),
         ("test", Value::Bool(x.test)),
         ("test_args", strs(&x.test_args)),
+        ("env", Value::Arr(x.env.iter().map(|(k, v)| Value::Arr(vec![s(k), s(v)])).collect())),
+        ("also", strs(&x.also)),
         ("lane", s(&x.lane)),
         ("src", s(&x.src)),
         ("cost", s(&x.cost)),
@@ -1353,6 +1367,11 @@ pub fn live_from(v: &Value) -> Live {
         app: text(o, "app"),
         test: flag(o, "test", false),
         test_args: strs_from(o, "test_args"),
+        env: arr(o, "env").iter().filter_map(|pair| {
+            let [k, v] = pair.as_arr()? else { return None };
+            Some((k.as_str()?.to_string(), v.as_str()?.to_string()))
+        }).collect(),
+        also: strs_from(o, "also"),
         lane: text(o, "lane"),
         src: text(o, "src"),
         cost: text(o, "cost"),
@@ -1372,7 +1391,7 @@ pub fn live_from(v: &Value) -> Live {
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
         ended_ms: uint(o, "ended_ms"),
-        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: text(Some(p), "output"), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: text(Some(p), "reason") }),
+        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: text(Some(p), "output"), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: text(Some(p), "reason") }),
         panic: panic_from(v.get("panic")),
         log: text(o, "log"),
         note: text(o, "note"),
@@ -1452,6 +1471,7 @@ pub fn job_value(j: &Job) -> Value {
         ("snap", s(&j.snap)),
         ("snap_files", int(j.snap_files as u64)),
         ("run_n", int(j.run_n)),
+        ("log_base", int(j.log_base)),
         ("attempts", int(j.attempts as u64)),
         ("granted_ms", int(j.granted_ms)),
         ("shipped_ms", int(j.shipped_ms)),
@@ -1479,6 +1499,7 @@ pub fn job_value(j: &Job) -> Value {
         ("tail", strs(&j.tail)),
         ("panic", panic),
         ("touched_ms", int(j.touched_ms)),
+        ("waited_ms", int(j.waited_ms)),
         ("note", s(&j.note)),
     ])
 }
@@ -1510,6 +1531,7 @@ pub fn job_from(v: &Value) -> Job {
         snap: text(o, "snap"),
         snap_files: uint(o, "snap_files") as u32,
         run_n: uint(o, "run_n"),
+        log_base: uint(o, "log_base"),
         attempts: uint(o, "attempts") as u32,
         granted_ms: uint(o, "granted_ms"),
         shipped_ms: uint(o, "shipped_ms"),
@@ -1537,6 +1559,7 @@ pub fn job_from(v: &Value) -> Job {
         tail: strs_from(o, "tail"),
         panic: p.map(|p| JobPanic { id: text(Some(p), "id"), pid: uint(Some(p), "pid") as u32, message: text(Some(p), "message"), thread: text(Some(p), "thread"), location: text(Some(p), "location"), at_ms: uint(Some(p), "at_ms") }),
         touched_ms: uint(o, "touched_ms"),
+        waited_ms: uint(o, "waited_ms"),
         note: text(o, "note"),
     }
 }

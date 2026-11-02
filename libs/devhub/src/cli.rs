@@ -61,6 +61,22 @@ pub(crate) fn retry_master<T>(mut call: impl FnMut() -> Result<T, String>) -> Re
 
 /// Sends one line to a lines service and collects the answer.
 pub fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
+    ask_lines(c, target, service, line).map_err(|e| older(target, service, e))
+}
+
+/// A refusal of a service this client knows means the other side runs older code: say so, and
+/// what brings it up to date (a bare "unsupported service native" failed whole buckets, 11-02).
+fn older(target: Option<&str>, service: &str, e: String) -> String {
+    if !e.contains("unsupported service") {
+        return e;
+    }
+    match target {
+        None => format!("the master is older than this client (it has no `{service}` service): run `devhub master restart`"),
+        Some(t) => format!("{t}'s hub is older than this client (it has no `{service}` service): it updates itself once its deployment has the landing (`devhub nodes` says when)"),
+    }
+}
+
+fn ask_lines(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
     let mut got = Vec::new();
     match target {
         Some(t) => {
@@ -341,7 +357,7 @@ pub fn main(args: &[String]) -> i32 {
         ["inspect", target, cmd @ ..] if !cmd.is_empty() => inspect(&c, target, &args[2..]),
         ["reply", id, status, msg @ ..] => reply(&c, id, status, &msg.join(" ")),
         ["inbox", rest @ ..] => lines_out(ask(&c, None, "inbox", if rest.contains(&"--all") { "list all" } else { "list" }), true),
-        ["show", id] => lines_out(ask(&c, None, "inbox", &format!("show {id}")), false),
+        ["show", id] => lines_out(ask(&c, None, "inbox", &format!("show {}", id.trim_start_matches("id="))), false),
         ["clear", id] => lines_out(ask(&c, None, "inbox", &format!("clear {id}")), false),
         ["seen", id] => lines_out(ask(&c, None, "inbox", &format!("seen {id}")), false),
         ["top", node, rest @ ..] => match ask(&c, if *node == local_name(&c) { None } else { Some(node) }, "top", &format!("top {}", rest.first().unwrap_or(&"12"))) {
@@ -460,7 +476,7 @@ fn serve(args: &[&str]) -> i32 {
     };
     match args {
         ["--node", conf] => {
-            let conf = crate::node::NodeConf::load(std::path::Path::new(conf));
+            let conf = makepad_devhub_conf::NodeConf::load(std::path::Path::new(conf));
             let t = trust(&conf.name);
             match crate::node::Node::start(conf, t, log) {
                 Ok(n) => {
@@ -476,8 +492,8 @@ fn serve(args: &[&str]) -> i32 {
             }
         }
         [] => {
-            let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| crate::trust::valid_name(n)).unwrap_or_else(|| "mac".into());
-            match crate::master::Master::start(&name, proto::HITCH_MS, trust(&name), std::sync::Arc::new(|_r| {})) {
+            let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub_conf::valid_name(n)).unwrap_or_else(|| "mac".into());
+            match crate::master::Master::start(&name, makepad_devhub_conf::HITCH_MS, trust(&name), std::sync::Arc::new(|_r| {})) {
                 Ok(_m) => {
                     eprintln!("devhub: master {name} up; control {}", proto::control_socket().display());
                     loop {
@@ -535,7 +551,7 @@ fn cache(args: &[&str]) -> i32 {
         Err(e) if node.is_some() => Err(e),
         Err(_) => {
             let mut out = Vec::new();
-            crate::jitcache::service(&proto::default_machine_name(), &line, &mut out, &|_| {});
+            crate::jitcache::service(&makepad_devhub_conf::default_machine_name(), &line, &mut out, &|_| {});
             Ok(out)
         }
     };
@@ -742,7 +758,7 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             } else {
                 a.iter().map(|x| x.to_string()).collect()
             };
-            let agent = std::env::var("DEVHUB_AGENT").ok().filter(|x| crate::trust::valid_name(x)).map(|x| format!(" agent={x}")).unwrap_or_default();
+            let agent = std::env::var("DEVHUB_AGENT").ok().filter(|x| makepad_devhub_conf::valid_name(x)).map(|x| format!(" agent={x}")).unwrap_or_default();
             match ask_land(&format!("add {}{agent}", args.join(" "))) {
                 Ok(l) => {
                     let v = l.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok());

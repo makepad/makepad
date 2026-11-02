@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <!-- devhub: the fleet hub. A central node with five machines linked around it, a calm pulse ring
        around the hub (the live event feed), one machine lit (the one that just spoke). The tray
-       glyph (libs/devhub/src/tray_glyph.rs, preview source tray.svg) is the same hub and
+       glyph (libs/devhub_conf/src/tray_glyph.rs, preview source tray.svg) is the same hub and
        satellites as a menu-bar template. The shared app icon tile (x/y 64, 896, radius 200);
        tools/app_icons/render.sh renders it to icon_1024.png. -->
   <defs>

@@ -152,6 +152,7 @@ fn frame(s: &mut Session, sid: u32, _target: Id, _kind: u32, packet: u32, view: 
     let mut deps: Vec<LentRef> = Vec::new();
     s.stats.max_frame_ns = s.stats.max_frame_ns.max(p.meta.build_end_ns.saturating_sub(p.meta.build_start_ns));
     for pass in &view.passes[pr] {
+        if pass.kind == pass_kind::COMPUTE { crate::compute::unsupported(); continue; }
         s.stats.passes += 1;
         for id in pass.color.iter().chain(std::iter::once(&pass.depth)).filter(|i| !i.is_none()) {
             touch(s, sid, Kind::Texture, *id, frame, now);
@@ -161,6 +162,7 @@ fn frame(s: &mut Session, sid: u32, _target: Id, _kind: u32, packet: u32, view: 
             continue;
         };
         for d in &view.draws[dr] {
+            if d.storage_buffers.len != 0 || !d.indirect_buffer.is_none() { crate::compute::unsupported(); continue; }
             s.stats.draws += 1;
             // a surface lent by a session that is gone (or relaunched) is never sampled
             let mut dead_lent = false;

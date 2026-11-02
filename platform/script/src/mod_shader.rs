@@ -53,6 +53,11 @@ pub const SHADER_IO_FRAGMENT_DEPTH_ANY: ShaderIoType = ShaderIoType(33);
 pub const SHADER_IO_FRAGMENT_DEPTH_GREATER: ShaderIoType = ShaderIoType(34);
 pub const SHADER_IO_FRAGMENT_DEPTH_LESS: ShaderIoType = ShaderIoType(35);
 
+pub fn storage_texture_format(io_type: ShaderIoType) -> Option<crate::shader_ir_compute::StorageTextureFormat> {
+    use crate::shader_ir_compute::StorageTextureFormat::*;
+    [R16f, R8unorm, R32f, R32uint, Rgba8unorm, Rgba16f].get(io_type.0.checked_sub(36)? as usize).copied()
+}
+
 /// The depth mode of a fragment depth io type (`FRAG_DEPTH_*`), if it is one.
 pub fn fragment_depth_mode(io_type: ShaderIoType) -> Option<u8> {
     (io_type.0 >= SHADER_IO_FRAGMENT_DEPTH_ANY.0 && io_type.0 <= SHADER_IO_FRAGMENT_DEPTH_LESS.0)
@@ -61,6 +66,17 @@ pub fn fragment_depth_mode(io_type: ShaderIoType) -> Option<u8> {
 
 pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     let shader = heap.new_module(id!(shader));
+
+    native.add_method(heap, shader, id_lut!(texture_2d_rw), script_args!(format = NIL), |vm, args| {
+        let format = script_value!(vm, args.format);
+        let formats = [id!(r16f), id!(r8unorm), id!(r32f), id!(r32uint), id!(rgba8unorm), id!(rgba16f)];
+        let Some(index) = formats.iter().position(|f| Some(*f) == format.as_id()) else {
+            return script_err_invalid_args!(vm.bx.threads.cur_ref().trap, "texture_2d_rw needs @r16f, @r8unorm, @r32f, @r32uint, @rgba8unorm or @rgba16f");
+        };
+        let obj = vm.bx.heap.new_with_proto(NIL);
+        vm.bx.heap.set_shader_io(obj, ShaderIoType(36 + index as u32));
+        obj.into()
+    });
 
     // Narrow integer components are matrix-only; memory may be packed in
     // u32/vec4u arrays. Offsets and strides use the array's element units.

@@ -14,6 +14,10 @@
 //! frame's end back through each wait to the thread that ended it), total work vs critical path
 //! vs wall, and the waits on the path ranked. `timeline save` writes the capture as a `.mkpf`
 //! profile recording (makepad-prof-stream), the format Scope and `pf` queries read.
+//!
+//! The hitch watcher runs a frame from the first phase after the previous frame to the UI
+//! thread's next event-loop wait (idle or GPU) after a Draw. Idle waits for input that drew
+//! nothing or for the next vsync do not count toward its frame time.
 
 use super::{json_str, now_ms, short, Out, Req};
 use std::cell::Cell;
@@ -30,8 +34,9 @@ static RINGS_ON: AtomicBool = AtomicBool::new(false);
 /// frame spikes are watched (`watch`, `events follow=1`, `--agent`)
 static FRAME_WATCH: AtomicBool = AtomicBool::new(false);
 
-/// UI frames finished (a frame's Draw dispatch ended) while frame markers are on (hitch
-/// detection, on by default): the per-frame denominator of `heap frame` and other rates
+/// UI frames finished (the UI thread next waited in the event loop after a Draw) while frame
+/// markers are on (hitch detection, on by default): the per-frame denominator of `heap frame`
+/// and other rates.
 pub static FRAMES: AtomicU64 = AtomicU64::new(0);
 
 /// frames slower than this are `hitch` events (ns; 0: off): always on, MAKEPAD_RUN_HITCH_MS
@@ -160,6 +165,12 @@ pub fn push(kind: Kind, label: &'static str, a: u64, b: u64) {
 /// `name` is a static string of the program.
 pub extern "C" fn relax_span_begin(name: *const u8, len: usize) {
     let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) };
+    if name == "idle" {
+        if FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0 {
+            frame_idle(true);
+        }
+        return;
+    }
     if recording() {
         push(Kind::SpanBegin, name, 0, 0);
     }
@@ -170,6 +181,12 @@ pub extern "C" fn relax_span_begin(name: *const u8, len: usize) {
 
 pub extern "C" fn relax_span_end(name: *const u8, len: usize) {
     let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) };
+    if name == "idle" {
+        if FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0 {
+            frame_idle(false);
+        }
+        return;
+    }
     if recording() {
         push(Kind::SpanEnd, name, 0, 0);
     }
@@ -180,20 +197,21 @@ pub extern "C" fn relax_span_end(name: *const u8, len: usize) {
 
 // ---- frames: spikes and hitches (always on; per UI thread, no lock)
 //
-// A frame runs from the first phase that begins after the previous frame's Draw ended to the end
-// of this frame's Draw; gaps over GAP_NS between its root phases (the UI thread idle in the
-// event loop) do not count. Each frame's phases, the UI thread's waits and its lazy compiles go
-// to a fixed log (cleared per frame): a frame over the hitch threshold is analysed from it after
-// it ends and raised as a `hitch` event (at most HITCH_PER_S a second; the rest are counted).
+// A frame runs from the first phase after the previous frame to the UI thread's next wait in
+// the event loop (idle or for the GPU) after a Draw. Its idle waits for input that drew nothing
+// or for the next vsync do not count. Each frame's phases, the UI thread's waits and its lazy
+// compiles go to a fixed log (cleared per frame): a frame over the hitch threshold is analysed
+// from it after it ends and raised as a `hitch` event (at most HITCH_PER_S a second; the rest
+// are counted).
 
-const GAP_NS: u64 = 16_000_000;
 const FRAME_RECS: usize = 8192;
 const HITCH_PER_S: u64 = 4;
 
 #[derive(Clone, Copy)]
 struct FRec {
     t: u64,
-    /// 1 phase begin, 2 phase end, 3 wait begin, 4 wait end, 5 compile begin, 6 compile end
+    /// 1 phase begin, 2 phase end, 3 wait begin, 4 wait end, 5 compile begin, 6 compile end,
+    /// 7 idle begin, 8 idle end.
     kind: u8,
     name: &'static str,
     detail: &'static str,
@@ -204,8 +222,10 @@ struct FrameLog {
     start: u64,
     /// running average of frame time (ns)
     avg: u64,
-    last_root_end: u64,
     idle: u64,
+    idle_t0: u64,
+    in_idle: bool,
+    drew: bool,
     recs: Vec<FRec>,
     dropped: u32,
     compile_depth: u32,
@@ -250,15 +270,19 @@ fn frame_rec(l: &mut FrameLog, kind: u8, name: &'static str, detail: &'static st
 fn frame_watch(begin: bool, name: &'static str) {
     let _k = crate::zone_alloc::kept();
     let now = crate::clock::wall_ns();
-    let done = FL.try_with(|c| {
-        let Ok(mut g) = c.try_borrow_mut() else { return None };
+    if begin && name == "gpu-wait" {
+        frame_finish(now);
+    }
+    let _ = FL.try_with(|c| {
+        let Ok(mut g) = c.try_borrow_mut() else { return };
         let l = g.get_or_insert_with(|| {
-            Box::new(FrameLog { depth: 0, start: 0, avg: 0, last_root_end: 0, idle: 0, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new(), wait_depth: 0, wait_t0: 0, wait_owner: false, wait_ns: 0, owner_ns: 0, waits: 0, wait_in_compile: false, cwait_ns: 0, cowner_ns: 0 })
+            Box::new(FrameLog { depth: 0, start: 0, avg: 0, idle: 0, idle_t0: 0, in_idle: false, drew: false, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new(), wait_depth: 0, wait_t0: 0, wait_owner: false, wait_ns: 0, owner_ns: 0, waits: 0, wait_in_compile: false, cwait_ns: 0, cowner_ns: 0 })
         });
         if begin {
             if l.start == 0 {
                 l.start = now;
                 l.idle = 0;
+                l.drew = false;
                 l.recs.clear();
                 l.dropped = 0;
                 l.compile_ns = 0;
@@ -275,25 +299,62 @@ fn frame_watch(begin: bool, name: &'static str) {
                 if HITCH_NS.load(Relaxed) > 0 && super::instrument::any_counters() {
                     l.probes0 = super::instrument::counters();
                 }
-            } else if l.depth == 0 && l.last_root_end > l.start && now.saturating_sub(l.last_root_end) > GAP_NS {
-                l.idle += now - l.last_root_end;
             }
             if l.depth == 0 {
                 super::flightrec::ui_root(now);
             }
             l.depth += 1;
             frame_rec(l, 1, name, "");
-            return None;
+            return;
         }
         l.depth = l.depth.saturating_sub(1);
         if l.start != 0 {
             frame_rec(l, 2, name, "");
         }
         if l.depth == 0 {
-            l.last_root_end = now;
             super::flightrec::ui_root(0);
         }
-        if name != "Draw" || l.start == 0 {
+        if name == "Draw" && l.start != 0 {
+            l.drew = true;
+        }
+    });
+}
+
+/// Idle waits are explicit so short input and vsync waits never inflate frame time.
+fn frame_idle(begin: bool) {
+    let _k = crate::zone_alloc::kept();
+    let now = crate::clock::wall_ns();
+    if begin {
+        frame_finish(now);
+    }
+    let _ = FL.try_with(|c| {
+        let Ok(mut g) = c.try_borrow_mut() else { return };
+        let Some(l) = g.as_mut() else { return };
+        if begin {
+            if l.depth != 0 {
+                return;
+            }
+            if l.start != 0 {
+                frame_rec(l, 7, "idle", "");
+            }
+            l.in_idle = true;
+            l.idle_t0 = now;
+        } else if l.in_idle {
+            l.in_idle = false;
+            if l.start != 0 {
+                l.idle += now - l.idle_t0.max(l.start);
+                frame_rec(l, 8, "idle", "");
+            }
+        }
+    });
+}
+
+/// Finish at a root event-loop wait so the work after Draw stays in the frame.
+fn frame_finish(now: u64) {
+    let done = FL.try_with(|c| {
+        let Ok(mut g) = c.try_borrow_mut() else { return None };
+        let Some(l) = g.as_mut() else { return None };
+        if l.depth != 0 || l.start == 0 || !l.drew {
             return None;
         }
         FRAMES.fetch_add(1, Relaxed);
@@ -387,20 +448,22 @@ fn analyse(l: &FrameLog, t0: u64, t1: u64) -> String {
     // the critical path: (what, ns) pieces in order
     let mut path: Vec<(String, u64)> = Vec::new();
     let mut compile_open = 0u32;
+    let mut idle_open = false;
     let mut cur_t = t0;
-    let what_now = |stack: &[(&'static str, u64, u64)], wait_open: &[(String, u64, &'static str)], compile_open: u32| -> String {
+    let what_now = |stack: &[(&'static str, u64, u64)], wait_open: &[(String, u64, &'static str)], compile_open: u32, idle_open: bool| -> String {
         if let Some(w) = wait_open.last() {
             format!("wait: {}", w.0)
         } else if compile_open > 0 {
             "lazy compile".into()
         } else if stack.is_empty() {
-            "(between phases)".into()
+            // Between phases is UI-thread work outside every named phase.
+            if idle_open { "idle".into() } else { "(between phases)".into() }
         } else {
             stack.iter().rev().take(3).rev().map(|x| x.0).collect::<Vec<_>>().join(">")
         }
     };
     let add_path = |path: &mut Vec<(String, u64)>, what: String, ns: u64| {
-        if ns == 0 {
+        if ns == 0 || what == "idle" {
             return;
         }
         match path.last_mut() {
@@ -410,7 +473,7 @@ fn analyse(l: &FrameLog, t0: u64, t1: u64) -> String {
     };
     for r in &l.recs {
         let t = r.t.max(cur_t);
-        add_path(&mut path, what_now(&stack, &wait_open, compile_open), t - cur_t);
+        add_path(&mut path, what_now(&stack, &wait_open, compile_open, idle_open), t - cur_t);
         cur_t = t;
         match r.kind {
             1 => stack.push((r.name, r.t, 0)),
@@ -453,10 +516,12 @@ fn analyse(l: &FrameLog, t0: u64, t1: u64) -> String {
             }
             5 => compile_open += 1,
             6 => compile_open = compile_open.saturating_sub(1),
+            7 => idle_open = true,
+            8 => idle_open = false,
             _ => {}
         }
     }
-    add_path(&mut path, what_now(&stack, &wait_open, compile_open), t1.saturating_sub(cur_t));
+    add_path(&mut path, what_now(&stack, &wait_open, compile_open, idle_open), t1.saturating_sub(cur_t));
     phases.sort_by(|a, b| b.1.cmp(&a.1));
     waits.sort_by(|a, b| b.1.cmp(&a.1));
     let ph: Vec<String> = phases.iter().take(10).map(|p| format!("{{\"phase\":{},\"ms\":{:.2},\"self_ms\":{:.2},\"n\":{}}}", json_str(&short(&p.0, 120)), ms(p.1), ms(p.2), p.3)).collect();
@@ -1269,8 +1334,10 @@ mod tests {
             depth: 0,
             start: 1,
             avg: 0,
-            last_root_end: 0,
             idle: 0,
+            idle_t0: 0,
+            in_idle: false,
+            drew: false,
             recs: vec![rec(1_000, 3, "owner", "main"), rec(3_001_000, 4, "none", ""), rec(3_002_000, 3, "futex", ""), rec(9_002_000, 4, "none", "")],
             dropped: 0,
             compile_depth: 0,

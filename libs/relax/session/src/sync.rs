@@ -3,9 +3,226 @@
 pub use std::sync::{LockResult, PoisonError, TryLockError, TryLockResult};
 
 #[cfg(not(target_vendor = "apple"))]
-pub use std::sync::{Condvar, Mutex, MutexGuard, WaitTimeoutResult};
+use std::sync as backend;
 #[cfg(target_vendor = "apple")]
-pub use macos::{Condvar, Mutex, MutexGuard, WaitTimeoutResult};
+use macos as backend;
+pub use backend::WaitTimeoutResult;
+
+mod held {
+    use core::cell::Cell;
+    use core::panic::Location;
+
+    // Tokens distinguish recursive acquisitions and guards dropped out of order. Only the
+    // eight newest sites are retained; the count remains exact even when older sites expire.
+    struct HeldLocks {
+        count: Cell<u32>,
+        next: Cell<u64>,
+        len: Cell<usize>,
+        sites: [Cell<Option<(u64, &'static Location<'static>)>>; 8],
+    }
+
+    thread_local! {
+        static HELD_LOCKS: HeldLocks = const { HeldLocks {
+            count: Cell::new(0),
+            next: Cell::new(0),
+            len: Cell::new(0),
+            sites: [const { Cell::new(None) }; 8],
+        } };
+    }
+
+    pub(crate) struct HeldLock(u64);
+
+    impl HeldLock {
+        #[inline]
+        #[track_caller]
+        pub(crate) fn new() -> Self {
+            let site = Location::caller();
+            HELD_LOCKS.with(|held| {
+                let id = held.next.get().wrapping_add(1);
+                held.next.set(id);
+                held.count.set(held.count.get() + 1);
+                let mut len = held.len.get();
+                if len == held.sites.len() {
+                    for i in 1..len {
+                        held.sites[i - 1].set(held.sites[i].get());
+                    }
+                    len -= 1;
+                }
+                held.sites[len].set(Some((id, site)));
+                held.len.set(len + 1);
+                Self(id)
+            })
+        }
+    }
+
+    impl Drop for HeldLock {
+        #[inline]
+        fn drop(&mut self) {
+            HELD_LOCKS.with(|held| {
+                held.count.set(held.count.get() - 1);
+                let len = held.len.get();
+                for i in (0..len).rev() {
+                    if held.sites[i].get().map(|entry| entry.0) == Some(self.0) {
+                        for j in i + 1..len {
+                            held.sites[j - 1].set(held.sites[j].get());
+                        }
+                        held.sites[len - 1].set(None);
+                        held.len.set(len - 1);
+                        break;
+                    }
+                }
+            });
+        }
+    }
+
+    /// The current thread's held-lock count and newest retained acquisition site.
+    /// With more than eight simultaneous acquisitions, older sites can be forgotten;
+    /// the count is still exact and a missing site never means that parking is safe.
+    #[inline]
+    pub fn held_lock() -> (u32, Option<&'static Location<'static>>) {
+        HELD_LOCKS.with(|held| {
+            let len = held.len.get();
+            let site = if len == 0 { None } else { held.sites[len - 1].get().map(|entry| entry.1) };
+            (held.count.get(), site)
+        })
+    }
+}
+pub use held::held_lock;
+
+use std::fmt;
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
+use std::time::Duration;
+
+/// A mutex that records each held guard for cooperative pool checkpoints.
+pub struct Mutex<T: ?Sized>(backend::Mutex<T>);
+
+impl<T> Mutex<T> {
+    pub const fn new(value: T) -> Self { Self(backend::Mutex::new(value)) }
+    pub fn into_inner(self) -> LockResult<T> { self.0.into_inner() }
+}
+
+impl<T: ?Sized> Mutex<T> {
+    #[inline]
+    #[track_caller]
+    pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
+        let result = self.0.lock();
+        wrap_guard(result, held::HeldLock::new())
+    }
+
+    #[inline]
+    #[track_caller]
+    pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
+        match self.0.try_lock() {
+            Ok(guard) => Ok(MutexGuard { inner: ManuallyDrop::new(guard), held: held::HeldLock::new() }),
+            Err(TryLockError::Poisoned(err)) => Err(TryLockError::Poisoned(PoisonError::new(MutexGuard {
+                inner: ManuallyDrop::new(err.into_inner()), held: held::HeldLock::new(),
+            }))),
+            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
+        }
+    }
+
+    pub fn get_mut(&mut self) -> LockResult<&mut T> { self.0.get_mut() }
+    pub fn is_poisoned(&self) -> bool { self.0.is_poisoned() }
+    pub fn clear_poison(&self) { self.0.clear_poison(); }
+}
+impl<T: Default> Default for Mutex<T> {
+    fn default() -> Self { Self::new(T::default()) }
+}
+impl<T> From<T> for Mutex<T> {
+    fn from(value: T) -> Self { Self::new(value) }
+}
+impl<T: ?Sized + fmt::Debug> fmt::Debug for Mutex<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut d = f.debug_struct("Mutex");
+        match self.try_lock() {
+            Ok(guard) => { d.field("data", &&*guard); }
+            Err(TryLockError::Poisoned(err)) => { d.field("data", &&**err.get_ref()); }
+            Err(TryLockError::WouldBlock) => { d.field("data", &"<locked>"); }
+        }
+        d.field("poisoned", &self.is_poisoned()).finish_non_exhaustive()
+    }
+}
+
+#[must_use = "if unused the Mutex will immediately unlock"]
+pub struct MutexGuard<'a, T: ?Sized> {
+    inner: ManuallyDrop<backend::MutexGuard<'a, T>>,
+    held: held::HeldLock,
+}
+
+fn wrap_guard<T: ?Sized>(result: LockResult<backend::MutexGuard<'_, T>>, held: held::HeldLock) -> LockResult<MutexGuard<'_, T>> {
+    match result {
+        Ok(guard) => Ok(MutexGuard { inner: ManuallyDrop::new(guard), held }),
+        Err(err) => Err(PoisonError::new(MutexGuard { inner: ManuallyDrop::new(err.into_inner()), held })),
+    }
+}
+
+impl<'a, T: ?Sized> MutexGuard<'a, T> {
+    fn into_parts(self) -> (backend::MutexGuard<'a, T>, held::HeldLock) {
+        let mut this = ManuallyDrop::new(self);
+        // Transfer both fields without running either guard's destructor.
+        unsafe { (ManuallyDrop::take(&mut this.inner), std::ptr::read(&this.held)) }
+    }
+}
+fn wrap_timeout<T>(result: LockResult<(backend::MutexGuard<'_, T>, WaitTimeoutResult)>, held: held::HeldLock) -> LockResult<(MutexGuard<'_, T>, WaitTimeoutResult)> {
+    match result {
+        Ok((inner, result)) => Ok((MutexGuard { inner: ManuallyDrop::new(inner), held }, result)),
+        Err(err) => {
+            let (inner, result) = err.into_inner();
+            Err(PoisonError::new((MutexGuard { inner: ManuallyDrop::new(inner), held }, result)))
+        }
+    }
+}
+
+impl<T: ?Sized> Drop for MutexGuard<'_, T> {
+    fn drop(&mut self) {
+        // Unlock before the held-lock token is dropped.
+        unsafe { ManuallyDrop::drop(&mut self.inner); }
+    }
+}
+impl<T: ?Sized> Deref for MutexGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T { &self.inner }
+}
+impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T { &mut self.inner }
+}
+impl<T: ?Sized + fmt::Debug> fmt::Debug for MutexGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Debug::fmt(&**self, f) }
+}
+impl<T: ?Sized + fmt::Display> fmt::Display for MutexGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(&**self, f) }
+}
+
+#[derive(Debug)]
+pub struct Condvar(backend::Condvar);
+impl Condvar {
+    pub const fn new() -> Self { Self(backend::Condvar::new()) }
+    pub fn notify_one(&self) { self.0.notify_one(); }
+    pub fn notify_all(&self) { self.0.notify_all(); }
+
+    pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> LockResult<MutexGuard<'a, T>> {
+        // Retain the acquisition token across waits: this thread cannot checkpoint
+        // inside the backend wait, and owns the mutex again before user code resumes.
+        let (inner, held) = guard.into_parts();
+        wrap_guard(self.0.wait(inner), held)
+    }
+    pub fn wait_while<'a, T, F: FnMut(&mut T) -> bool>(&self, guard: MutexGuard<'a, T>, condition: F) -> LockResult<MutexGuard<'a, T>> {
+        let (inner, held) = guard.into_parts();
+        wrap_guard(self.0.wait_while(inner, condition), held)
+    }
+    pub fn wait_timeout<'a, T>(&self, guard: MutexGuard<'a, T>, dur: Duration) -> LockResult<(MutexGuard<'a, T>, WaitTimeoutResult)> {
+        let (inner, held) = guard.into_parts();
+        wrap_timeout(self.0.wait_timeout(inner, dur), held)
+    }
+    pub fn wait_timeout_while<'a, T, F: FnMut(&mut T) -> bool>(&self, guard: MutexGuard<'a, T>, dur: Duration, condition: F) -> LockResult<(MutexGuard<'a, T>, WaitTimeoutResult)> {
+        let (inner, held) = guard.into_parts();
+        wrap_timeout(self.0.wait_timeout_while(inner, dur, condition), held)
+    }
+}
+impl Default for Condvar {
+    fn default() -> Self { Self::new() }
+}
 
 #[cfg(target_vendor = "apple")]
 mod macos {
@@ -385,9 +602,105 @@ mod macos {
 
 #[cfg(test)]
 mod tests {
-    use super::{Condvar, Mutex, TryLockError};
+    use super::{held_lock, Condvar, Mutex, TryLockError};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn debug_formatter_sees_held_lock() {
+        struct Value;
+        impl std::fmt::Debug for Value {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                assert_eq!(held_lock().0, 1);
+                f.write_str("value")
+            }
+        }
+        assert!(format!("{:?}", Mutex::new(Value)).contains("value"));
+        assert_eq!(held_lock(), (0, None));
+    }
+
+    #[test]
+    fn held_mutex_sites() {
+        assert_eq!(held_lock(), (0, None));
+        let a = Mutex::new(());
+        let b = Mutex::new(());
+        let first_line = line!() + 1;
+        let first = a.lock().unwrap();
+        let first_site = held_lock().1.unwrap();
+        assert_eq!((first_site.file(), first_site.line()), (file!(), first_line));
+        let second_line = line!() + 1;
+        let second = b.try_lock().unwrap();
+        assert_eq!(held_lock().0, 2);
+        assert_eq!(held_lock().1.unwrap().line(), second_line);
+        assert!(matches!(a.try_lock(), Err(TryLockError::WouldBlock)));
+        assert_eq!(held_lock().0, 2);
+        drop(second);
+        assert_eq!(held_lock(), (1, Some(first_site)));
+        let second = b.lock().unwrap();
+        let second_site = held_lock().1;
+        drop(first);
+        assert_eq!(held_lock(), (1, second_site));
+        drop(second);
+        assert_eq!(held_lock(), (0, None));
+    }
+
+    #[test]
+    fn held_mutex_overflow_and_threads() {
+        let locks: Vec<_> = (0..12).map(|_| Mutex::new(())).collect();
+        let mut guards = Vec::new();
+        for lock in &locks { guards.push(lock.lock().unwrap()); }
+        assert_eq!(held_lock().0, 12);
+        while guards.len() > 4 {
+            drop(guards.pop());
+            assert_eq!(held_lock().0, guards.len() as u32);
+        }
+        assert_eq!(held_lock(), (4, None));
+        drop(guards);
+        assert_eq!(held_lock(), (0, None));
+        thread::spawn(|| {
+            assert_eq!(held_lock(), (0, None));
+            let lock = Mutex::new(());
+            let guard = lock.lock().unwrap();
+            assert_eq!(held_lock().0, 1);
+            drop(guard);
+            assert_eq!(held_lock(), (0, None));
+        }).join().unwrap();
+        assert_eq!(held_lock(), (0, None));
+    }
+
+    #[test]
+    fn held_condvar_round_trip() {
+        let pair = std::sync::Arc::new((Mutex::new(false), Condvar::new()));
+        let guard = pair.0.lock().unwrap();
+        let before = held_lock();
+        let other = pair.clone();
+        let worker = thread::spawn(move || {
+            assert_eq!(held_lock(), (0, None));
+            let mut ready = other.0.lock().unwrap();
+            assert_eq!(held_lock().0, 1);
+            *ready = true;
+            other.1.notify_one();
+        });
+        let guard = pair.1.wait_while(guard, |ready| {
+            assert_eq!(held_lock(), before);
+            !*ready
+        }).unwrap();
+        assert_eq!(held_lock(), before);
+        let (guard, _) = pair.1.wait_timeout(guard, Duration::ZERO).unwrap();
+        assert_eq!(held_lock(), before);
+        let (guard, result) = pair.1.wait_timeout_while(guard, Duration::ZERO, |_| {
+            assert_eq!(held_lock(), before);
+            false
+        }).unwrap();
+        assert!(!result.timed_out());
+        assert_eq!(held_lock(), before);
+        let (guard, result) = pair.1.wait_timeout_while(guard, Duration::ZERO, |_| true).unwrap();
+        assert!(result.timed_out());
+        assert_eq!(held_lock(), before);
+        drop(guard);
+        worker.join().unwrap();
+        assert_eq!(held_lock(), (0, None));
+    }
 
     #[test]
     fn mutual_exclusion() {
@@ -452,10 +765,18 @@ mod tests {
             *guard = 7;
             panic!("poison the mutex");
         }).is_err());
+        assert_eq!(held_lock(), (0, None));
         assert!(mutex.is_poisoned());
-        assert_eq!(*mutex.lock().unwrap_err().into_inner(), 7);
+        let guard = mutex.lock().unwrap_err().into_inner();
+        assert_eq!(held_lock().0, 1);
+        assert_eq!(*guard, 7);
+        drop(guard);
+        assert_eq!(held_lock(), (0, None));
         match mutex.try_lock() {
-            Err(TryLockError::Poisoned(e)) => assert_eq!(*e.into_inner(), 7),
+            Err(TryLockError::Poisoned(e)) => {
+                assert_eq!(held_lock().0, 1);
+                assert_eq!(*e.into_inner(), 7);
+            }
             other => panic!("expected poison, got {other:?}"),
         }
         assert_eq!(*mutex.get_mut().unwrap_err().into_inner(), 7);

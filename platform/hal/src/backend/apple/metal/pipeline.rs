@@ -53,6 +53,7 @@ pub struct Pipe {
     pub state: Arc<PipeState>,
     pub desc: PipelineDesc,
     pub bindings: Arc<[u32]>,
+    pub storage: Vec<StorageBinding>,
     /// the session was told the first outcome (variants announce readiness again)
     pub announced: bool,
     /// the GPU profiler's cost hints of the generated source ([`crate::gpu_prof::source_stats`])
@@ -103,7 +104,7 @@ unsafe fn describe_attachments(descriptor: ObjcId, formats: &[MTLPixelFormat], w
     }
 }
 
-fn describe_error(error: ObjcId, none: &str) -> String {
+pub(super) fn describe_error(error: ObjcId, none: &str) -> String {
     if error == nil {
         none.into()
     } else {
@@ -240,7 +241,8 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
         blend_max: desc.blend & pipeline_blend::MAX != 0,
         can_blend: declared == MTLPixelFormat::BGRA8Unorm && !raw,
         discards: source.contains("discard_fragment"),
-        declared: desc.color_formats.iter().copied().take_while(|f| *f != 0).filter_map(mtl_format).collect(),
+        // RGBA8 is format zero, so the output mask determines the attachment span.
+        declared: desc.color_formats.iter().copied().take((u32::BITS - desc.outputs.leading_zeros()) as usize).filter_map(mtl_format).collect(),
         settled: AtomicU8::new(0),
         failed: AtomicBool::new(false),
         sid,
@@ -259,7 +261,7 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
 /// The options a pipeline's MSL is compiled with: fast math, or for a precise-math pipeline
 /// (`pipeline_flags::PRECISE`) none (IEEE division and sqrt; the source also turns fp
 /// contraction off), with the safe math mode and precise fp32 functions where the OS has them.
-fn compile_options(precise: bool) -> RcObjcId {
+pub(super) fn compile_options(precise: bool) -> RcObjcId {
     let options = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![class!(MTLCompileOptions), new] }).expect("options"));
     unsafe {
         let _: () = msg_send![options.as_id(), setFastMathEnabled: if precise { NO } else { YES }];

@@ -103,6 +103,16 @@ impl<K: Hash + Eq + Clone, V: Clone> QueryTable<K, V> {
         Some(shard.slots.get(index as usize / SHARDS)?.key.clone())
     }
 
+    /// The completed value of `key` at the engine's current revision, if one is held; nothing is
+    /// computed and no read is recorded (a caller outside any query asking only whether the work
+    /// is done already).
+    pub fn peek(&self, engine: &QueryEngine, key: &K) -> Option<V> {
+        let shard = self.shards()[Self::shard(key)].read().unwrap_or_else(|e| e.into_inner());
+        let slot = &shard.slots[*shard.keys.get(key)? as usize];
+        if slot.verified_at != engine.revision() { return None; }
+        slot.value.clone()
+    }
+
     pub fn query_id(&self, key: &K) -> Option<QueryId> {
         let shard_index = Self::shard(key);
         let shard = self.shards()[shard_index].read().unwrap_or_else(|e| e.into_inner());

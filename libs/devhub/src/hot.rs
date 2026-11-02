@@ -61,7 +61,8 @@ pub fn ingest(r: Record) -> Result<bool, String> { with(|l| l.add(r)) }
 /// Reconstruct inbox delivery after a hub died between journal append and
 /// publication. Inbox identities and clear tombstones make replay idempotent.
 pub fn replay_failures(publish: &dyn Fn(crate::proto::Record)) -> Result<(), String> {
-    let records = with(|l| Ok(l.records.iter().filter(|r| r.outcome.failure() || r.outcome == Outcome::RestartFailed).cloned().collect::<Vec<_>>()))?;
+    let records = with(|l| Ok(l.records.iter().filter(|r| r.outcome.failure()
+        || matches!(r.outcome, Outcome::RestartFailed | Outcome::FirstFrameTimeout | Outcome::NoWindow)).cloned().collect::<Vec<_>>()))?;
     for record in records { publish(crate::proto::from_hot(&record)); }
     Ok(())
 }
@@ -110,6 +111,8 @@ fn summary(records: &[Record], now: u64) -> String {
     let mut causes: BTreeMap<String, Vec<&Record>> = BTreeMap::new();
     let mut apps = std::collections::BTreeSet::new();
     for r in records {
+        // Startup alerts reach the inbox but do not enter the hot-load ledger's statistics.
+        if matches!(r.outcome, Outcome::FirstFrameTimeout | Outcome::NoWindow) { continue; }
         apps.insert(r.app.as_str());
         if r.outcome.failure() || r.outcome == Outcome::RestartFailed {
             causes.entry(cause_key(&r.reason)).or_default().push(r);

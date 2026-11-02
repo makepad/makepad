@@ -5,3 +5,9 @@ date = "2026-11-02"
 digest = "7655851a57f786be132113d3bc15c700fb0bd9e937edc3aa7200989cdfd8beed"
 main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
 work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+
+[tests.windows]
+date = "2026-11-02"
+digest = "a3610fe8d07e3cc95398d45acc344d16e1ab1a189f820cfc4ca473272f49a89d"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"

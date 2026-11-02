@@ -141,7 +141,9 @@ def main():
     # Workspace-wide resolver/patch/profile inputs apply to every member.
     workspace = any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in compiled)
     if os.environ.get("HOT") == "1":
-        selected = set()
+        # every land boots one small drawing app under the JIT to its first present: a broken draw
+        # path (a shader IR change) fails every app, whichever crate the landing touched
+        selected = {CALC}
         for name in SMOKE:
             if name not in PRESENT_ARGS:
                 continue

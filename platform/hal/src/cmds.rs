@@ -221,6 +221,8 @@ hal_commands! {
     PipelineDestroy = 60, pipeline_destroy { id: obj };
     /// Retained instance data the HAL may drop under pressure (-> `BufferEvicted`).
     BufferEvictable = 61, buffer_evictable { id: obj };
+    /// Copy a byte range asynchronously; answered by Readback with the same req.
+    BufferReadback = 62, buffer_readback { id: obj, req: u32, offset: u64, len: u64 };
 
     // ---- frames
     /// Render `packet` (index into `CmdBuf::frames`) to `target`; `kind` is `target::*`.

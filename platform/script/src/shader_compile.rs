@@ -87,6 +87,8 @@ pub struct CompiledShader {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CompiledShaderView<'a> {
+    pub storage_buffers: &'a [makepad_shader::shader_ir_compute::ComputeBufferBinding],
+    pub storage_push_size: u32,
     pub has_errors: bool,
     pub error_report: &'a str,
     pub combined: &'a str,
@@ -247,6 +249,8 @@ impl CompiledShader {
     #[relax_api]
     pub fn view(&self) -> CompiledShaderView<'_> {
         CompiledShaderView {
+            storage_buffers: &self.state.storage_buffers,
+            storage_push_size: self.state.storage_push_size,
             has_errors: self.state.has_errors(),
             error_report: &self.diagnostics,
             combined: &self.combined,

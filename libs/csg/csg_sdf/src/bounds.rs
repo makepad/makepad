@@ -281,6 +281,13 @@ pub fn same(a: &SdfNode, b: &SdfNode) -> bool {
     }
 }
 
+/// Where two stroke logs on the same field can differ: the moved strokes' boxes, grown by
+/// the widest blend.
+fn strokes_changed(sa: &crate::strokes::Strokes, sb: &crate::strokes::Strokes) -> Option<Bounds> {
+    let k = sa.applied().chain(sb.applied()).filter_map(|(_, s)| s.tube()).map(|t| t.blend).fold(0.0, f64::max);
+    sa.changed_boxes(sb, false).into_iter().map(|b| grow(b, k)).reduce(union)
+}
+
 /// Where the surface of `new` can differ from the surface of `old`: the
 /// bounds of every changed subtree, old and new, grown by the blends,
 /// shells and roundings above it and placed into the root frame. `None`
@@ -315,10 +322,10 @@ pub fn changed(old: &SdfNode, new: &SdfNode) -> Option<Bounds> {
         (SdfNode::Material { of: a, .. }, SdfNode::Material { of: b, .. }) | (SdfNode::Id { of: a, .. }, SdfNode::Id { of: b, .. }) => changed(a, b).unwrap_or_else(whole),
         (SdfNode::Bone { id: ia, rest: ra, of: a }, SdfNode::Bone { id: ib, rest: rb, of: b }) if ia == ib && ra == rb => changed(a, b)?,
         // Only where the strokes moved (one drawn, one undone).
-        (SdfNode::Sculpt { strokes: sa, of: a }, SdfNode::Sculpt { strokes: sb, of: b }) if same(a, b) => {
-            let k = sa.applied().chain(sb.applied()).filter_map(|(_, s)| s.tube()).map(|t| t.blend).fold(0.0, f64::max);
-            sa.changed_boxes(sb, false).into_iter().map(|b| grow(b, k)).reduce(union)?
-        }
+        (SdfNode::Sculpt { strokes: sa, of: a }, SdfNode::Sculpt { strokes: sb, of: b }) if same(a, b) => strokes_changed(sa, sb)?,
+        // The first stroke (or the last one undone): only where it reaches.
+        (a, SdfNode::Sculpt { strokes, of: b }) if same(a, b) => strokes_changed(&crate::strokes::Strokes::new(), strokes)?,
+        (SdfNode::Sculpt { strokes, of: a }, b) if same(a, b) => strokes_changed(strokes, &crate::strokes::Strokes::new())?,
         (SdfNode::Instance { places: pa, of: a }, SdfNode::Instance { places: pb, of: b }) if same(a, b) => {
             // Only the moved, added or removed copies.
             let ob = node_bounds(a).unwrap_or(everywhere);

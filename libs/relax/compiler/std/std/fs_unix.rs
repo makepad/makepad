@@ -100,13 +100,25 @@ fn needs_write() -> io::Error {
 
 pub struct File {
     fd: OwnedFd,
-    /// a virtual file's bytes and read position (its fd is /dev/null's)
-    mem: Option<Box<Mem>>,
+    virtual_len: Option<u64>,
 }
 
-struct Mem {
-    data: Arc<Vec<u8>>,
-    pos: core::sync::atomic::AtomicU64,
+fn virtual_fd() -> io::Result<OwnedFd> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let fd = cvt_r(|| unsafe { sys::os::memfd_create(b"relax-vfs\0".as_ptr() as *const c_char, sys::os::MFD_CLOEXEC) })?;
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        let path = crate::env::temp_dir().join("relax-vfs-XXXXXX");
+        let mut name = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| NUL_ERR)?.into_bytes_with_nul();
+        let fd = cvt(unsafe { sys::os::mkstemp(name.as_mut_ptr() as *mut c_char) })?;
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        cvt_r(|| unsafe { sys::unlink(name.as_ptr() as *const c_char) })?;
+        cvt_r(|| unsafe { sys::fcntl(fd.as_raw_fd(), sys::F_SETFD, sys::FD_CLOEXEC) })?;
+        Ok(fd)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -166,10 +178,12 @@ impl OpenOptions {
             return match k {
                 vfs::Kind::File(_) => {
                     let data = vfs::read(&*abs)?;
-                    let fd = run_path_with_cstr(Path::new("/dev/null"), &|null| {
-                        cvt_r(|| unsafe { sys::open(null.as_ptr(), sys::os::O_CLOEXEC | sys::O_RDONLY, 0) })
-                    })?;
-                    Ok(File { fd: unsafe { OwnedFd::from_raw_fd(fd) }, mem: Some(Box::new(Mem { data: Arc::new(data), pos: core::sync::atomic::AtomicU64::new(0) })) })
+                    let mut file = File { fd: virtual_fd()?, virtual_len: None };
+                    cvt_r(|| unsafe { sys::fchmod(file.raw(), 0o644 as sys::mode_t) })?;
+                    file.write_all(&data)?;
+                    file.seek(SeekFrom::Start(0))?;
+                    file.virtual_len = Some(data.len() as u64);
+                    Ok(file)
                 }
                 vfs::Kind::Dir => Err(io::const_error!(io::ErrorKind::IsADirectory, "is a directory")),
                 vfs::Kind::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
@@ -222,7 +236,7 @@ impl OpenOptions {
         let flags = sys::os::O_CLOEXEC | self.access_mode()? | self.creation_mode()? | (self.custom_flags & !3);
         let mode = self.mode;
         let fd = cvt_r(|| unsafe { sys::open(path.as_ptr(), flags, mode as core::ffi::c_uint) })?;
-        Ok(File { fd: unsafe { OwnedFd::from_raw_fd(fd) }, mem: None })
+        Ok(File { fd: unsafe { OwnedFd::from_raw_fd(fd) }, virtual_len: None })
     }
 }
 
@@ -282,6 +296,9 @@ impl File {
         self.sync_all()
     }
     pub fn set_len(&self, size: u64) -> io::Result<()> {
+        if self.virtual_len.is_some() {
+            return Err(vfs::read_only());
+        }
         if size > i64::MAX as u64 {
             return Err(io::Error::from_raw_os_error(sys::os::EINVAL));
         }
@@ -289,16 +306,15 @@ impl File {
         Ok(())
     }
     pub fn metadata(&self) -> io::Result<Metadata> {
-        if let Some(m) = &self.mem {
-            return Ok(Metadata { st: vfs_stat(&vfs::Kind::File(m.data.len() as u64)) });
+        if let Some(len) = self.virtual_len {
+            return Ok(Metadata { st: vfs_stat(&vfs::Kind::File(len)) });
         }
         let mut st = stat_t::zeroed();
         cvt(unsafe { sys::os::fstat(self.raw(), &mut st as *mut stat_t) })?;
         Ok(Metadata { st })
     }
     pub fn try_clone(&self) -> io::Result<File> {
-        let mem = self.mem.as_ref().map(|m| Box::new(Mem { data: m.data.clone(), pos: core::sync::atomic::AtomicU64::new(m.pos.load(core::sync::atomic::Ordering::Relaxed)) }));
-        Ok(File { fd: self.fd.try_clone()?, mem })
+        Ok(File { fd: self.fd.try_clone()?, virtual_len: self.virtual_len })
     }
     pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
         cvt_r(|| unsafe { sys::fchmod(self.raw(), perm.mode as sys::mode_t) })?;
@@ -351,13 +367,6 @@ impl File {
         Ok(())
     }
     fn read_raw(&self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(m) = &self.mem {
-            let pos = (m.pos.load(core::sync::atomic::Ordering::Relaxed) as usize).min(m.data.len());
-            let n = buf.len().min(m.data.len() - pos);
-            buf[..n].copy_from_slice(&m.data[pos..pos + n]);
-            m.pos.store((pos + n) as u64, core::sync::atomic::Ordering::Relaxed);
-            return Ok(n);
-        }
         let len = if buf.len() > crate::os::unix::fs::READ_LIMIT { crate::os::unix::fs::READ_LIMIT } else { buf.len() };
         let r = unsafe { sys::read(self.raw(), buf.as_mut_ptr() as *mut c_void, len) };
         if r < 0 {
@@ -367,7 +376,7 @@ impl File {
         }
     }
     fn write_raw(&self, buf: &[u8]) -> io::Result<usize> {
-        if self.mem.is_some() {
+        if self.virtual_len.is_some() {
             return Err(vfs::read_only());
         }
         let len = if buf.len() > crate::os::unix::fs::READ_LIMIT { crate::os::unix::fs::READ_LIMIT } else { buf.len() };
@@ -379,19 +388,6 @@ impl File {
         }
     }
     fn seek_raw(&self, pos: SeekFrom) -> io::Result<u64> {
-        if let Some(m) = &self.mem {
-            let cur = m.pos.load(core::sync::atomic::Ordering::Relaxed) as i64;
-            let to = match pos {
-                SeekFrom::Start(o) => o as i64,
-                SeekFrom::End(o) => m.data.len() as i64 + o,
-                SeekFrom::Current(o) => cur + o,
-            };
-            if to < 0 {
-                return Err(io::Error::from_raw_os_error(sys::os::EINVAL));
-            }
-            m.pos.store(to as u64, core::sync::atomic::Ordering::Relaxed);
-            return Ok(to as u64);
-        }
         let (whence, off) = match pos {
             SeekFrom::Start(o) => (sys::SEEK_SET, o as i64),
             SeekFrom::End(o) => (sys::SEEK_END, o),
@@ -406,9 +402,6 @@ impl File {
     }
     /// Buffer sized from the file length for read_to_end (as real std does).
     fn size_hint(&self) -> Option<usize> {
-        if let Some(m) = &self.mem {
-            return Some(m.data.len().saturating_sub(m.pos.load(core::sync::atomic::Ordering::Relaxed) as usize));
-        }
         let mut st = stat_t::zeroed();
         if unsafe { sys::os::fstat(self.raw(), &mut st as *mut stat_t) } != 0 {
             return None;
@@ -502,7 +495,7 @@ impl AsFd for File {
 }
 impl FromRawFd for File {
     unsafe fn from_raw_fd(fd: RawFd) -> File {
-        File { fd: OwnedFd::from_raw_fd(fd), mem: None }
+        File { fd: OwnedFd::from_raw_fd(fd), virtual_len: None }
     }
 }
 impl IntoRawFd for File {
@@ -517,7 +510,7 @@ impl From<File> for OwnedFd {
 }
 impl From<OwnedFd> for File {
     fn from(fd: OwnedFd) -> File {
-        File { fd, mem: None }
+        File { fd, virtual_len: None }
     }
 }
 impl crate::io::IsTerminal for File {
@@ -883,6 +876,9 @@ impl Default for DirBuilder {
 // ---- free functions
 
 pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
+    if let Some((abs, vfs::Kind::File(_))) = vfs::kind(path.as_ref()) {
+        return vfs::read(&*abs);
+    }
     let mut file = File::open(path.as_ref())?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
@@ -890,6 +886,9 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
 }
 
 pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
+    if let Some((abs, vfs::Kind::File(_))) = vfs::kind(path.as_ref()) {
+        return String::from_utf8(vfs::read(&*abs)?).map_err(|_| io::Error::INVALID_UTF8);
+    }
     let mut file = File::open(path.as_ref())?;
     let mut s = String::new();
     file.read_to_string(&mut s)?;

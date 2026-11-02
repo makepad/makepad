@@ -149,7 +149,7 @@
 
 use crate::ao_atlas::{Chart, TEXEL_SUBSAMPLES, TEXEL_SUB_OFFSETS};
 use makepad_draw::makepad_math::Vec3f;
-use makepad_draw::makepad_platform::thread::{Lane, TaskPool};
+use makepad_draw::makepad_platform::thread::{TaskPool};
 
 /// Everything `BakerBoyConfig` carries that this port honours, plus the two
 /// knobs the task parameterises (direction count, depth resolution).
@@ -740,7 +740,7 @@ pub(crate) fn bake_all_charts(
     // partial sums reduced in worker order, so the float addition order — and
     // with it the bake — is reproducible.
     let threads = pool
-        .map_or(1, |pool| pool.heavy_workers().saturating_add(1))
+        .map_or(1, |pool| pool.worker_count().saturating_add(1))
         .min(params.sample_count.max(1));
     let res = params.depth_res;
     let point_count = points.len();
@@ -766,7 +766,7 @@ pub(crate) fn bake_all_charts(
         let _ = tx.send((worker, occ));
     };
     match pool {
-        Some(pool) => pool.fan_out(Lane::Heavy, threads, work),
+        Some(pool) => pool.fan_out(threads, work),
         None => (0..threads).for_each(work),
     }
     drop(tx);

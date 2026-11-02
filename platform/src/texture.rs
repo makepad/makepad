@@ -564,6 +564,7 @@ pub enum TextureWrap {
 
 #[derive(Clone)]
 pub enum TextureFormat {
+    Storage { format: crate::makepad_script::shader_ir_compute::StorageTextureFormat, width: usize, height: usize },
     Unknown,
     VecBGRAu8_32 {
         width: usize,
@@ -757,6 +758,7 @@ impl std::fmt::Debug for TextureFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         match self {
             TextureFormat::Unknown => write!(f, "TextureFormat::Unknown"),
+            TextureFormat::Storage { format, width, height } => write!(f, "Storage({format:?}, {width}x{height})"),
             TextureFormat::VecBGRAu8_32 { width, height, .. } => write!(
                 f,
                 "TextureFormat::VecBGRAu8_32(width:{width},height:{height})"
@@ -988,6 +990,7 @@ impl TextureUpdated {
 #[allow(unused)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TexturePixel {
+    RGBAu8,
     BGRAu8,
     RGBAf16,
     RGBAf32,
@@ -1256,6 +1259,7 @@ impl TextureFormat {
 
     pub fn is_render(&self) -> bool {
         match self {
+            Self::Storage { .. } => true,
             Self::RenderBGRAu8 { .. } => true,
             Self::RenderCubeBGRAu8 { .. } => true,
             Self::RenderRGBAf16 { .. } => true,
@@ -1413,6 +1417,11 @@ impl TextureFormat {
     #[allow(unused)]
     pub(crate) fn as_render_alloc(&self, width: usize, height: usize) -> Option<TextureAlloc> {
         match self {
+            Self::Storage { format, width, height } => {
+                use crate::makepad_script::shader_ir_compute::StorageTextureFormat as F;
+                let pixel = match format { F::R16f => TexturePixel::Rf16, F::R8unorm => TexturePixel::Ru8, F::R32f => TexturePixel::Rf32, F::R32uint => TexturePixel::Ru32, F::Rgba8unorm => TexturePixel::RGBAu8, F::Rgba16f => TexturePixel::RGBAf16 };
+                Some(TextureAlloc { width: *width, height: *height, pixel, category: TextureCategory::Render })
+            }
             Self::RenderBGRAu8 { size, .. } => {
                 let (width, height) = size.width_height(width, height);
                 Some(TextureAlloc {

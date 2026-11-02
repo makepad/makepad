@@ -42,7 +42,7 @@ pub mod files;
 #[cfg(feature = "checkout")]
 pub(crate) mod git;
 #[cfg(feature = "checkout")]
-mod jits;
+pub(crate) mod jits;
 #[cfg(feature = "checkout")]
 pub mod lanes;
 #[cfg(feature = "checkout")]

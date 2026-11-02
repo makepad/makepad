@@ -30,6 +30,7 @@ impl DrawVars {
             return;
         }
 
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::ShaderCompile);
         // not seen: compile. Uniform buffer indices start at 3 (0 = geometry, 1 = instances,
         // 2 = dyn uniforms)
         let dialect = vm.host.cx().hal.info.map_or(makepad_hal::dialect::NONE, |i| i.dialect);
@@ -76,6 +77,8 @@ impl DrawVars {
         let source = vm.new_object_ref(io_self);
         let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output, geometry_id);
         mapping.pick_code = output.pick_code().map(str::to_owned);
+        mapping.storage_buffers = output.view().storage_buffers.to_vec();
+        mapping.storage_push_size = output.view().storage_push_size;
         if vulkan {
             let payload = |result: &crate::makepad_script::shader_ir_draw::IrDrawSpirvResult, multiview: bool| -> Result<Vec<u8>, String> {
                 use crate::makepad_script::shader::{SamplerAddress, SamplerCoord, SamplerFilter, TextureType};

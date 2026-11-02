@@ -8,6 +8,8 @@
 //! let frame: fn(&mut FxState, f32) = m.get("frame")?;
 //! ```
 
+pub use crate::sync::held_lock::held_lock;
+
 use crate::string::String;
 
 /// The harness `makepad test <package>` runs a crate's `#[test]` fns with (libtest's semantics).

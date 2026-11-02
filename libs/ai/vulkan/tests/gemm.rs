@@ -488,7 +488,7 @@ fn gemm_variants_match_cpu() {
                 assert_eq!(compiled.layout.shared_bytes, c.shared_bytes, "{name}");
                 assert!(compiled.layout.shared_bytes <= 32 * 1024, "{name}");
                 assert_eq!(compiled.layout.workgroup, [c.workgroup, 1, 1], "{name}");
-                if let Some(result) = makepad_script::shader_ir_spirv::spirv_val(&compiled.spirv) { result.unwrap(); }
+                if let Some(result) = makepad_script::shader_ir_spirv::spirv_val(compiled.code.as_spirv().unwrap()) { result.unwrap(); }
             }
         }
     }
@@ -499,7 +499,7 @@ fn gemm_variants_match_cpu() {
             for name in ["gemm_i8_coop_16x16x16", "gemm_i8_coop_64x16x16", "gemm_i8_coop_16x16x32"] {
                 let compiled = library.compile_constants(name, &[("workgroup_size", subgroup * count), ("subgroups", count)]).unwrap();
                 assert!(compiled.layout.shared_bytes <= 32 * 1024);
-                if let Some(result) = makepad_script::shader_ir_spirv::spirv_val(&compiled.spirv) { result.unwrap(); }
+                if let Some(result) = makepad_script::shader_ir_spirv::spirv_val(compiled.code.as_spirv().unwrap()) { result.unwrap(); }
             }
             for half_x in [0, 1] {
                 for (vector, half_vector8) in [(0, 0), (1, 0), (1, 1)] {
@@ -508,7 +508,7 @@ fn gemm_variants_match_cpu() {
                         ("vector_w", vector), ("vector_x", vector), ("half_vector8", half_vector8),
                     ]).unwrap();
                     assert!(compiled.layout.shared_bytes <= 32 * 1024);
-                    if let Some(result) = makepad_script::shader_ir_spirv::spirv_val(&compiled.spirv) { result.unwrap(); }
+                    if let Some(result) = makepad_script::shader_ir_spirv::spirv_val(compiled.code.as_spirv().unwrap()) { result.unwrap(); }
                 }
             }
         }
@@ -604,7 +604,7 @@ fn gemm_nt_bias_matches_cpu() {
     for weights in [0, 1] {
         for vector in [0, 1] {
             let compiled = library.compile_constants("gemm_register_nt_4x4", &[("half_w", weights), ("vector_w", vector), ("vector_x", vector)]).unwrap();
-            if let Some(result) = makepad_script::shader_ir_spirv::spirv_val(&compiled.spirv) { result.unwrap(); }
+            if let Some(result) = makepad_script::shader_ir_spirv::spirv_val(compiled.code.as_spirv().unwrap()) { result.unwrap(); }
         }
     }
 }
@@ -669,7 +669,7 @@ fn cooperative_operations(device: &Device) {
         let depth = if component == vk::ComponentTypeKHR::FLOAT16 { 16 } else { 32 };
         if !device.features.cooperative_matrix_shapes.iter().any(|s| s.m == 16 && s.n == 16 && s.k == depth && s.a == component && s.b == component) { continue; }
         let compiled = library.compile_constants(name, &[("workgroup_size", device.features.subgroup_size)]).unwrap();
-        if let Some(r) = makepad_script::shader_ir_spirv::spirv_val(&compiled.spirv) { r.unwrap(); }
+        if let Some(r) = makepad_script::shader_ir_spirv::spirv_val(compiled.code.as_spirv().unwrap()) { r.unwrap(); }
         let kernel = device.kernel(name, &compiled, Some(device.features.subgroup_size)).unwrap();
         let depth = depth as usize;
         let signed = component != vk::ComponentTypeKHR::UINT8;

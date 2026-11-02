@@ -942,7 +942,7 @@ impl Cx {
             }
             HalEvent::PipelineFailed { pipeline, log } => {
                 if let Some((shader, waited)) = self.hal.frames.pipeline_failed(pipeline) {
-                    let name = self.draw_shaders[shader].debug_id;
+                    let name = self.draw_shaders.shaders.get(shader).map(|s| s.debug_id).unwrap_or_default();
                     let error = format!("hal: pipeline of shader {:?} failed: {}", name, String::from_utf8_lossy(log));
                     crate::shader_error::note(error.clone());
                     crate::error!("{}", error);
@@ -1204,6 +1204,7 @@ impl Cx {
     /// Signals, actions, script tasks and network events the loop services on a wake and on
     /// every beat (the work macOS did on its timer-0 beat).
     pub(crate) fn hal_service_signals(&mut self) -> bool {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Signals);
         let internal_signal = SignalToUI::check_and_clear_internal_signal();
         let ui_signal = SignalToUI::check_and_clear_ui_signal();
         let mut did = false;

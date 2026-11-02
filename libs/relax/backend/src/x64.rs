@@ -6722,7 +6722,12 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         block_pads: Vec::new(),
         pads_n: 0,
     };
-    g.zero_above = crate::passes::zero_above(options, g.f, &g.low_only);
+    // read only at integer casts: a function without one needs no table
+    g.zero_above = if g.f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Conv(Conv::IntToInt(_), ..)))) {
+        crate::passes::zero_above(options, g.f, &g.low_only)
+    } else {
+        vec![0; g.f.vregs.len()]
+    };
     if env.opt_regs || g.f.full {
         g.copy_reg = regalloc::copy_reuse(options, g.f, &g.al);
     }

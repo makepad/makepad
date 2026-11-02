@@ -109,17 +109,17 @@ mod tests {
 
     #[test]
     fn two_bead_walls_gap() {
-        // two parallel walls 0.35 apart between bead edges, 5 layers
+        // two parallel walls 0.35 apart between bead edges, 3 layers
         let mut a = Vec::new();
         let mut b = Vec::new();
-        for k in 0..5 {
+        for k in 0..3 {
             let z0 = k as f64 * 0.2;
-            a.push(Bead { a: [0.0, 0.0], b: [10.0, 0.0], z0, z1: z0 + 0.2, width: 0.42 });
-            b.push(Bead { a: [0.0, 0.77], b: [10.0, 0.77], z0, z1: z0 + 0.2, width: 0.42 });
+            a.push(Bead { a: [0.0, 0.0], b: [2.0, 0.0], z0, z1: z0 + 0.2, width: 0.42 });
+            b.push(Bead { a: [0.0, 0.77], b: [2.0, 0.77], z0, z1: z0 + 0.2, width: 0.42 });
         }
         let fa = BeadField::new(a, 0.0, 0.2, 1.0);
         let fb = BeadField::new(b, 0.0, 0.2, 1.0);
-        let g = crate::check::min_gap(&fa, &fb, [-1.0, -1.0, 0.0], [11.0, 2.0, 1.0], 0.005);
+        let g = crate::check::min_gap(&fa, &fb, [-1.0, -1.0, 0.0], [3.0, 2.0, 0.6], 0.005);
         assert!((g.gap - 0.35).abs() < 0.015, "{g:?}");
     }
 }

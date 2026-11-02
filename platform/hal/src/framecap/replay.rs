@@ -249,6 +249,7 @@ impl Replayer {
             let mut expected = 0u64;
             for (pi, p) in c.passes.iter().enumerate().take(cut.pass + 1) {
                 let pass = Pass {
+                    kind: pass_kind::DRAW, dispatches: Range::default(),
                     color: if p.is_window() { [self.rt, Id::NONE, Id::NONE, Id::NONE] } else { p.color.map(|i| self.map_tex(i)) },
                     depth: self.map_tex(p.depth),
                     load: p.load,
@@ -282,6 +283,7 @@ impl Replayer {
                     let tex_ids: Vec<Id> = d.tex.iter().map(|t| self.map_tex(*t)).collect();
                     let tex = w.put_ids(&tex_ids);
                     let draw = Draw {
+                        storage_buffers: Range::default(), indirect_buffer: Id::NONE, indirect_offset: 0,
                         pipeline,
                         vb: self.map_buf(d.vb),
                         ib: self.map_buf(d.ib),

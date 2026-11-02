@@ -10,7 +10,7 @@ use makepad_studio_protocol::{AppToStudio};
 use makepad_widgets::*;
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc::Sender, OnceLock};
-use makepad_platform::thread::{Lane, TaskHandle};
+use makepad_platform::thread::{Class, TaskHandle};
 
 static REMOTE_UI: OnceLock<makepad_app_host::a11y::RemoteUi> = OnceLock::new();
 fn dispatch_hosted(req: &makepad_remote::Req, out: &mut makepad_remote::Out) {
@@ -171,7 +171,7 @@ impl Probe {
                 let command = format!("ui act node={} press wait=1", button.id.short());
                 // Exercise the hosted command interpreter and its action/presentation replies.
                 // The UI continues pumping the child while the pool task waits.
-                match cx.task_pool().submit(Lane::Heavy, move || {
+                match cx.task_pool().submit(Class::Background, move || {
                     let (bytes, truncated) = makepad_remote::cmd::answer(dispatch_hosted, &command);
                     let reply = String::from_utf8_lossy(&bytes);
                     println!("hosted {command}: {reply}");

@@ -980,6 +980,11 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             "" | "--dry" => sweep(&ctx_arc(ctx)?, rest == "--dry"),
             _ => Err("lane sweep [--dry] | lane sweep status".into()),
         },
+        "dormant" => {
+            let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-lanes");
+            let rows = crate::cli::ask(&c, None, "lanes", "lanes dormant")?;
+            Ok(format!("[{}]", rows.join(",")))
+        }
         "list" => {
             let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-lanes");
             let merge = crate::cli::ask(&c, None, "lanes", "lanes list").unwrap_or_default();
@@ -988,7 +993,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             let rows: Vec<String> = lanes.iter().map(|l| row(ctx, l, &merge, &land)).collect();
             Ok(format!("[{}]", rows.join(",")))
         }
-        _ => Err(format!("lane: unknown word `{verb}` (new drop remove keep unkeep live timeline adopt sweep list)")),
+        _ => Err(format!("lane: unknown word `{verb}` (new drop remove keep unkeep live timeline adopt sweep list dormant)")),
     }
 }
 

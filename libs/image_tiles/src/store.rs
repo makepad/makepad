@@ -11,7 +11,7 @@
 use crate::library::{display_frame, ItemId, Library};
 use crate::tape::{full_frame, read_frame, FullFrame, Planes};
 use makepad_widgets_core::makepad_platform::thread::{
-    CancellationToken, Lane, TaskHandle, TaskPool, ToUIReceiver, ToUISender,
+    CancellationToken, Class, TaskHandle, TaskPool, ToUIReceiver, ToUISender,
 };
 use std::collections::HashMap;
 
@@ -61,7 +61,7 @@ impl StoreHandle {
         let job_cancel = cancel.clone();
         let library = self.library.clone();
         let events: ToUISender<StoreEvent> = self.events.sender();
-        let Ok(task) = self.pool.submit(Lane::Heavy, move || {
+        let Ok(task) = self.pool.submit(Class::Background, move || {
             if job_cancel.is_cancelled() {
                 return;
             }

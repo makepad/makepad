@@ -69,6 +69,33 @@ impl Sync {
         ep.register("sync-push", 1, push_factory(self.clone()));
         ep.register("launch", 1, lines::service("launch", super::launch::service(self.conf.clone(), self.ctx.publish.clone(), self.ctx.machine.clone())));
         self.after_wm_restart();
+        #[cfg(target_os = "linux")]
+        self.roll_other_wire();
+    }
+
+    /// A WM on another hosted wire hosts no app of today (Fab could not start on a node,
+    /// 2026-11-02; caps reports no display meanwhile): restarted onto the deployed one as soon as
+    /// nothing is lost by it ([`Self::wm_restart`] waits for apps, viewers and the person). Never
+    /// on a box a person used in the last 12 h (their session is theirs to restart), and at most
+    /// once in 6 h.
+    #[cfg(target_os = "linux")]
+    fn roll_other_wire(self: &Arc<Self>) {
+        let me = self.clone();
+        let _ = std::thread::Builder::new().name("devhub-wm-wire".into()).spawn(move || {
+            let mut last: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let Some(answer) = crate::lease::caps::other_wire() else { continue };
+                if crate::lease::exec::person_within(12 * 3_600_000) || last.is_some_and(|t| t.elapsed() < Duration::from_secs(6 * 3600)) || !crate::lease::exec::writes_allowed() {
+                    continue;
+                }
+                last = Some(Instant::now());
+                let _busy = me.busy.lock().unwrap();
+                if let Err(e) = me.wm_restart(&format!("its WM speaks another hosted wire ({answer}): no app starts under it")) {
+                    me.event(Sev::Warn, format!("sync: WM restart refused: {e}"), String::new());
+                }
+            }
+        });
     }
 
     /// The commit the checkout of `repo` holds: the store's record of it, else what a deploy
@@ -550,6 +577,11 @@ impl Sync {
             return Err(format!("{} is not available for dev: WM restarts need its dev switch on", self.ctx.machine));
         }
         let svc = self.conf.wm_service.clone().ok_or("this node has no WM service (wm_service = none)")?;
+        // The new WM starts this hub again when the deployment moved its binary: built first, that
+        // start is a no-op `cargo run` (102's compiled 13 s behind a package-cache lock while its
+        // hub refused connections, 11-02). A hub that does not build keeps the WM and this hub.
+        #[cfg(feature = "checkout")]
+        crate::lease::exec::build_hub(&self.conf.checkout).map_err(|e| format!("the hub does not build at this deployment ({e}): the WM is not restarted, this hub keeps running"))?;
         let _ = std::fs::create_dir_all(proto::home().join("sync"));
         let _ = std::fs::write(Self::marker(), format!("{} {why}\n", proto::wall_ms()));
         self.event(Sev::Info, format!("sync: restarting the WM ({svc}): {why}"), String::new());
@@ -640,18 +672,18 @@ pub fn applying() -> bool {
 /// A WM restart is waiting on this node (`Sync::wm_restart`).
 static WM_RESTART_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// What a WM restart would cost now: the gate leases on this node (landings), a user at the node,
+/// What a WM restart would cost now: the leases using the WM or landing ([`crate::lease::exec::on_the_wm`]), a user at the node,
 /// the unsaved work of its apps ([`crate::lease::exec::user_blockers`]), a viewer watching and any
 /// user app running. Empty: it may restart.
 fn restart_blockers() -> Vec<String> {
-    let why = crate::lease::exec::held().into_iter().filter(|(_, lane, kind)| *kind == "gate" || lane.starts_with("land")).map(|(id, lane, kind)| format!("{kind} lease {id} of {lane}"));
-    let mut out: Vec<String> = why.chain(crate::lease::exec::user_blockers()).collect();
+    let mut out: Vec<String> = crate::lease::exec::on_the_wm().into_iter().chain(crate::lease::exec::user_blockers()).collect();
     if crate::lease::exec::user_watching() {
-        out.push("a Desk Link viewer is attached".to_string());
+        out.push("a Desk Link viewer shows this node (input within 10 min)".to_string());
     }
     // a WM restart ends every app in its session: it never takes a user's app with it (it
     // killed Fab on a node, 3 min after the last input, 2026-10-30)
-    out.extend(super::jits::list().into_iter().filter(|j| !WM_SERVICES.iter().any(|s| j.app == *s || j.app == format!("makepad-app-{s}"))).map(|j| format!("{} runs (pid {}): close it to let the WM update", j.app, j.pid)));
+    // (a headless lease's JIT runs on through it: its lease is not on the WM)
+    out.extend(super::jits::list().into_iter().filter(|j| !WM_SERVICES.iter().any(|s| j.app == *s || j.app == format!("makepad-app-{s}")) && !crate::lease::exec::in_headless_lease(j.pid)).map(|j| format!("{} runs (pid {}): close it to let the WM update", j.app, j.pid)));
     out
 }
 

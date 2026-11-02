@@ -200,3 +200,142 @@ fn a07_barrier() {
     }
     println!("| {} {:?}", leaders.load(Ordering::SeqCst), b);
 }
+
+#[cfg(relax)]
+mod held_locks {
+    use super::*;
+    use std::relax::held_lock;
+
+    #[test]
+    fn held_mutex_sites() {
+        assert_eq!(held_lock(), (0, None));
+        let a = Mutex::new(());
+        let b = Mutex::new(());
+        let first_line = line!() + 1;
+        let first = a.lock().unwrap();
+        let first_site = held_lock().1.unwrap();
+        assert_eq!((first_site.file(), first_site.line()), (file!(), first_line));
+        let second_line = line!() + 1;
+        let second = b.try_lock().unwrap();
+        assert_eq!(held_lock().0, 2);
+        assert_eq!(held_lock().1.unwrap().line(), second_line);
+        assert!(matches!(a.try_lock(), Err(TryLockError::WouldBlock)));
+        assert_eq!(held_lock().0, 2);
+        drop(second);
+        assert_eq!(held_lock(), (1, Some(first_site)));
+        let second = b.lock().unwrap();
+        let second_site = held_lock().1;
+        drop(first);
+        assert_eq!(held_lock(), (1, second_site));
+        drop(second);
+        assert_eq!(held_lock(), (0, None));
+    }
+
+    #[test]
+    fn held_mutex_overflow_and_threads() {
+        let locks: Vec<_> = (0..12).map(|_| Mutex::new(())).collect();
+        let mut guards = Vec::new();
+        for lock in &locks { guards.push(lock.lock().unwrap()); }
+        assert_eq!(held_lock().0, 12);
+        while guards.len() > 4 {
+            drop(guards.pop());
+            assert_eq!(held_lock().0, guards.len() as u32);
+        }
+        assert_eq!(held_lock(), (4, None));
+        drop(guards);
+        assert_eq!(held_lock(), (0, None));
+        thread::spawn(|| {
+            assert_eq!(held_lock(), (0, None));
+            let lock = Mutex::new(());
+            let guard = lock.lock().unwrap();
+            assert_eq!(held_lock().0, 1);
+            drop(guard);
+            assert_eq!(held_lock(), (0, None));
+        }).join().unwrap();
+        assert_eq!(held_lock(), (0, None));
+    }
+
+    #[test]
+    fn held_condvar_round_trip() {
+        let pair = std::sync::Arc::new((Mutex::new(false), Condvar::new()));
+        let guard = pair.0.lock().unwrap();
+        let before = held_lock();
+        let other = pair.clone();
+        let worker = thread::spawn(move || {
+            assert_eq!(held_lock(), (0, None));
+            let mut ready = other.0.lock().unwrap();
+            assert_eq!(held_lock().0, 1);
+            *ready = true;
+            other.1.notify_one();
+        });
+        let guard = pair.1.wait_while(guard, |ready| {
+            assert_eq!(held_lock(), before);
+            !*ready
+        }).unwrap();
+        assert_eq!(held_lock(), before);
+        let (guard, _) = pair.1.wait_timeout(guard, Duration::ZERO).unwrap();
+        assert_eq!(held_lock(), before);
+        let (guard, result) = pair.1.wait_timeout_while(guard, Duration::ZERO, |_| {
+            assert_eq!(held_lock(), before);
+            false
+        }).unwrap();
+        assert!(!result.timed_out());
+        assert_eq!(held_lock(), before);
+        let (guard, result) = pair.1.wait_timeout_while(guard, Duration::ZERO, |_| true).unwrap();
+        assert!(result.timed_out());
+        assert_eq!(held_lock(), before);
+        drop(guard);
+        worker.join().unwrap();
+        assert_eq!(held_lock(), (0, None));
+    }
+
+    #[test]
+    fn held_rwlock_sites() {
+        let lock = RwLock::new(0);
+        let first_line = line!() + 1;
+        let first = lock.read().unwrap();
+        let first_site = held_lock().1.unwrap();
+        assert_eq!((first_site.file(), first_site.line()), (file!(), first_line));
+        let second_line = line!() + 1;
+        let second = lock.try_read().unwrap();
+        assert_eq!(held_lock().0, 2);
+        assert_eq!(held_lock().1.unwrap().line(), second_line);
+        assert!(matches!(lock.try_write(), Err(TryLockError::WouldBlock)));
+        drop(second);
+        assert_eq!(held_lock(), (1, Some(first_site)));
+        drop(first);
+        let write_line = line!() + 1;
+        let write = lock.write().unwrap();
+        assert_eq!(held_lock().0, 1);
+        assert_eq!(held_lock().1.unwrap().line(), write_line);
+        assert!(matches!(lock.try_read(), Err(TryLockError::WouldBlock)));
+        assert!(matches!(lock.try_write(), Err(TryLockError::WouldBlock)));
+        let site = held_lock();
+        let read = std::sync::RwLockWriteGuard::downgrade(write);
+        assert_eq!(held_lock(), site);
+        drop(read);
+        assert_eq!(held_lock(), (0, None));
+        let try_line = line!() + 1;
+        let write = lock.try_write().unwrap();
+        assert_eq!(held_lock().1.unwrap().line(), try_line);
+        drop(write);
+        assert_eq!(held_lock(), (0, None));
+    }
+
+    #[test]
+    fn held_reentrant_sites() {
+        let lock = std::sync::ReentrantLock::new(());
+        let first_line = line!() + 1;
+        let first = lock.lock();
+        assert_eq!(held_lock().1.unwrap().line(), first_line);
+        let second_line = line!() + 1;
+        let second = lock.try_lock().unwrap();
+        assert_eq!(held_lock().0, 2);
+        assert_eq!(held_lock().1.unwrap().line(), second_line);
+        drop(first);
+        assert_eq!(held_lock().0, 1);
+        assert_eq!(held_lock().1.unwrap().line(), second_line);
+        drop(second);
+        assert_eq!(held_lock(), (0, None));
+    }
+}

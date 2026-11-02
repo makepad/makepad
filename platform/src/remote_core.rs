@@ -377,8 +377,6 @@ pub enum Cmd {
         tx: Sender<Reply>,
     },
     CancelGrabs(Vec<u64>),
-    /// The task pool's one-line summary (workers, jobs, queue waits).
-    PoolSummary(Sender<Reply>),
     /// Run `frames` frames of the virtual clock at `fps`; answered after
     /// the last is presented (and captured, while a capture runs).
     Step {
@@ -769,8 +767,10 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "text", args: "t=TEXT [w=ID] [wait=1]", answers: "type text", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["t"], positional: &[] },
     Command { words: "drop", args: "path=ABS x= y= [w=ID] [wait=1]", answers: "drop one absolute file path through Drag/Drop/DragEnd", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["path"], positional: &[] },
     Command { words: "window", args: "k=maximize | k=resize width= height= | k=dragquery x= y= [w=ID] [wait=1]", answers: "window operations (the maximise/occlusion proof, the caption hit test)", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"maximize\",\"resize\",\"dragquery\"]},\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["k"], positional: &[] },
-    Command { words: "log", args: "[n=50] [since=N]", answers: "{\"n\":lastseq,\"pool\",\"l\":[lines]}", service: "logs", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"since\":{\"type\":\"integer\"}", required: &[], positional: &[] },
+    Command { words: "cpu", args: "", answers: "shared CPU budget and app pool summary", service: "platform", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "log", args: "[n=50] [since=N]", answers: "{\"n\":lastseq,\"l\":[lines]}", service: "logs", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"since\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "net", args: "", answers: "the app's HTTP requests and network event queue, answered off the UI thread: a verdict per runtime first (STUCK: an answer waits unread in the app's queue, with when the app last read it / WAITING: in flight with nothing from the backend / OK), then per request: id, method and URL, the backend's answer and when, whether the app read it", service: "logs", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "loop", args: "", answers: "what the UI thread's event loop waits for, answered off the UI thread: one verdict line (STUCK: a frame asked for and never granted, or a raised signal the loop slept through / WAITING: the GPU / OK) with the pump, frame-request, GPU and signal ages", service: "logs", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "midi", args: "a= b= c= [p=PORT] | k=ports n=NAME[,NAME] | k=out | k=reset", answers: "inject a MIDI message as if a device sent it; declare ports; read back what the app sent", service: "ui", risk: CmdRisk::Act, params: "\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"},\"c\":{\"type\":\"integer\"},\"p\":{\"type\":\"string\"},\"k\":{\"type\":\"string\",\"enum\":[\"ports\",\"out\",\"reset\"]},\"n\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "trace", args: "[topics=a,b] [off=1]", answers: "get / set the trace topics", service: "logs", risk: CmdRisk::Act, params: "\"topics\":{\"type\":\"string\"},\"off\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "step", args: "[frames=1] [fps=60] [wait_loads=1] [w=ID]", answers: "--virtual-clock only: run frames of 1/fps; answers {\"frame\",\"time\"} after the last", service: "ui", risk: CmdRisk::Act, params: "\"frames\":{\"type\":\"integer\"},\"fps\":{\"type\":\"number\"},\"wait_loads\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
@@ -2021,7 +2021,9 @@ mod tests {
             ("gpu_inventory", 1),
             ("quit", 1),
             ("log", 1),
+            ("cpu", 1),
             ("net", 1),
+            ("loop", 1),
             ("midi", 1),
             ("cursor", 1),
         ];

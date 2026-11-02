@@ -63,10 +63,10 @@ impl Inputs {
 
     fn protected(&mut self, path: &Path, root: &Path, kind: Kind) {
         self.insert(path, kind.clone());
-        // Directory identities catch additions and atomic replacements of files that
-        // did not exist at boot. Native events, not a periodic tree walk, drive them.
+        // Watch directories below a package root: unrelated root-file replacements must not
+        // restart makepad. Std retains its whole-tree watch. Outside includes get no parents.
         let mut parent = path.parent();
-        while let Some(dir) = parent.filter(|p| p.starts_with(root)) {
+        while let Some(dir) = parent.filter(|p| p.starts_with(root) && (*p != root || kind == Kind::Std)) {
             self.insert(dir, if kind == Kind::Manifest { Kind::Provided } else { kind.clone() });
             parent = dir.parent();
         }
@@ -87,10 +87,13 @@ impl Inputs {
         for (dir, _, _) in graph.pkg.iter().chain(graph.raw.iter().map(|u| &u.pkg)) {
             if dir.is_empty() || dir.contains("/.cargo/registry/") || dir.contains("/.cargo/git/") || !dirs.insert(dir) { continue; }
             let provided = provided.contains(dir);
-            let mut files = Vec::new();
-            crate::srchash::files(Path::new(dir), "", &mut files);
+            let files = if provided { crate::srchash::compiled_files(Path::new(dir)) } else {
+                let mut files = Vec::new();
+                crate::srchash::files(Path::new(dir), "", &mut files);
+                files
+            };
             for (rel, path) in files {
-                let kind = if matches!(rel.as_str(), "Cargo.toml" | "Cargo.lock") {
+                let kind = if rel == "Cargo.toml" || (!provided && rel == "Cargo.lock") {
                     Kind::Manifest
                 } else if provided {
                     Kind::Provided
@@ -100,9 +103,14 @@ impl Inputs {
                 if provided { inputs.protected(&path, Path::new(dir), kind); }
                 else { inputs.insert(&path, kind); }
             }
-            // Include an absent lockfile too: creating it changes the resolved graph.
-            inputs.insert(&Path::new(dir).join("Cargo.lock"), Kind::Manifest);
-            if !provided { inputs.discover_source_dir(Path::new(dir), dir, &mut Vec::new()); }
+            if provided {
+                let build = Path::new(dir).join("build.rs");
+                if crate::vfs::is_file(&build) { inputs.insert(&build, Kind::Provided); }
+            } else {
+                // Include an absent lockfile too: creating it changes the resolved graph.
+                inputs.insert(&Path::new(dir).join("Cargo.lock"), Kind::Manifest);
+                inputs.discover_source_dir(Path::new(dir), dir, &mut Vec::new());
+            }
         }
         for script in &graph.build_scripts {
             inputs.insert(Path::new(&script.src_path), Kind::Build);

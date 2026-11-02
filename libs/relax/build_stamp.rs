@@ -1,6 +1,6 @@
 //! Build provenance, shared by the build scripts of the makepad loader and relax-compiler
 //! (#[path]; each declares `json` and `srchash` at its root): MAKEPAD_RUN_PROVENANCE =
-//! "fastrust <hash> relax <hash>", content hashes of the source files of the path packages the
+//! "makepad <hash> jit <hash>", content hashes of the compiled files of the path packages the
 //! binary compiles, from `cargo metadata` of the package (its library-dependency closure), split into
 //! Relax's own (under libs/relax and tools/run) and the makepad crates it uses. Only file contents count:
 //! never git state, mtimes or the checkout's location. A commit, checkout or `git add` neither
@@ -13,7 +13,7 @@ use crate::srchash::{self, SrcPkg};
 use std::path::Path;
 use std::process::Command;
 
-/// srchash.rs reads through Relax's VFS (`crate::vfs`); a build script has only the disk.
+/// srchash.rs reads through its parent's VFS (`super::vfs`); a build script has only the disk.
 pub mod vfs {
     pub fn read(p: impl AsRef<std::path::Path>) -> std::io::Result<Vec<u8>> {
         std::fs::read(p)
@@ -103,10 +103,10 @@ impl Graph {
     }
 
     /// Prints MAKEPAD_RUN_PROVENANCE for the package's closure and watches every file it hashes:
-    /// each path package's files as srchash.rs lists them (nested packages, `target` and hidden
-    /// entries left out) but for its tests, benches and examples, which the binary does not
-    /// compile. `extra` joins Relax's own part: inputs the binary depends on outside those
-    /// files (the compiler's std digest).
+    /// each path package's Rust files, Cargo.toml and literal include targets, as
+    /// srchash::compiled_files lists them. Unreferenced non-Rust files do not count.
+    /// `extra` joins Relax's own part: inputs the binary depends on outside those files
+    /// (the compiler's std digest).
     pub fn provenance(&self, relax_roots: &[&Path], extra: &str) -> String {
         let relax_roots: Vec<std::path::PathBuf> = relax_roots.iter().map(|r| r.canonicalize().unwrap_or_else(|_| r.to_path_buf())).collect();
         let mut relax = vec![{ let mut h = Fnv::new(); h.bytes(extra.as_bytes()); h.0 }];
@@ -116,10 +116,7 @@ impl Graph {
             if p.dir.contains("/.cargo/") {
                 continue;
             }
-            let mut files = Vec::new();
-            srchash::files(Path::new(&p.dir), "", &mut files);
-            files.retain(|(rel, _)| !["tests/", "benches/", "examples/"].iter().any(|d| rel.starts_with(d)));
-            files.sort();
+            let files = srchash::compiled_files(Path::new(&p.dir));
             let mut h = Fnv::new();
             h.bytes(p.name.as_bytes());
             for (rel, f) in &files {

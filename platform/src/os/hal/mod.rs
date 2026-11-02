@@ -18,6 +18,7 @@ pub(crate) mod gl_interop;
 mod hosted;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
+pub(crate) mod loop_watch;
 mod media;
 mod ops;
 mod query;
@@ -200,6 +201,7 @@ pub struct HalClient {
     /// the least event payload room the session needs (camera frames and readbacks are large)
     pub(crate) event_arena_min: usize,
     pub(crate) readbacks: readback::Readbacks,
+    pub(crate) compute: crate::gpu_compute::ComputeState,
     /// font service answers the text stack has not taken yet
     pub(crate) font_events: Vec<HalFontEvent>,
     pub(crate) glyph_wait: fonts::GlyphWait,
@@ -266,6 +268,7 @@ impl Default for HalClient {
             software_videos: HashMap::new(),
             native_videos: HashMap::new(),
             readbacks: Default::default(),
+            compute: Default::default(),
             event_arena_min: 0,
             font_events: Vec::new(),
             glyph_wait: Default::default(),

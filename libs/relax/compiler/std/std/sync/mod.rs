@@ -1,6 +1,7 @@
 //! std::sync: locks, once-cells, channels, plus re-exports of Arc and the atomics.
 
 mod barrier;
+pub(crate) mod held_lock;
 pub mod mpsc;
 mod mpmc;
 mod mutex;

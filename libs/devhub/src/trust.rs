@@ -13,6 +13,7 @@
 //! Listeners bind a private LAN address only, close non-LAN peers unread, ban an address after
 //! repeated failed proofs and cap sessions. Proofs and keys are never logged (names are).
 
+use makepad_devhub_conf::valid_name;
 use makepad_network::fleet::id::{self, Need};
 use makepad_remote::carrier::tcp::carrier;
 use makepad_remote::carrier::Carrier;
@@ -58,11 +59,6 @@ fn read_line<S: Read>(s: &mut S) -> io::Result<String> {
 
 fn denied(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, msg)
-}
-
-/// Whether `name` is a hub name: what a line and a hosts entry can carry.
-pub fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
 }
 
 /// What a proven peer may be to this hub.

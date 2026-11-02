@@ -3,7 +3,6 @@
 // ported from N:rustc_middle/src/ty/consts/int.rs @8d1a764
 use crate::program::DefId;
 use crate::types::{BoundVar, DebruijnIndex, RegionId, TyId, Types, UniverseIndex};
-use std::collections::HashMap;
 use std::num::NonZeroU8;
 use std::sync::Arc;
 
@@ -106,36 +105,117 @@ pub struct Value { pub ty: TyId, pub valtree: ValTree }
 
 /// Const storage is separate from TyKind: u128 payloads do not enlarge type entries.
 /// Branches contain typed constants (const_kind.rs:223), not untyped child valtrees.
-#[derive(Default)]
+///
+/// Shared by every thread that type-checks or lowers, like the type interner: the kinds live in
+/// an append-only arena of fixed-size chunks read without a lock (an id is handed out only after
+/// its entry is written); an insert takes the shard of its kind's hash, then `grow` for the id.
+/// (One mutex over the whole table, taken by every `const_kind` read too, was the most contended
+/// lock of makepad run's parallel app check: a third of ~1M acquisitions waited.)
 pub(crate) struct ConstInterner {
-    kinds: Vec<ConstKind>,
-    ids: HashMap<ConstKind, Const>,
-    valtrees: HashMap<ValTreeKind, ValTree>,
+    chunks: Box<[std::sync::atomic::AtomicPtr<ConstKind>]>,
+    len: std::sync::atomic::AtomicU32,
+    ids: Box<[relax_session::sync::Mutex<crate::fxhash::HashMap<ConstKind, Const>>]>,
+    /// serialises chunk allocation and id assignment (ids stay dense)
+    grow: relax_session::sync::Mutex<()>,
+    valtrees: relax_session::sync::Mutex<crate::fxhash::HashMap<ValTreeKind, ValTree>>,
+}
+
+const CONST_CHUNK_BITS: u32 = 12;
+const CONST_CHUNK: usize = 1 << CONST_CHUNK_BITS;
+const CONST_MAX_CHUNKS: usize = 1 << 13;
+const CONST_SHARDS: usize = 32;
+
+// The arena's chunks are owned by the interner; entries are written once before their id is
+// handed out and never mutated after.
+unsafe impl Send for ConstInterner {}
+unsafe impl Sync for ConstInterner {}
+
+impl Default for ConstInterner {
+    fn default() -> Self {
+        ConstInterner {
+            chunks: (0..CONST_MAX_CHUNKS).map(|_| std::sync::atomic::AtomicPtr::new(std::ptr::null_mut())).collect(),
+            len: std::sync::atomic::AtomicU32::new(0),
+            ids: (0..CONST_SHARDS).map(|_| relax_session::sync::Mutex::new(Default::default())).collect(),
+            grow: relax_session::sync::Mutex::new(()),
+            valtrees: relax_session::sync::Mutex::new(Default::default()),
+        }
+    }
+}
+
+impl Drop for ConstInterner {
+    fn drop(&mut self) {
+        let n = *self.len.get_mut() as usize;
+        for (ci, c) in self.chunks.iter_mut().enumerate() {
+            let p = *c.get_mut();
+            if p.is_null() { continue; }
+            let live = n.saturating_sub(ci * CONST_CHUNK).min(CONST_CHUNK);
+            unsafe {
+                for i in 0..live { std::ptr::drop_in_place(p.add(i)); }
+                std::alloc::dealloc(p as *mut u8, std::alloc::Layout::array::<ConstKind>(CONST_CHUNK).unwrap());
+            }
+        }
+    }
+}
+
+impl ConstInterner {
+    fn len(&self) -> usize {
+        self.len.load(std::sync::atomic::Ordering::Acquire) as usize
+    }
+
+    fn kind(&self, ct: Const) -> &ConstKind {
+        let i = ct.0 as usize;
+        // Acquire: pairs with the chunk's publication (whoever holds `ct` got it after its entry
+        // was written)
+        let c = self.chunks[i >> CONST_CHUNK_BITS].load(std::sync::atomic::Ordering::Acquire);
+        assert!(!c.is_null(), "makepad: constant {} not interned", i);
+        unsafe { &*c.add(i & (CONST_CHUNK - 1)) }
+    }
+
+    fn intern(&self, kind: ConstKind) -> Const {
+        use std::hash::{Hash, Hasher};
+        let mut h = crate::fxhash::FxHasher::default();
+        kind.hash(&mut h);
+        let mut shard = self.ids[(h.finish() >> 40) as usize % CONST_SHARDS].lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = shard.get(&kind) { return id; }
+        let id = {
+            let _g = self.grow.lock().unwrap_or_else(|e| e.into_inner());
+            let i = self.len.load(std::sync::atomic::Ordering::Relaxed) as usize;
+            let ci = i >> CONST_CHUNK_BITS;
+            assert!(ci < CONST_MAX_CHUNKS, "makepad: too many constants");
+            let mut c = self.chunks[ci].load(std::sync::atomic::Ordering::Relaxed);
+            if c.is_null() {
+                let layout = std::alloc::Layout::array::<ConstKind>(CONST_CHUNK).unwrap();
+                c = unsafe { std::alloc::alloc(layout) as *mut ConstKind };
+                if c.is_null() { std::alloc::handle_alloc_error(layout); }
+                self.chunks[ci].store(c, std::sync::atomic::Ordering::Release);
+            }
+            unsafe { c.add(i & (CONST_CHUNK - 1)).write(kind.clone()) };
+            self.len.store(i as u32 + 1, std::sync::atomic::Ordering::Release);
+            Const(i as u32)
+        };
+        shard.insert(kind, id);
+        id
+    }
 }
 
 impl Types {
     pub(crate) fn const_count(&self) -> usize {
-        self.consts.lock().unwrap_or_else(|e| e.into_inner()).kinds.len()
+        self.consts.len()
     }
 
     pub fn intern_const(&self, kind: ConstKind) -> Const {
-        let mut table = self.consts.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&id) = table.ids.get(&kind) { return id; }
-        let id = Const(u32::try_from(table.kinds.len()).expect("too many constants"));
-        table.kinds.push(kind.clone());
-        table.ids.insert(kind, id);
-        id
+        self.consts.intern(kind)
     }
 
     pub fn const_kind(&self, ct: Const) -> ConstKind {
-        self.consts.lock().unwrap_or_else(|e| e.into_inner()).kinds[ct.0 as usize].clone()
+        self.consts.kind(ct).clone()
     }
 
     fn intern_valtree(&self, kind: ValTreeKind) -> ValTree {
-        let mut table = self.consts.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(value) = table.valtrees.get(&kind) { return value.clone(); }
+        let mut table = self.consts.valtrees.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(value) = table.get(&kind) { return value.clone(); }
         let value = ValTree(Arc::new(kind.clone()));
-        table.valtrees.insert(kind, value.clone());
+        table.insert(kind, value.clone());
         value
     }
 }
@@ -419,15 +499,18 @@ mod collected {
         }
     }
     impl Codec for ConstInterner {
-        fn put(&self, w: &mut Vec<u8>) { self.kinds.put(w); }
+        fn put(&self, w: &mut Vec<u8>) {
+            // (the count first: every entry below it is written)
+            let kinds: Vec<ConstKind> = (0..self.len() as u32).map(|i| self.kind(Const(i)).clone()).collect();
+            kinds.put(w);
+        }
         fn get(r: &mut Decode<'_>) -> Option<Self> {
             let kinds = Vec::<ConstKind>::get(r)?;
-            let mut table = Self::default();
-            for (i, kind) in kinds.iter().enumerate() {
-                if table.ids.insert(kind.clone(), Const(i as u32)).is_some() { return None; }
-                if let ConstKind::Value(v) = kind { table.valtrees.insert(v.valtree.kind().clone(), v.valtree.clone()); }
+            let table = Self::default();
+            for (i, kind) in kinds.into_iter().enumerate() {
+                if let ConstKind::Value(v) = &kind { table.valtrees.lock().unwrap_or_else(|e| e.into_inner()).insert(v.valtree.kind().clone(), v.valtree.clone()); }
+                if table.intern(kind) != Const(i as u32) { return None; }
             }
-            table.kinds = kinds;
             Some(table)
         }
     }

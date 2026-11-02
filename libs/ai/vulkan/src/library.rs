@@ -7,7 +7,7 @@
 
 use crate::device::{Device, Result};
 use crate::kernel::Kernel;
-use makepad_script::shader_ir_compute::compile_compute_kernel_result;
+use makepad_script::shader_ir_compute::{compile_compute_kernel_result, ComputeTarget};
 use makepad_script::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,7 +77,7 @@ impl Library {
             }
             variant
         };
-        let r = compile_compute_kernel_result(&mut self.vm, obj).view().to_kernel();
+        let r = compile_compute_kernel_result(&mut self.vm, obj, ComputeTarget::Spirv).view().to_kernel();
         let errors = self.vm.take_errors();
         let k = r.map_err(|e| format!("kernel {name}: {e}"))?;
         if !errors.is_empty() {

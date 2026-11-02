@@ -9,7 +9,7 @@
 //! compute crate's own pool. Results never depend on which: chunks are
 //! fixed and combine in order.
 
-use makepad_platform::thread::{Lane, TaskPool};
+use makepad_platform::thread::{Class, TaskPool};
 use makepad_platform::Cx;
 use makepad_script_compute_sched::admission::{JobBudget, Ledger, Origin};
 use makepad_script_compute::boundary::LayoutView;
@@ -32,16 +32,16 @@ static ENGINE: OnceLock<KernelEngine> = OnceLock::new();
 /// the pool never fans out from it (that would block the UI on the pool's
 /// queue), so a job run there runs on it alone.
 pub fn task_pool_executor(pool: TaskPool, ui: std::thread::ThreadId) -> Arc<dyn Executor> {
-    let workers = pool.heavy_workers();
+    let workers = pool.worker_count();
     let (p1, p2) = (pool.clone(), pool);
     Arc::new(FnExecutor::new(
         workers,
-        move |task: Arc<dyn Fn() + Send + Sync>| p1.submit_internal(Lane::Heavy, move || task()).is_ok(),
+        move |task: Arc<dyn Fn() + Send + Sync>| p1.submit_internal(Class::Background, move || task()).is_ok(),
         move |n: usize, f: &(dyn Fn(usize) + Sync)| {
             if std::thread::current().id() == ui {
                 (0..n).for_each(f);
             } else {
-                p2.fan_out(Lane::Heavy, n, |w| f(w))
+                p2.fan_out(n, |w| f(w))
             }
         },
     ))

@@ -54,7 +54,7 @@ pub struct Kind {
 }
 
 pub const AI_HUB: Kind = Kind { app_id: crate::clients::HUB_SERVICE_APP, file: "ai-hub", label: "AI Hub", conf_env: NODE_CONF_ENV };
-pub const DEVHUB: Kind = Kind { app_id: crate::clients::DEVHUB_SERVICE_APP, file: "devhub", label: "devhub", conf_env: makepad_devhub::conf::NODE_CONF_ENV };
+pub const DEVHUB: Kind = Kind { app_id: crate::clients::DEVHUB_SERVICE_APP, file: "devhub", label: "devhub", conf_env: makepad_devhub_conf::NODE_CONF_ENV };
 
 /// What the supervisor needs from a service's settings file.
 pub trait ServiceConf: Clone {
@@ -99,7 +99,7 @@ impl ServiceConf for NodeConf {
     }
 }
 
-impl ServiceConf for makepad_devhub::conf::NodeConf {
+impl ServiceConf for makepad_devhub_conf::NodeConf {
     fn reload(path: &Path, prev: &Self) -> Self {
         if path.exists() { Self::load(path) } else { prev.clone() }
     }
@@ -128,9 +128,9 @@ impl ServiceConf for makepad_devhub::conf::NodeConf {
 
 /// The node's devhub settings (`~/.makepad/wm/devhub.conf`, `MAKEPAD_WM_DEVHUB_CONF` names
 /// another); a hidden WM without its own file starts none.
-pub fn load_devhub_conf() -> (PathBuf, makepad_devhub::conf::NodeConf) {
+pub fn load_devhub_conf() -> (PathBuf, makepad_devhub_conf::NodeConf) {
     let path = std::env::var_os("MAKEPAD_WM_DEVHUB_CONF").filter(|p| !p.is_empty()).map(PathBuf::from).unwrap_or_else(|| crate::theme::makepad_home().join("wm/devhub.conf"));
-    let mut conf = makepad_devhub::conf::NodeConf::load(&path);
+    let mut conf = makepad_devhub_conf::NodeConf::load(&path);
     if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os("MAKEPAD_WM_DEVHUB_CONF").is_none() {
         conf.enabled = false;
     }
@@ -358,7 +358,7 @@ fn rival_hubs(file: &str, port: u16, keep: Option<u32>) -> Vec<u32> {
 /// The AI Hub's supervisor.
 pub type HubApp = Supervised<NodeConf>;
 /// The devhub's supervisor.
-pub type DevhubApp = Supervised<makepad_devhub::conf::NodeConf>;
+pub type DevhubApp = Supervised<makepad_devhub_conf::NodeConf>;
 
 pub struct Supervised<C: ServiceConf> {
     pub kind: &'static Kind,
@@ -968,7 +968,7 @@ mod tests {
         // The WM's start and the deploy's build (`makepad-wm-build -- devhub`) are the same
         // cargo invocation with `run` for `build`: a start after the deploy compiles nothing.
         let dir = scratch("devhub");
-        let conf = makepad_devhub::conf::NodeConf::parse("name = t1\nport = 8797\n");
+        let conf = makepad_devhub_conf::NodeConf::parse("name = t1\nport = 8797\n");
         let d = DevhubApp::new(&DEVHUB, dir.join("devhub.conf"), conf);
         let args = |verb| -> (Vec<String>, Vec<(String, String)>) {
             let cmd = d.cargo(verb).unwrap();
@@ -983,7 +983,7 @@ mod tests {
         assert!(run.iter().any(|a| a == "--release"), "{run:?}");
         assert_eq!(tail(&run, "run"), tail(&build, "build"), "same package, profile and features");
         assert_eq!(run_env, build_env, "same cargo environment");
-        assert!(run_env.iter().any(|(k, v)| k == makepad_devhub::conf::NODE_CONF_ENV && v.ends_with("devhub.conf")));
+        assert!(run_env.iter().any(|(k, v)| k == makepad_devhub_conf::NODE_CONF_ENV && v.ends_with("devhub.conf")));
         assert_eq!(d.state.file_name().unwrap(), "devhub.state");
     }
 

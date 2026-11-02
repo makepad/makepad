@@ -14,6 +14,8 @@ pub enum Outcome {
     RelaunchFailed,
     Restarted,
     RestartFailed,
+    FirstFrameTimeout,
+    NoWindow,
 }
 
 impl Outcome {
@@ -26,6 +28,8 @@ impl Outcome {
             Self::RelaunchFailed => "relaunch_failed",
             Self::Restarted => "restarted",
             Self::RestartFailed => "restart_failed",
+            Self::FirstFrameTimeout => "first_frame_timeout",
+            Self::NoWindow => "no_window",
         }
     }
 
@@ -38,6 +42,8 @@ impl Outcome {
             "relaunch_failed" => Self::RelaunchFailed,
             "restarted" => Self::Restarted,
             "restart_failed" => Self::RestartFailed,
+            "first_frame_timeout" => Self::FirstFrameTimeout,
+            "no_window" => Self::NoWindow,
             _ => return None,
         })
     }

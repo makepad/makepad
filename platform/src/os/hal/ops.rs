@@ -239,6 +239,7 @@ impl Cx {
 
     /// Drains the platform ops into HAL commands. False when the app asked to quit.
     pub(crate) fn hal_handle_platform_ops(&mut self) -> bool {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::PlatformOps);
         self.native_layer_retire();
         while let Some(op) = self.platform_ops.pop_front() {
             match op {

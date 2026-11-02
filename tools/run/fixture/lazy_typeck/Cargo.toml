@@ -1,0 +1,3 @@
+[workspace]
+members = ["app", "libs/dep"]
+resolver = "2"

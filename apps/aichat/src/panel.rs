@@ -1210,7 +1210,7 @@ impl AiChatPanel {
 
     /// A picture for the person's next line, as if dropped on the panel.
     pub fn attach(&mut self, cx: &mut Cx, source: Source) {
-        match cx.task_pool().submit(Lane::Light, move || attach::load(source)) {
+        match cx.task_pool().submit(Class::Visible, move || attach::load(source)) {
             Ok(handle) => self.loading.push(handle),
             Err(e) => self.note(cx, format!("could not read the picture ({e:?})")),
         }

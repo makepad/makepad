@@ -26,8 +26,10 @@ pub type PfnCmdCopyBufferToImage = unsafe extern "system" fn(CommandBuffer, Buff
 pub type PfnCmdCopyImage = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, Image, ImageLayout, u32, *const ImageCopy) -> ();
 pub type PfnCmdCopyImageToBuffer = unsafe extern "system" fn(CommandBuffer, Image, ImageLayout, Buffer, u32, *const BufferImageCopy) -> ();
 pub type PfnCmdDispatch = unsafe extern "system" fn(CommandBuffer, u32, u32, u32) -> ();
+pub type PfnCmdDispatchIndirect = unsafe extern "system" fn(CommandBuffer, Buffer, DeviceSize) -> ();
 pub type PfnCmdDraw = unsafe extern "system" fn(CommandBuffer, u32, u32, u32, u32) -> ();
 pub type PfnCmdDrawIndexed = unsafe extern "system" fn(CommandBuffer, u32, u32, u32, i32, u32) -> ();
+pub type PfnCmdDrawIndexedIndirect = unsafe extern "system" fn(CommandBuffer, Buffer, DeviceSize, u32, u32) -> ();
 pub type PfnCmdEncodeVideoKHR = unsafe extern "system" fn(CommandBuffer, *const VideoEncodeInfoKHR) -> ();
 pub type PfnCmdEndQuery = unsafe extern "system" fn(CommandBuffer, QueryPool, u32) -> ();
 pub type PfnCmdEndRenderPass = unsafe extern "system" fn(CommandBuffer) -> ();
@@ -298,8 +300,10 @@ pub struct DeviceTable {
     pub cmd_copy_image: Option<PfnCmdCopyImage>,
     pub cmd_copy_image_to_buffer: Option<PfnCmdCopyImageToBuffer>,
     pub cmd_dispatch: Option<PfnCmdDispatch>,
+    pub cmd_dispatch_indirect: Option<PfnCmdDispatchIndirect>,
     pub cmd_draw: Option<PfnCmdDraw>,
     pub cmd_draw_indexed: Option<PfnCmdDrawIndexed>,
+    pub cmd_draw_indexed_indirect: Option<PfnCmdDrawIndexedIndirect>,
     pub cmd_encode_video_khr: Option<PfnCmdEncodeVideoKHR>,
     pub cmd_end_query: Option<PfnCmdEndQuery>,
     pub cmd_end_render_pass: Option<PfnCmdEndRenderPass>,
@@ -419,8 +423,10 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         cmd_copy_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdCopyImage>>(lookup(c"vkCmdCopyImage")),
         cmd_copy_image_to_buffer: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdCopyImageToBuffer>>(lookup(c"vkCmdCopyImageToBuffer")),
         cmd_dispatch: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdDispatch>>(lookup(c"vkCmdDispatch")),
+        cmd_dispatch_indirect: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdDispatchIndirect>>(lookup(c"vkCmdDispatchIndirect")),
         cmd_draw: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdDraw>>(lookup(c"vkCmdDraw")),
         cmd_draw_indexed: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdDrawIndexed>>(lookup(c"vkCmdDrawIndexed")),
+        cmd_draw_indexed_indirect: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdDrawIndexedIndirect>>(lookup(c"vkCmdDrawIndexedIndirect")),
         cmd_encode_video_khr: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdEncodeVideoKHR>>(lookup(c"vkCmdEncodeVideoKHR")),
         cmd_end_query: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdEndQuery>>(lookup(c"vkCmdEndQuery")),
         cmd_end_render_pass: core::mem::transmute::<PfnVoidFunction, Option<PfnCmdEndRenderPass>>(lookup(c"vkCmdEndRenderPass")),
@@ -721,6 +727,14 @@ impl crate::Device {
 }
 impl crate::Device {
     #[inline]
+    pub unsafe fn cmd_dispatch_indirect(&self, command_buffer: CommandBuffer, buffer: Buffer, offset: DeviceSize) -> () {
+        let call = self.table.cmd_dispatch_indirect.expect("vkCmdDispatchIndirect is unavailable");
+        call(command_buffer, buffer, offset);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
     pub unsafe fn cmd_draw(&self, command_buffer: CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) -> () {
         let call = self.table.cmd_draw.expect("vkCmdDraw is unavailable");
         call(command_buffer, vertex_count, instance_count, first_vertex, first_instance);
@@ -732,6 +746,14 @@ impl crate::Device {
     pub unsafe fn cmd_draw_indexed(&self, command_buffer: CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) -> () {
         let call = self.table.cmd_draw_indexed.expect("vkCmdDrawIndexed is unavailable");
         call(command_buffer, index_count, instance_count, first_index, vertex_offset, first_instance);
+        ()
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn cmd_draw_indexed_indirect(&self, command_buffer: CommandBuffer, buffer: Buffer, offset: DeviceSize, draw_count: u32, stride: u32) -> () {
+        let call = self.table.cmd_draw_indexed_indirect.expect("vkCmdDrawIndexedIndirect is unavailable");
+        call(command_buffer, buffer, offset, draw_count, stride);
         ()
     }
 }

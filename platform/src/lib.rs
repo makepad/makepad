@@ -469,3 +469,8 @@ pub use crate::collect::{ScanEvent, Scanner};
 
 pub mod restart;
 pub mod engine_request;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod gpu_compute;
+#[cfg(not(target_arch = "wasm32"))]
+pub use gpu_compute::{GpuBuffer, GpuBufferFlags, ComputeKernel, ComputeParams, ComputePass};

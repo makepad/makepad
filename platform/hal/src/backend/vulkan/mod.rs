@@ -15,6 +15,7 @@ mod frame;
 #[cfg(target_os = "android")]
 mod native_layer;
 mod pipeline;
+mod compute;
 mod prof;
 mod readback;
 pub(crate) mod resources;
@@ -82,6 +83,7 @@ pub struct Vulkan {
     tex: FastMap<(u32, u32), Texture>,
     buf: FastMap<(u32, u32), Retained>,
     pipe: FastMap<(u32, u32), Pipe>,
+    compute: FastMap<(u32, u32), compute::Pipe>,
     programs: FastMap<Vec<u8>, Weak<State>>,
     /// Scratch of `prepare`: one draw's buffer and image descriptors, cleared per draw.
     draw_bins: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorBufferInfo)>,
@@ -212,10 +214,17 @@ impl Vulkan {
             },
             ..Default::default() };
         let mut info = info;
+        if dev.compute {
+            info.flags |= info_flags::COMPUTE | info_flags::DRAW_STORAGE_BUFFERS;
+            info.max_workgroup_size = dev.properties.limits.max_compute_work_group_size;
+            info.max_workgroup_invocations = dev.properties.limits.max_compute_work_group_invocations;
+            info.storage_formats = (0..format::COUNT).filter(|f| dev.formats[*f as usize].optimal_tiling_features.contains(makepad_vulkan::vk::FormatFeatureFlags::STORAGE_IMAGE)
+                && (!matches!(*f, format::R8 | format::R16F) || dev.features.shader_storage_image_extended_formats != 0)).fold(0, |bits, f| bits | (1u64 << f));
+        }
         info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
-        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
+        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
             #[cfg(target_os = "android")] native_layers: Default::default(),
             passes: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
@@ -318,6 +327,7 @@ impl Vulkan {
                 world.to_session(*sid, |q| q.pipeline_ready(id));
             }
         }
+        self.announce_compute(world);
         let allocated = self.dev.allocated.load(Ordering::Relaxed);
         let scratch = self.dev.scratch_allocated.load(Ordering::Relaxed);
         for ((sid, index), texture) in &self.win {
@@ -577,7 +587,7 @@ impl Backend for Vulkan {
         #[cfg(target_os = "linux")]
         self.capture_pool.retain(|key, _| key.0 != sid);
         self.windows.close_session(sid, self.queue.as_ref().unwrap());
-        self.tex.retain(|k, _| k.0 != sid); self.buf.retain(|k, _| k.0 != sid); self.pipe.retain(|k, _| k.0 != sid);
+        self.tex.retain(|k, _| k.0 != sid); self.buf.retain(|k, _| k.0 != sid); self.pipe.retain(|k, _| k.0 != sid); self.compute.retain(|k, _| k.0 != sid);
         if sid == HOST { self.badged.clear(); self.retained_stale.clear(); self.direct_frame.clear(); }
         self.win.retain(|k, _| k.0 != sid); self.hosted_sizes.retain(|k, _| k.0 != sid); self.aliases.retain(|k, _| k.0 != sid);
         self.scanout_images.retain(|k, _| k.0 != sid);
@@ -621,7 +631,7 @@ impl Vulkan {
             // again: a program never fails for want of memory
             let mut tries = 0u64;
             let program = loop {
-                match pipeline::Program::new(dev.clone(), src.desc, src.code.clone(), src.bindings.clone(), src.stride, None) {
+                match pipeline::Program::new(dev.clone(), src.desc, src.code.clone(), src.bindings.clone(), src.stride, src.storage.clone(), None) {
                     Err(e) if pipeline::out_of_memory(&e) && !dev.lost.load(Ordering::Acquire) => {
                         if tries == 0 { eprintln!("[hal-vulkan] pipeline: {e}; waiting for GPU memory"); }
                         tries += 1;
@@ -719,6 +729,20 @@ impl exec::DeviceReset for Vulkan {
     }
 
     fn rebuild_pipelines(&mut self, world: &mut World) {
+        let kernels: Vec<_> = self.compute.iter().map(|(key, pipe)| (*key, pipe.gen, pipe.announced)).collect();
+        self.compute.clear();
+        for ((sid, index), gen, announced) in kernels {
+            let Some(s) = world.session_mut(sid) else { continue; };
+            let id = Id::new(index, gen);
+            let Ok(entry) = s.pipelines.get(sid, id) else { continue; };
+            let bytes = entry.val.blob.clone();
+            let Some(blob) = PipelineBlob::parse(&bytes) else { continue; };
+            if announced { s.pipelines_pending += 1; }
+            if let PipeStatus::Failed(error) = self.create_compute(s, id, &blob) {
+                s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
+                s.events.pipeline_failed(id, error.as_bytes());
+            }
+        }
         self.programs.clear();
         let mut rebuilt: FastMap<*const State, Arc<State>> = FastMap::default();
         let keys: Vec<(u32, u32)> = self.pipe.keys().copied().collect();
@@ -873,7 +897,7 @@ impl Gpu for Vulkan {
         Some(desc)
     }
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String> {
-        let buffer = Buffer::new(self.dev.clone(), b.size, buffer_usage())?; b.bytes = buffer.bytes;
+        let buffer = Buffer::new(self.dev.clone(), b.size, compute::usage(b.kind, self.dev.compute))?; b.bytes = buffer.bytes;
         self.buf.insert((s.id, id.index), Retained { gen: id.gen, buffer, evictable: b.evictable }); Ok(())
     }
     fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]) {
@@ -883,7 +907,7 @@ impl Gpu for Vulkan {
                 let retained = self.buf.get_mut(&(s.id, id.index)).filter(|r| r.gen == id.gen).ok_or("missing retained buffer")?;
                 if Arc::strong_count(&retained.buffer) > 1 {
                     let old = retained.buffer.clone();
-                    let fresh = Buffer::new(self.dev.clone(), b.size, buffer_usage())?;
+                    let fresh = Buffer::new(self.dev.clone(), b.size, compute::usage(b.kind, self.dev.compute))?;
                     fresh.write(off, data)?;
                     b.bytes = fresh.bytes;
                     retained.buffer = fresh.clone();
@@ -927,12 +951,15 @@ impl Gpu for Vulkan {
         })();
         if let Err(e) = result { eprintln!("[hal-vulkan] buffer update: {e}"); s.bad(); }
     }
+    fn buffer_readback(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) { self.read_compute_buffer(s, id, req, offset, len); }
     fn buffer_destroy(&mut self, sid: u32, id: Id) { if self.buf.get(&(sid, id.index)).is_some_and(|b| b.gen <= id.gen) { self.buf.remove(&(sid, id.index)); } }
     fn buffer_evictable(&mut self, sid: u32, id: Id) { if let Some(b) = self.buf.get_mut(&(sid, id.index)).filter(|b| b.gen == id.gen) { b.evictable = true; } }
     fn pipeline_create(&mut self, s: &mut Session, id: Id, dialect: u32, blob: &PipelineBlob, _: Attr) -> PipeStatus {
         if dialect != self::dialect::SPIRV { return PipeStatus::Failed("Vulkan takes binary SPIR-V".into()); }
+        if blob.desc.compute.len != 0 { return self.create_compute(s, id, blob); }
         let code = match crate::spirv::SpirvPipeline::decode(blob.code) { Ok(c) => c, Err(e) => return PipeStatus::Failed(e) };
         let mut key = blob.code.to_vec();
+        key.extend_from_slice(crate::compute::bytes(blob.raw, blob.desc.storage_buffers).unwrap_or_default());
         key.extend_from_slice(&(blob.bindings.len() as u64).to_le_bytes());
         key.extend_from_slice(&(blob.vertex_layout.len() as u64).to_le_bytes());
         for v in blob.bindings.iter().chain(blob.vertex_layout.iter()).copied().chain([blob.desc.blend, blob.desc.instance_stride, blob.desc.outputs]) { key.extend_from_slice(&v.to_le_bytes()); }
@@ -940,7 +967,7 @@ impl Gpu for Vulkan {
             Some(state) => state,
             None => {
                 let stride = blob.vertex_layout.first().copied().unwrap_or(0);
-                let state = State::new(Arc::new(pipeline::Source { desc: blob.desc, code, bindings: blob.bindings.clone(), stride, key: key.clone() }));
+                let state = State::new(Arc::new(pipeline::Source { desc: blob.desc, code, bindings: blob.bindings.clone(), storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), stride, key: key.clone() }));
                 // registered before the compile is queued, so its answer cannot be missed
                 state.wait(s.id);
                 self.compile(&state);
@@ -951,6 +978,7 @@ impl Gpu for Vulkan {
         self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false, desc: blob.desc }); PipeStatus::Pending
     }
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
+        if self.compute.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.compute.remove(&(sid, id.index)).is_some_and(|p| !p.announced); }
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced); } false
     }
     fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {

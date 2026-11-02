@@ -124,8 +124,8 @@ pub fn start(files: &Path, workspace: &str, conf: StoreConf) {
         if let Err(e) = identity(&files) {
             logcat::log(&format!("devhub: {e}"));
         }
-        let mut nc = makepad_devhub::conf::NodeConf::default();
-        nc.name = if conf.name.is_empty() { makepad_devhub::proto::default_machine_name() } else { conf.name.clone() };
+        let mut nc = makepad_devhub_conf::NodeConf::default();
+        nc.name = if conf.name.is_empty() { makepad_devhub_conf::default_machine_name() } else { conf.name.clone() };
         nc.embedded = true;
         nc.discovery = true;
         nc.launch = Vec::new();

@@ -16,11 +16,11 @@ impl Hold {
     }
 }
 
-/// The argv a lease run executes: the scope, nice and pinning wrappers, then `argv`.
+/// The argv a lease run executes: the scope (collected even on failure), nice and pinning wrappers, then `argv`.
 pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str, share: Option<crate::lease::Cost>) -> Vec<String> {
     let mut full: Vec<String> = Vec::new();
     if let Some(u) = unit {
-        full.extend(["systemd-run", "--user", "--scope", "--quiet"].map(String::from));
+        full.extend(["systemd-run", "--user", "--scope", "--collect", "--quiet"].map(String::from));
         full.push(format!("--unit={u}"));
         if let Some(cost) = share.filter(|_| cfg!(target_os = "linux")) {
             full.extend(["-p".into(), format!("CPUQuota={:.2}%", cost.cores * 100.0), "-p".into(), format!("MemoryMax={}G", cost.ram_gb * 1.5)]);
@@ -35,17 +35,30 @@ pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str, share: Opti
     full
 }
 
-/// Keep the scope alive until its final counters are saved, including runs shorter than a
-/// heartbeat. Arguments are positional shell parameters, never interpolated shell source.
+/// Clear failed transient units left by earlier hubs; an unloaded unit is harmless.
+pub fn reset_failed_units(pattern: &str) {
+    let _ = Command::new("systemctl").args(["--user", "reset-failed", pattern])
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+}
+
+/// Every run goes under a small wrapper that writes the run's exit code beside its ledger
+/// (`<id>-<n>.exit` beside `<id>-<n>.usage`) as it ends: a restarted hub (its self-update, at any moment) reads it, so no
+/// run waits for a hub restart and no restart loses an exit. In a scope it also keeps the scope
+/// alive until its final counters are saved, including runs shorter than a heartbeat. Arguments
+/// are positional shell parameters, never interpolated shell source (and never `${..}`, which
+/// `systemd-run` expands itself).
 pub fn metered_argv(argv: Vec<String>, unit: Option<&str>, usage: &Path) -> Vec<String> {
-    if !cfg!(target_os = "linux") || unit.is_none() { return argv; }
     let script = r#"usage=$1
-shift
+exitf=$2
+scoped=$3
+shift 3
 group=
-while IFS=: read -r hierarchy controllers path; do
-    if [ "$hierarchy" = 0 ]; then group=/sys/fs/cgroup$path; fi
-done < /proc/self/cgroup
-printf '%s\n' "$group" > "$usage.cgroup"
+if [ "$scoped" = 1 ] && [ -r /proc/self/cgroup ]; then
+    while IFS=: read -r hierarchy controllers path; do
+        if [ "$hierarchy" = 0 ]; then group=/sys/fs/cgroup$path; fi
+    done < /proc/self/cgroup
+    printf '%s\n' "$group" > "$usage.cgroup"
+fi
 record() {
     if [ -n "$group" ]; then
         if [ -r "$group/memory.peak" ] && read -r peak < "$group/memory.peak"; then printf 'peak %s\n' "$peak"; fi
@@ -56,16 +69,17 @@ record() {
         fi
     fi
 }
-trap 'record > "$usage"' 0
+trap 'status=$?; record > "$usage"; printf "%s\n" "$status" > "$exitf"' 0
 trap 'exit 143' TERM
 "$@" &
 child=$!
 printf '%s\n' "$child" > "$usage.pid"
 wait "$child"
-status=$?
-exit "$status"
+exit "$?"
 "#;
-    let mut full = vec!["sh".into(), "-c".into(), script.into(), "devhub-usage".into(), usage.to_string_lossy().into_owned()];
+    let scoped = cfg!(target_os = "linux") && unit.is_some();
+    let exit = usage.with_extension("exit");
+    let mut full = vec!["sh".into(), "-c".into(), script.into(), "devhub-usage".into(), usage.to_string_lossy().into_owned(), exit.to_string_lossy().into_owned(), if scoped { "1" } else { "0" }.into()];
     full.extend(argv);
     full
 }
@@ -127,7 +141,7 @@ pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>
 }
 
 /// Starts a lease run in its own session and process group (the group is what end signals).
-pub fn lease_spawn(cmd: &mut Command) -> std::io::Result<(Child, Hold)> {
+pub fn lease_spawn(cmd: &mut Command, _share: Option<crate::lease::Cost>) -> std::io::Result<(Child, Hold)> {
     use std::os::unix::process::CommandExt;
     extern "C" {
         fn setsid() -> i32;

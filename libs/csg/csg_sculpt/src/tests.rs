@@ -423,6 +423,10 @@ fn live_strokes_equal_the_committed_bake() {
     for mirror in [None, Some(0)] {
         let s = strokes();
         for (i, t) in s.iter().enumerate() {
+            // unmirrored: the last stroke over all the others (the mirrored run covers every mode on its own)
+            if mirror.is_none() && i + 1 < s.len() {
+                continue;
+            }
             let prior = &s[..i];
             let mut l = baked(prior, mirror);
             let samples = dense(&t.path, 12);

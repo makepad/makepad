@@ -406,6 +406,7 @@ impl DefCollector<'_> {
 
     fn check_generic_path(&mut self, p: Path, type_ns: bool) {
         if !self.legacy || self.checking_defs || p.global() || !p.no_qself() { return; }
+        if !self.bindings.iter().any(|rib| matches!(rib, ValueRib::Constant { .. } | ValueRib::Forward(_))) { return; }
         let Some(first) = self.ast.segs(p.segs).first() else { return; };
         let type_ns = type_ns || p.segs.len() > 1;
         let pf = &self.prog.files[self.file as usize];

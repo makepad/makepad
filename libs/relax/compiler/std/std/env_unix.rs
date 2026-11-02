@@ -1,6 +1,5 @@
 //! std::env: environment variables (behind a RwLock like real std), args, directories.
 
-use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::error::Error;
@@ -40,6 +39,7 @@ extern "C" {
     fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32;
 }
 
+// Build short keys on the stack like real std: no allocation for an absent variable.
 pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
     let kb = key.as_ref().as_encoded_bytes();
     let mut pm_out: *const u8 = core::ptr::null();
@@ -48,17 +48,11 @@ pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
         let bytes = unsafe { core::slice::from_raw_parts(pm_out, pm_len).to_vec() };
         return Some(OsString::from_bytes_vec(bytes));
     }
-    let key = match CString::new(kb) {
-        Ok(k) => k,
-        Err(_) => return None,
-    };
-    let _guard = ENV_LOCK.read();
-    let v = unsafe { sys::getenv(key.as_ptr()) };
-    if v.is_null() {
-        None
-    } else {
-        Some(OsString::from_bytes_vec(c_bytes(v)))
-    }
+    crate::fs::run_with_cstr(kb, &|key| {
+        let _guard = ENV_LOCK.read();
+        let v = unsafe { sys::getenv(key.as_ptr()) };
+        Ok(if v.is_null() { None } else { Some(OsString::from_bytes_vec(c_bytes(v))) })
+    }).ok().flatten()
 }
 
 pub fn var<K: AsRef<OsStr>>(key: K) -> Result<String, VarError> {
@@ -74,19 +68,16 @@ pub fn var<K: AsRef<OsStr>>(key: K) -> Result<String, VarError> {
 /// Safe to call in edition 2021 code (real std marks it `unsafe` only from edition 2024).
 pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
     let (key, value) = (key.as_ref(), value.as_ref());
-    let k = CString::new(key.as_encoded_bytes());
-    let v = CString::new(value.as_encoded_bytes());
-    let r = match (k, v) {
-        (Ok(k), Ok(v)) => {
+    let r = crate::fs::run_with_cstr(key.as_encoded_bytes(), &|k| {
+        crate::fs::run_with_cstr(value.as_encoded_bytes(), &|v| {
             let _guard = ENV_LOCK.write();
             if unsafe { sys::setenv(k.as_ptr(), v.as_ptr(), 1) } == 0 {
                 Ok(())
             } else {
                 Err(io::Error::last_os_error())
             }
-        }
-        _ => Err(io::const_error!(io::ErrorKind::InvalidInput, "file name contained an unexpected NUL byte")),
-    };
+        })
+    });
     if let Err(e) = r {
         panic!("failed to set environment variable `{:?}` to `{:?}`: {}", key, value, e);
     }
@@ -94,17 +85,14 @@ pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
 
 pub fn remove_var<K: AsRef<OsStr>>(key: K) {
     let key = key.as_ref();
-    let r = match CString::new(key.as_encoded_bytes()) {
-        Ok(k) => {
-            let _guard = ENV_LOCK.write();
-            if unsafe { sys::unsetenv(k.as_ptr()) } == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
+    let r = crate::fs::run_with_cstr(key.as_encoded_bytes(), &|k| {
+        let _guard = ENV_LOCK.write();
+        if unsafe { sys::unsetenv(k.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
-        Err(_) => Err(io::const_error!(io::ErrorKind::InvalidInput, "file name contained an unexpected NUL byte")),
-    };
+    });
     if let Err(e) = r {
         panic!("failed to remove environment variable `{:?}`: {}", key, e);
     }

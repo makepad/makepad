@@ -484,6 +484,7 @@ mod tests {
     /// A deploy's prebuild is the launch's own cargo command with `build` for `run` and the same
     /// environment, so the launch finds every artifact fresh (a different CARGO_INCREMENTAL or
     /// MAKEPAD is another profile/fingerprint: 165 recompiled 97 crates at a JIT launch).
+    /// A host already under a JIT loader launches it directly, without cargo's build environment.
     #[test]
     fn the_prebuild_is_the_launch_with_build_for_run() {
         let root = crate::checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("tests run in a checkout");
@@ -507,11 +508,35 @@ mod tests {
                 v
             };
             let (run_args, build_args) = (args(&run), args(&build));
-            let cut = run_args.iter().position(|a| a == "--").unwrap();
-            assert_eq!(run_args[0], "run");
-            assert_eq!(build_args[0], "build");
-            assert_eq!(run_args[1..cut], build_args[1..], "{id}");
-            assert_eq!(envs(&run), envs(&build), "{id}");
+            let loader = std::env::var_os("MAKEPAD_RUN_LOADER").map(PathBuf::from).filter(|p| p.is_file());
+            if let Some(loader) = loader.filter(|_| runner == Runner::Jit) {
+                assert_eq!(run.get_program(), loader.as_os_str());
+                let mut expected_args = vec!["run".to_string(), entry.package.to_string()];
+                let mut app_args = Vec::new();
+                if !cfg!(target_os = "linux") { app_args.push("--stdin-loop".to_string()); }
+                app_args.extend(entry.args.iter().map(|arg| arg.to_string()));
+                if !app_args.is_empty() {
+                    expected_args.push("--".to_string());
+                    expected_args.extend(app_args);
+                }
+                assert_eq!(run_args, expected_args, "{id}");
+                let (program, expected_args) = build_argv(&MAKEPAD_RUN, &root);
+                assert_eq!(build.get_program(), program.as_os_str());
+                assert_eq!(build_args, expected_args, "{id}");
+                let mut expected = Command::new(&loader);
+                crate::child_env::scrub(&mut expected);
+                crate::child_env::scrub_lane(&mut expected);
+                assert_eq!(envs(&run), envs(&expected), "{id}");
+                crate::cargo_env(&mut expected);
+                assert_eq!(envs(&build), envs(&expected), "{id}");
+            } else {
+                let cut = run_args.iter().position(|a| a == "--").unwrap();
+                assert_eq!(run.get_program(), build.get_program());
+                assert_eq!(run_args[0], "run");
+                assert_eq!(build_args[0], "build");
+                assert_eq!(run_args[1..cut], build_args[1..], "{id}");
+                assert_eq!(envs(&run), envs(&build), "{id}");
+            }
             assert_eq!(run.get_current_dir(), build.get_current_dir());
         }
     }

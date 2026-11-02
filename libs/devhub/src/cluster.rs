@@ -64,7 +64,7 @@ pub fn start(name: &str, port: u16, peers: Arc<Mutex<Peers>>, log: crate::trust:
                             let text = String::from_utf8_lossy(body);
                             let Some((hub, port)) = text.split_once('|') else { continue };
                             let Ok(port) = port.parse::<u16>() else { continue };
-                            if hub == own || !crate::trust::valid_name(hub) {
+                            if hub == own || !makepad_devhub_conf::valid_name(hub) {
                                 continue;
                             }
                             peers.lock().unwrap().saw(hub, &format!("{}:{port}", id::normalize(from.ip())), &peer.name);

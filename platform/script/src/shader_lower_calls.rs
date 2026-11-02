@@ -621,12 +621,50 @@ impl IrFnCompiler {
         let Some(op) = Builtin::from_name(name) else {
             return self.push(ShaderType::Pod(ret), NO_EXPR);
         };
+        if op == Builtin::AtomicAdd && !exprs.is_empty() {
+            let mut place = exprs[0];
+            if place == NO_EXPR { return self.void_nop(vm); }
+            loop {
+                match self.f.exprs[place as usize].kind {
+                    ExprKind::Index(base, _) | ExprKind::Swizzle(base, _, _) => place = base,
+                    ExprKind::Global(g) if output.compiled.ir.globals[g as usize].kind == IrGlobalKind::Io(IrIo::Storage(true)) => break,
+                    _ => {
+                        output.push_error("atomic_add requires an element of a writable device buffer".into());
+                        return self.void_nop(vm);
+                    }
+                }
+            }
+        }
         let rt = Self::ir_ty(vm, output, ret);
         let e = self.expr(ExprKind::Builtin(op, exprs), rt);
         self.push(ShaderType::Pod(ret), e);
     }
 
     fn handle_texture_builtin(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, method_id: LiveId, tex_type: TextureType, tex: ExprId, args: Vec<(ShaderType, ExprId)>) {
+        if let Some(ExprKind::Global(g)) = self.f.exprs.get(tex as usize).map(|e| &e.kind) {
+            if let IrGlobalKind::StorageTexture(format) = output.compiled.ir.globals[*g as usize].kind {
+                if method_id != id!(write) || args.len() != 2 {
+                    output.push_error("storage textures are write-only; use .write(uint2, texel)".into());
+                    return self.void_nop(vm);
+                }
+                let coord = args[0].1;
+                let value = args[1].1;
+                if coord == NO_EXPR || value == NO_EXPR { return self.void_nop(vm); }
+                if matches!(args[1].0, ShaderType::AbstractInt | ShaderType::AbstractFloat) {
+                    self.concretize(value, format.scalar());
+                }
+                let coord_ty = output.compiled.ir.get(self.f.exprs[coord as usize].ty);
+                let value_ty = output.compiled.ir.get(self.f.exprs[value as usize].ty);
+                let expected = if format.channels() == 1 { IrTy::Scalar(format.scalar()) } else { IrTy::Vec(4, format.scalar()) };
+                if *coord_ty != IrTy::Vec(2, IrScalar::U32) || *value_ty != expected {
+                    output.push_error(format!("storage texture {:?}.write requires vec2u and {:?}", format, expected));
+                    return self.void_nop(vm);
+                }
+                let e = self.expr(ExprKind::Builtin(Builtin::StorageTextureWrite, vec![tex, coord, value]), TY_VOID);
+                self.emit(Stmt::Expr(e));
+                return self.void_nop(vm);
+            }
+        }
         // A namespaced fn's input read (`self.<field>.<method>(self.<at>())`):
         // the parameter that stands for it, and nothing of the read itself.
         if let Some(mark) = self.ns_input_mark.filter(|m| m.tex == tex && tex != NO_EXPR) {

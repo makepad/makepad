@@ -693,17 +693,37 @@ impl<'a> Lcx<'a> {
     }
 
     fn err(&mut self, pos: u32, mut msg: String) {
-        // A provided crate's own fn compiled here (it has no shim): say which manifest decides.
+        // A provided fn may have a shim but refuse binding: report that reason, not a missing mark.
         if msg.contains("lives in a provided crate") {
             if let crate::jit::FnKey::Inst(d, args) = self.u.fns[self.cur_fn as usize].key.clone() {
                 let krate = self.u.prog.def(d).krate;
-                if args.is_empty() && self.u.provided.iter().any(|(k, _)| *k == krate) {
-                    let name = self.u.prog.syms.str(self.u.prog.crates[krate as usize].name).replace('_', "-");
-                    msg.push_str(&format!(
-                        " (`{}` of {} runs here because it is not marked `#[relax_api]` in that crate: mark it, or call one of the crate's ops)",
-                        crate::provided::key(&self.u.prog, &self.u.tcx, d),
-                        name
-                    ));
+                if args.is_empty() {
+                    if let Some((_, pc)) = self.u.provided.iter().find(|(k, _)| *k == krate) {
+                        let name = self.u.prog.syms.str(self.u.prog.crates[krate as usize].name).replace('_', "-");
+                        let key = crate::provided::key(&self.u.prog, &self.u.tcx, d);
+                        if pc.shims.contains_key(key.as_str()) {
+                            let opaque = |a| self.u.provided_types.contains_key(&a);
+                            if let Some(reason) = crate::provided::unbound_reason(&self.u.prog, &self.u.tcx, krate, d, &opaque) {
+                                msg.push_str(&format!(" (`{}` of {} is #[relax_api] but runs here as JIT code: {}", key, name, reason));
+                                if reason == "signature not C-shaped" {
+                                    if let Some(t) = crate::provided::first_untrusted_signature_type(&self.u.prog, &self.u.tcx, krate, d, &opaque) {
+                                        msg.push_str(&format!(": `{}` does not cross the boundary", crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t)));
+                                        let path = crate::provided::untrusted_path(&self.u.prog, &self.u.tcx, krate, t);
+                                        if !path.is_empty() {
+                                            msg.push_str(&format!(" (at {})", path));
+                                        }
+                                    }
+                                }
+                                msg.push(')');
+                            }
+                        } else {
+                            msg.push_str(&format!(
+                                " (`{}` of {} runs here because it is not marked `#[relax_api]` in that crate: mark it, or call one of the crate's ops)",
+                                key,
+                                name
+                            ));
+                        }
+                    }
                 }
             }
         }

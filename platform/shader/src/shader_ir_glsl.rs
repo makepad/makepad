@@ -56,6 +56,10 @@ pub fn gles_draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_t
 }
 
 fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::ShaderTypes, complete: bool, pick: bool) -> GlslDrawSources {
+    if !output.use_vulkan && output.ir.globals.iter().any(|g| matches!(g.kind, IrGlobalKind::Io(IrIo::Storage(_)))) {
+        output.push_error("storage buffers in draw shaders need Metal, Vulkan or D3D11".into());
+        return GlslDrawSources { vertex: String::new(), fragment: String::new(), info: GlDrawInfo::default(), inline_estimate: (0, Vec::new()) };
+    }
     let mut ir = output.ir.clone();
     crate::shader_ir_precise::lower_precise(&mut ir, true);
     let info = build_gl_entries(output, &mut ir, types);

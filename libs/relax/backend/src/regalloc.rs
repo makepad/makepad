@@ -4907,15 +4907,15 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool, n
         }
         t
     };
-    let mut changed = false;
-    let mut g = f.clone();
+    // Rewrites only replace the current instruction; read the original until one is needed.
+    let mut g: Option<Func> = None;
     // (value, home block) -> vreg
     let mut consts: Vec<(i64, u32, VReg)> = Vec::new();
     // float constants by (bits, f64?)
     let mut fconsts: Vec<((u64, bool), u32, VReg)> = Vec::new();
-    let mut moved = vec![false; nv];
-    let mut moved_home = vec![0u32; nv];
-    for bi in 0..g.blocks.len() {
+    let mut moved = Vec::new();
+    let mut moved_home = Vec::new();
+    for bi in 0..f.blocks.len() {
         if !reach[bi] {
             continue;
         }
@@ -4925,10 +4925,9 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool, n
             _ => true,
         };
         let in_loop = depth[bi] > 0 && iterates;
-        for k in 0..g.blocks[bi].insts.len() {
-            let i = g.blocks[bi].insts[k].clone();
+        for (k, i) in f.blocks[bi].insts.iter().enumerate() {
             // immediate forms the target encodes
-            let as_imm = match i {
+            let as_imm = match *i {
                 Inst::IBin(op, it, d, a, c) if cval[c.0 as usize].is_some() && !matches!(op, IOp::Div | IOp::Rem | IOp::MulHi) => Some(Inst::IBinI(op, it, d, a, cval[c.0 as usize].unwrap())),
                 Inst::IBin(op @ (IOp::Add | IOp::Mul | IOp::And | IOp::Or | IOp::Xor), it, d, c, a) if cval[c.0 as usize].is_some() && cval[a.0 as usize].is_none() => Some(Inst::IBinI(op, it, d, a, cval[c.0 as usize].unwrap())),
                 Inst::ICmp(cc, sg, d, a, c) if cval[c.0 as usize].is_some() => Some(Inst::ICmpI(cc, sg, d, a, cval[c.0 as usize].unwrap())),
@@ -4936,49 +4935,54 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool, n
             };
             if let Some(ii) = as_imm {
                 if fits(&ii) {
-                    g.blocks[bi].insts[k] = ii;
-                    changed = true;
+                    g.get_or_insert_with(|| f.clone()).blocks[bi].insts[k] = ii;
                     continue;
                 }
             }
             if !in_loop {
                 continue;
             }
-            match i {
+            match *i {
                 // a constant defined in the loop: defined outside it instead
                 Inst::Iconst(d, v) if ndef[d.0 as usize] == 1 => {
+                    g.get_or_insert_with(|| f.clone());
+                    if moved.is_empty() {
+                        moved.resize(nv, false);
+                        moved_home.resize(nv, 0u32);
+                    }
                     moved[d.0 as usize] = true;
                     moved_home[d.0 as usize] = h;
                     if !consts.iter().any(|x| x.0 == v && x.1 == h) {
                         consts.push((v, h, d));
                     }
-                    changed = true;
                 }
                 Inst::Fconst(d, bits, w) if floats && ndef[d.0 as usize] == 1 => {
+                    g.get_or_insert_with(|| f.clone());
+                    if moved.is_empty() {
+                        moved.resize(nv, false);
+                        moved_home.resize(nv, 0u32);
+                    }
                     moved[d.0 as usize] = true;
                     moved_home[d.0 as usize] = h;
                     if !fconsts.iter().any(|x| x.0 == (bits, w) && x.1 == h) {
                         fconsts.push(((bits, w), h, d));
                     }
-                    changed = true;
                 }
-                Inst::IBinI(op, it, d, a, v) if !fits(&i) => {
-                    let c = const_vreg(&mut g, &mut consts, v, h);
+                Inst::IBinI(op, it, d, a, v) if !fits(i) => {
+                    let g = g.get_or_insert_with(|| f.clone());
+                    let c = const_vreg(g, &mut consts, v, h);
                     g.blocks[bi].insts[k] = Inst::IBin(op, it, d, a, c);
-                    changed = true;
                 }
-                Inst::ICmpI(cc, sg, d, a, v) if !fits(&i) => {
-                    let c = const_vreg(&mut g, &mut consts, v, h);
+                Inst::ICmpI(cc, sg, d, a, v) if !fits(i) => {
+                    let g = g.get_or_insert_with(|| f.clone());
+                    let c = const_vreg(g, &mut consts, v, h);
                     g.blocks[bi].insts[k] = Inst::ICmp(cc, sg, d, a, c);
-                    changed = true;
                 }
                 _ => {}
             }
         }
     }
-    if !changed {
-        return None;
-    }
+    let mut g = g?;
     if has_loop && moved.iter().any(|x| *x) {
         // moved constants: the loop's defs go; other vregs of the same value and home read the one defined there
         let mut map: Vec<u32> = (0..g.vregs.len() as u32).collect();
@@ -5072,11 +5076,11 @@ pub fn share_index_bases(f: &Func) -> Option<Func> {
             }
             // a def of a base or index closes its groups (after this instruction: a load's own
             // destination may be its index)
-            let mut defs = Vec::new();
-            for_defs(i, |d| defs.push(d));
-            open.retain(|gi| {
-                let (bs, x, _) = groups[*gi].0;
-                !defs.contains(&bs) && !defs.contains(&x)
+            for_defs(i, |d| {
+                open.retain(|gi| {
+                    let (bs, x, _) = groups[*gi].0;
+                    bs != d && x != d
+                });
             });
         }
         let worth: Vec<&((VReg, VReg, u8), Vec<usize>)> = groups
@@ -5326,11 +5330,7 @@ pub fn sink_increments(options: &relax_session::Options, f: &Func) -> Option<Fun
         // the block's steps, last first: a step only ever moves down and each is looked at once
         // (two steps of different counters before a common reader would otherwise keep hopping
         // over each other)
-        let cands: Vec<usize> = {
-            let b = &f.blocks[bi];
-            (0..b.insts.len()).filter(|&a| matches!(b.insts[a], Inst::IBinI(IOp::Add | IOp::Sub, ..))).collect()
-        };
-        for &a in cands.iter().rev() {
+        for a in (0..f.blocks[bi].insts.len()).rev().filter(|&a| matches!(f.blocks[bi].insts[a], Inst::IBinI(IOp::Add | IOp::Sub, ..))) {
             let cur = g.as_ref().unwrap_or(f);
             let b = &cur.blocks[bi];
             // the step at a: (counter, number of instructions)
@@ -5418,6 +5418,8 @@ pub fn sink_branch_compares(options: &relax_session::Options, f: &Func) -> Optio
         }
     }
     let mut g: Option<Func> = None;
+    let mut reads: Vec<VReg> = Vec::new();
+    let mut writes: Vec<VReg> = Vec::new();
     for bi in 0..f.blocks.len() {
         let b = &f.blocks[bi];
         let Term::Branch(c, _, _) = b.term else { continue };
@@ -5435,23 +5437,22 @@ pub fn sink_branch_compares(options: &relax_session::Options, f: &Func) -> Optio
         if j + 1 == n {
             continue;
         }
-        let ops: Vec<VReg> = match b.insts[j] {
-            Inst::ICmp(_, _, _, x, y) | Inst::FCmp(_, _, _, x, y) => vec![x, y],
-            Inst::ICmpI(_, _, _, x, _) => vec![x],
+        let ops = match b.insts[j] {
+            Inst::ICmp(_, _, _, x, y) | Inst::FCmp(_, _, _, x, y) => [x, y],
+            Inst::ICmpI(_, _, _, x, _) => [x, x],
             _ => continue,
         };
         // the pure one-use operand computed right before it travels along
         let mut lo = j;
         if j > 0 {
-            let p = &b.insts[j - 1];
-            let mut d1 = Vec::new();
-            for_defs(p, |x| d1.push(x));
-            if d1.len() == 1 && ops.contains(&d1[0]) && uses[d1[0].0 as usize] == 1 && matches!(p, Inst::IBinI(..) | Inst::IBin(..) | Inst::Conv(Conv::IntToInt(_), ..)) {
-                lo = j - 1;
+            if let Inst::IBinI(_, _, d, _, _) | Inst::IBin(_, _, d, _, _) | Inst::Conv(Conv::IntToInt(_), d, _) = b.insts[j - 1] {
+                if ops.contains(&d) && uses[d.0 as usize] == 1 {
+                    lo = j - 1;
+                }
             }
         }
-        let mut reads: Vec<VReg> = Vec::new();
-        let mut writes: Vec<VReg> = Vec::new();
+        reads.clear();
+        writes.clear();
         for k in lo..=j {
             for_uses(&b.insts[k], |u| reads.push(u));
             for_defs(&b.insts[k], |d| writes.push(d));

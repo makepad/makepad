@@ -247,10 +247,12 @@ pub mod info_flags {
     /// both eyes side by side, and the app hands the result on; the XR window only paces them
     /// (its `XrFrame`s and `FrameReady`s), it is never presented.
     pub const XR_OFFSCREEN: u32 = 2048;
+    pub const COMPUTE: u32 = 4096;
+    pub const DRAW_STORAGE_BUFFERS: u32 = 8192;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN, COMPUTE, DRAW_STORAGE_BUFFERS];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -383,6 +385,10 @@ pub struct HalInfo {
     pub flags: u32,
     /// bit per [`format`]
     pub formats: u64,
+    /// Writable storage-image formats, one bit per `format`.
+    pub storage_formats: u64,
+    pub max_workgroup_size: [u32; 3],
+    pub max_workgroup_invocations: u32,
     /// The sample counts a pass may ask for ([`Pass::samples`]): bit n set = 2^n samples per
     /// pixel (1: single sampling only, no MSAA).
     pub msaa: u32,
@@ -560,6 +566,7 @@ pub mod usage {
     /// a layered texture that is a 2D array even with six square colour layers (otherwise those
     /// are a cube: [`crate::session::TextureObj::is_cube`])
     pub const ARRAY: u16 = 16;
+    pub const STORAGE: u16 = 32;
 }
 
 /// Buffer kinds (`BufferCreate` flags).
@@ -568,6 +575,10 @@ pub mod buffer_kind {
     pub const VERTEX: u16 = 1;
     pub const INDEX: u16 = 2;
     pub const UNIFORM: u16 = 3;
+    pub const STORAGE: u16 = 4;
+    pub const KIND_MASK: u16 = 255;
+    pub const INDIRECT: u16 = 1 << 8;
+    pub const READBACK: u16 = 1 << 9;
 }
 
 /// `Pass::load` values.
@@ -851,6 +862,8 @@ pub mod selection_handles {
 
 /// `Frame` target kinds.
 pub mod target {
+    /// A packet containing only compute passes, without a presentation target.
+    pub const COMPUTE: u32 = 2;
     pub const WINDOW: u32 = 0;
     pub const TEXTURE: u32 = 1;
     /// Or-ed into `kind`: the frame is a pick frame. Its draws name pick-variant pipelines
@@ -1089,6 +1102,9 @@ pub struct XrDepth {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pass {
+    /// `pass_kind`; dispatches are byte ranges in the command arena.
+    pub kind: u32,
+    pub dispatches: Range,
     pub color: [Id; 4],
     pub depth: Id,
     /// per colour attachment, then depth: [`pass_load`]
@@ -1156,6 +1172,10 @@ impl Inst {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Draw {
+    /// Storage ids in reflection order, encoded like `tex`.
+    pub storage_buffers: Range,
+    pub indirect_buffer: Id,
+    pub indirect_offset: u64,
     pub pipeline: Id,
     pub vb: Id,
     pub ib: Id,
@@ -1310,6 +1330,12 @@ unsafe impl Plain for FramePacket {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PipelineDesc {
+    /// Reflected read-only draw buffers (wire `StorageBinding` records).
+    pub storage_buffers: Range,
+    /// Reflected Vulkan draw push-constant size (zero on text targets).
+    pub storage_push_size: u32,
+    /// Empty for draws; otherwise one wire `ComputeDesc`.
+    pub compute: Range,
     pub code: Range,
     /// `[u32]` binding table
     pub bindings: Range,
@@ -1367,4 +1393,60 @@ pub mod domain_stop {
     pub const QUIT: u32 = 0;
     /// free the session now
     pub const KILL: u32 = 1;
+}
+
+/// Pass kind: one ordered stream of drawing and compute work.
+pub mod pass_kind {
+    pub const DRAW: u32 = 0;
+    pub const COMPUTE: u32 = 1;
+}
+
+/// Native binding of one storage buffer, in reflection order.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StorageBinding {
+    pub index: u32,
+    pub offset: u32,
+    /// Zero: read-only (HLSL t register); one: writable (HLSL u register).
+    pub writable: u32,
+}
+
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StorageImageBinding {
+    pub index: u32,
+    pub format: u32,
+}
+
+/// Kernel ABI; ranges point into the pipeline blob, never into host pointers.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ComputeDesc {
+    pub buffers: Range,
+    pub textures: Range,
+    pub push_size: u32,
+    pub param_binding: u32,
+    pub param_binding_size: u32,
+    /// `u32::MAX` when absent.
+    pub group_count_offset: u32,
+    pub workgroup: [u32; 3],
+    pub precise_math: u32,
+}
+
+/// One dispatch. All ranges are byte ranges in the command arena; buffer and
+/// texture ids inside those ranges are wire Id records, in reflection order.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dispatch {
+    pub pipeline: Id,
+    pub groups: [u32; 3],
+    pub indirect_buffer: Id,
+    pub indirect_offset: u64,
+    pub params: Range,
+    pub buffers: Range,
+    pub textures: Range,
 }

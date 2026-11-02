@@ -53,7 +53,7 @@ session() { # session <label>: one launch to idle and quit; prints its first-fra
     done
     kill -TERM $pid 2>/dev/null
     wait $pid
-    grep -m1 ' first frame at ' "$dir/log.$label" | sed 's/^.* first frame/first frame/'
+    grep -m1 ' first frame at ' "$dir/log.$label" | sed 's/^.* first frame at /first frame at /'
     echo "$last" | grep '^session:'
 }
 cold=$(session cold)

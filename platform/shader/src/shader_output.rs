@@ -172,6 +172,8 @@ pub enum ShaderMode {
 /// Backend input and reflection, independent of frontend provenance.
 #[derive(Default, Debug)]
 pub struct ShaderOutput {
+    pub storage_buffers: Vec<crate::shader_ir_compute::ComputeBufferBinding>,
+    pub storage_push_size: u32,
     pub backend: ShaderBackend,
     pub use_vulkan: bool,
     pub glsl_webgl2: bool,

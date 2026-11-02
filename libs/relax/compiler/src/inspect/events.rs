@@ -240,7 +240,7 @@ struct Parked {
     os_id: u64,
     domain: Option<crate::domain::DomainId>,
     /// 0 waiting, 1 resume as a panic, 2 retry the boundary's unit, 3 restart the restartable fn,
-    /// 4 make it return `words`
+    /// 4 make it return `words`, 5 stop the process
     decision: AtomicU32,
     words: Mutex<Vec<u64>>,
     event: std::sync::Arc<str>,
@@ -252,8 +252,17 @@ struct Parked {
     /// return address, callee-saved registers; jit.rs REG_WORDS): `locals` reads the frames'
     /// variables from it; empty for a stop without one (a fault)
     regs: Vec<u64>,
+    kind: ParkKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParkKind {
+    Panic,
     /// a stale access (stale.rs): parked in its fault handler for good; only `restart` / `stop`
-    stale: bool,
+    Stale,
+    /// a call of code that did not compile (park_compile_error): a live patch that fixes it
+    /// resumes the call; only `stop`
+    CompileError,
 }
 
 /// Parked panic `id`'s (the newest with None) register block at its innermost frame's call
@@ -328,7 +337,7 @@ fn park_secs_unwatched() -> u64 {
 /// return addresses, as a capture gives them).
 pub fn stale_frames_of(os_id: u64) -> Option<Vec<u64>> {
     let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
-    let p = list.iter().find(|p| p.stale && p.os_id == os_id)?;
+    let p = list.iter().find(|p| p.kind == ParkKind::Stale && p.os_id == os_id)?;
     Some(p.frames.iter().enumerate().map(|(i, &f)| if i == 0 { f } else { f + 1 }).collect())
 }
 
@@ -423,7 +432,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     // Do not park a new cleanup panic after that release.
     if domain.is_some_and(crate::domain::cancelled) { return; }
     let (seq, event) = emit_record("panic", &format!("P{}", id), &fields);
-    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()), frames: info.frames.iter().copied().take(64).collect(), regs: if unwinds { unsafe { std::slice::from_raw_parts(regs, crate::jit::REG_WORDS) }.to_vec() } else { Vec::new() }, stale: false });
+    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()), frames: info.frames.iter().copied().take(64).collect(), regs: if unwinds { unsafe { std::slice::from_raw_parts(regs, crate::jit::REG_WORDS) }.to_vec() } else { Vec::new() }, kind: ParkKind::Panic });
     list.push(p.clone());
     parked_changed();
     // said watched or not: what reads the app's output (a CI smoke) is no watcher of the event stream
@@ -503,7 +512,7 @@ pub fn park_stale(os_id: u64, domain: Option<crate::domain::DomainId>, message: 
     );
     let mut list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
     let (seq, event) = emit_record("panic", &format!("P{}", id), &fields);
-    let p = std::sync::Arc::new(Parked { id, seq, os_id, domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread, message.to_string(), location), frames: frames.iter().copied().take(64).collect(), regs: Vec::new(), stale: true });
+    let p = std::sync::Arc::new(Parked { id, seq, os_id, domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread, message.to_string(), location), frames: frames.iter().copied().take(64).collect(), regs: Vec::new(), kind: ParkKind::Stale });
     list.push(p.clone());
     parked_changed();
     eprintln!("makepad: stale access parked as P{} -- makepad inspect {} panics; resume P{} restart | stop", id, std::process::id(), id);
@@ -521,6 +530,72 @@ pub fn park_stale(os_id: u64, domain: Option<crate::domain::DomainId>, message: 
     };
     super::flightrec::panic_decided(id, match d { StaleDecision::Stop => "stale: stop", StaleDecision::RestartDomain => "stale: restart (domain)", StaleDecision::RestartProcess => "stale: restart (process)" });
     d
+}
+
+/// How a call parked at a compile error ended.
+pub enum CompileParked {
+    /// a live patch fixed the callee: its code
+    Fixed(u64),
+    /// the user stopped the run
+    Stop,
+    /// its domain is stopping: the call fails as the error's panic, so the domain's cleanup runs
+    Unwind,
+}
+
+/// A call of code that did not compile (`makepad run`, jit.rs park_compile_error): the calling
+/// thread waits at the call -- nothing unwound, its arguments kept -- listed and announced like a
+/// parked panic (`panics`, `watch`, the Run panel) with the one choice `stop` (the user may end
+/// the run). After every live patch (the patch epoch moved) `rebuild` compiles the callee again:
+/// once it builds, the call goes on with that code. No timeout: a compile error never ends the
+/// program by itself (the user's rule, 2026-11-02).
+pub fn park_compile_error(message: &str, location: &str, frames: &[u64], mut rebuild: impl FnMut() -> Option<u64>) -> CompileParked {
+    let _k = crate::zone_alloc::kept();
+    let id = PANIC_IDS.fetch_add(1, SeqCst) + 1;
+    let domain = crate::domain::current_app_domain();
+    let as_raw: Vec<u64> = frames.iter().copied().take(12).enumerate().map(|(i, p)| if i == 0 { p } else { p + 1 }).collect();
+    let mut partial = Vec::new();
+    let sym = super::symbolise_within(&[as_raw], &mut partial, 500).pop().unwrap_or_default();
+    let fr: Vec<String> = sym.iter().map(super::frame_json).collect();
+    let me = crate::os::thread::current();
+    let thread = if me == crate::jit::MAIN_TID.load(Relaxed) { "main".to_string() } else { crate::os::thread::name(me) };
+    let fields = format!(
+        "\"id\":\"P{}\",\"kind\":\"compile error\",\"message\":{},\"location\":{},\"thread\":{},\"frames\":[{}],\"parked_s\":null,\"resumes\":\"a live edit that makes it compile\",\"more\":[\"stacks\",\"resume P{} stop\"]",
+        id,
+        json_str(&super::short(message, 400)),
+        json_str(location),
+        json_str(&thread),
+        fr.join(","),
+        id
+    );
+    let mut list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let (seq, event) = emit_record("panic", &format!("P{}", id), &fields);
+    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), message.to_string(), location.to_string()), frames: frames.iter().copied().take(64).collect(), regs: Vec::new(), kind: ParkKind::CompileError });
+    list.push(p.clone());
+    parked_changed();
+    super::flightrec::panic(&super::short(message, 120), if location.is_empty() { "?" } else { location });
+    eprintln!("makepad: compile error parked on thread {} at its call of code that did not compile: edit the code (a live edit that makes it compile resumes the call), or stop: makepad inspect {} panics (resume P{} stop)", thread, std::process::id(), id);
+    let mut epoch = crate::jit::patch_epoch();
+    let end = loop {
+        match p.decision.load(SeqCst) {
+            0 => {}
+            5 => break CompileParked::Stop,
+            _ => break CompileParked::Unwind,
+        }
+        list = RESUME.wait_timeout(list, std::time::Duration::from_millis(200)).unwrap_or_else(|e| e.into_inner()).0;
+        let now = crate::jit::patch_epoch();
+        if now != epoch && p.decision.load(SeqCst) == 0 {
+            epoch = now;
+            drop(list);
+            let fixed = rebuild();
+            list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(a) = fixed { break CompileParked::Fixed(a); }
+        }
+    };
+    list.retain(|x| x.id != id);
+    drop(list);
+    parked_changed();
+    super::flightrec::panic_decided(id, match end { CompileParked::Fixed(_) => "compile error: fixed by a live edit", CompileParked::Stop => "compile error: stop", CompileParked::Unwind => "compile error: domain stopping" });
+    end
 }
 
 /// "file:line:col" of a compiler-known panic site.
@@ -590,9 +665,10 @@ pub fn cmd_resume(req: &Req, out: &mut Out) {
     }
     let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
     match list.iter().find(|p| p.id == id) {
-        Some(p) if p.stale && decision != 3 && decision != 5 => out.err(&format!("P{} is a stale access: its thread cannot go on (resume P{} restart | stop)", id, id)),
-        Some(p) if !p.stale && decision == 5 => out.err(&format!("P{} is a panic: stop is for stale accesses", id)),
-        Some(p) if p.stale && decision == 3 && !(p.domain.is_some() && p.domain == crate::run::app_domain()) => {
+        Some(p) if p.kind == ParkKind::Stale && decision != 3 && decision != 5 => out.err(&format!("P{} is a stale access: its thread cannot go on (resume P{} restart | stop)", id, id)),
+        Some(p) if p.kind == ParkKind::CompileError && decision != 5 => out.err(&format!("P{} is a call of code that did not compile: a live edit that fixes it resumes it (resume P{} stop ends the run)", id, id)),
+        Some(p) if p.kind == ParkKind::Panic && decision == 5 => out.err(&format!("P{} is a panic: stop is for stale accesses and compile errors", id)),
+        Some(p) if p.kind == ParkKind::Stale && decision == 3 && !(p.domain.is_some() && p.domain == crate::run::app_domain()) => {
             // no app domain: the process starts again (stale.rs restart_process)
             p.decision.store(3, SeqCst);
             RESUME.notify_all();

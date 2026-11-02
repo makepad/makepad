@@ -4,6 +4,7 @@
 //!   box released when it ends;
 //! - [`verify`]: the rolling CI verifier of the newest landed work + main pair;
 //! - [`jitlegs`]: long JIT correctness legs after input changes, outside every gate;
+//! - [`warm`]: warm dev JITs and test code caches on active lane boxes and one spare per lane;
 //! - [`allapps`]: `makepad check` of every app, example and WM package, hourly when idle;
 //! - [`push`]: the collapsed push of a requested commit or newest landed tip to origin/work;
 //! - [`live`]: a long-running app on a box that the worktree's edits hot-patch into;
@@ -22,6 +23,7 @@ pub mod ci;
 pub mod ci_status;
 pub mod cli;
 pub mod jitlegs;
+pub mod warm;
 pub mod job;
 pub mod lane;
 pub mod live;
@@ -44,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The control services of the jobs (`cli` talks to them).
-pub const SERVICES: [&str; 13] = ["overlay-shadow", "lane", "job", "live", "show", "verify", "jitlegs", "after", "allapps", "push", "state", "ci", "master"];
+pub const SERVICES: [&str; 14] = ["overlay-shadow", "lane", "job", "live", "show", "verify", "jitlegs", "warm", "after", "allapps", "push", "state", "ci", "master"];
 
 /// What every job has: the state, the leases, the checkout the master serves.
 pub struct Ctx {
@@ -125,6 +127,7 @@ pub fn go() {
     ci::start(&ctx);
     verify::start(ctx.clone());
     jitlegs::start(ctx.clone());
+    warm::start(ctx.clone());
     ci_status::start(ctx.clone());
     after::start(ctx.clone());
     allapps::start(ctx);
@@ -247,14 +250,18 @@ fn serve(ctx: &Arc<Ctx>, svc: &str, line: &str, out: &mut Vec<String>) {
         "live" => live::serve(ctx, line),
         "verify" => verify::serve(ctx, line),
         "jitlegs" => jitlegs::serve(ctx, line),
+        "warm" => warm::serve(line),
         "after" => after::serve(ctx, line),
         "allapps" => allapps::serve(ctx, line),
         "push" => push::serve(ctx, line),
         "ci" => ci::serve(ctx, line),
-        "master" if line.trim() == "master restart" => {
-            roll::ask_restart();
-            Ok("{\"restart\":\"asked: the master execs itself on work's tip within 15 s\"}".into())
-        }
+        // builds work's tip and answers how that went: the exec follows the answer, a failed
+        // build keeps this master running (and is in the inbox too). On the tip already (its
+        // self-update came first) it says so: an exec onto the same build only drops what runs
+        // through it (a job's JIT build twice in 2 min, 11-02).
+        "master" if line.trim() == "master restart" => git(&ctx.repo, &["rev-parse", "refs/heads/work"])
+            .and_then(|work| if work == crate::lease::caps::hub_rev() { Ok(format!("the master already runs work's tip {}: nothing to restart", short(&work))) } else { roll::restart_master(ctx, &work, "`devhub master restart`") })
+            .map(|done| format!("{{\"restart\":{}}}", json_str(&done))),
         "state" => {
             let name = line.split_whitespace().nth(1);
             ctx.store.read(|d| d.section(name)).ok_or_else(|| format!("no state section `{}` (verify jitlegs allapps after pushes lanes jobs)", name.unwrap_or("")))

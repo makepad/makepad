@@ -351,7 +351,7 @@ impl Default for TerrainLayer {
             last_view: None,
             next_request_id: 1,
             latest_request_id: 0,
-            render_queue: TaskQueue::new(Lane::Heavy, 1, 1),
+            render_queue: TaskQueue::new(Class::Background, 1, 1),
             worker: Arc::new(Mutex::new(None)),
             worker_latest_request: Arc::new(AtomicU64::new(0)),
             results: Default::default(),

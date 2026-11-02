@@ -729,6 +729,10 @@ pub fn main(args: &[&str]) -> Option<i32> {
     if !matches!(verb, "sync" | "autosync" | "launch" | "show" | "open" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart") {
         return None;
     }
+    // only `show <node> <app>` is a launcher's: `show <app>` is the master's, `show <event id>` the inbox's
+    if verb == "show" && args.len() != 3 {
+        return None;
+    }
     if args.len() < 2 || matches!(args[1], "-h" | "--help" | "help") {
         println!("{HELP}");
         return Some(if args.len() < 2 { 2 } else { 0 });

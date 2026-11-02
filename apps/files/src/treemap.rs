@@ -32,7 +32,7 @@ use std::{
     time::Duration,
 };
 
-use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
+use makepad_widgets::makepad_platform::thread::{TaskPool};
 use makepad_widgets::Cx;
 
 /// A rectangle in treemap space. Plain `f64` so this module stays free of
@@ -501,7 +501,7 @@ fn read_listing(
         let slices: Vec<Option<&mut [Found]>> = found.chunks_mut(chunk).map(Some).collect();
         let count = slices.len();
         let slices = Mutex::new(slices);
-        pool.fan_out(Lane::Heavy, count, |index| {
+        pool.fan_out(count, |index| {
             let slice = slices.lock().unwrap_or_else(|e| e.into_inner())[index].take();
             if let Some(slice) = slice {
                 stat_all(slice, device);
@@ -738,7 +738,7 @@ pub fn scan_stream(
     // the caller-helping `fan_out` replacement for the `std::thread::scope`
     // this used to be. `scan_stream` only ever runs as a Heavy pool job
     // itself (see `treemap_view`), never on the UI thread.
-    pool.fan_out(Lane::Heavy, SCAN_THREADS, |_index| {
+    pool.fan_out(SCAN_THREADS, |_index| {
         let mut growth = Growth::new(sink, &open);
         while let Some(job) = take(&queue, &wake, cancel) {
             let children = run_job(job, rules, device, cancel, sink, &mut growth, pool);

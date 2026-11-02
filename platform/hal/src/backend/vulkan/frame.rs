@@ -338,6 +338,7 @@ impl Vulkan {
             }
         };
         batch.draw_counts = draw_counts;
+        if !self.compute_ready(sid, &view.passes[pr.clone()], view) { return None; }
         s.frame = packet.frame; s.font_frames.submitted(packet.frame);
         s.stats.max_frame_ns = s.stats.max_frame_ns.max(packet.meta.build_end_ns.saturating_sub(packet.meta.build_start_ns));
         let is_window = kind & !target::FLAGS == target::WINDOW;
@@ -388,6 +389,21 @@ impl Vulkan {
             if v.iter().all(|x| x.is_finite() && *x >= 0.0) { [m[0].max((v[0] + v[2]).ceil() as u32), m[1].max((v[1] + v[3]).ceil() as u32)] } else { m }
         });
         for pass in &view.passes[pr] {
+            if pass.kind == crate::types::pass_kind::COMPUTE {
+                let q = batch.prof.as_mut().and_then(|p| p.reserve(1));
+                if let Some(q) = q { batch.stamp(q); }
+                if let Err(e) = self.encode_compute(s, pass, view, &mut batch) { eprintln!("[hal-vulkan] compute: {e}"); s.bad(); }
+                if let Some(q) = q { batch.stamp(q + 1); }
+                if let Some(key) = batch.prof.as_ref().map(|p| p.key) {
+                    let pi = gpu_prof::with_frame(key, |b| {
+                        if q.is_some() { b.expect(1); } else { b.untimed(1); }
+                        b.pass(s.string(pass.name).unwrap_or("compute"), pass_kind::COMPUTE, 0, 0, "", 0)
+                    });
+                    if let (Some(pi), Some(prof)) = (pi.filter(|_| q.is_some()), batch.prof.as_mut()) { prof.passes.push(ProfPass { pass: pi, query: q, split: None }); }
+                }
+                s.stats.passes += 1;
+                continue;
+            }
             #[cfg(target_os = "linux")] self.native_apps.begin_pass();
             let draws = &view.draws[slice(pass.draws, view.draws.len()).unwrap()];
             #[cfg(target_os = "android")]
@@ -634,7 +650,7 @@ impl Vulkan {
         batch.forget_blocks();
         for d in draws {
             s.stats.draws += 1;
-            if d.index[1] == 0 || d.inst.count == 0 { continue; }
+            if d.indirect_buffer.is_none() && (d.index[1] == 0 || d.inst.count == 0) { continue; }
             if let Some(t) = ablate.as_deref() {
                 if self.pipe.get(&(s.id, d.pipeline.index)).is_some_and(|p| gpu_prof::ablates(s, &p.desc, d.owner, t)) { continue; }
             }
@@ -794,6 +810,28 @@ impl Vulkan {
                 }
                 let dynamic = p.pipeline.program.dynamic.len();
                 self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &p.offsets[..dynamic]);
+                let storage = &p.pipeline.program.storage;
+                if d.storage_buffers.len as usize != storage.len() { s.bad(); continue; }
+                let mut push = vec![0u8; p.pipeline.program.desc.storage_push_size as usize];
+                let mut valid = true;
+                for (i, binding) in storage.iter().enumerate() {
+                    let id = id_at(view.arena, d.storage_buffers, i);
+                    let Some(buffer) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone()) else { valid = false; break; };
+                    let address = self.dev.raw.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer));
+                    push[binding.offset as usize..binding.offset as usize + 8].copy_from_slice(&address.to_le_bytes());
+                    batch.buffers.push(buffer);
+                    s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
+                }
+                if !valid { s.bad(); continue; }
+                if !push.is_empty() { self.dev.raw.cmd_push_constants(batch.cb, p.pipeline.program.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, &push); }
+                if !d.indirect_buffer.is_none() {
+                    let id = d.indirect_buffer;
+                    let Some(buffer) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone()) else { s.bad(); continue; };
+                    if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(20).is_none_or(|n| n > buffer.size) { s.bad(); continue; }
+                    self.dev.raw.cmd_draw_indexed_indirect(batch.cb, buffer.buffer, d.indirect_offset, 1, 20);
+                    batch.buffers.push(buffer);
+                    continue;
+                }
                 if d.inst_ranges.len != 0 && read_pairs(view.arena, d.inst_ranges).count() != d.inst_ranges.len as usize { s.bad(); continue; }
                 let whole = (d.inst_ranges.len == 0).then_some([0, d.inst.count]);
                 for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
@@ -865,6 +903,7 @@ impl Vulkan {
         }
         let selected = if video.is_empty() { state.select(&render_pass, d.flags) } else { state.select_video(&render_pass, d.flags, &video) };
         let Some(pipeline) = selected else { return Ok(None) };
+        crate::compute::validate_draw(s, d, arena, &pipeline.program.storage)?;
         let p = &pipeline.program;
         let buffer = |id: Id| self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone());
         let vertex = buffer(d.vb).ok_or("missing vertex buffer")?;
@@ -884,8 +923,24 @@ impl Vulkan {
                 let end = (d.inst.off as u64 + d.inst.count as u64).checked_mul(stride).ok_or("instance range overflow")?;
                 if stride == 0 || end > buffer.size { return Err("instance range exceeds storage".into()); }
                 if buffer.size > max_range { return Err("instance storage exceeds device range".into()); }
-                first_instance = d.inst.off;
-                let length = buffer.size; (buffer, 0, length)
+                if !d.indirect_buffer.is_none() && d.inst.off != 0 {
+                    // Indirect firstInstance is GPU-owned. Rebase the instance storage,
+                    // rather than changing its arguments or assuming the base is aligned
+                    // to minStorageBufferOffsetAlignment.
+                    let start = d.inst.off as u64 * stride;
+                    let length = buffer.size - start;
+                    let rebased = Buffer::scratch(self.dev.clone(), length,
+                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)?;
+                    super::compute::barrier(batch);
+                    unsafe { self.dev.raw.cmd_copy_buffer(batch.cb, buffer.buffer, rebased.buffer,
+                        &[vk::BufferCopy { src_offset: start, dst_offset: 0, size: length }]); }
+                    super::compute::barrier(batch);
+                    batch.buffers.push(buffer);
+                    (rebased, 0, length)
+                } else {
+                    first_instance = d.inst.off;
+                    let length = buffer.size; (buffer, 0, length)
+                }
             } else if d.inst.kind == Inst::INLINE {
                 let data = unsafe { d.inst.data.as_bytes() };
                 if stride == 0 || d.inst.count as u64 * stride > data.len() as u64 { return Err("inline instance range exceeds data".into()); }

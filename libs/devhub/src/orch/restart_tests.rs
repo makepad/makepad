@@ -1,6 +1,7 @@
 //! A master restart ends nothing, end to end: a real master process (leases, jobs, verify, CI) over
 //! real node executors in another process, killed under a job, a verify leg and a CI shard and
 //! started again on its state. All three finish with their real exit codes, each command run once.
+//! The tools wait for a release file, created once the restarted master has taken its state back.
 
 use super::*;
 use crate::lease::exec::{Exec, Opts, WORDS};
@@ -24,6 +25,15 @@ fn restart_role_nodes() {
         return;
     }
     let base = role_env("DEVHUB_RESTART_BASE");
+    // The boots need a gui box, independent of the host's WM (102 has none on today's wire).
+    let wm = std::os::unix::net::UnixListener::bind(role_env("XDG_RUNTIME_DIR").join("makepad-wm-0")).unwrap();
+    let _ = std::thread::spawn(move || {
+        use std::io::{BufRead, Write};
+        for mut s in wm.incoming().flatten() {
+            let _ = std::io::BufReader::new(&s).read_line(&mut String::new());
+            let _ = s.write_all(b"makepad-wm ok 1\n");
+        }
+    });
     let mut keep = Vec::new();
     for name in NODES {
         let dir = base.join(name);
@@ -107,8 +117,15 @@ fn restart_role_master() {
     }
     job::start(ctx.clone());
     ci::start(&ctx);
+    if std::env::var_os("DEVHUB_RESTART_SUBMIT").is_some() {
+        let run = ci::ci(ctx.repo.clone());
+        let pair = snapshot(&ctx.repo).unwrap();
+        let log = base.join("ci.log");
+        let _ = std::thread::spawn(move || run(None, &pair, &log));
+    }
     jitlegs::start(ctx.clone());
     verify::start(ctx);
+    eprintln!("restart master ready");
     std::thread::sleep(Duration::from_secs(600));
 }
 
@@ -142,7 +159,7 @@ fn a_master_restart_ends_nothing() {
     let _ = std::fs::remove_dir_all(&base);
     let (bin, tmp, home, ran) = (base.join("bin"), base.join("tmp"), base.join("home"), base.join("ran"));
     let repo = base.join("repo");
-    for d in [&bin, &tmp, &home.join("devhub"), &ran, &repo.join("apps/a/src"), &repo.join("apps/b/src"), &repo.join("tools/ci_leg/src"), &repo.join("tools/run"), &repo.join("apps/commercial")] {
+    for d in [&bin, &tmp, &home.join("devhub"), &ran, &base.join("rt"), &repo.join("apps/a/src"), &repo.join("apps/b/src"), &repo.join("tools/ci_leg/src"), &repo.join("tools/run"), &repo.join("apps/commercial")] {
         std::fs::create_dir_all(d).unwrap();
     }
     // the tree: two apps the gate boots (each on Linux only), ci-leg, and a commercial side
@@ -169,11 +186,12 @@ fn a_master_restart_ends_nothing() {
     let (work, main) = (git(&repo, &["rev-parse", "HEAD"]), git(&com, &["rev-parse", "HEAD"]));
     // the tools on the nodes: each run leaves a line behind, so a run started twice shows (an empty
     // CARGO_HOME keeps the box's rustup toolchain from going ahead of them in the runs' PATH)
-    let once = |name: &str, body: &str| format!("#!/bin/sh\necho \"$*\" >> {}/{name}\n{body}\n", ran.display());
-    script(&bin.join("cargo"), &once("cargo", "echo before\nsleep 15\necho 0 errors\necho \"test result: ok. 1 passed; 0 failed\"\nexit 0"));
+    let release = base.join("release");
+    let once = |name: &str, body: &str| format!("#!/bin/sh\necho \"$*\" >> {}/{name}\necho before\nwhile [ ! -e \"{}\" ]; do sleep 0.02; done\n{body}\n", ran.display(), release.display());
+    script(&bin.join("cargo"), &once("cargo", "echo 0 errors\necho \"test result: ok. 1 passed; 0 failed\"\nexit 0"));
     script(&bin.join("git"), &format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo {main}; else echo {work}; fi\n"));
-    script(&bin.join("leg"), &once("leg", "echo before\nsleep 12\necho TESTLEG-OK\nexit 0"));
-    script(&bin.join("job"), &once("job", "echo before\nsleep 12\necho after\nexit 7"));
+    script(&bin.join("leg"), &once("leg", "echo TESTLEG-OK\nexit 0"));
+    script(&bin.join("job"), &once("job", "echo after\nexit 7"));
 
     let exe = std::env::current_exe().unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
@@ -183,7 +201,7 @@ fn a_master_restart_ends_nothing() {
         c
     };
     let mut roles = Roles(Vec::new());
-    roles.0.push(role("nodes", "orch::restart_tests::restart_role_nodes").env("PATH", &path).spawn().unwrap());
+    roles.0.push(role("nodes", "orch::restart_tests::restart_role_nodes").env("PATH", &path).env("XDG_RUNTIME_DIR", base.join("rt")).spawn().unwrap());
     let sock = base.join("n6.sock");
     let t = Instant::now();
     while !sock.exists() {
@@ -233,9 +251,14 @@ fn a_master_restart_ends_nothing() {
     // the master dies under all three, and comes back on its state
     let _ = master.kill();
     let _ = master.wait();
+    // gone long enough that the nodes miss its beats; readiness below, not elapsed time, releases the tools
     let down = Duration::from_secs(2);
     std::thread::sleep(down);
-    roles.0.push(role("master", "orch::restart_tests::restart_role_master").spawn().unwrap());
+    let ready = base.join("master.log");
+    roles.0.push(role("master", "orch::restart_tests::restart_role_master").stderr(std::fs::File::create(&ready).unwrap()).spawn().unwrap());
+    // only the new master writes this log, after restoring leases and starting every workflow
+    until("the restarted master ready", &|_| std::fs::read_to_string(&ready).unwrap_or_default().lines().any(|l| l == "restart master ready"));
+    std::fs::write(&release, "").unwrap();
 
     until("the job's result", &|s| job0(s).is_some_and(|j| !matches!(text(&j, "state").as_str(), "queued" | "leasing" | "running")));
     let s = state().unwrap();
@@ -245,7 +268,8 @@ fn a_master_restart_ends_nothing() {
     assert_eq!(log, "before\nafter\n", "the job's whole output, once");
 
     let verified = |s: &makepad_strict_json::Value| s.get("verify").and_then(|v| v.get("verified")).and_then(|v| v.as_arr()).is_some_and(|v| !v.is_empty());
-    until("the verdict", &|s| verified(s) || s.get("verify").and_then(|v| v.get("failing")).is_some_and(|f| !f.is_null()));
+    until("the verdict", &|s| (verified(s) || s.get("verify").and_then(|v| v.get("failing")).is_some_and(|f| !f.is_null()))
+        && s.get("ci").and_then(|c| c.get("runs")).and_then(|r| r.as_arr()).is_some_and(|r| !r.is_empty()));
     // and the legs' run, which nothing waits for
     until("the legs' end", &|s| s.get("jitlegs").and_then(|v| v.get("runs")).and_then(|r| r.as_arr()).and_then(|r| r.last()).is_some_and(|r| num(r, "ended_ms") > 0));
     let s = state().unwrap();

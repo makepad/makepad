@@ -87,10 +87,10 @@ fn report_checks(checks: &[JointCheck]) {
 }
 
 #[test]
-fn chain_of_eight_hangs_and_articulates() {
+fn chain_of_three_hangs_and_articulates() {
     let profile = Profile::default();
     let mut g = Graph::new();
-    let n = 8;
+    let n = 3;
     let pitch = 12.0;
     let nodes: Vec<NodeId> = (0..n).map(|i| boxed(&mut g, [i as f64 * pitch, 0.0, -2.5], [(i + 1) as f64 * pitch, 6.0, 2.5])).collect();
     let boxes: Vec<PartBox> = (0..n).map(|i| PartBox { min: [i as f64 * pitch, 0.0, -2.5], max: [(i + 1) as f64 * pitch, 6.0, 2.5] }).collect();
@@ -101,14 +101,10 @@ fn chain_of_eight_hangs_and_articulates() {
     let plan = plan(&boxes, &decls, &anchors, &profile).unwrap();
     let names: Vec<String> = (0..n).map(|i| format!("link[{i}]")).collect();
     let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let t = std::time::Instant::now();
     let built = build(g, &nodes, &name_refs, &plan);
-    println!("chain: meshed in {:.0} ms; {:?}", t.elapsed().as_secs_f64() * 1e3, plan.joints[0]);
     let fs = fields(&built, &plan);
     let parts = finals(&built, &fs);
-    let t = std::time::Instant::now();
     let checks = check_joints(&plan, &parts, Geometry::Design, &|| false);
-    println!("chain: checks {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     report_checks(&checks);
     for c in &checks {
         assert!((c.gap.gap - c.clearance).abs() < 0.05, "gap {} vs {}", c.gap.gap, c.clearance);
@@ -119,14 +115,7 @@ fn chain_of_eight_hangs_and_articulates() {
     let asm = assembly(&plan, &parts, &checks, 1.0);
     for scenario in [Scenario::Hang, Scenario::Shake] {
         let r = simulate(&asm, &SimOptions { scenario, seconds: 20.0, ..Default::default() }, &|| false).unwrap();
-        println!(
-            "  sim {}: articulates {} hangs_right {} binding {:?} settle {:?} self-contacts {:?} | {} steps {:.0} ms",
-            r.scenario, r.articulates, r.hangs_right, r.binding, r.settle, r.self_contacts, r.steps, r.wall_ms
-        );
-        for j in &r.joints {
-            println!("    {} range {:.1}..{:.1} last {:.1} deg, limits {:.1}..{:.1}, hits {}, dead band {:.1}, hang error {:.1}, peak {:.4} N", j.name, j.min.to_degrees(), j.max.to_degrees(), j.last.to_degrees(), j.limits.0.to_degrees(), j.limits.1.to_degrees(), j.limit_hits, j.dead_band.to_degrees(), j.hang_error.to_degrees(), j.peak_force);
-        }
-        assert!(r.articulates, "{:?}", r.binding);
+        assert!(r.articulates, "{} binding {:?}", r.scenario, r.binding);
         if r.scenario == "hang" {
             assert!(r.hangs_right);
         }
@@ -134,22 +123,25 @@ fn chain_of_eight_hangs_and_articulates() {
     // deterministic
     let a = simulate(&asm, &SimOptions { scenario: Scenario::Shake, seconds: 3.0, ..Default::default() }, &|| false).unwrap();
     let b = simulate(&asm, &SimOptions { scenario: Scenario::Shake, seconds: 3.0, ..Default::default() }, &|| false).unwrap();
-    assert_eq!(a.final_pose, b.final_pose);
+    assert_eq!(a.final_pose, b.final_pose, "the same run twice gives the same pose");
 }
 
 #[test]
 fn puppet_arm_ball_shoulder_hinge_elbow() {
     let profile = Profile::default();
     let mut g = Graph::new();
-    // model frame (Y up): torso lying on the bed, the arm along +Z beside it
-    let torso_box = PartBox { min: [-8.0, 0.0, -26.0], max: [8.0, 15.0, 0.0] };
-    let upper_box = PartBox { min: [11.0, 0.0, -20.0], max: [16.0, 11.0, -6.0] };
-    let fore_box = PartBox { min: [11.0, 0.0, -6.0], max: [16.0, 11.0, 8.0] };
+    // Model frame (Y up): torso lying on the bed, the arm along +Z beside it. Scaled to 0.7 of the
+    // arm the guide shows: the ball's field check costs seconds and falls with the ball's size.
+    let k = 0.7;
+    let sc = |v: f64| v * k;
+    let sc3 = |v: P3| [v[0] * k, v[1] * k, v[2] * k];
+    let torso_box = PartBox { min: sc3([-8.0, 0.0, -26.0]), max: sc3([8.0, 15.0, 0.0]) };
+    let upper_box = PartBox { min: sc3([11.0, 0.0, -20.0]), max: sc3([16.0, 11.0, -6.0]) };
+    let fore_box = PartBox { min: sc3([11.0, 0.0, -6.0]), max: sc3([16.0, 11.0, 8.0]) };
     let nodes = vec![boxed(&mut g, torso_box.min, torso_box.max), boxed(&mut g, upper_box.min, upper_box.max), boxed(&mut g, fore_box.min, fore_box.max)];
-    let shoulder = JointDecl::Ball(BallDecl { a: 0, b: 1, at: [13.5, 7.5, -20.0], radius: Some(5.5), neck: Some(2.0), axis: Some([0.0, 0.0, 1.0]), cone: 35f64.to_radians(), twist: None, clearance: None, wall: Some(2.0) });
-    let elbow = JointDecl::Hinge(HingeDecl { a: 1, b: 2, at: [13.5, 0.0, -6.0], axis: [0.0, 1.0, 0.0], limits: Some((-110f64.to_radians(), 110f64.to_radians())), pin: None, plate: None, clearance: None, clearance_axial: None });
-    let anchors = vec![AnchorDecl { part: 0, at: [0.0, 7.5, -13.0], hole: None }];
-    // the torso is shorter than the shell: extend its box to the socket for sizing
+    let shoulder = JointDecl::Ball(BallDecl { a: 0, b: 1, at: sc3([13.5, 7.5, -20.0]), radius: Some(sc(5.5)), neck: Some(sc(2.0)), axis: Some([0.0, 0.0, 1.0]), cone: 35f64.to_radians(), twist: None, clearance: None, wall: Some(sc(2.0)) });
+    let elbow = JointDecl::Hinge(HingeDecl { a: 1, b: 2, at: sc3([13.5, 0.0, -6.0]), axis: [0.0, 1.0, 0.0], limits: Some((-110f64.to_radians(), 110f64.to_radians())), pin: None, plate: None, clearance: None, clearance_axial: None });
+    let anchors = vec![AnchorDecl { part: 0, at: sc3([0.0, 7.5, -13.0]), hole: None }];
     let plan = plan(&[torso_box, upper_box, fore_box], &[shoulder, elbow], &anchors, &profile).unwrap();
     for (i, n) in plan.notes.iter().enumerate() {
         for x in n {

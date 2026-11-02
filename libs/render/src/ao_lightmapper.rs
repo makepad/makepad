@@ -1061,7 +1061,7 @@ pub(crate) fn bake_ao_inner(
         let results: Vec<(f32, f32)> = {
             let mut out = vec![(0.0f32, 0.0f32); queue.len()];
             let threads = pool
-                .map_or(1, |pool| pool.heavy_workers().saturating_add(1))
+                .map_or(1, |pool| pool.worker_count().saturating_add(1))
                 .min(queue.len().max(1));
             let queue = &queue;
             let tris = &tris;
@@ -1083,9 +1083,7 @@ pub(crate) fn bake_ao_inner(
                 }
             };
             match pool {
-                Some(pool) => pool.fan_out(
-                    makepad_draw::makepad_platform::thread::Lane::Heavy,
-                    threads,
+                Some(pool) => pool.fan_out(threads,
                     work,
                 ),
                 None => (0..threads).for_each(work),

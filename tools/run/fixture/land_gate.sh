@@ -12,7 +12,8 @@
 #   fast  : the JIT binary of the landed tree (kept or built here, 0 warnings), devhub's binary when changed,
 #           checks and warm presents of the affected set across the bucket's landings, plus affected JIT suites.
 #           GATE_PROVEN skips units whose inputs already passed.
-#   hot   : boot the directly touched apps on the hot Mac's warm JIT, then settle for 3 s.
+#   hot   : boot the directly touched apps and always Calculator (one small drawing app: a broken draw path
+#           fails every app) on a Linux node's warm JIT, then settle for 3 s.
 #   stage : build, makepad check makepad-stage, headless Stage present (commercial-only branches)
 # Every mode runs in place: a devhub rev lease runs in the node's ONE tree (its synced checkout, moved to the gated
 # commits: only changed files get new mtimes), with the node's one target, JIT binary and JIT cache, so it is warm.
@@ -67,6 +68,7 @@ step_checks() {
   for p in makepad-example-counter makepad-app-calculator makepad-platform makepad-draw makepad-widgets makepad-widgets-core; do check_pkg $p $p .; done
   step_check_stage
   cr=$(bash tools/run/fixture/check_reject.sh 2>&1); echo "$cr"; case "$cr" in *"check_reject: ok"*) ;; *) fail="$fail check-reject";; esac
+  lt=$(bash tools/run/fixture/lazy_typeck.sh 2>&1); echo "$lt"; case "$lt" in *"lazy_typeck: ok"*) ;; *) fail="$fail lazy-typeck";; esac
   ag=$(bash tools/run/fixture/agree.sh 2>&1); echo "$ag"; case "$ag" in *"agree: ok"*) ;; *) fail="$fail agree";; esac
 }
 step_check_stage() { check_pkg stage makepad-stage apps/commercial; }
@@ -84,6 +86,8 @@ present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh
   for i in $(seq 1 $(( ${PRESENT_WAIT:-120} * 2 ))); do
     grep -q present $s/report 2>/dev/null && break
     kill -0 $pid 2>/dev/null || break
+    # a JIT compile error or panic before the first frame fails the present now, not after the wait
+    [ -n "$(settle_errors "$s")" ] && break
     sleep 0.5
   done
   # the settle window: the first frame comes before the app's worker threads do their work (Fab's model thread
@@ -106,7 +110,7 @@ present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh
   wait $pid 2>/dev/null
   n=$(grep -cx present $s/report 2>/dev/null)
   echo "$name present: $n${settled:+ (settle: $settled)}"
-  [ "$n" = 1 ] || { fail="$fail $name-present"; echo "$name: no present within ${PRESENT_WAIT:-120} s; its last log lines:"; tail -30 "$s/out.log"; return 1; }
+  [ "$n" = 1 ] || { fail="$fail $name-present"; bad=$(settle_errors "$s"); echo "$name: no present ${bad:+(failed before its first frame: $bad)}${bad:-within ${PRESENT_WAIT:-120} s}; its last log lines:"; tail -30 "$s/out.log"; return 1; }
   [ -z "$settled" ] || { fail="$fail $name-settle"; echo "$name: failed in the settle window after its first frame; its last log lines:"; tail -30 "$s/out.log"; return 1; }
 }
 settle_errors() { # settle_errors <run dir>: the panics and JIT compile errors of a run (its log and its report), one line
@@ -238,6 +242,9 @@ step_jit() { # the JIT binary of this tree: the one this box built before from e
   if [ -x "${MAKEPAD_LOADER:-}" ]; then B=$MAKEPAD_LOADER; echo "jit: kept ${MAKEPAD_LOADER##*-}"; return 0; fi
   out=$(bash tools/run/fixture/loader_build.sh 2>&1) || { fail="$fail build"; echo "$out"; return 1; }
   echo "$out" | grep -v '^LOADER-OK'
+  # a new JIT binary starts on an empty JIT cache: its presents are cold, and six cold boots at once on a
+  # loaded box took over 60 s (Stage, Sandbox and Fab on a node, 11:27): a hang still fails, later
+  PRESENT_WAIT=240
 }
 step_devhub() { # devhub's own binary when the bucket diff touches it (0 warnings)
   grep -qx 'devhub yes' "$log/affected" || return 0
@@ -295,9 +302,6 @@ if [ "$mode" = hot ]; then
   export PRESENT_WARM=1 PRESENT_WAIT=60 SETTLE=3
   if HOT=1 timed step_affected; then
     grep '^present ' "$log/affected" > "$log/presents"
-    if [ ! -s "$log/presents" ]; then
-      echo "hot: no app touched"; echo "NODEGATE-OK hot"; exit 0
-    fi
     if timed step_jit; then timed step_qpresent; fi
   fi
   who="[lease ${DEVHUB_LEASE:-none} lane ${MAKEPAD_TEST_LANE:-none} at $(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown) in $PWD]"

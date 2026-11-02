@@ -111,6 +111,8 @@ pub struct PassSamples {
     pub buffer: Option<RcObjcId>,
     /// Samples reserved (backend thread only; atomic to share with handlers).
     used: AtomicUsize,
+    /// Compute encoders use two timestamps, including on stage-boundary devices.
+    simple: [AtomicBool; PASS_CLOCK_SAMPLES / PASS_CLOCK_STRIDE],
     /// per sample group: its four times in host seconds (`None`: not sampled)
     raw: OnceLock<Vec<[Option<f64>; 4]>>,
 }
@@ -118,8 +120,10 @@ pub struct PassSamples {
 impl PassSamples {
     pub fn new(clock: Arc<PassClock>) -> Option<Arc<PassSamples>> {
         let buffer = clock.take()?;
-        Some(Arc::new(PassSamples { clock, buffer: Some(buffer), used: AtomicUsize::new(0), raw: OnceLock::new() }))
+        Some(Arc::new(PassSamples { clock, buffer: Some(buffer), used: AtomicUsize::new(0), simple: std::array::from_fn(|_| AtomicBool::new(false)), raw: OnceLock::new() }))
     }
+
+    pub fn simple_encoder(&self, index: usize) { self.simple[index / PASS_CLOCK_STRIDE].store(true, Ordering::Release); }
 
     pub fn reserve(&self) -> Option<usize> {
         let at = self.used.load(Ordering::Relaxed);
@@ -149,6 +153,9 @@ impl PassSamples {
     /// `GPUStartTime`; `None` for a pass whose fragment stage left no time inside the buffer's span.
     pub fn span(&self, command_buffer: ObjcId, index: usize) -> Option<(f64, f64)> {
         let [v0, v1, f0, f1] = self.raw(command_buffer, index);
+        if self.simple[index / PASS_CLOCK_STRIDE].load(Ordering::Acquire) {
+            return v0.zip(v1).filter(|(a, b)| b >= a);
+        }
         if !self.clock.stage {
             // encoder samples: first and last
             return v0.zip(f1).filter(|(a, b)| b >= a);

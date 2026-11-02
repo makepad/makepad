@@ -58,7 +58,13 @@ pub enum Outcome {
     /// not merged this round for its lane's sake: the other half is held, conflicts or failed,
     /// or a job or live job of the lane runs; retried every round
     Waiting(String),
+    /// no commits, leases or jobs in [`DORMANT_MS`]: no merge attempts (said once); its commits not
+    /// in the tip
+    Dormant(u32),
 }
+
+/// A lane with no commits, leases or jobs for this long is dormant: the bot leaves it alone.
+pub const DORMANT_MS: u64 = 24 * 3_600_000;
 
 impl Outcome {
     pub fn word(&self) -> &'static str {
@@ -71,6 +77,7 @@ impl Outcome {
             Outcome::Held(_) => "held",
             Outcome::Failed(_) => "failed",
             Outcome::Waiting(_) => "waiting",
+            Outcome::Dormant(_) => "dormant",
         }
     }
 }
@@ -88,6 +95,8 @@ pub struct Lane {
     pub base: String,
     pub outcome: Outcome,
     pub at_ms: u64,
+    /// the lane's last commit (its own, not the bot's merges), lease or job: what dormancy counts from
+    pub active_ms: u64,
 }
 
 impl Lane {
@@ -99,7 +108,7 @@ impl Lane {
             _ => ("null".into(), String::new(), String::new()),
         };
         format!(
-            "{{\"branch\":{},\"repo\":{},\"worktree\":{},\"tip\":{},\"base\":{},\"result\":\"{}\",\"merge\":{merge},\"files\":[{files}],\"why\":{},\"at_ms\":{}}}",
+            "{{\"branch\":{},\"repo\":{},\"worktree\":{},\"tip\":{},\"base\":{},\"result\":\"{}\",\"merge\":{merge},\"files\":[{files}],\"why\":{},\"at_ms\":{},\"active_ms\":{},\"ahead\":{}}}",
             json_str(&self.branch),
             json_str(&self.repo),
             json_str(&self.worktree.display().to_string()),
@@ -107,7 +116,9 @@ impl Lane {
             json_str(&self.base),
             self.outcome.word(),
             json_str(&why),
-            self.at_ms
+            self.at_ms,
+            self.active_ms,
+            if let Outcome::Dormant(n) = self.outcome { n } else { 0 }
         )
     }
 
@@ -124,9 +135,10 @@ impl Lane {
             "held" => Outcome::Held(why),
             "failed" => Outcome::Failed(why),
             "waiting" => Outcome::Waiting(why),
+            "dormant" => Outcome::Dormant(v.get("ahead").and_then(|x| x.as_u64()).unwrap_or(0) as u32),
             _ => return None,
         };
-        Some(Lane { repo: s("repo"), branch: s("branch"), worktree: PathBuf::from(s("worktree")), tip: s("tip"), base: s("base"), outcome, at_ms: v.get("at_ms").and_then(|x| x.as_u64()).unwrap_or(0) })
+        Some(Lane { repo: s("repo"), branch: s("branch"), worktree: PathBuf::from(s("worktree")), tip: s("tip"), base: s("base"), outcome, at_ms: v.get("at_ms").and_then(|x| x.as_u64()).unwrap_or(0), active_ms: v.get("active_ms").and_then(|x| x.as_u64()).unwrap_or(0) })
     }
 
     /// The one-line event text for this result.
@@ -145,6 +157,7 @@ impl Lane {
             Outcome::Waiting(w) => (Sev::Info, format!("lanes: {} ({}) not merged with {tip_name} {b}: {w}; retried next round", self.branch, self.repo)),
             Outcome::Landed => (Sev::Info, format!("lanes: {} ({}) is in {tip_name}", self.branch, self.repo)),
             Outcome::UpToDate => (Sev::Info, format!("lanes: {} ({}) holds {tip_name} {b}", self.branch, self.repo)),
+            Outcome::Dormant(n) => (Sev::Info, format!("lanes: {} ({}) dormant: no commits, leases or jobs in {} h; {n} commit(s) not in {tip_name}: no merges until it is used again (`devhub lane dormant`)", self.branch, self.repo, DORMANT_MS / 3_600_000)),
         }
     }
 }
@@ -236,6 +249,22 @@ fn lane_busy(wt: &Path) -> Option<String> {
     None
 }
 
+/// When a lease or job of the lane (by name or worktree) was last asked or ended (0: none known).
+pub type Seen = Box<dyn Fn(&str, &Path) -> u64 + Send + Sync>;
+
+/// The master's leases (queued, live and recently ended) and jobs of the lane (0 outside a master).
+fn lane_seen(name: &str, wt: &Path) -> u64 {
+    #[cfg(feature = "checkout")]
+    if let Some(ctx) = crate::orch::ctx() {
+        let now = proto::wall_ms();
+        let at = |dir: &str| !dir.is_empty() && Path::new(dir).starts_with(wt);
+        let jobs = ctx.store.read(|d| d.jobs.iter().filter(|j| j.lane == name || at(&j.repo_dir)).map(|j| if j.done() { j.ended_ms.max(j.submitted_ms) } else { now }).max().unwrap_or(0));
+        return ctx.leases.lane_seen_ms(name, wt).max(jobs);
+    }
+    let _ = (name, wt);
+    0
+}
+
 pub struct Lanes {
     machine: String,
     home: PathBuf,
@@ -246,6 +275,7 @@ pub struct Lanes {
     held: Mutex<BTreeMap<String, String>>,
     wake: (Mutex<bool>, Condvar),
     busy: Busy,
+    seen: Seen,
 }
 
 impl Lanes {
@@ -256,7 +286,7 @@ impl Lanes {
             state.insert((l.repo.clone(), l.branch.clone()), l);
         }
         let held: BTreeMap<String, String> = held_list.into_iter().collect();
-        Arc::new(Lanes { machine: machine.into(), home, publish, env: Vec::new(), state: Mutex::new(state), held: Mutex::new(held), wake: (Mutex::new(false), Condvar::new()), busy: Box::new(lane_busy) })
+        Arc::new(Lanes { machine: machine.into(), home, publish, env: Vec::new(), state: Mutex::new(state), held: Mutex::new(held), wake: (Mutex::new(false), Condvar::new()), busy: Box::new(lane_busy), seen: Box::new(lane_seen) })
     }
 
     #[cfg(test)]
@@ -375,18 +405,29 @@ impl Lanes {
 
         let mut changed = Vec::new();
         let mut seen = Vec::new();
+        let mut active_moved = false;
+        let now = proto::wall_ms();
         for unit in units {
             let prevs: Vec<Option<Lane>> = unit.iter().map(|h| self.state.lock().unwrap().get(&h.key()).cloned()).collect();
-            let outcomes = self.pair(&unit, &prevs);
-            for ((h, prev), outcome) in unit.into_iter().zip(prevs).zip(outcomes) {
+            // the lane's last use: its own newest commit (looked up when its head moved), a lease or
+            // a job of it; a pair is as active as its busier half
+            let active: Vec<u64> = unit.iter().zip(&prevs).map(|(h, p)| {
+                let name = h.branch.strip_prefix("rc-").unwrap_or(&h.branch);
+                let known = p.as_ref().filter(|p| p.tip == h.head && p.active_ms > 0).map(|p| p.active_ms);
+                known.unwrap_or_else(|| self.own_commit_ms(h)).max(p.as_ref().map_or(0, |p| p.active_ms)).max((self.seen)(name, &h.wt))
+            }).collect();
+            let dormant = active.iter().max().is_some_and(|a| now.saturating_sub(*a) > DORMANT_MS);
+            let outcomes = self.pair(&unit, &prevs, dormant);
+            for (((h, prev), outcome), active_ms) in unit.into_iter().zip(prevs).zip(outcomes).zip(active) {
                 let key = h.key();
                 seen.push(key.clone());
                 let tip = match &outcome {
                     Outcome::Merged(c) => c.clone(),
                     _ => h.head.clone(),
                 };
-                let lane = Lane { repo: h.repo.into(), branch: h.branch, worktree: h.wt, tip, base: h.base, outcome, at_ms: proto::wall_ms() };
-                let same = prev.as_ref().is_some_and(|p| p.outcome == lane.outcome && (p.tip == lane.tip || matches!(lane.outcome, Outcome::Merged(_))) && (p.base == lane.base || matches!(lane.outcome, Outcome::Landed | Outcome::Held(_))));
+                let lane = Lane { repo: h.repo.into(), branch: h.branch, worktree: h.wt, tip, base: h.base, outcome, at_ms: now, active_ms };
+                // the same conflict against a newer tip, or a dormant lane, is said once
+                let same = prev.as_ref().is_some_and(|p| p.outcome == lane.outcome && (p.tip == lane.tip || matches!(lane.outcome, Outcome::Merged(_))) && (p.base == lane.base || matches!(lane.outcome, Outcome::Landed | Outcome::Held(_) | Outcome::Conflict(_) | Outcome::Dormant(_))));
                 if !same {
                     let (sev, line) = lane.event();
                     // a lane that just caught up after the bot's own merge says nothing new
@@ -399,16 +440,31 @@ impl Lanes {
                 } else if let Some(p) = self.state.lock().unwrap().get_mut(&key) {
                     p.tip = lane.tip;
                     p.base = lane.base;
+                    // saved when it moved by an hour (it only needs to outlive a master restart)
+                    active_moved |= lane.active_ms > p.active_ms + 3_600_000;
+                    p.active_ms = lane.active_ms;
                 }
             }
         }
         // lanes whose worktree went away
         let before = self.state.lock().unwrap().len();
         self.state.lock().unwrap().retain(|k, _| seen.contains(k));
-        if !changed.is_empty() || before != self.state.lock().unwrap().len() {
+        if !changed.is_empty() || active_moved || before != self.state.lock().unwrap().len() {
             self.save();
         }
         Ok(changed)
+    }
+
+    /// The newest commit of the half's own (not in its tip, not a merge) as wall ms; 0: none.
+    fn own_commit_ms(&self, h: &Half) -> u64 {
+        let (ok, out, _) = git(&h.dir, &self.env, &["log", "-1", "--no-merges", "--format=%ct", &format!("{}..{}", h.base, h.head)]);
+        if ok { out.trim().parse::<u64>().map_or(0, |s| s * 1000) } else { 0 }
+    }
+
+    /// Its commits not in the tip (merges left out).
+    fn ahead(&self, h: &Half) -> u32 {
+        let (ok, out, _) = git(&h.dir, &self.env, &["rev-list", "--count", "--no-merges", &format!("{}..{}", h.base, h.head)]);
+        if ok { out.trim().parse().unwrap_or(0) } else { 0 }
     }
 
     /// One lane's halves, merged in one step or not at all: work into the makepad half and main
@@ -416,8 +472,17 @@ impl Lanes {
     /// build). Nothing is merged while either worktree has uncommitted tracked changes or an
     /// operation in progress, while a job or live job of the lane runs, or when either half is
     /// held, conflicts or fails: the half that would have merged says why.
-    fn pair(&self, unit: &[Half], prevs: &[Option<Lane>]) -> Vec<Outcome> {
+    fn pair(&self, unit: &[Half], prevs: &[Option<Lane>], dormant: bool) -> Vec<Outcome> {
         let mut out: Vec<Option<Outcome>> = unit.iter().zip(prevs).map(|(h, p)| self.settled(h, p.as_ref())).collect();
+        // a dormant lane is left alone (landed or held halves say so): no merge attempt, its count
+        // kept while its head stays
+        if dormant {
+            return unit.iter().zip(prevs).zip(out).map(|((h, p), o)| match (o, p) {
+                (Some(o @ (Outcome::Landed | Outcome::Held(_))), _) => o,
+                (_, Some(Lane { outcome: Outcome::Dormant(n), tip, .. })) if *tip == h.head => Outcome::Dormant(*n),
+                _ => Outcome::Dormant(self.ahead(h)),
+            }).collect();
+        }
         // a lane is landed only when both halves are: a half with nothing of its own (in its tip)
         // still follows the tip while its other half holds unlanded work, so the pair stays one
         // build (stagedmx: its makepad half was called landed and never got work again)
@@ -485,7 +550,9 @@ impl Lanes {
                 if moved.0 { git(&h.wt, &self.env, &["update-ref", "HEAD", c, &h.head]) } else { moved }
             };
             if !ok {
-                let why = format!("fast-forward to the merge: {}", first_err(&err));
+                // the lane committed while the merge was computed: the next round merges its new head
+                let raced = git(&h.wt, &self.env, &["rev-parse", "HEAD"]).1.trim() != h.head;
+                let why = if raced { "the lane committed meanwhile".to_string() } else { format!("fast-forward to the merge: {}", first_err(&err)) };
                 for j in &moved {
                     let b = &unit[*j];
                     // only the bot's own merge is taken back (`--keep`: never over a change)
@@ -494,7 +561,7 @@ impl Lanes {
                         out[*j] = Some(Outcome::Failed(format!("taking its merge back after the {} half refused: {}", h.repo, first_err(&e))));
                     }
                 }
-                out[*i] = Some(Outcome::Failed(why));
+                out[*i] = Some(if raced { Outcome::Waiting(why) } else { Outcome::Failed(why) });
                 for (j, _) in &merges {
                     if out[*j].is_none() {
                         out[*j] = Some(Outcome::Waiting(format!("its {} half could not move: the pair merges together", h.repo)));
@@ -612,6 +679,7 @@ impl Lanes {
                     }
                 }
             }
+            ("dormant", None, None) => out.extend(self.list().iter().filter(|l| matches!(l.outcome, Outcome::Dormant(_))).map(|l| l.to_json())),
             ("held", None, None) => out.extend(self.held().iter().map(|(b, w)| format!("{{\"held\":{},\"why\":{}}}", json_str(b), json_str(w)))),
             ("hold", Some(b), why) => match self.hold(b, why.unwrap_or("")) {
                 Ok(()) => out.push(format!("{{\"held\":{}}}", json_str(b))),
@@ -625,7 +693,7 @@ impl Lanes {
                 self.poke();
                 out.push("{\"poked\":true}".into());
             }
-            _ => out.push(err("lanes [list] | held | hold <branch> [why] | unhold <branch> | now")),
+            _ => out.push(err("lanes [list] | dormant | held | hold <branch> [why] | unhold <branch> | now")),
         }
     }
 
@@ -678,6 +746,7 @@ pub fn row(lane: &Lane) -> (&'static str, String) {
         Outcome::Failed(w) => ("err", format!("failed: {w}")),
         Outcome::Landed => ("info", format!("in {tip_name}")),
         Outcome::UpToDate => ("info", format!("holds {tip_name} {base}")),
+        Outcome::Dormant(n) => ("info", format!("dormant: {n} commit(s) not in {tip_name}, untouched {} d", proto::wall_ms().saturating_sub(lane.active_ms) / 86_400_000)),
     };
     let ago = proto::wall_ms().saturating_sub(lane.at_ms) / 60_000;
     (sev, format!("{:<28} {:<10} {}  {:<10} {detail}  ({ago} min ago)", lane.branch, lane.repo, &lane.tip[..lane.tip.len().min(10)], lane.outcome.word()))
@@ -961,10 +1030,45 @@ mod tests {
         // not retried (nor re-announced) until the branch or the tip moves
         assert!(bot.pass(&f.w()).unwrap().is_empty());
         assert_eq!(f.events.lock().unwrap().len(), ev.len());
+        // the same conflict against a newer tip is not said again
+        f.write(&f.repo, "b.txt", "landed\n");
+        f.commit(&f.repo, "unrelated landing");
+        bot.pass(&f.w()).unwrap();
+        assert_eq!(f.result(&bot, "rc-c"), Outcome::Conflict(vec!["a.txt".into()]));
+        assert_eq!(f.events.lock().unwrap().len(), ev.len());
         // the lane resolves by hand: its merge holds work, the bot sees it up to date
         f.g(&wt, &["merge", "-q", "work", "-X", "ours", "-m", "resolve"]);
         bot.pass(&f.w()).unwrap();
         assert_eq!(f.result(&bot, "rc-c"), Outcome::UpToDate);
+    }
+
+    #[test]
+    fn a_dormant_lane_is_left_alone_until_used_again() {
+        let f = Fix::new("dormant");
+        let wt = f.lane("z");
+        f.write(&wt, "lane.txt", "lane\n");
+        let old = (proto::wall_ms() / 1000 - 3 * 86_400).to_string();
+        let mut aged = f.env.clone();
+        aged.extend([("GIT_COMMITTER_DATE".to_string(), format!("@{old} +0000")), ("GIT_AUTHOR_DATE".to_string(), format!("@{old} +0000"))]);
+        git(&wt, &aged, &["add", "-A"]);
+        git(&wt, &aged, &["commit", "-q", "-m", "old lane work"]);
+        let head = f.g(&wt, &["rev-parse", "HEAD"]);
+        f.write(&f.repo, "b.txt", "landed\n");
+        f.commit(&f.repo, "landed");
+        let bot = f.bot();
+        bot.pass(&f.w()).unwrap();
+        assert_eq!(f.result(&bot, "rc-z"), Outcome::Dormant(1));
+        assert_eq!(f.g(&wt, &["rev-parse", "HEAD"]), head, "no merge into a dormant lane");
+        let n = f.events.lock().unwrap().len();
+        f.write(&f.repo, "c.txt", "again\n");
+        f.commit(&f.repo, "another landing");
+        bot.pass(&f.w()).unwrap();
+        assert_eq!(f.events.lock().unwrap().len(), n, "said once");
+        // a fresh commit wakes it: merged at once
+        f.write(&wt, "lane2.txt", "back\n");
+        f.commit(&wt, "back at it");
+        bot.pass(&f.w()).unwrap();
+        assert!(matches!(f.result(&bot, "rc-z"), Outcome::Merged(_)), "{:?}", bot.list());
     }
 
     #[test]

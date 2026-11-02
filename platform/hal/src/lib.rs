@@ -56,6 +56,7 @@ pub use backend::linux::wm::native as hosted_native;
 #[cfg(target_os = "linux")]
 pub use backend::linux::wm::{prepare_exec as wm_prepare_exec, undo_exec as wm_undo_exec};
 pub mod cmds;
+pub mod compute;
 pub mod codec;
 pub mod events;
 pub mod font;
@@ -109,6 +110,22 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
 pub use session::{AppCaption, CAPTION_BADGE_ROOM, CloseAs, DomainLaunch, ExecRecord};
+
+/// The loader's reader of the files its run serves from virtual folders (an overlay lease's
+/// sources, a git run): the program names such a file, but there is none on disk. None: the
+/// path is not virtual.
+pub type VirtualRead = fn(&str) -> Option<std::io::Result<Vec<u8>>>;
+static VIRTUAL_READ: OnceLock<VirtualRead> = OnceLock::new();
+
+/// Set once, by the loader, before a session opens fonts or loads an automation script.
+pub fn set_virtual_reader(read: VirtualRead) {
+    let _ = VIRTUAL_READ.set(read);
+}
+
+/// A file the run serves from a virtual folder; None: it is on disk.
+pub(crate) fn read_virtual(path: &str) -> Option<std::io::Result<Vec<u8>>> {
+    VIRTUAL_READ.get().and_then(|read| read(path))
+}
 
 /// What the relax host provides so a privileged session can start, stop and relaunch apps
 /// (`DomainStart` / `DomainStop` / `DomainRelaunch`): host-native code, registered with
@@ -456,7 +473,11 @@ impl Hal {
                         None
                     }
                 },
-                backend_id::HEADLESS => Some(Box::new(Headless)),
+                backend_id::HEADLESS => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    { *backend::shell::snapshot() = backend::shell::Snapshot::new("headless", "headless backend requested".into()); }
+                    Some(Box::new(Headless))
+                },
                 #[cfg(target_vendor = "apple")]
                 backend_id::METAL => backend::apple::Metal::new(req.flags, sessions.clone(), notify.clone()).map(|m| Box::new(m) as Box<dyn Backend>),
                 #[cfg(windows)]
@@ -486,6 +507,18 @@ impl Hal {
             None if st.exited => return refused,
             None => match make(req.backend) {
                 Some(b) => {
+                    // Linux names its shell in `connect`; offscreen (hidden) windows have no shell.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if b.info().backend != backend_id::HEADLESS {
+                        let offscreen = req.flags & open_flags::OFFSCREEN_WINDOWS != 0;
+                        if offscreen || !cfg!(target_os = "linux") {
+                            *backend::shell::snapshot() = if offscreen {
+                                backend::shell::Snapshot::new("offscreen", "hidden windows: no shell or WM".into())
+                            } else {
+                                backend::shell::Snapshot::new(std::env::consts::OS, String::new())
+                            };
+                        }
+                    }
                     st.backend = Some((b.info().backend, b));
                     st.backend_inits += 1;
                     // a remote headset slot's XR window events wake the pumps like the backend's

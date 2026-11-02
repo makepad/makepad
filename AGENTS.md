@@ -86,16 +86,22 @@ in [Change reports](docs/agents/change-report.md); the steps:
   register it with `makepad devhub lane adopt` before building.
 - Build, test and land through devhub (`devhub run`, leases, `devhub land`), not
   ad-hoc scripts on nodes.
-- THE way to check a change is
-  `makepad devhub test <lane> <pkg> [--lib|--test T] --live [-- filter]`
-  (a warm JIT test process per lane on a hot box: an edit is patched in and
-  only the tests it reaches rerun; seconds). `--native` (`cargo test --release`)
-  only for full sweeps, perf/bench tests and explicit native checks.
-  App edit loops: `makepad devhub live start <app>`, then
-  `live wait <id> patched` and `live act <id> grab`.
+- Iterate and check under the JIT, never by native rebuilds:
+  - UI: `makepad devhub live start <app> --visible`, then after each save
+    `makepad devhub live look <id>` (patched, a frame, a PNG in `local/screencap/<lane>/`).
+  - Tests: `makepad devhub test <lane> <pkg> [--lib|--test T] --live [-- filter]`; the
+    pre-land check is the same without `--live`.
+  - devhub refuses a lane's native cargo build/run/test. It runs only for the JIT's own
+    crates, an open JIT miss, a platform without a JIT, a test devhub's measured routing
+    sends to cargo, or `--native "<reason>"` (native-vs-JIT baselines, timed perf series).
   A `JIT error, not your change` answer is not the lane's bug: carry on.
 - Pass `--cost small|medium|large` or `--est-min N` to run/job/lease so small jobs
   go to the hot boxes; devhub corrects bad guesses from measured times.
+- Apps run and are checked on Linux nodes (screen and live leases, grabs, app tests,
+  benchmarks and JIT cold starts included). Add `--needs os=macos` only for
+  macOS/Metal-specific work and macOS-specific timings: nothing else lands on a Mac, and a
+  lease naming a Mac without it is refused. The Macs are scarce: one batched bench lease
+  per lane, all its cases in one run.
 - The merge bot keeps each lane merged with the tip, in the lane's own worktree. It waits
   while a job or live job runs there, and while a `timed` lease of the lane is queued, live,
   or ended in the last 15 minutes. A timed or bench series with longer gaps between runs, or
@@ -174,6 +180,14 @@ it used (this one and any build or bench node):
   implementation, duplicates another, pins timings or unchecked golden output,
   or needs external tools (Node.js, clang, network, credentials, model
   downloads). No `#[ignore]`d or never-run tests.
+- Tests are as fast as is meaningfully useful: the smallest input that proves
+  the property; unit tests well under 1 s, scenario/app tests a few seconds;
+  no multi-minute tests; slow product code is a perf bug, not a reason for a
+  slow test. Every test runs thousands of times (every lane, every land, CI),
+  so each one must be worth its cost: delete redundant or implementation-pinning
+  tests; keep the ones that guard real behaviour or past bugs. Prefer one test
+  that sets up once and checks several properties (each assertion saying which
+  property broke) over several tests that rebuild the same setup.
 - The source hierarchy is `local` → `work` → `main`: `local` records every
   build iteration, `work` carries day-to-day landings, and `main` holds validated
   milestones, one squashed commit per logical block, and incoming external PRs.
@@ -188,8 +202,8 @@ it used (this one and any build or bench node):
   changes without discarding unrelated work.
 - For Studio-managed flow builds, use this order: platform build checks,
   rustfmt on changed Rust, repeat checks if formatting changed the source,
-  commit the exact eligible source to `local`, release binary build, existing
-  native tests, then launch. Record the checkpoint hash with the binary and
+  commit the exact eligible source to `local`, release binary build, its tests
+  under the JIT (`devhub test`), then launch. Record the checkpoint hash with the binary and
   its evidence. Reuse bounded worktrees; never create one per build.
 - Agents may code, check, and build the next revision while its previous app
   is running. When the replacement is ready, gracefully close and restart
@@ -199,8 +213,8 @@ it used (this one and any build or bench node):
   is not a reason to defer a build, ask for permission, or require the user
   to close it.
 - A validated revision requires `cargo check` for its supported platforms with
-  zero warnings/errors, the existing native tests on the current host, and a
-  release build/runtime check when applicable. Use the repository's actual
+  zero warnings/errors, its tests under the JIT (`devhub test`), and a runtime
+  check under the JIT (`devhub live start` + `live look`) when applicable. Use the repository's actual
   package/target support matrix. Missing SDKs, runners, or required tests are
   blocked coverage, not passes. Do not suppress warnings to obtain a green gate.
 - Validate the exact resulting source for each feature/milestone promotion so
@@ -218,9 +232,9 @@ it used (this one and any build or bench node):
 
 - Use release builds for runtime validation, profiling, benchmarks, and
   timing checks unless the user explicitly requests debug.
-- Build with `cargo build --release -p <package>` from the package's owning
-  workspace, then launch the resulting standalone executable from this
-  checkout. Check the target directory and resource working directory;
+- Native builds (`cargo build --release -p <package>` from the package's owning
+  workspace, then the standalone executable) only where the JIT-first rule above
+  allows them. Check the target directory and resource working directory;
   some apps have their own workspace.
 - Build profiles live in the root `Cargo.toml`: dev keeps line tables only,
   release is incremental without LTO. cargo-makepad's packaging commands

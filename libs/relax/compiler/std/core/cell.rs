@@ -500,6 +500,15 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
             None => Err(orig),
         }
     }
+    pub fn map_split<U: ?Sized, V: ?Sized, F: FnOnce(&mut T) -> (&mut U, &mut V)>(orig: RefMut<'b, T>, f: F) -> (RefMut<'b, U>, RefMut<'b, V>) {
+        let value: *mut T = &mut *orig.value;
+        let borrow = orig.borrow;
+        crate::mem::forget(orig);
+        let (a, b) = f(unsafe { &mut *value });
+        // a second writer of the cell (rustc's BorrowRefMut::clone): each guard's drop gives one back
+        borrow.set(borrow.get() - 1);
+        (RefMut { value: a, borrow }, RefMut { value: b, borrow })
+    }
 }
 
 impl<'b, T: ?Sized + fmt::Display> fmt::Display for RefMut<'b, T> {

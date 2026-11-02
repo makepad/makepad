@@ -10,9 +10,9 @@
 //! let pool = cx.task_pool();
 //! let (p1, p2) = (pool.clone(), pool.clone());
 //! let exec = FnExecutor::new(
-//!     pool.heavy_workers(),
-//!     move |task| p1.submit_internal(Lane::Heavy, move || task()).is_ok(),
-//!     move |n, f| p2.fan_out(Lane::Heavy, n, |w| f(w)),
+//!     pool.worker_count(),
+//!     move |task| p1.submit_internal(Class::Background, move || task()).is_ok(),
+//!     move |n, f| p2.fan_out(n, |w| f(w)),
 //! );
 //! let sched = Scheduler::new(Arc::new(exec), SchedulerConfig::default());
 //! ```

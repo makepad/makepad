@@ -1882,7 +1882,7 @@ impl App {
     fn read_package(&mut self, cx: &mut Cx, dir: std::path::PathBuf) {
         let generation = self.package_generation;
         match cx.task_pool().submit(
-            makepad_widgets::makepad_platform::thread::Lane::Heavy,
+            makepad_widgets::makepad_platform::thread::Class::Background,
             move || open_package_dir(&dir),
         ) {
             Ok(task) => self.package_task = Some((generation, task)),
@@ -1954,7 +1954,7 @@ impl App {
             || (self.selected.as_deref() == Some(open.name.as_str()) && !self.pending_params.is_empty())
     }
 
-    /// One session-owned reload, with one read or save in flight. Lane
+    /// One session-owned reload, with one read or save in flight. Class
     /// refusals wait for room; actual I/O failures cancel the intent.
     fn continue_package_reload(&mut self, cx: &mut Cx) {
         if self.package_writes_waiting() { return }
@@ -7115,7 +7115,7 @@ impl App {
                 let path = path.clone();
                 let bytes = value.bytes;
                 match cx.task_pool().submit(
-                    makepad_widgets::makepad_platform::thread::Lane::Light,
+                    makepad_widgets::makepad_platform::thread::Class::Visible,
                     move || {
                         std::fs::write(&path, bytes.as_ref())
                             .map(|_| path)

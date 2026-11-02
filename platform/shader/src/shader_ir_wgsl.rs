@@ -27,6 +27,9 @@ pub struct WgslDrawShaderSource {
 }
 
 pub fn draw_wgsl(output: &ShaderOutput, types: &impl ShaderTypes, xr: bool) -> Result<(String, IrDrawInfo), String> {
+    if output.ir.globals.iter().any(|g| matches!(g.kind, IrGlobalKind::Io(IrIo::Storage(_)))) {
+        return Err("storage buffers in draw shaders need Metal, Vulkan or D3D11".into());
+    }
     let mut ir = output.ir.clone();
     crate::shader_ir_precise::lower_precise(&mut ir, true);
     let info = build_draw_entries(output, &mut ir, types, xr);

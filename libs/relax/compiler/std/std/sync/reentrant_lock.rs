@@ -6,6 +6,7 @@ use core::ops::Deref;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::Relaxed;
 
+use super::held_lock::HeldLock;
 use super::raw::RawMutex;
 
 pub struct ReentrantLock<T: ?Sized> {
@@ -20,7 +21,10 @@ unsafe impl<T: Send> Sync for ReentrantLock<T> {}
 
 pub struct ReentrantLockGuard<'a, T: ?Sized + 'a> {
     lock: &'a ReentrantLock<T>,
+    _held: HeldLock,
 }
+
+impl<T: ?Sized> !Send for ReentrantLockGuard<'_, T> {}
 
 fn current_thread() -> usize {
     crate::sys::current_thread()
@@ -31,6 +35,7 @@ impl<T> ReentrantLock<T> {
         ReentrantLock { mutex: RawMutex::new(), owner: AtomicUsize::new(0), lock_count: UnsafeCell::new(0), data: t }
     }
 
+    #[track_caller]
     pub fn lock(&self) -> ReentrantLockGuard<'_, T> {
         let this_thread = current_thread();
         unsafe {
@@ -42,19 +47,20 @@ impl<T> ReentrantLock<T> {
                 *self.lock_count.get() = 1;
             }
         }
-        ReentrantLockGuard { lock: self }
+        ReentrantLockGuard { lock: self, _held: HeldLock::new() }
     }
 
+    #[track_caller]
     pub fn try_lock(&self) -> Option<ReentrantLockGuard<'_, T>> {
         let this_thread = current_thread();
         unsafe {
             if self.owner.load(Relaxed) == this_thread {
                 self.increment_lock_count();
-                Some(ReentrantLockGuard { lock: self })
+                Some(ReentrantLockGuard { lock: self, _held: HeldLock::new() })
             } else if self.mutex.try_lock() {
                 self.owner.store(this_thread, Relaxed);
                 *self.lock_count.get() = 1;
-                Some(ReentrantLockGuard { lock: self })
+                Some(ReentrantLockGuard { lock: self, _held: HeldLock::new() })
             } else {
                 None
             }

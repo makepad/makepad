@@ -1,42 +1,10 @@
-//! JIT placement hints and fleet build counts. Binaries stay on their own boxes.
+//! Fleet JIT build counts; the master computes placement hints with loaders::commit_ids.
 
 use super::sched::NodeView;
 use makepad_strict_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::path::Path;
-
-/// Cheap content hint from a box's reported compiler and .inputs list. Dirty inputs have no hint.
-pub fn head_id(root: &Path, nodes: &[NodeView]) -> Option<String> {
-    let store = nodes.iter().filter_map(|n| n.caps.as_ref()?.jit_store.as_ref()).find(|s| !s.inputs.is_empty() && !s.compiler.is_empty())?;
-    let inputs: Vec<&str> = store.inputs.iter().map(String::as_str).collect();
-    if inputs.iter().any(|p| p.is_empty() || Path::new(p).components().any(|c| !matches!(c, std::path::Component::Normal(_)))) { return None; }
-    let run = |args: &[&str], paths: &[&str]| makepad_remote::group::command("git").arg("-C").arg(root).arg("--literal-pathspecs").args(args).args(paths).stdin(std::process::Stdio::null()).output().ok();
-    // The index names HEAD's blobs only while these inputs have no staged or unstaged edits.
-    // Bound argv just like the monitor: a JIT can have thousands of input paths.
-    let mut listing = String::new();
-    for paths in inputs.chunks(500) {
-        if !run(&["diff", "--quiet", "HEAD", "--"], paths)?.status.success() { return None; }
-        let out = run(&["ls-files", "-s", "-z", "--"], paths)?;
-        if !out.status.success() { return None; }
-        listing.push_str(&String::from_utf8(out.stdout).ok()?);
-    }
-    let blobs: HashMap<&str, &str> = listing.split('\0').filter_map(|e| {
-        let (meta, path) = e.split_once('\t')?;
-        let mut words = meta.split_whitespace();
-        words.next()?;
-        let blob = words.next()?;
-        (words.next()? == "0").then_some((path, blob))
-    }).collect();
-    let mut text = store.compiler.clone();
-    for p in inputs {
-        text.push('\n');
-        text.push_str(p);
-        text.push(' ');
-        text.push_str(blobs.get(p)?);
-    }
-    Some(makepad_network::digest::sha256_hash(text.as_bytes())[..12].iter().map(|b| format!("{b:02x}")).collect())
-}
 
 #[derive(Default)]
 struct Tally { n: u64, secs: f64 }

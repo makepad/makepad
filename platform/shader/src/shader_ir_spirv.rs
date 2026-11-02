@@ -28,7 +28,10 @@ pub fn ir_to_spirv(m: &IrModule, entry: FuncId, xr: bool) -> Result<Vec<u32>, St
         Some(e) => e.stage,
         None => return Err("not an entry point".to_string()),
     };
-    let compute = if stage == IrStage::Compute { Some(compute_layout(m)?) } else { None };
+    let compute = if stage == IrStage::Compute { Some(compute_layout(m)?) }
+        else if m.globals.iter().any(|g| matches!(g.kind, IrGlobalKind::Io(IrIo::Storage(_)))) {
+            Some(crate::shader_ir_compute::draw_storage_layout(m, crate::shader_ir_compute::ComputeTarget::Spirv)?)
+        } else { None };
     let cooperative = m.reachable(entry).iter().any(|fi| {
         let f = &m.functions[*fi as usize];
         let matrix = |ty| matches!(m.get(ty), IrTy::CooperativeMatrix(_));
@@ -445,6 +448,9 @@ impl<'a> Gen<'a> {
     // ---- globals ----
 
     fn global_sc(&self, g: GlobalId) -> u32 {
+        if matches!(self.m.globals[g as usize].kind, IrGlobalKind::Io(IrIo::Storage(_))) {
+            return SC_PHYSICAL_STORAGE_BUFFER;
+        }
         if self.stage == IrStage::Compute {
             match self.m.globals[g as usize].kind {
                 IrGlobalKind::Io(IrIo::Storage(_)) => return SC_PHYSICAL_STORAGE_BUFFER,
@@ -1067,6 +1073,27 @@ impl<'a> Gen<'a> {
             return err("a missing value (an earlier shader error)");
         }
         let ty = self.ety(e);
+        if let ExprKind::Global(g) = self.func().exprs[e as usize].kind.clone() {
+            if let IrGlobalKind::StorageTexture(format) = self.m.globals[g as usize].kind {
+                let scalar = self.scalar(format.scalar());
+                let image = self.b.type_storage_image(scalar, format.spirv_format());
+                let var = if self.global_ids[g as usize] != 0 { self.global_ids[g as usize] } else {
+                    // StorageImageExtendedFormats includes the narrow single-channel formats.
+                    if matches!(format, crate::shader_ir_compute::StorageTextureFormat::R16f | crate::shader_ir_compute::StorageTextureFormat::R8unorm) {
+                        self.b.capability(CAP_STORAGE_IMAGE_EXTENDED_FORMATS);
+                    }
+                    let p = self.b.type_pointer(SC_UNIFORM_CONSTANT, image);
+                    let var = self.b.global_variable(p, SC_UNIFORM_CONSTANT, 0);
+                    let index = self.m.globals[..g as usize].iter().filter(|g| matches!(g.kind, IrGlobalKind::StorageTexture(_))).count() as u32;
+                    self.b.decorate(var, DECO_DESCRIPTOR_SET, &[0]);
+                    self.b.decorate(var, DECO_BINDING, &[index]);
+                    self.b.decorate(var, DECO_NON_READABLE, &[]);
+                    self.global_ids[g as usize] = var;
+                    var
+                };
+                return Ok(self.ins_id(OP_LOAD, image, &[var]));
+            }
+        }
         if self.is_place(e) {
             let p = self.place(e)?;
             return Ok(self.load(p));
@@ -1723,6 +1750,15 @@ impl<'a> Gen<'a> {
                 let scope = self.b.const_u32(SCOPE_WORKGROUP);
                 let sem = self.b.const_u32(SEMANTICS_ACQUIRE_RELEASE | SEMANTICS_WORKGROUP_MEMORY);
                 self.emit(OP_CONTROL_BARRIER, &[scope, scope, sem]);
+                0
+            }
+            Builtin::StorageTextureWrite => {
+                let image = self.value(args[0])?;
+                let coord = self.value(args[1])?;
+                let value = self.value(args[2])?;
+                let scalar = self.m.scalar_of(self.ety(args[2])).unwrap();
+                let value = if self.m.lanes(self.ety(args[2])) <= 1 { self.splat(scalar, 4, value) } else { value };
+                self.emit(OP_IMAGE_WRITE, &[image, coord, value]);
                 0
             }
             Builtin::SubgroupAdd | Builtin::SubgroupMin | Builtin::SubgroupMax => {

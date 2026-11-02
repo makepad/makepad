@@ -11,6 +11,7 @@ pub(crate) mod dcomp;
 pub(crate) mod device;
 mod frame;
 mod pipeline;
+mod compute;
 mod readback;
 pub(crate) mod resources;
 pub mod share_copy;
@@ -55,6 +56,7 @@ pub struct D3d11 {
     tex: HashMap<(u32, u32), Tex>,
     buf: HashMap<(u32, u32), Buf>,
     pipe: HashMap<(u32, u32), Pipe>,
+    compute: HashMap<(u32, u32), compute::Pipe>,
     /// compiled pipelines shared by identical sources and layouts (by `PipeSrc::hash_key`)
     programs: HashMap<u64, Vec<Weak<PipeState>>>,
     /// windows' retained images, by (owner, index)
@@ -129,7 +131,10 @@ impl D3d11 {
             msaa: 1,
             dpi: shell.map_or_else(win32::system_dpi, |s| s.dpi()),
             // offscreen too: a badge layer is composed into the retained image's copy either way
-            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES,
+            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES | info_flags::COMPUTE | info_flags::DRAW_STORAGE_BUFFERS,
+            max_workgroup_size: [1024, 1024, 64],
+            max_workgroup_invocations: 1024,
+            storage_formats: (0..format::COUNT).filter(|f| device::dxgi(*f).is_some_and(|fmt| unsafe { dev.device.CheckFormatSupport(fmt.resource) }.unwrap_or(0) & 0x02000000 != 0)).fold(0, |bits, f| bits | (1u64 << f)),
             max_texture: 16384,
             max_window: [16384, 16384],
             max_buffer: (u32::MAX as u64) & !15,
@@ -168,6 +173,7 @@ impl D3d11 {
             tex: HashMap::new(),
             buf: HashMap::new(),
             pipe: HashMap::new(),
+            compute: HashMap::new(),
             programs: HashMap::new(),
             win: HashMap::new(),
             badged: HashMap::new(),
@@ -213,7 +219,7 @@ impl D3d11 {
             if win32::log_enabled() {
                 eprintln!("[hal-d3d11] compiling `{}` ({} bytes of HLSL)", src.name, src.code.source.len());
             }
-            let program = pipeline::build(&dev, &src.code, src.desc, src.bindings.clone(), src.layout.clone(), &src.name);
+            let program = pipeline::build(&dev, &src.code, src.desc, src.bindings.clone(), src.layout.clone(), src.storage.clone(), &src.name);
             if win32::log_enabled() || t0.elapsed() > std::time::Duration::from_secs(2) {
                 eprintln!("[hal-d3d11] compiled `{}` in {:.0} ms", src.name, t0.elapsed().as_secs_f64() * 1e3);
             }
@@ -327,6 +333,7 @@ impl D3d11 {
                 world.to_session(*sid, |q| q.pipeline_ready(id));
             }
         }
+        self.announce_compute(world);
         let allocated = self.dev.allocated.load(Ordering::Relaxed);
         if let Some(host) = world.session_mut(HOST) {
             for ((sid, index), t) in &self.win {
@@ -400,7 +407,7 @@ impl Backend for D3d11 {
         self.media.session_closed(sid);
         self.tex.retain(|k, _| k.0 != sid);
         self.buf.retain(|k, _| k.0 != sid);
-        self.pipe.retain(|k, _| k.0 != sid);
+        self.pipe.retain(|k, _| k.0 != sid); self.compute.retain(|k, _| k.0 != sid);
         self.win.retain(|k, _| k.0 != sid);
         self.segments.retain(|k, _| k.0 != sid);
         self.segment_depths.retain(|k, _| k.0 != sid);
@@ -469,6 +476,20 @@ impl exec::DeviceReset for D3d11 {
     }
 
     fn rebuild_pipelines(&mut self, world: &mut World) {
+        let kernels: Vec<_> = self.compute.iter().map(|(key, pipe)| (*key, pipe.gen, pipe.announced)).collect();
+        self.compute.clear();
+        for ((sid, index), gen, announced) in kernels {
+            let Some(s) = world.session_mut(sid) else { continue; };
+            let id = Id::new(index, gen);
+            let Ok(entry) = s.pipelines.get(sid, id) else { continue; };
+            let bytes = entry.val.blob.clone();
+            let Some(blob) = PipelineBlob::parse(&bytes) else { continue; };
+            if announced { s.pipelines_pending += 1; }
+            if let PipeStatus::Failed(error) = self.create_compute(s, id, &blob) {
+                s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
+                s.events.pipeline_failed(id, error.as_bytes());
+            }
+        }
         self.programs.clear();
         let mut rebuilt: HashMap<*const PipeState, Arc<PipeState>> = HashMap::new();
         let keys: Vec<(u32, u32)> = self.pipe.keys().copied().collect();
@@ -617,6 +638,7 @@ impl Gpu for D3d11 {
             }
         }
     }
+    fn buffer_readback(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) { self.read_compute_buffer(s, id, req, offset, len); }
     fn buffer_destroy(&mut self, sid: u32, id: Id) {
         if self.buf.get(&(sid, id.index)).is_some_and(|b| b.gen <= id.gen) {
             self.buf.remove(&(sid, id.index));
@@ -631,6 +653,7 @@ impl Gpu for D3d11 {
         if dialect != self::dialect::HLSL {
             return PipeStatus::Failed("D3D11 takes the HLSL payload".into());
         }
+        if blob.desc.compute.len != 0 { return self.create_compute(s, id, blob); }
         let code = match HlslPipeline::decode(blob.code) {
             Ok(c) => c,
             Err(e) => return PipeStatus::Failed(e),
@@ -640,6 +663,7 @@ impl Gpu for D3d11 {
             desc: blob.desc,
             bindings: blob.bindings.clone(),
             layout: blob.vertex_layout.clone(),
+            storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(),
             name: s.string(blob.desc.name).unwrap_or("").to_owned(),
         };
         let key = src.hash_key();
@@ -656,6 +680,7 @@ impl Gpu for D3d11 {
         PipeStatus::Pending
     }
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
+        if self.compute.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.compute.remove(&(sid, id.index)).is_some_and(|p| !p.announced); }
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) {
             return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced);
         }

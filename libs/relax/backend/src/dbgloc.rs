@@ -159,25 +159,42 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
     var_of.sort_unstable_by_key(|x| x.0);
     var_of.dedup_by_key(|x| x.0);
     let mut of_entry: Vec<u32> = Vec::with_capacity(f.dbg.len());
-    let used = used_slots(f);
+    let mut slots = Vec::new();
+    if f.dbg.iter().any(|d| matches!(d.loc, DbgLoc::Slot(..))) {
+        slots.resize(f.slots.len(), None);
+        let mut ranges = Vec::new();
+        for (s, used) in used_slots(f).into_iter().enumerate() {
+            if used {
+                let at = (fr.slot_fp)(s as u32);
+                slots[s] = Some((at, false));
+                ranges.push((at as i64, at as i64 + f.slots[s].size as i64, s));
+            }
+        }
+        // The furthest end detects every overlap; both slots are marked when they meet.
+        // Empty slots sort first at the same start, preserving the strict overlap test.
+        ranges.sort_unstable_by_key(|r| (r.0, r.1));
+        let mut furthest: Option<(i64, i64, usize)> = None;
+        for (start, end, s) in ranges {
+            if let Some((a, z, t)) = furthest {
+                if start < z && a < end {
+                    slots[s].as_mut().unwrap().1 = true;
+                    slots[t].as_mut().unwrap().1 = true;
+                }
+            }
+            if furthest.is_none_or(|r| end > r.1) {
+                furthest = Some((start, end, s));
+            }
+        }
+    }
     for d in &f.dbg {
         let kind = match &d.loc {
             DbgLoc::Regs(r) => VarKind::Regs(r.len() as u32),
             DbgLoc::Slot(s, off) => {
-                let s = *s as usize;
-                if s >= f.slots.len() || !used[s] {
+                let Some((at, shared)) = slots.get(*s as usize).copied().flatten() else {
                     // the slot went (promoted to values, forwarded): not held as such
                     of_entry.push(u32::MAX);
                     continue;
-                }
-                let at = (fr.slot_fp)(s as u32);
-                let size = f.slots[s].size as i64;
-                let shared = (0..f.slots.len()).any(|t| {
-                    t != s && used[t] && {
-                        let a = (fr.slot_fp)(t as u32) as i64;
-                        a < at as i64 + size && (at as i64) < a + f.slots[t].size as i64
-                    }
-                });
+                };
                 if shared {
                     VarKind::Shared
                 } else {
@@ -201,6 +218,10 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
             }
         }
         of_entry.push(k as u32);
+    }
+    // a function without calls has no site: what follows only locates values at calls
+    if calls.is_empty() {
+        return finish(f, al, Table { vars, sites: Vec::new() });
     }
     // copies between single-definition values hold the same value everywhere (O1 code is full
     // of them: a local read through a copy into a temporary): a leaf is held by any value of its
@@ -369,7 +390,7 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
         let mut preds: Vec<Vec<u32>> = vec![Vec::new(); nb];
         for (bi, blk) in f.blocks.iter().enumerate() {
             for t in blk.term.succs() {
-                if (t as usize) < nb && !preds[t as usize].contains(&(bi as u32)) {
+                if (t as usize) < nb && preds[t as usize].last() != Some(&(bi as u32)) {
                     preds[t as usize].push(bi as u32);
                 }
             }
@@ -557,6 +578,11 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
         }
         table.sites.sort_unstable_by_key(|s| s.0);
     }
+    finish(f, al, table)
+}
+
+/// The table as encoded: only what a stop can show.
+fn finish(f: &Func, al: &Alloc, mut table: Table) -> Vec<u8> {
     // only what a stop can show: variables located somewhere (a site, a constant, a frame
     // slot) and the sites that locate something; a variable left out reads as optimised out
     let mut used = vec![false; table.vars.len()];

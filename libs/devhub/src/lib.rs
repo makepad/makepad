@@ -20,7 +20,6 @@ macro_rules! print {
 }
 
 pub mod proto;
-pub mod conf;
 pub mod procinfo;
 pub mod os;
 pub mod embed;
@@ -33,7 +32,6 @@ pub mod cli;
 pub mod sync;
 pub mod cluster;
 pub mod trust;
-pub mod tray_glyph;
 pub mod glance;
 pub mod explorer;
 pub mod top;

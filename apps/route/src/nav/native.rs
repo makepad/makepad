@@ -118,7 +118,7 @@ pub fn start_nav_load(
     chargers: PathBuf,
 ) {
     let rejected_sender = sender.clone();
-    match pool.submit(Lane::Heavy, move || {
+    match pool.submit(Class::Background, move || {
         let maps_root = basenames
             .first()
             .and_then(|basename| Path::new(basename).parent())
@@ -370,7 +370,7 @@ pub fn start_radar_worker(
                             let display_frames = (0..frames.len())
                                 .map(|_| std::sync::OnceLock::new())
                                 .collect::<Vec<_>>();
-                            pool.fan_out(Lane::Heavy, frames.len(), |index| {
+                            pool.fan_out(frames.len(), |index| {
                                 let rgba = projection.frame_to_rgba(&frames[index]);
                                 let _ = display_frames[index].set(
                                     makepad_geodata::radar_raster::rgba_to_bgra_texels(&rgba),

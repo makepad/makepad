@@ -163,16 +163,18 @@ fn wheel_follows_setting(id: &InputId) -> bool {
 const BUS_VIRTUAL: u16 = 0x06;
 
 /// One device report of a person's deliberate input, noted for the WM's `activity`
-/// (`crate::user_input`): a key (below the button range 0x100..0x160; key repeats are the
-/// kernel's while a key is held), a button press or release, a wheel step, or motion while a
-/// button or touch is down (a drag). Bare pointer motion never counts: a stray move from a
-/// Desk Link viewer or a bumped mouse is not a person needing the box. `down` is the device's
-/// held-button state across reports.
+/// (`crate::user_input`): a key press or release (below the button range 0x100..0x160), a
+/// button press or release, a wheel step, or motion while a button or touch is down (a drag).
+/// The kernel's autorepeat (value 2) never counts, for keys or buttons: a stuck or lost-release
+/// button repeats for ever with nobody there (103's mouse pinned it "present" all day). Bare
+/// pointer motion never counts either: a stray move from a Desk Link viewer or a bumped mouse is
+/// not a person needing the box. `down` is the device's held-button state across reports.
 fn note_presence(origin: crate::user_input::Origin, report: &[InputEvent], down: &mut bool) {
     use crate::user_input::What;
+    const REPEAT: i32 = 2;
     let is_button = |e: &InputEvent| e.ty == InputEventType::EV_KEY && (0x100..0x160).contains(&e.code);
-    let key = report.iter().any(|e| e.ty == InputEventType::EV_KEY && !(0x100..0x160).contains(&e.code));
-    let button = report.iter().any(is_button);
+    let key = report.iter().any(|e| e.ty == InputEventType::EV_KEY && !(0x100..0x160).contains(&e.code) && e.value != REPEAT);
+    let button = report.iter().any(|e| is_button(e) && e.value != REPEAT);
     for e in report.iter().filter(|e| is_button(e)) {
         *down = e.value != 0;
     }
@@ -1514,6 +1516,10 @@ mod wheel_tests {
         // a report with no input (a bare sync) notes nothing
         let seq = last().unwrap().seq;
         super::note_presence(Origin::Device, &[], &mut down);
+        assert_eq!(last().unwrap().seq, seq);
+        // the kernel's autorepeat of a stuck button or a held key is nobody there
+        super::note_presence(Origin::Device, &[ev(1, 0x111, 2)], &mut down);
+        super::note_presence(Origin::Device, &[ev(1, 30, 2)], &mut down);
         assert_eq!(last().unwrap().seq, seq);
     }
 

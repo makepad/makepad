@@ -1,7 +1,66 @@
-//! A node's settings file (the WM's `~/.makepad/wm/devhub.conf`; any file through
-//! `makepad devhub serve --node`). Platform-neutral: the WM reads it on every OS.
+//! A devhub node's settings file (the WM's `~/.makepad/wm/devhub.conf`; any file through
+//! `makepad devhub serve --node`), its default name and port, and devhub's tray glyph: what the WM
+//! needs of devhub, without linking devhub (a devhub landing relinked and so restarted every idle
+//! node's WM). Platform-neutral: the WM reads it on every OS.
 
-use crate::proto;
+pub mod tray_glyph;
+
+/// The node's fleet TLS listener (master and peer connections).
+pub const NODE_PORT: u16 = 8797;
+/// Hitches shorter than this are not worth a line (the JIT reports from 50 ms).
+pub const HITCH_MS: f64 = 500.0;
+
+/// Whether `name` is a hub name: what a line and a hosts entry can carry.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+/// This machine's first private IPv4 address (the LAN address a node binds), if any.
+pub fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    // a UDP connect sends nothing: it only asks the routing table for the source address of a
+    // TEST-NET-1 destination (routed, so it never counts as touching the local network)
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    match s.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(v4) if v4.is_private() => Some(v4),
+        _ => None,
+    }
+}
+
+/// The default machine name: a node is called by the last octet of its LAN address (`217`), the
+/// way the fleet is spoken of; a machine without one by its host name.
+pub fn default_machine_name() -> String {
+    if let Some(ip) = lan_ipv4() {
+        return ip.octets()[3].to_string();
+    }
+    host_name()
+}
+
+/// `/etc/hostname`, else the OS's, cleaned to `a-z 0-9 - _`.
+pub fn host_name() -> String {
+    let raw = std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).unwrap_or_else(os_hostname);
+    let clean: String = raw.split('.').next().unwrap_or("").chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).take(48).collect();
+    if clean.is_empty() { "machine".into() } else { clean }
+}
+
+#[cfg(unix)]
+fn os_hostname() -> String {
+    extern "C" {
+        fn gethostname(name: *mut u8, len: usize) -> i32;
+    }
+    let mut buf = [0u8; 256];
+    if unsafe { gethostname(buf.as_mut_ptr(), buf.len()) } != 0 {
+        return String::new();
+    }
+    let n = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+#[cfg(not(unix))]
+fn os_hostname() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+
 
 /// The env var the WM sets to the node's conf file (as for the AI Hub): its presence makes the
 /// app a node.
@@ -55,7 +114,7 @@ fn default_launch() -> Vec<String> {
 
 impl Default for NodeConf {
     fn default() -> Self {
-        NodeConf { enabled: true, name: String::new(), host: None, port: proto::NODE_PORT, hitch_ms: proto::HITCH_MS, launch: default_launch(), embedded: false, nice: 10, discovery: !cfg!(target_os = "macos") }
+        NodeConf { enabled: true, name: String::new(), host: None, port: NODE_PORT, hitch_ms: HITCH_MS, launch: default_launch(), embedded: false, nice: 10, discovery: !cfg!(target_os = "macos") }
     }
 }
 
@@ -68,7 +127,7 @@ impl NodeConf {
             let (k, v) = (k.trim(), v.trim());
             match k {
                 "enabled" => c.enabled = !matches!(v, "off" | "false" | "0"),
-                "name" if crate::trust::valid_name(v) => c.name = v.to_string(),
+                "name" if valid_name(v) => c.name = v.to_string(),
                 "host" => c.host = v.parse().ok(),
                 "port" => c.port = v.parse().unwrap_or(c.port),
                 "hitch_ms" => c.hitch_ms = v.parse().unwrap_or(c.hitch_ms),
@@ -80,7 +139,7 @@ impl NodeConf {
             }
         }
         if c.name.is_empty() {
-            c.name = proto::default_machine_name();
+            c.name = default_machine_name();
         }
         c
     }

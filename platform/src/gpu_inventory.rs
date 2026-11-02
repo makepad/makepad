@@ -230,6 +230,7 @@ fn json_escape(s: &str) -> String {
 
 fn format_name(format: &TextureFormat) -> &'static str {
     match format {
+        TextureFormat::Storage { .. } => "Storage",
         TextureFormat::Unknown => "Unknown",
         TextureFormat::VecBGRAu8_32 { .. } => "VecBGRAu8_32",
         TextureFormat::VecCubeBGRAu8_32 { .. } => "VecCubeBGRAu8_32",
@@ -265,6 +266,10 @@ fn format_name(format: &TextureFormat) -> &'static str {
 /// Bytes per texel (per block for compressed formats, handled apart).
 fn texel_size(format: &TextureFormat) -> u64 {
     match format {
+        TextureFormat::Storage { format, .. } => {
+            use crate::makepad_script::shader_ir_compute::StorageTextureFormat as F;
+            match format { F::R8unorm => 1, F::R16f => 2, F::Rgba16f => 8, _ => 4 }
+        }
         TextureFormat::VecBGRAu8_32 { .. }
         | TextureFormat::VecCubeBGRAu8_32 { .. }
         | TextureFormat::VecMipBGRAu8_32 { .. }

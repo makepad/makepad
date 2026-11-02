@@ -636,7 +636,7 @@ impl App {
                         let dem_cache = dem_cache.clone();
                         let sender = sender.clone();
                         let rejected_sender = sender.clone();
-                        match worker_pool.submit(Lane::Heavy, move || {
+                        match worker_pool.submit(Class::Background, move || {
                             let mut cache = dem_cache.lock().unwrap();
                             let profile = dem::route_profile(&mut cache, &points, 200);
                             let _ = sender.send(NavResponse::ElevationDone {
@@ -812,7 +812,7 @@ impl App {
                                     let texels = (0..frames.len())
                                         .map(|_| std::sync::OnceLock::new())
                                         .collect::<Vec<_>>();
-                                    pool.fan_out(Lane::Heavy, frames.len(), |index| {
+                                    pool.fan_out(frames.len(), |index| {
                                         let rgba = projection.frame_to_rgba(&frames[index]);
                                         let _ = texels[index]
                                             .set(radar_raster::rgba_to_bgra_texels(&rgba));

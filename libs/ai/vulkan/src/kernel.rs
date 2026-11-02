@@ -45,7 +45,7 @@ impl Device {
         unsafe {
             let module = self
                 .device
-                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&compiled.spirv), None)
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(compiled.code.as_spirv().ok_or("Vulkan requires SPIR-V kernel code")?), None)
                 .map_err(vk_err("vkCreateShaderModule"))?;
             let mut required = vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default();
             let mut stage = vk::PipelineShaderStageCreateInfo::default()

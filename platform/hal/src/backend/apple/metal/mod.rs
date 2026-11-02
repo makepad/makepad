@@ -17,6 +17,7 @@ mod frame;
 mod layers;
 mod media;
 mod pipeline;
+mod compute;
 mod readback;
 mod resources;
 mod timing;
@@ -79,6 +80,7 @@ pub struct Metal {
     tex: FastMap<(u32, u32), Tex>,
     buf: FastMap<(u32, u32), Buf>,
     pipe: FastMap<(u32, u32), pipeline::Pipe>,
+    compute: FastMap<(u32, u32), compute::Pipe>,
     win: FastMap<(u32, u32), Win>,
     /// App aliases resolve to host storage; lending never moves or frees that storage.
     window_aliases: FastMap<(u32, Id), Id>,
@@ -153,11 +155,12 @@ impl Metal {
         if !texture_compression.1 {
             formats &= !(1 << format::ASTC4X4);
         }
+        let threads: MTLSize = unsafe { msg_send![dev.device, maxThreadsPerThreadgroup] };
         let info = HalInfo {
             session: 0,
             backend: backend_id::METAL,
             dialect: dialect::MSL,
-            flags: info_flags::WINDOW_LAYERS
+            flags: info_flags::WINDOW_LAYERS | info_flags::COMPUTE | info_flags::DRAW_STORAGE_BUFFERS
                 | if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 }
                 | if shell.is_some() && cfg!(target_os = "macos") { info_flags::WINDOW_BADGES } else { 0 },
             formats,
@@ -172,6 +175,9 @@ impl Metal {
             // card reports its own name and no unified memory.
             device_kind: if dev.unified_memory { device_kind::INTEGRATED } else { device_kind::DISCRETE },
             device_name: Default::default(),
+            storage_formats: (1 << format::R16F) | (1 << format::R8) | (1 << format::R32F) | (1 << format::R32UINT) | (1 << format::RGBA8) | (1 << format::RGBA16F),
+            max_workgroup_size: [threads.width as u32, threads.height as u32, threads.depth as u32],
+            max_workgroup_invocations: threads.width as u32,
         };
         let mut info = info;
         info.set_device_name(&dev.name);
@@ -181,6 +187,7 @@ impl Metal {
             tex: FastMap::default(),
             buf: FastMap::default(),
             pipe: FastMap::default(),
+            compute: FastMap::default(),
             win: FastMap::default(),
             window_aliases: FastMap::default(),
             overlays: FastMap::default(),
@@ -303,6 +310,9 @@ impl Metal {
                     if let Some(s) = world.session_mut(sid) {
                         if s.pipelines.get(sid, id).is_ok() {
                             Self::announce(&mut self.pipe, s, id);
+                            if let Some(p) = self.compute.get_mut(&(sid, id.index)).filter(|p| p.gen == id.gen) {
+                                if !std::mem::replace(&mut p.announced, true) { s.pipelines_pending = s.pipelines_pending.saturating_sub(1); }
+                            }
                             s.events.pipeline_ready(id);
                         }
                     }
@@ -311,6 +321,9 @@ impl Metal {
                     if let Some(s) = world.session_mut(sid) {
                         if s.pipelines.get(sid, id).is_ok() {
                             Self::announce(&mut self.pipe, s, id);
+                            if let Some(p) = self.compute.get_mut(&(sid, id.index)).filter(|p| p.gen == id.gen) {
+                                if !std::mem::replace(&mut p.announced, true) { s.pipelines_pending = s.pipelines_pending.saturating_sub(1); }
+                            }
                             s.events.pipeline_failed(id, log.as_bytes());
                         }
                     }
@@ -492,6 +505,7 @@ impl Backend for Metal {
             }
         }
         self.pipe.retain(|k, _| !own(k));
+        self.compute.retain(|k, _| !own(k));
         let win: Vec<_> = self.win.keys().filter(|k| own(k)).copied().collect();
         for k in win {
             if let Some(w) = self.win.remove(&k) {
@@ -601,6 +615,24 @@ impl Gpu for Metal {
     }
 
     fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]) {
+        if b.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE {
+            // Storage may contain GPU writes: never copy its contents on the CPU.
+            // A queued blit preserves untouched bytes and orders the update with dispatches.
+            let Some(dst) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone()) else { return; };
+            if data.is_empty() { return; }
+            let staging: ObjcId = unsafe { msg_send![self.dev.device, newBufferWithBytes: data.as_ptr() as *const std::ffi::c_void length: data.len() as u64 options: MTLResourceOptions::StorageModeShared] };
+            let Some(staging) = NonNull::new(staging).map(RcObjcId::from_owned) else { s.bad(); return; };
+            let (cb, seq) = self.ensure_batch();
+            self.flush_uploads();
+            unsafe {
+                let encoder: ObjcId = msg_send![cb, blitCommandEncoder];
+                let _: () = msg_send![encoder, copyFromBuffer: staging.as_id() sourceOffset: 0u64 toBuffer: dst.as_id() destinationOffset: off size: data.len() as u64];
+                let _: () = msg_send![encoder, endEncoding];
+            }
+            self.buf.get_mut(&(s.id, id.index)).unwrap().last_bound = seq;
+            self.dev.retire(Box::new(staging));
+            return;
+        }
         let completed = self.dev.completed.load(std::sync::atomic::Ordering::Acquire);
         let Some(buf) = self.buf.get_mut(&(s.id, id.index)).filter(|x| x.gen == id.gen) else { return };
         if !writable_in_place(buf, completed) {
@@ -620,6 +652,8 @@ impl Gpu for Metal {
         fill(buf, off, data);
     }
 
+    fn buffer_readback(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) { self.read_compute_buffer(s, id, req, offset, len); }
+
     fn buffer_destroy(&mut self, sid: u32, id: Id) {
         if self.buf.get(&(sid, id.index)).is_some_and(|b| b.gen <= id.gen) {
             if let Some(b) = self.buf.remove(&(sid, id.index)) {
@@ -638,15 +672,19 @@ impl Gpu for Metal {
         if dialect != self::dialect::MSL {
             return PipeStatus::Failed(format!("the Metal backend takes MSL, not dialect {dialect}"));
         }
+        if blob.desc.compute.len != 0 { return self.create_compute(s, id, blob); }
         let Ok(source) = std::str::from_utf8(blob.code) else { return PipeStatus::Failed("the pipeline source is not utf8".into()) };
         let state = pipeline::create(&self.dev, s.id, id, s.font_frames.clone(), source, &blob.desc);
         let stats = crate::gpu_prof::source_stats(source).into();
         let kept = crate::gpu_prof::keep_sources().then(|| source.into());
-        self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, bindings: blob.bindings.as_slice().into(), announced: false, stats, source: kept });
+        self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), bindings: blob.bindings.as_slice().into(), announced: false, stats, source: kept });
         PipeStatus::Pending
     }
 
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
+        if self.compute.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) {
+            return self.compute.remove(&(sid, id.index)).is_some_and(|p| !p.announced);
+        }
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) {
             return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced);
         }

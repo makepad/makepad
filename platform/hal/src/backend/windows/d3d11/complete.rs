@@ -163,6 +163,7 @@ fn prof_passes(dev: &Device, t: &Timer, clock: Option<(u64, u64, u64)>, key: cra
 }
 
 pub enum Ticket {
+    Buffer { token: Token, req: u32, staging: ID3D11Buffer, len: usize },
     Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool, timer: Option<Timer> },
     Read { token: Token, req: u32, rect: [u32; 4], staged: Staged, pick: Option<[f32; 2]> },
     Copy { token: Token, req: u32, rect: [u32; 4] },
@@ -333,6 +334,16 @@ fn complete(dev: &Device, mut batch: Batch, lost: bool, mailbox: &Mailbox, timer
     let mut out: Vec<(Token, Event)> = Vec::new();
     for ticket in batch.tickets.drain(..) {
         match ticket {
+            Ticket::Buffer { token, req, staging, len } => {
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                let ok = !lost && unsafe { dev.ctx.Map(staging.as_ID3D11Resource(), 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.is_ok();
+                let pixels = if ok {
+                    let pixels = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, len).to_vec() };
+                    unsafe { dev.ctx.Unmap(staging.as_ID3D11Resource(), 0); }
+                    pixels
+                } else { Vec::new() };
+                out.push((token, Event::Readback { req, status: if ok { readback::OK } else { readback::FAILED }, rect: [0; 4], pixels }));
+            }
             Ticket::Frame { token, target, kind, frame, window, timer } => {
                 token.incarnation.done(frame);
                 let (gpu_ns, gpu_span) = match timer {

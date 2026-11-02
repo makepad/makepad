@@ -257,6 +257,37 @@ pub fn request_window_gauss(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
     cx.global::<GaussWindowGlobal>().request(window_id)
 }
 
+/// [`request_window_gauss`] for a backdrop that stands still while it is up (a
+/// modal's blurred page): the scene is captured once and `held` by the surface,
+/// and captured again only when the window changes size or dpi. A frame that
+/// captured anyway (an arm, another surface's request) refreshes what it holds.
+/// A surface showing its held scene asks for nothing, so typing or hovering in
+/// front of it repaints only what changed instead of capturing the whole window.
+pub fn request_window_gauss_held(cx: &mut Cx2d, held: &mut Option<GaussBlurSnapshot>) -> Option<GaussBlurSnapshot> {
+    if !cx.is_drawing_overlay() {
+        return None;
+    }
+    let redraw_id = cx.redraw_id;
+    if !cx.global::<GaussWindowGlobal>().scope_in(redraw_id).is_empty() {
+        return request_window_gauss(cx);
+    }
+    let window_id = cx.get_current_window_id()?;
+    let size = cx.current_pass_size();
+    let dpi = cx.current_dpi_factor();
+    let entry = cx.global::<GaussWindowGlobal>().entry_mut(window_id);
+    if entry.capture_active {
+        *held = entry.snapshot.clone();
+        return held.clone();
+    }
+    match held {
+        Some(snapshot) if snapshot.source_size == size && snapshot.dpi_factor == dpi => Some(snapshot.clone()),
+        _ => {
+            entry.requested_this_frame = true;
+            entry.snapshot.clone()
+        }
+    }
+}
+
 /// [`request_window_gauss`] for a shader that shows the window's scene
 /// sharp and moves it, such as glass that bends what lies under it: only a
 /// capture made in this very frame, and `None` on a frame that did not
@@ -1150,6 +1181,12 @@ pub struct GaussRoundedView {
     // the walk drew, background included.
     #[rust]
     overlay_began: Option<u64>,
+    /// A still backdrop (`request_window_gauss_held`): the scene is captured once while the
+    /// surface is up and again only on a resize, instead of on every frame it repaints in.
+    #[live]
+    static_backdrop: bool,
+    #[rust]
+    held: Option<GaussBlurSnapshot>,
 }
 
 impl ScriptHook for GaussRoundedView {
@@ -1173,6 +1210,10 @@ impl GaussRoundedView {
         self.view.draw_bg.draw_vars.set_dyn_instance(cx, live_id!(layer_opacity), &[opacity.clamp(0.0, 1.0)]);
         self.bind_snapshot(cx, snapshot);
         self.view.draw_bg.draw_abs(cx, rect);
+    }
+
+    fn request(&mut self, cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
+        if self.static_backdrop { request_window_gauss_held(cx, &mut self.held) } else { request_window_gauss(cx) }
     }
 
     fn bind_snapshot(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
@@ -1791,7 +1832,7 @@ impl Widget for GaussRoundedView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if cx.is_drawing_overlay() {
             // Already inside an overlay (e.g. a glass.Layer): draw inline.
-            let snapshot = request_window_gauss(cx);
+            let snapshot = self.request(cx);
             self.bind_snapshot(cx, snapshot);
             self.view.draw_walk(cx, scope, walk)
         } else {
@@ -1807,7 +1848,7 @@ impl Widget for GaussRoundedView {
                 self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
                 self.overlay_began = Some(cx.cx.redraw_id);
             }
-            let snapshot = request_window_gauss(cx);
+            let snapshot = self.request(cx);
             self.bind_snapshot(cx, snapshot);
             let step = self.view.draw_walk(cx, scope, walk);
             self.draw_list.as_mut().unwrap().end(cx);

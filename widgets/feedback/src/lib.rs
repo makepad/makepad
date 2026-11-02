@@ -34,7 +34,7 @@ use makepad_widgets_core::makepad_platform::screen_capture::{
     add_screen_capture, remove_screen_capture, ScreenCaptureOptions,
 };
 use makepad_widgets_core::makepad_platform::system_info;
-use makepad_widgets_core::makepad_platform::thread::{Lane, TaskHandle};
+use makepad_widgets_core::makepad_platform::thread::{Class, TaskHandle};
 use makepad_widgets_core::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -320,7 +320,7 @@ impl FeedbackPanel {
         self.state = PanelState::Capturing;
         self.shot = None;
         let window_id = self.window_id;
-        self.capture = match cx.task_pool().submit(Lane::Heavy, move || capture_window(window_id)) {
+        self.capture = match cx.task_pool().submit(Class::Background, move || capture_window(window_id)) {
             Ok(handle) => Some(handle),
             Err(error) => {
                 log!("feedback: screenshot unavailable ({error:?})");
@@ -397,7 +397,7 @@ impl FeedbackPanel {
                     prepare_image(width, height, rgba)
                 }
             };
-            match cx.task_pool().submit(Lane::Heavy, job) {
+            match cx.task_pool().submit(Class::Background, job) {
                 Ok(handle) => {
                     cx.stop_timer(self.clip_timer);
                     self.clip_timer = cx.start_interval(0.05);

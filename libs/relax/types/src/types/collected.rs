@@ -192,8 +192,8 @@ impl Types {
         self.regions = Regions::restored(kinds, args);
         // (through the codec: a constant's value tree is a fresh allocation)
         let mut w = Vec::new();
-        live.consts.lock().unwrap_or_else(|e| e.into_inner()).put(&mut w);
-        *self.consts.get_mut().unwrap_or_else(|e| e.into_inner()) = Codec::get(&mut Decode::new(&w))?;
+        live.consts.put(&mut w);
+        self.consts = Codec::get(&mut Decode::new(&w))?;
         *self.free_regions.get_mut() = live.free_regions.load(Ordering::Relaxed);
         self.lists = list::Lists::copy_of(&live.lists);
         Some(())
@@ -213,7 +213,7 @@ impl Types {
         let kinds: Vec<RegionKind> = self.regions.kinds.iter().copied().collect();
         let args: Vec<std::sync::Arc<[RegionId]>> = self.regions.args.iter().cloned().collect();
         kinds.put(&mut meta); args.put(&mut meta);
-        self.consts.lock().unwrap_or_else(|e| e.into_inner()).put(&mut meta);
+        self.consts.put(&mut meta);
         self.free_regions.load(Ordering::Relaxed).put(&mut meta);
         for t in [self.unit, self.bool_, self.char_, self.str_, self.never, self.error,
             self.i32_, self.i64_, self.u8_, self.u32_, self.u64_, self.usize_, self.isize_,
@@ -293,7 +293,7 @@ impl Types {
         let mut t = Types::new();
         if n < t.len() { return None; }
         t.regions = Regions::restored(region_kinds, args);
-        *t.consts.get_mut().ok()? = Codec::get(&mut r)?;
+        t.consts = Codec::get(&mut r)?;
         *t.free_regions.get_mut() = bool::get(&mut r)?;
         for dst in [&mut t.unit, &mut t.bool_, &mut t.char_, &mut t.str_, &mut t.never,
             &mut t.error, &mut t.i32_, &mut t.i64_, &mut t.u8_, &mut t.u32_, &mut t.u64_,

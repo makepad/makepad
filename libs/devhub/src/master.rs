@@ -32,6 +32,10 @@ pub struct Master {
     followed: Mutex<HashSet<String>>,
     /// nodes learned from the nodes' `peers` (their signed LAN announcements)
     heard: Arc<Mutex<Vec<Heard>>>,
+    /// each node's last `peers` answer, and the nodes asked right now: one silent node holds
+    /// only its own ask, never the others' discovery
+    heard_from: Mutex<std::collections::BTreeMap<String, Vec<Heard>>>,
+    asking_peers: Mutex<HashSet<String>>,
     on_record: OnRecord,
     /// what the user has not cleared yet (err / warn / req records of every machine)
     pub inbox: Arc<Mutex<Inbox>>,
@@ -66,9 +70,9 @@ pub fn seeds() -> Hosts {
     for line in std::fs::read_to_string(nodes_conf()).unwrap_or_default().lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         let mut w = line.split_whitespace();
-        let Some(name) = w.next().filter(|n| crate::trust::valid_name(n)) else { continue };
+        let Some(name) = w.next().filter(|n| makepad_devhub_conf::valid_name(n)) else { continue };
         let Some(addr) = w.find_map(|kv| kv.strip_prefix("addr=")) else { continue };
-        let addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:{}", proto::NODE_PORT) };
+        let addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:{}", makepad_devhub_conf::NODE_PORT) };
         if !out.hosts.iter().any(|h| h.name == name) {
             out.hosts.push(Host { name: name.to_string(), via: Via::Fleet { addr } });
         }
@@ -238,7 +242,14 @@ impl Master {
             let run = crate::bucket::hot(repo.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO };
-            crate::bucket::spawn("hot", timing, repo, home.clone(), Arc::new(move |r: Record| {
+            crate::bucket::spawn("hot", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }), run);
+            let run = crate::orch::ci::ci(repo.clone());
+            let (s, o) = (sink.clone(), on_record.clone());
+            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::from_secs(15 * 60), cap: Duration::from_secs(3 * 3600) };
+            crate::bucket::spawn("ci", timing, repo, home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
             }), run);
@@ -275,7 +286,7 @@ impl Master {
         let _ = std::fs::write(pid_file(), format!("{}\n", std::process::id()));
         *slot.lock().unwrap() = Some((sink.clone(), on_record.clone()));
         local.ready();
-        let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, on_record, inbox, leases, recent, flow, land });
+        let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, heard_from: Mutex::new(Default::default()), asking_peers: Mutex::new(HashSet::new()), on_record, inbox, leases, recent, flow, land });
         let m2 = m.clone();
         let _ = std::thread::Builder::new().name("devhub-master".into()).spawn(move || m2.follow_loop());
         let m3 = m.clone();
@@ -303,27 +314,42 @@ impl Master {
 
     /// Follows every node's `watch` (new nodes as nodes.conf and gossip add them).
     fn follow_loop(self: Arc<Self>) {
-        let me = Client::new(Target::Unix(proto::control_socket()), "devhub-master");
         loop {
             let hosts = self.hosts();
             self.hub.sync(&hosts);
             // one link per machine: drop names that turned out to be another name of a seed
             let names: Vec<String> = hosts.hosts.iter().map(|h| h.name.clone()).collect();
             self.hub.retain(&|n| names.iter().any(|x| x == n));
-            // what the reachable nodes have heard on their LAN
-            let mut heard: Vec<Heard> = Vec::new();
+            // what the reachable nodes have heard on their LAN, each asked on its own thread
             for h in hosts.hosts.iter() {
-                let _ = makepad_remote::hub::ask(&me, &h.name, "peers", "", "peers", &mut |l| {
-                    if let Ok(v) = makepad_strict_json::parse(l.as_bytes()) {
-                        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                        let (name, addr, fleet) = (s("hub"), s("addr"), s("fleet"));
-                        if crate::trust::valid_name(&name) && !fleet.is_empty() && addr.parse::<std::net::SocketAddr>().is_ok_and(|a| crate::trust::lan_peer(a.ip())) && !heard.iter().any(|x| x.fleet == fleet) {
-                            heard.push(Heard { name, addr, fleet });
+                if !self.asking_peers.lock().unwrap().insert(h.name.clone()) { continue; }
+                let (m, host) = (self.clone(), h.name.clone());
+                let _ = std::thread::Builder::new().name("devhub-peers".into()).spawn(move || {
+                    let me = Client::new(Target::Unix(proto::control_socket()), "devhub-master");
+                    let mut heard: Vec<Heard> = Vec::new();
+                    let _ = makepad_remote::hub::ask(&me, &host, "peers", "", "peers", &mut |l| {
+                        if let Ok(v) = makepad_strict_json::parse(l.as_bytes()) {
+                            let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                            let (name, addr, fleet) = (s("hub"), s("addr"), s("fleet"));
+                            if makepad_devhub_conf::valid_name(&name) && !fleet.is_empty() && addr.parse::<std::net::SocketAddr>().is_ok_and(|a| crate::trust::lan_peer(a.ip())) && !heard.iter().any(|x| x.fleet == fleet) {
+                                heard.push(Heard { name, addr, fleet });
+                            }
                         }
-                    }
-                    true
+                        true
+                    });
+                    m.heard_from.lock().unwrap().insert(host.clone(), heard);
+                    m.asking_peers.lock().unwrap().remove(&host);
                 });
             }
+            let heard: Vec<Heard> = {
+                let mut from = self.heard_from.lock().unwrap();
+                from.retain(|n, _| names.iter().any(|x| x == n));
+                let mut heard: Vec<Heard> = Vec::new();
+                for x in from.values().flatten() {
+                    if !heard.iter().any(|y| y.fleet == x.fleet) { heard.push(x.clone()); }
+                }
+                heard
+            };
             *self.heard.lock().unwrap() = heard;
             for h in self.hosts().hosts {
                 if !self.followed.lock().unwrap().insert(h.name.clone()) {

@@ -2307,6 +2307,13 @@ impl Cache {
         Some((k, crates, e.0))
     }
 
+    /// The item graph now (deps_graph): `makepad run`'s app check beside main has it built before
+    /// main, where the check before main had its first code key build it -- else main's first
+    /// compile does, half a second of a cold Fab boot on its path.
+    pub fn build_item_graph(&mut self, u: &Unit) {
+        self.deps_graph(u);
+    }
+
     /// The item graph (cache/deps.rs), on the first need: the stored one when it was built from
     /// this program's very sources (a warm start maps it), else built over it -- the rows of the
     /// crates whose sources and dependencies are as it was built from are taken over, only the
@@ -2648,6 +2655,28 @@ impl Cache {
         }
         let k = h.finish128();
         self.key_crate.insert(k, krate);
+        Some(k)
+    }
+
+    /// A whole-crate check's clean verdict for crate `c`: `mode` 0, `makepad run`'s type check of
+    /// its every body (run.rs up front for the app's crates, typeck_bg.rs after the first present
+    /// for the others); 1 and 2, `makepad test`'s up-front check of a test subject (check.rs
+    /// subjects_mode: a plain program, a libtest harness; run.rs check_test_subjects). The key:
+    /// the Relax build and options (cfg), the crate's fingerprint, which covers its loaded files
+    /// and its dependencies' fingerprints, as the code keys rest on, and `skipped`, the text of
+    /// its files the boot's selection did not load (check.rs skipped_text_hash): every file of
+    /// it. A borrowck-kind entry (record_borrowck).
+    pub fn crate_check_key(&mut self, c: u32, skipped: u128, mode: u8) -> Option<u128> {
+        let fp = *self.fps.get(c as usize)?;
+        let mut h = Sip128::new();
+        h.str(if mode == 0 { "run-typeck-crate" } else { "test-check-crate" });
+        h.u8(mode);
+        h.u32(CHECK_BODY_VERSION);
+        h.u128(self.cfg);
+        h.u128(fp);
+        h.u128(skipped);
+        let k = h.finish128();
+        self.key_crate.insert(k, c);
         Some(k)
     }
 
@@ -6627,6 +6656,9 @@ mod cold_tests {
         assert_eq!(cold.fps, fps);
         assert_eq!(cold.records, records, "a finished load writes no record twice");
         assert_fingerprints(&cold, &prog);
+        // `again` queued its records on writer threads and was never finished: dropping it joins
+        // them, so no write lands in the folder while it is removed
+        drop(again);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

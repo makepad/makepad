@@ -377,6 +377,8 @@ pub struct ReadSnapshot {
 }
 impl ReadSnapshot {
     pub fn new(profile: bool) -> Arc<Self> { Arc::new(Self { profile, ..Self::default() }) }
+    /// Snapshot keys preserve parent components until canonicalization records an alias.
+    pub fn key(path: &str) -> String { normalize_components(path, false) }
     pub fn bind(self: &Arc<Self>) -> ReadScope {
         let id = BIND_SEQ.fetch_add(1, Ordering::Relaxed);
         // the thread's table outlives the compiler generation the load runs in
@@ -385,8 +387,8 @@ impl ReadSnapshot {
         ReadScope { id, _thread: std::marker::PhantomData }
     }
     pub fn alias(&self, path: &std::path::Path, canonical: &std::path::Path) {
-        let path = normalize_components(&path.to_string_lossy(), false);
-        let canonical = normalize_components(&canonical.to_string_lossy(), false);
+        let path = Self::key(&path.to_string_lossy());
+        let canonical = Self::key(&canonical.to_string_lossy());
         if path == canonical { return; }
         let mut paths = self.paths.lock().unwrap();
         if let Some(entry) = paths.files.remove(&path) {
@@ -398,18 +400,17 @@ impl ReadSnapshot {
         }
         paths.aliases.insert(path, canonical);
     }
-    /// Drops the snapshot's copy of `path` once its bytes live elsewhere (a mapped image); the
+    /// Drops the snapshot's copy for `ReadSnapshot::key` once its bytes live elsewhere; the
     /// bytes stay alive only for holders that already have them.
-    pub fn release(&self, path: &std::path::Path) {
-        let key = normalize_components(&path.to_string_lossy(), false);
+    pub fn release(&self, key: &str) {
         let mut paths = self.paths.lock().unwrap();
-        let key = paths.aliases.get(&key).cloned().unwrap_or(key);
+        let key = paths.aliases.get(key).cloned().unwrap_or_else(|| key.to_string());
         if let Some(entry) = paths.files.remove(&key) {
             if self.profile { paths.retired.push((key, entry)); }
         }
     }
     fn read_shared(&self, path: &std::path::Path) -> io::Result<Arc<[u8]>> {
-        let key = normalize_components(&path.to_string_lossy(), false);
+        let key = Self::key(&path.to_string_lossy());
         let (key, entry) = {
             let mut paths = self.paths.lock().unwrap();
             let key = paths.aliases.get(&key).cloned().unwrap_or(key);

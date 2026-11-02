@@ -261,16 +261,28 @@ impl FontService {
         } else {
             // map the file (once, for every session and worker), or take the bytes
             let source = match source {
-                FontSource::Path(_) => match open_font_file(&path) {
-                    Ok(m) => {
-                        entry.len = m.len() as u64;
-                        entry.hash = table_hash(m.as_slice(), index);
-                        HostSource::Mapped(m)
+                FontSource::Path(_) => match crate::read_virtual(&path) {
+                    // a file the run serves from a virtual folder: no file on disk to map
+                    Some(Ok(b)) => {
+                        entry.len = b.len() as u64;
+                        entry.hash = table_hash(&b, index);
+                        HostSource::Inline(Arc::new(b))
                     }
-                    Err(_) => {
+                    Some(Err(_)) => {
                         answer(world, font_status::MISSING, 0, 0, &path);
                         return;
                     }
+                    None => match open_font_file(&path) {
+                        Ok(m) => {
+                            entry.len = m.len() as u64;
+                            entry.hash = table_hash(m.as_slice(), index);
+                            HostSource::Mapped(m)
+                        }
+                        Err(_) => {
+                            answer(world, font_status::MISSING, 0, 0, &path);
+                            return;
+                        }
+                    },
                 },
                 FontSource::Bytes(b) => {
                     entry.len = b.len() as u64;

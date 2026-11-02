@@ -27,11 +27,11 @@ const ENCODE_SLICE: Duration = Duration::from_millis(2);
 /// An encoder the GPU profiler times: its group in the batch's samples, or (a split pass) the
 /// encoders of its shader runs in samples of their own.
 pub(super) struct ProfPass {
-    key: FrameKey,
-    pass: u16,
-    kind: u8,
-    sample: Option<usize>,
-    split: Option<SplitTimes>,
+    pub(super) key: FrameKey,
+    pub(super) pass: u16,
+    pub(super) kind: u8,
+    pub(super) sample: Option<usize>,
+    pub(super) split: Option<SplitTimes>,
 }
 
 pub(super) struct SplitTimes {
@@ -140,7 +140,7 @@ pub struct Batch {
     pub buffer: RcObjcId,
     pub seq: u64,
     opened: Instant,
-    samples: Option<Arc<PassSamples>>,
+    pub(super) samples: Option<Arc<PassSamples>>,
     tickets: Vec<Ticket>,
     passes: Vec<(String, Vec<String>)>,
     native_frames: Vec<super::super::media::layers::Frame>,
@@ -903,6 +903,7 @@ impl Metal {
             s.stats.bad_args += 1;
             return None;
         };
+        if !self.compute_ready(sid, &view.passes[passes.clone()], view) { return None; }
         let frame = p.frame;
         s.frame = frame;
         s.font_frames.submitted(frame);
@@ -972,7 +973,7 @@ impl Metal {
         let mut native = None;
         if native_frame {
             self.native_windows.discard_pending(sid, target);
-            if let Some(pass) = view.passes[passes.clone()].iter().find(|p| p.color.iter().all(|id| id.is_none())) {
+            if let Some(pass) = view.passes[passes.clone()].iter().find(|p| p.kind == crate::types::pass_kind::DRAW && p.color.iter().all(|id| id.is_none())) {
                 let placement = self.media.native_frame(s, target, pass.dpi, records, view);
                 native = self.native_windows.prepare(s, target, (owner, physical), self.dev.device, pass, records, view, placement, fallback);
                 if native.is_none() {
@@ -994,6 +995,19 @@ impl Metal {
         self.native_sync = native.is_some();
         let sync_frame = self.native_sync;
         for pass in &view.passes[passes] {
+            if pass.kind == crate::types::pass_kind::COMPUTE {
+                let pending = self.pending_draws;
+                match self.encode_compute(s, pass, view, cb, seq) {
+                    Ok(index) => {
+                        if let Some(index) = index { indices.push(index); }
+                        s.stats.passes += 1;
+                        if let Some(b) = self.batch.as_mut() { b.passes.push((s.string(pass.name).unwrap_or("compute").to_string(), Vec::new())); }
+                    }
+                    Err(e) => { eprintln!("[hal-metal] {e}"); s.bad(); }
+                }
+                partial |= self.pending_draws != pending;
+                continue;
+            }
             let Some(dr) = slice(pass.draws, view.draws.len()) else {
                 s.stats.bad_args += 1;
                 continue;
@@ -1052,7 +1066,7 @@ impl Metal {
             // A retained window image must contain all Makepad segments, including transparent
             // draws above native content. Upper layers are framebuffer-only: replay the existing
             // draws into `win` rather than reading their drawables. Native pixels are unavailable.
-            if let Some(pass) = view.passes[slice(p.passes, view.passes.len())?].iter().find(|p| p.color.iter().all(|id| id.is_none())) {
+            if let Some(pass) = view.passes[slice(p.passes, view.passes.len())?].iter().find(|p| p.kind == crate::types::pass_kind::DRAW && p.color.iter().all(|id| id.is_none())) {
                 let w = pass.viewport[2].max(1.0) as u32;
                 let h = pass.viewport[3].max(1.0) as u32;
                 if let (Some(texture), Some(drawable)) = (self.offscreen_target(s, sid, target, w, h, now), self.frame_drawable.as_ref().and_then(|f| f.drawable.clone())) {
@@ -1385,7 +1399,7 @@ impl Metal {
                 continue;
             };
             let index_count = d.index[1] as u64;
-            if index_count == 0 || d.inst.count == 0 {
+            if d.indirect_buffer.is_none() && (index_count == 0 || d.inst.count == 0) {
                 continue;
             }
 
@@ -1482,6 +1496,19 @@ impl Metal {
                 enc.buffer(buffer.unwrap_or(nil), 0, index);
             }
 
+            if crate::compute::validate_draw(s, d, view.arena, &pipe.storage).is_err() { s.bad(); continue; }
+            if d.storage_buffers.len as usize != pipe.storage.len() { s.bad(); continue; }
+            let mut storage_valid = true;
+            for (i, binding) in pipe.storage.iter().enumerate() {
+                let id = id_at(view.arena, d.storage_buffers, i);
+                if let Some(buffer) = self.buf.get_mut(&(sid, id.index)).filter(|b| b.gen == id.gen) {
+                    buffer.last_bound = seq;
+                    enc.buffer(buffer.buffer.as_id(), 0, binding.index as u64);
+                    s.ledger.touch(Kind::Buffer, id.index, id.gen, frame, now);
+                } else { storage_valid = false; break; }
+            }
+            if !storage_valid { s.bad(); continue; }
+
             // textures: what the shader samples, then (a pick) the id twins of those
             let ntex = slot(pipeline_binding::TEXTURES).unwrap_or(0) as usize;
             for i in 0..ntex {
@@ -1530,6 +1557,14 @@ impl Metal {
             if prof_key.is_some() {
                 let size = |id: Id| self.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen).map_or(0, |b| b.size);
                 prof_draws.push(gpu_prof::DrawRecord::new(s, d, view.arena, vw, vh, depth.is_some(), stride, size(d.vb) + size(d.ib), ntex));
+            }
+            if !d.indirect_buffer.is_none() {
+                let id = d.indirect_buffer;
+                let Some(args) = self.buf.get_mut(&(sid, id.index)).filter(|b| b.gen == id.gen) else { s.bad(); continue; };
+                if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(20).is_none_or(|n| n > args.size) { s.bad(); continue; }
+                args.last_bound = seq;
+                unsafe { let _: () = msg_send![enc.id, drawIndexedPrimitives: MTLPrimitiveType::Triangle indexType: index_type indexBuffer: ib indexBufferOffset: 0u64 indirectBuffer: args.buffer.as_id() indirectBufferOffset: d.indirect_offset]; }
+                continue;
             }
             for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
                 let start = start.min(d.inst.count) as u64;

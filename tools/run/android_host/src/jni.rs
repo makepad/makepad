@@ -334,7 +334,7 @@ fn boot_thread(
         on_mounted: {
             let (files, store, desk) = (files.to_path_buf(), conf.store.clone(), conf.desk.clone());
             Some(Box::new(move |workspace: &str| {
-                let name = if store.name.is_empty() { makepad_devhub::proto::default_machine_name() } else { store.name.clone() };
+                let name = if store.name.is_empty() { makepad_devhub_conf::default_machine_name() } else { store.name.clone() };
                 // after devhub's start: it sets the fleet dir the endpoint's credential is in
                 crate::devhub::start(&files, workspace, store);
                 crate::deskhost::start(&files, name, desk);

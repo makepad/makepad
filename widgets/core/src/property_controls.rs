@@ -125,7 +125,10 @@ script_mod! {
                         text_style: theme.font_regular{font_size: theme.font_size_p}
                     }
                 }
+                // Shown by the owner once it has a count to say: an empty one would
+                // still take a slot in the row and the semantic tree.
                 count := Label{
+                    visible: false
                     height: Fit
                     padding: Inset{}
                     text: ""

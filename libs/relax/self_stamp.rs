@@ -1,44 +1,41 @@
 //! A Relax crate's own source stamp (#[path] from its build script; the build script declares
 //! `sha256` at its root): writes `$OUT_DIR/src_stamp.rs` = `pub const SRC_STAMP: u128`, a hash of
-//! every file of the package (nested packages, `target`, hidden entries and its tests, benches and
-//! examples left out), the files `extra` names (inputs the build reads outside the package), and
+//! the package's compiled files (Rust sources, Cargo.toml and literal include targets, as
+//! srchash::compiled_files defines them), `extra` (additional build inputs), and
 //! the package's enabled features and how rustc compiles it (version, target, CPU features,
 //! profile, flags). The crate `include!`s it, so the stamp is compiled into the
 //! same rlib as the code it describes: a crate cargo did not rebuild keeps its old stamp with its
 //! old code. relax-compiler folds every stamp of its closure into the codegen identity
 //! (codegen_id.rs), the key of every stored build.
 //! Reruns: every file it hashes, so the stamp changes exactly when the crate's inputs do.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-fn files(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
-    let mut rd: Vec<(String, bool)> = std::fs::read_dir(dir)
-        .expect("read package directory")
-        .flatten()
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.file_type().map(|t| t.is_dir()).unwrap_or(false)))
-        .collect();
-    rd.sort();
-    for (name, is_dir) in rd {
-        if name.starts_with('.') {
-            continue;
-        }
-        let p = dir.join(&name);
-        let r = if rel.is_empty() { name.clone() } else { format!("{}/{}", rel, name) };
-        if is_dir {
-            if name == "target" || p.join("Cargo.toml").is_file() || (rel.is_empty() && matches!(name.as_str(), "tests" | "benches" | "examples")) {
-                continue;
-            }
-            files(&p, &r, out);
-        } else if p.is_file() {
-            out.push((r, p));
-        }
+#[path = "base/src/srchash.rs"]
+#[allow(dead_code)]
+mod srchash;
+
+// This module is mounted by build scripts that need no Relax VFS at their crate root.
+mod vfs {
+    pub fn read(p: impl AsRef<std::path::Path>) -> std::io::Result<Vec<u8>> {
+        std::fs::read(p)
+    }
+    pub fn is_file(p: impl AsRef<std::path::Path>) -> bool {
+        p.as_ref().is_file()
+    }
+    pub fn read_dir(p: impl AsRef<std::path::Path>) -> std::io::Result<Vec<(String, bool)>> {
+        let mut v: Vec<(String, bool)> = std::fs::read_dir(p)?
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.file_type().map(|t| t.is_dir()).unwrap_or(false)))
+            .collect();
+        v.sort();
+        Ok(v)
     }
 }
 
 /// Writes the stamp; `extra` = (label, bytes) of inputs outside the package.
 pub fn write(extra: &[(String, Vec<u8>)]) {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let mut list = Vec::new();
-    files(&dir, "", &mut list);
+    let list = srchash::compiled_files(&dir);
     let mut buf = Vec::new();
     let put = |b: &[u8], buf: &mut Vec<u8>| {
         buf.extend_from_slice(&(b.len() as u64).to_le_bytes());
@@ -51,7 +48,7 @@ pub fn write(extra: &[(String, Vec<u8>)]) {
         put(rel.as_bytes(), &mut buf);
         put(&std::fs::read(p).expect("read package file"), &mut buf);
     }
-    // a directory watch sees files added to or removed from the package
+    // a source-directory watch sees additions and removals without watching the package root
     println!("cargo:rerun-if-changed={}", dir.join("src").display());
     for (label, bytes) in extra {
         put(label.as_bytes(), &mut buf);

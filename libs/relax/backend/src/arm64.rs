@@ -4748,12 +4748,24 @@ impl<'a> Gen<'a> {
 /// the multiply-add's flags (product / addend negated), x read instead. Exact: the fused forms negate
 /// the operand (FPNeg) before the one rounding, as the separate fneg did (NaN signs included).
 fn fold_fma_negs(f: &Func) -> Option<Func> {
+    let mut has_neg = false;
+    let mut has_user = false;
+    for i in f.blocks.iter().flat_map(|b| &b.insts) {
+        has_neg |= matches!(i, Inst::FUnary(FUn::Neg, ..));
+        has_user |= matches!(i, Inst::FMulAdd(..) | Inst::FCmp(..));
+        if has_neg && has_user {
+            break;
+        }
+    }
+    if !has_neg || !has_user {
+        return None;
+    }
     let n = f.vregs.len();
     let mut ndef = vec![0u32; n];
     let mut uses = vec![0u32; n];
     let mut neg: Vec<Option<(VReg, bool)>> = vec![None; n];
     let mut fzero = vec![false; n];
-    let mut any = false;
+    let mut t = Vec::new();
     for p in &f.params {
         ndef[p.0 as usize] += 1;
     }
@@ -4764,76 +4776,75 @@ fn fold_fma_negs(f: &Func) -> Option<Func> {
             if let Inst::FUnary(FUn::Neg, w, d, x) = *i {
                 neg[d.0 as usize] = Some((x, w));
             }
-            any |= matches!(i, Inst::FMulAdd(..) | Inst::FCmp(..));
             if let Inst::Fconst(d, 0, _) = *i {
                 fzero[d.0 as usize] = true;
             }
         }
-        let mut t = Vec::new();
         regalloc::term_uses(&b.term, &mut t);
-        for u in t {
+        for u in &t {
             uses[u.0 as usize] += 1;
         }
-    }
-    if !any {
-        return None;
     }
     let of = |v: VReg, w: bool| match neg[v.0 as usize] {
         Some((x, w2)) if w2 == w && ndef[v.0 as usize] == 1 && uses[v.0 as usize] == 1 && ndef[x.0 as usize] == 1 => Some(x),
         _ => None,
     };
-    let mut g = f.clone();
-    let mut dead = vec![false; n];
+    let mut g: Option<Func> = None;
+    let mut dead = Vec::new();
     let zero = |v: VReg| fzero[v.0 as usize] && ndef[v.0 as usize] == 1;
-    for b in &mut g.blocks {
-        for i in &mut b.insts {
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (ii, i) in b.insts.iter().enumerate() {
             // -x c -y == x c' y and -x c 0 == x c' 0 (c' mirrored: -x < y == x > -y; unordered
             // stays unordered; -0 == +0)
-            if let Inst::FCmp(c, w, _, a, bb) = i {
-                let (na, nb) = (of(*a, *w), of(*bb, *w));
+            if let Inst::FCmp(c, w, d, a, bb) = *i {
+                let (na, nb) = (of(a, w), of(bb, w));
                 let fold = match (na, nb) {
                     (Some(x), Some(y)) => Some((x, y)),
-                    (Some(x), None) if zero(*bb) => Some((x, *bb)),
-                    (None, Some(y)) if zero(*a) => Some((*a, y)),
+                    (Some(x), None) if zero(bb) => Some((x, bb)),
+                    (None, Some(y)) if zero(a) => Some((a, y)),
                     _ => None,
                 };
                 if let Some((x, y)) = fold {
+                    if dead.is_empty() {
+                        dead.resize(n, false);
+                    }
                     if na.is_some() {
                         dead[a.0 as usize] = true;
                     }
                     if nb.is_some() {
                         dead[bb.0 as usize] = true;
                     }
-                    *a = x;
-                    *bb = y;
-                    *c = match *c {
+                    let c = match c {
                         Cond::Lt => Cond::Gt,
                         Cond::Le => Cond::Ge,
                         Cond::Gt => Cond::Lt,
                         Cond::Ge => Cond::Le,
                         c => c,
                     };
+                    g.get_or_insert_with(|| f.clone()).blocks[bi].insts[ii] = Inst::FCmp(c, w, d, x, y);
                 }
             }
-            if let Inst::FMulAdd(np, na, w, _, a, _, c) = i {
-                if let Some(x) = of(*c, *w) {
+            if let Inst::FMulAdd(np, na, w, d, a, b, c) = *i {
+                let (ac, aa) = (of(c, w), of(a, w));
+                if ac.is_none() && aa.is_none() {
+                    continue;
+                }
+                if dead.is_empty() {
+                    dead.resize(n, false);
+                }
+                if ac.is_some() {
                     dead[c.0 as usize] = true;
-                    *c = x;
-                    *na = !*na;
                 }
                 // a only: FMSUB / FNMADD negate the first factor (Rn), so a NaN b keeps its sign
                 // only when the negation was on a
-                if let Some(x) = of(*a, *w) {
+                if aa.is_some() {
                     dead[a.0 as usize] = true;
-                    *a = x;
-                    *np = !*np;
                 }
+                g.get_or_insert_with(|| f.clone()).blocks[bi].insts[ii] = Inst::FMulAdd(np ^ aa.is_some(), na ^ ac.is_some(), w, d, aa.unwrap_or(a), b, ac.unwrap_or(c));
             }
         }
     }
-    if !dead.iter().any(|d| *d) {
-        return None;
-    }
+    let mut g = g?;
     for b in &mut g.blocks {
         let keep: Vec<bool> = b.insts.iter().map(|i| !matches!(i, Inst::FUnary(FUn::Neg, _, d, _) if dead[d.0 as usize])).collect();
         let mut k = 0;
@@ -4854,37 +4865,50 @@ fn fold_fma_negs(f: &Func) -> Option<Func> {
 /// the constant defined right before the compare instead; the emitter builds none of them
 /// (`fcmp s, #0.0`, Gen::zero_cmp).
 fn split_zero_compares(f: &Func) -> Option<Func> {
+    let mut has_zero = false;
+    let mut has_cmp = false;
+    for i in f.blocks.iter().flat_map(|b| &b.insts) {
+        has_zero |= matches!(i, Inst::Fconst(_, 0, _));
+        has_cmp |= matches!(i, Inst::FCmp(..));
+        if has_zero && has_cmp {
+            break;
+        }
+    }
+    if !has_zero || !has_cmp {
+        return None;
+    }
     let n = f.vregs.len();
     let mut ndef = vec![0u32; n];
     let mut fz: Vec<Option<bool>> = vec![None; n];
     for p in &f.params {
         ndef[p.0 as usize] += 1;
     }
-    let mut any = false;
     for b in &f.blocks {
         for i in &b.insts {
             i.defs(|d| ndef[d.0 as usize] += 1);
             if let Inst::Fconst(d, 0, w) = *i {
                 fz[d.0 as usize] = Some(w);
             }
-            any |= matches!(i, Inst::FCmp(..));
         }
     }
     let zero = |v: VReg| if ndef[v.0 as usize] == 1 { fz[v.0 as usize] } else { None };
-    if !any {
-        return None;
-    }
-    let mut g = f.clone();
-    let mut changed = false;
-    for bi in 0..g.blocks.len() {
+    let mut g: Option<Func> = None;
+    for bi in 0..f.blocks.len() {
         let mut k = 0;
-        while k < g.blocks[bi].insts.len() {
-            if let Inst::FCmp(c, w, d, a, b) = g.blocks[bi].insts[k] {
+        while k < g.as_ref().unwrap_or(f).blocks[bi].insts.len() {
+            let blk = &g.as_ref().unwrap_or(f).blocks[bi];
+            if let Inst::FCmp(c, w, d, a, b) = blk.insts[k] {
                 let prev_def = |v: VReg, blk: &Block| k > 0 && matches!(blk.insts[k - 1], Inst::Fconst(t, 0, _) if t == v);
+                let split = [a, b].map(|op| zero(op) == Some(w) && !prev_def(op, blk) && a != b);
+                if !split[0] && !split[1] {
+                    k += 1;
+                    continue;
+                }
+                let g = g.get_or_insert_with(|| f.clone());
                 let mut ins = Vec::new();
                 let (mut a2, mut b2) = (a, b);
-                for (op, slot) in [(a, 0), (b, 1)] {
-                    if zero(op) == Some(w) && !prev_def(op, &g.blocks[bi]) && a != b {
+                for (slot, split) in split.into_iter().enumerate() {
+                    if split {
                         let t = g.vreg(if w { Cls::F64 } else { Cls::F32 });
                         ins.push(Inst::Fconst(t, 0, w));
                         if slot == 0 {
@@ -4901,13 +4925,12 @@ fn split_zero_compares(f: &Func) -> Option<Func> {
                     g.blocks[bi].insts.splice(k..k, ins);
                     g.blocks[bi].pos.splice(k..k, std::iter::repeat(pos).take(m));
                     k += m;
-                    changed = true;
                 }
             }
             k += 1;
         }
     }
-    changed.then_some(g)
+    g
 }
 
 /// Per vreg: defined exactly once, as an all-zero vector (VConst 0, or FromLo64 of a vreg defined
@@ -5035,20 +5058,18 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &Env) -> Result<
 /// fresh zero vector per element. A constant of a long range is still rebuilt at its uses when
 /// the allocator spills it (Remat::VConst).
 fn share_vconsts(f: &Func) -> Option<Func> {
+    if f.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, Inst::VConst(..))).take(2).count() < 2 {
+        return None;
+    }
     let n = f.vregs.len();
     let mut ndef = vec![0u32; n];
     for p in &f.params {
         ndef[p.0 as usize] += 1;
     }
-    let mut any = 0usize;
     for b in &f.blocks {
         for i in &b.insts {
             i.defs(|d| ndef[d.0 as usize] += 1);
-            any += matches!(i, Inst::VConst(..)) as usize;
         }
-    }
-    if any < 2 {
-        return None;
     }
     let mut to: Vec<u32> = (0..n as u32).collect();
     let mut drop: Vec<(usize, usize)> = Vec::new();
@@ -5094,27 +5115,25 @@ fn share_vconsts(f: &Func) -> Option<Func> {
 }
 
 fn fold_shift_amounts(f: &Func) -> Option<Func> {
+    if !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VX(VX::ShrUV(VW::S) | VX::ShrSV(VW::S), ..)))) {
+        return None;
+    }
     let n = f.vregs.len();
     let mut ndef = vec![0u32; n];
     let mut nuse = vec![0u32; n];
     for p in &f.params {
         ndef[p.0 as usize] += 1;
     }
-    let mut any = false;
+    let mut tu = Vec::new();
     for b in &f.blocks {
         for i in &b.insts {
             i.defs(|d| ndef[d.0 as usize] += 1);
             regalloc::for_uses(i, |u| nuse[u.0 as usize] += 1);
-            any |= matches!(i, Inst::VX(VX::ShrUV(VW::S) | VX::ShrSV(VW::S), ..));
         }
-        let mut tu = Vec::new();
         regalloc::term_uses(&b.term, &mut tu);
-        for u in tu {
+        for u in &tu {
             nuse[u.0 as usize] += 1;
         }
-    }
-    if !any {
-        return None;
     }
     // single-definition values: their defining instruction (block, index); constants' bits
     let mut at: Vec<(u32, u32)> = vec![(u32::MAX, 0); n];
@@ -5134,10 +5153,9 @@ fn fold_shift_amounts(f: &Func) -> Option<Func> {
         }
     }
     let is_k = |v: VReg| konst[v.0 as usize].is_some();
-    let mut g = f.clone();
+    let mut g: Option<Func> = None;
     // constant vreg -> its negation's vreg (built right after it)
     let mut neg: Vec<(VReg, VReg)> = Vec::new();
-    let mut changed = false;
     for bi in 0..f.blocks.len() {
         for ii in 0..f.blocks[bi].insts.len() {
             let Inst::VX(op @ (VX::ShrUV(VW::S) | VX::ShrSV(VW::S)), d, x, a) = f.blocks[bi].insts[ii] else { continue };
@@ -5154,6 +5172,7 @@ fn fold_shift_amounts(f: &Func) -> Option<Func> {
                 _ => None,
             };
             let Some((y, k, negate)) = amount else { continue };
+            let g = g.get_or_insert_with(|| f.clone());
             let from = if negate {
                 match neg.iter().find(|e| e.0 == k) {
                     Some(e) => e.1,
@@ -5169,12 +5188,9 @@ fn fold_shift_amounts(f: &Func) -> Option<Func> {
             g.blocks[ab as usize].insts[ai as usize] = Inst::VX(VX::Sub(VW::S), a, from, y);
             let sh = if let VX::ShrUV(_) = op { VX::ArmUShl(VW::S) } else { VX::ArmSShl(VW::S) };
             g.blocks[bi].insts[ii] = Inst::VX(sh, d, x, a);
-            changed = true;
         }
     }
-    if !changed {
-        return None;
-    }
+    let mut g = g?;
     // the negated constants, each right after its constant (it dominates every use of that one);
     // later positions of a block first, so earlier indices stay valid
     let mut ins: Vec<(u32, u32, Inst)> = neg.iter().map(|&(k, m)| (at[k.0 as usize].0, at[k.0 as usize].1 + 1, Inst::VConst(m, konst[k.0 as usize].unwrap().wrapping_neg()))).collect();
@@ -5191,13 +5207,15 @@ fn fold_shift_amounts(f: &Func) -> Option<Func> {
 }
 
 fn fold_lane_splats(f: &Func) -> Option<Func> {
+    if !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VSplat(..)))) {
+        return None;
+    }
     let n = f.vregs.len();
     let mut splat: Vec<Option<VReg>> = vec![None; n];
     let mut ndef = vec![0u32; n];
     for p in &f.params {
         ndef[p.0 as usize] += 1;
     }
-    let mut any = false;
     // 32-bit constants (f32 bits / integers) by vreg
     let mut k32: Vec<Option<u32>> = vec![None; n];
     for b in &f.blocks {
@@ -5206,16 +5224,12 @@ fn fold_lane_splats(f: &Func) -> Option<Func> {
             match *i {
                 Inst::VSplat(d, s) => {
                     splat[d.0 as usize] = Some(s);
-                    any = true;
                 }
                 Inst::Fconst(d, bits, false) => k32[d.0 as usize] = Some(bits as u32),
                 Inst::Iconst(d, k) => k32[d.0 as usize] = Some(k as u32),
                 _ => {}
             }
         }
-    }
-    if !any {
-        return None;
     }
     // a splat of a single-def constant is a vector constant (movi / fmov .4s #imm / one literal
     // load, rematerialised at its uses: `fmov d31, xzr; dup v.4s, v31.s[0]` was a 0.0 splat)
@@ -5229,47 +5243,38 @@ fn fold_lane_splats(f: &Func) -> Option<Func> {
     }
     // both single-def: the scalar holds the splatted value wherever the splat is read
     let of = |v: VReg| if ndef[v.0 as usize] == 1 { splat[v.0 as usize].filter(|s| ndef[s.0 as usize] == 1) } else { None };
-    let mut g = f.clone();
-    let mut changed = false;
-    for b in &mut g.blocks {
-        for i in &mut b.insts {
-            match i {
-                Inst::VSplat(d, s) if kof(*s).is_some() => {
-                    *i = Inst::VConst(*d, kof(*s).unwrap());
-                    changed = true;
-                }
-                Inst::VFma(_, _, _, _, bb, _) => {
-                    if let Some(s) = of(*bb) {
-                        *bb = s;
-                        changed = true;
+    let mut g: Option<Func> = None;
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (ii, i) in b.insts.iter().enumerate() {
+            let folded = match *i {
+                Inst::VSplat(d, s) => kof(s).map(|k| Inst::VConst(d, k)),
+                Inst::VFma(np, na, d, a, b, c) => of(b).map(|s| Inst::VFma(np, na, d, a, s, c)),
+                Inst::VX(op @ VX::FMul(VW::S, nb), d, a, b) if a != b => {
+                    if let Some(s) = of(b) {
+                        Some(Inst::VX(op, d, a, s))
+                    } else if let (Some(s), NanBits::Host) = (of(a), nb) {
+                        Some(Inst::VX(op, d, b, s))
+                    } else {
+                        None
                     }
                 }
-                Inst::VX(VX::FMul(VW::S, nb), _, a, bb) if *a != *bb => {
-                    if let Some(s) = of(*bb) {
-                        *bb = s;
-                        changed = true;
-                    } else if let (Some(s), NanBits::Host) = (of(*a), *nb) {
-                        *a = *bb;
-                        *bb = s;
-                        changed = true;
-                    }
-                }
-                _ => {}
+                _ => None,
+            };
+            if let Some(i) = folded {
+                g.get_or_insert_with(|| f.clone()).blocks[bi].insts[ii] = i;
             }
         }
     }
-    if !changed {
-        return None;
-    }
+    let mut g = g?;
     // splats left without uses go (they are pure)
     let mut used = vec![false; n];
+    let mut t = Vec::new();
     for b in &g.blocks {
         for i in &b.insts {
             regalloc::for_uses(i, |u| used[u.0 as usize] = true);
         }
-        let mut t = Vec::new();
         regalloc::term_uses(&b.term, &mut t);
-        for u in t {
+        for u in &t {
             used[u.0 as usize] = true;
         }
     }

@@ -14,9 +14,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// An exclusive request's expected wait, as the asker reads it (minutes; 5-minute steps past 10).
+fn eta(ms: u64) -> String {
+    if ms == 0 { return String::new(); }
+    let min = ms.div_ceil(60_000);
+    let min = if min > 10 { min.div_ceil(5) * 5 } else { min };
+    format!("; expected start in ~{min} min")
+}
+
 pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<commercial>[@sha]]]
         [--repo-dir D] [--watch-pid P] [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
-        [--class name] [--priority interactive|background] [--jit key] [-- cmd...]
+        [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [-- cmd...]
                                           hold a lease (kinds: build test screen long timed gpu inspect gate ci;
                                           ci: its own tree and target, beside ordinary work, never timed or user boxes;
                                           --needs gui=1: a test that opens windows, only nodes that take screen leases);
@@ -26,20 +34,27 @@ pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lan
                                           (timed, screen, ci and inspect leases always wait for the named node)
   run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] [--tree]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
-        [--class name] [--priority interactive|background] [--jit key] -- cmd...
+        [--class name] [--priority interactive|background] [--jit key] [--native <reason>] -- cmd...
                                           JIT commands of kinds test, screen, gpu, long and build use overlays by default;
                                           --tree uses the work tree. CI, gates, timed and non-JIT commands always use trees.
                                           Main checkout edits need --with-uncommitted.
+                                          JIT first: a lane command (or job, or test --native) that cargo-builds a package
+                                          is refused unless it is the JIT's own crate, has an open JIT miss, targets a
+                                          platform no JIT runs on, or says --native <reason> (native-vs-JIT baseline, timed
+                                          perf series); the refusal names the JIT command
   overlay status <lane> [--node N]        pinned commits, overlay hashes, whiteouts and diff vs work
   overlay why <lane> <path> [--node N]     serving layer and content hash
   overlay selftest [--node N] [--case NAME]
                                           compare real checkouts with overlay runs on a test lease
   overlay shadow on|off|status           background tree/overlay comparisons of JIT tests; last 24 h of evidence
-  test <lane> <pkg> [--lib|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native|--live] [--tree] [-- args...]
+  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--tree] [-- args...]
                                           --live: THE lane check; one warm process per lane, package, target and args,
                                           small cost on a hot box; overlay by default, --tree opts out; only affected tests rerun.
-                                          --native: cargo test --release (always a tree), for full sweeps, perf and explicit native checks.
-                                          compile/resolve misses fall back to cargo on a pool box; open misses skip the JIT.
+                                          Without --live: one JIT run, the lane's final check; devhub's measured routing may
+                                          pick cargo (saying both walls). --native <reason>: cargo test --release (a tree),
+                                          only for native-vs-JIT baselines and timed perf series (or an open JIT miss).
+                                          compile/resolve misses fall back to cargo on a pool box; open misses skip the JIT;
+                                          an open miss is retried once the JIT's inputs changed.
                                           Other JIT errors: a separate event, exit 3; carry on
   get <lane> <rel> <local-dir> [--node N] [--lease L]
                                           copy results back from the lane's dir on its node (`src/..`: the tree
@@ -55,9 +70,15 @@ pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lan
   jit stats [--day]                      JIT builds per id/arch and box/day (UTC), store hits/misses
   jit misses [--all]                     open compile/resolve misses (--all includes closed entries)
   jit misses close <id>                  close M<n>; the next test tries the JIT again
-  prof [--hour|--day] [--lane L] [--kind K]
-                                          workflow minutes: phases, blockers, run classes and box idle budget
-  stats queue [--hour]                   live counts and last hour's average/max queue wait, per class
+  prof [--hour|--day] [--agent] [--lane L] [--kind K]
+                                          workflow minutes: agent wait first (how long agents sat blocked on
+                                          devhub: run/test/lease from a lane, job wait, live save -> verdict;
+                                          not CI, post-land buckets, prebuilds, timed series), then phases,
+                                          blockers, run classes, box idle, and last `jit first`: per lane, native
+                                          builds (by gate verdict, --native reasons) vs saves patched live, OVER
+                                          on 2+ refused or --native builds above the live saves; --agent: per lane
+  stats queue [--hour]                   the last hour's agent wait, then live counts and average/max queue
+                                          wait per class
   queue | leases [--all]                  live and waiting leases, positions and reasons
   why-queued <lease>                     each candidate box's start blocker and reservation expiry
   nodes                                   capabilities, dev switch and leases per node
@@ -227,6 +248,8 @@ struct Opts {
     watch: Option<i32>,
     cmd: Vec<String>,
     tree: bool,
+    /// `--native "<reason>"`: why this command builds natively (lease/native.rs)
+    native: String,
 }
 
 /// The flags shared by `lease` and `run`.
@@ -235,6 +258,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     let mut req = Req::new(lane.unwrap_or(""), kind);
     let mut watch = None;
     let mut tree = false;
+    let mut native = String::new();
     let mut i = 0;
     let mut cmd = Vec::new();
     while i < args.len() {
@@ -264,6 +288,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--repo-dir" => req.repo_dir = Some(val(i)?.to_string()),
             "--watch-pid" => watch = Some(val(i)?.parse().map_err(|_| "--watch-pid takes a pid")?),
             "--jit" => req.loader = Some(val(i)?.to_string()),
+            "--native" => native = val(i)?.to_string(),
             a => return Err(format!("unknown flag `{a}`")),
         }
         i += 2;
@@ -282,16 +307,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         req.rev = Some(super::pin_revs(Path::new(dir), spec)?);
     }
     if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(kind, &cmd); }
-    Ok(Opts { req, watch, cmd, tree })
-}
-
-/// Missing or older caps leave placement unhinted.
-pub(crate) fn jit_hint(c: &Client, root: &Path) -> Option<String> {
-    let nodes: Vec<_> = ask(c, None, "nodes", "nodes").ok()?.iter().filter_map(|line| {
-        let v = json(line)?;
-        Some(super::sched::NodeView { caps: super::Caps::parse(&v.get("caps")?.to_json()), ..Default::default() })
-    }).collect();
-    super::jit::head_id(root, &nodes)
+    Ok(Opts { req, watch, cmd, tree, native })
 }
 
 /// A granted lease as the holder knows it.
@@ -309,7 +325,7 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
     req.holder = Some(std::process::id());
     req.since_ms.get_or_insert_with(crate::proto::wall_ms);
     if req.agent.is_none() {
-        req.agent = std::env::var("DEVHUB_AGENT").ok().filter(|a| crate::trust::valid_name(a));
+        req.agent = std::env::var("DEVHUB_AGENT").ok().filter(|a| makepad_devhub_conf::valid_name(a));
     }
     let req = &req;
     let wire = req.to_json();
@@ -327,7 +343,7 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
         let note = s(&v, "class_note");
         let note = if class_notified || note.is_empty() { String::new() } else { format!("; {note}") };
         let line = match state.as_str() {
-            "queued" => format!("{id} {}: {} in queue ({})", req.kind.as_str(), ordinal(n(&v, "pos") as usize), s(&v, "reason")),
+            "queued" => format!("{id} {}: {} in queue ({}){}", req.kind.as_str(), ordinal(n(&v, "pos") as usize), s(&v, "reason"), eta(n(&v, "eta_ms") as u64)),
             "starting" => format!("{id} {}@{}: granted, setting up", req.kind.as_str(), s(&v, "node")),
             "granted" => {
                 if !note.is_empty() { eprintln!("{id} {}@{}: granted{note}", req.kind.as_str(), s(&v, "node")); }
@@ -447,13 +463,37 @@ fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Resul
     }
 }
 
+/// The JIT-first gate (lease/native.rs) for a command the lane runs here: prints its hint;
+/// Err(2) when the master refuses the native build.
+fn native_gate(c: &Client, o: &Opts) -> Result<(), i32> {
+    if o.cmd.is_empty() { return Ok(()); }
+    let root = o.req.repo_dir.clone().or_else(|| git(&cwd(), &["rev-parse", "--show-toplevel"])).unwrap_or_default();
+    let rel = git(&cwd(), &["rev-parse", "--show-prefix"]).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
+    let j = makepad_remote::json_str;
+    let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
+    let body = format!("{{\"lane\":{},\"agent\":{},\"kind\":{},\"cmd\":[{}],\"repo_dir\":{},\"cwd\":{},\"rev\":{},\"reason\":{},\"class\":{},\"needs\":{},\"node\":{}}}",
+        j(&o.req.lane), j(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), j(o.req.kind.as_str()), o.cmd.iter().map(|a| j(a)).collect::<Vec<_>>().join(","),
+        j(&root), j(rel.trim_end_matches('/')), j(o.req.rev.as_deref().unwrap_or("")), j(&o.native), j(&o.req.class), j(&needs), j(o.req.node.as_deref().unwrap_or("")));
+    match retry_master(|| one(c, "native", &format!("native check {body}"))) {
+        Ok(v) => {
+            let note = s(&v, "note");
+            if !note.is_empty() { eprintln!("{note}"); }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("makepad devhub: {e}");
+            Err(2)
+        }
+    }
+}
+
 /// `lease …`: hold (print the env, beat until released) or run a cmd under it.
 fn lease(args: &[&str]) -> i32 {
     let Some((kind, rest)) = args.split_first() else {
         eprintln!("makepad devhub lease <kind> [--node N|--needs ..] [-- cmd...]");
         return 2;
     };
-    let mut o = match parse(kind, None, rest) {
+    let o = match parse(kind, None, rest) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("makepad devhub lease: {e}");
@@ -464,9 +504,7 @@ fn lease(args: &[&str]) -> i32 {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
-    if o.req.loader.is_none() && super::loaders::cargo_run_args(&o.cmd).is_some() {
-        o.req.loader = o.req.repo_dir.as_deref().and_then(|d| jit_hint(&c, Path::new(d)));
-    }
+    if let Err(code) = native_gate(&c, &o) { return code; }
     let held = match acquire(&c, &o.req) {
         Ok(h) => h,
         Err(code) => return code,
@@ -588,7 +626,7 @@ fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: boo
         return Err(format!("{}: no work dir to ship to", held.id));
     }
     let (files, deleted) = super::ship::uncommitted(root, pin)?;
-    let (mut files, deleted) = if uncommitted || !super::ship::is_main_checkout(root) {
+    let (files, deleted) = if uncommitted || !super::ship::is_main_checkout(root) {
         (files, deleted)
     } else {
         if files.len() + deleted.len() > 0 {
@@ -596,20 +634,26 @@ fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: boo
         }
         (Vec::new(), Vec::new())
     };
-    for p in std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace() {
-        if super::ship::never_ships(p) {
-            return Err(format!("DEVHUB_ALSO path never ships: {p}"));
-        }
-        if !root.join(p).exists() {
-            return Err(format!("DEVHUB_ALSO path missing: {p}"));
-        }
-        files.push(p.to_string());
-    }
     let mut entries = Vec::new();
     for f in &files {
         super::ship::entries(root, f, &mut entries)?;
     }
     entries.retain(|e| !super::ship::never_ships(&e.path));
+    // named paths ship as they are (untracked dirs and `local/` included); a file the
+    // uncommitted set has already ships once
+    for p in std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace() {
+        if !super::ship::inside(p) || super::ship::never_ships_named(p) {
+            return Err(format!("DEVHUB_ALSO path never ships: {p}"));
+        }
+        if !root.join(p).exists() {
+            return Err(format!("DEVHUB_ALSO path missing: {p}"));
+        }
+        let mut named = Vec::new();
+        super::ship::entries(root, p, &mut named)?;
+        entries.extend(named.into_iter().filter(|e| !super::ship::never_ships_named(&e.path)));
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    entries.dedup_by(|a, b| a.path == b.path);
     let t = Instant::now();
     // the lease is beaten while the files go
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -654,6 +698,7 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
             return 2;
         }
     };
+    if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &o)) { return code; }
     run_worktree(o, uncommitted, None)
 }
 
@@ -686,7 +731,6 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
         Ok(c) => c,
         Err(e) => return (fail(e), false),
     };
-    if o.req.loader.is_none() && super::loaders::cargo_run_args(&o.cmd).is_some() { o.req.loader = jit_hint(&c, &root); }
     let queued = Instant::now();
     let held = match acquire(&c, &o.req) {
         Ok(h) => h,
@@ -695,7 +739,9 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     let queue = queued.elapsed();
     let shipping = Instant::now();
     let pin = o.req.rev.as_deref().and_then(super::Pin::of_rev).unwrap();
-    let shipped = ship(&c, &root, &held, &pin, uncommitted);
+    // a node hub restarting mid-ship keeps the lease (its new hub takes it back from the
+    // ledger): the ship is made again once it answers
+    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &pin, uncommitted), &master);
     let ship = shipping.elapsed();
     let running = Instant::now();
     let r = shipped.and_then(|_| run_there_into(&c, &held, rel.trim_end_matches('/'), &o.cmd, out));
@@ -710,7 +756,8 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
 }
 
 fn test_miss(o: &Opts, pkg: &str, args: &[String], verb: &str, errors: &[String]) -> Result<Value, String> {
-    let req = format!("{{\"pkg\":{},\"target\":{},\"lane\":{},\"rev\":{},\"error\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&crate::jit_misses::target(args)), makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.rev.as_deref().unwrap_or("")), errors.iter().take(5).map(|e| makepad_remote::json_str(e)).collect::<Vec<_>>().join(","));
+    let repo = o.req.repo_dir.clone().or_else(|| git(&cwd(), &["rev-parse", "--show-toplevel"])).unwrap_or_default();
+    let req = format!("{{\"pkg\":{},\"target\":{},\"lane\":{},\"rev\":{},\"repo\":{},\"error\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&crate::jit_misses::target(args)), makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.rev.as_deref().unwrap_or("")), makepad_remote::json_str(&repo), errors.iter().take(5).map(|e| makepad_remote::json_str(e)).collect::<Vec<_>>().join(","));
     retry_master(|| master().and_then(|c| one(&c, "jit", &format!("jit misses {verb} {req}"))))
 }
 
@@ -786,44 +833,96 @@ fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known:
     code
 }
 
+/// One-shot tests change their default route only with at least this measured run-phase gain.
+const ROUTE_MIN_GAIN: f64 = 0.25;
+
+/// One-shot tests default to the JIT, or cargo for JIT-own crates; true selects the JIT.
+/// Compares run-phase medians (the command's own time, its build included; not the dev JIT build).
+/// Switch only when both medians exist and the other side is at least ROUTE_MIN_GAIN faster.
+pub fn test_route(own: bool, jit: Option<u64>, cargo: Option<u64>) -> (bool, String) {
+    let default = if own { "cargo" } else { "the JIT" };
+    let why = if own { "compiled only into the JIT binary; " } else { "" };
+    match (jit, cargo) {
+        (None, _) => (!own, format!("{default} ({why}no JIT measurement yet)")),
+        (_, None) => (!own, format!("{default} ({why}no cargo measurement yet)")),
+        (Some(jit), Some(cargo)) => {
+            let use_jit = if own { jit as f64 <= cargo as f64 * (1.0 - ROUTE_MIN_GAIN) }
+                else { cargo as f64 > jit as f64 * (1.0 - ROUTE_MIN_GAIN) };
+            let jit = super::sched::dur(jit).replace(' ', "");
+            let cargo = super::sched::dur(cargo).replace(' ', "");
+            let reason = match (own, use_jit) {
+                (true, true) => format!("the JIT (JIT {jit}, cargo {cargo}: at least {:.0}% faster than cargo)", ROUTE_MIN_GAIN * 100.0),
+                (true, false) => format!("cargo ({why}cargo {cargo}, JIT {jit}: the JIT must be {:.0}% faster)", ROUTE_MIN_GAIN * 100.0),
+                (false, true) => format!("the JIT (JIT {jit}, cargo {cargo})"),
+                (false, false) => format!("cargo (cargo {cargo}, JIT {jit}: cargo is at least {:.0}% faster)", ROUTE_MIN_GAIN * 100.0),
+            };
+            (use_jit, reason)
+        }
+    }
+}
+
+pub(crate) const ALL_TESTS: &str = "tests:*";
+
 fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     let parsed = (|| -> Result<_, String> {
         if pkg.is_empty() || pkg.starts_with('-') || !pkg.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
             return Err(format!("`{pkg}` is not a package name"));
         }
         let (mut flags, mut select, mut args) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut native, mut live, mut target) = (false, false, None);
+        let (mut native, mut live, mut target) = (false, false, None::<String>);
         let mut i = 0;
         while i < rest.len() {
             let val = || rest.get(i + 1).copied().filter(|v| !v.is_empty() && !v.starts_with('-')).ok_or_else(|| format!("{} needs a value", rest[i]));
             match rest[i] {
                 "--" => { args.extend_from_slice(&rest[i..]); break; }
-                "--native" => native = true,
+                // `--native "<reason>"`: the reason goes to the JIT-first gate (lease/native.rs)
+                "--native" => {
+                    native = true;
+                    if let Ok(reason) = val() { flags.extend(["--native", reason]); i += 1; }
+                }
                 "--live" => live = true,
                 "--tree" => flags.push("--tree"),
                 "--needs" | "--node" | "--priority" | "--jit" | "--cost" | "--est-min" | "--class" => { flags.extend([rest[i], val()?]); i += 1; }
                 "--features" => { select.extend([rest[i], val()?]); i += 1; }
-                "--lib" | "--tests" | "--test" => {
-                    if target.is_some() { return Err("select only one of --lib, --test T or --tests".into()); }
+                "--lib" | "--bin" | "--tests" | "--test" => {
+                    if target.is_some() { return Err("select only one of --lib, --bin B, --test T or --tests".into()); }
                     select.push(rest[i]);
                     target = Some(match rest[i] {
-                        "--test" => { let t = val()?; select.push(t); i += 1; t }
-                        "--lib" => "lib",
-                        _ => "tests",
+                        "--bin" => { let t = val()?; select.push(t); i += 1; format!("bin:{t}") }
+                        "--test" => { let t = val()?; select.push(t); i += 1; t.to_string() }
+                        "--lib" => "lib".to_string(),
+                        _ => ALL_TESTS.to_string(),
                     });
                 }
                 f => return Err(format!("unknown flag `{f}`")),
             }
             i += 1;
         }
-        // makepad test --live defaults to --lib; cargo's default also selects other targets.
-        if live && target.is_none() { select.push("--lib"); target = Some("lib"); }
         let mut o = parse("test", Some(lane), &flags)?;
-        if live && (native || target == Some("tests") || select.contains(&"--features")) {
-            return Err("--live selects one target (--lib or --test T); --native, --tests and --features cannot be combined with it".into());
+        let root = o.req.repo_dir.as_deref().map(PathBuf::from).unwrap_or_else(cwd);
+        let rev = head_rev(&root, &o.req.lane)?;
+        let pin = super::Pin::of_rev(&rev).ok_or("test: missing commit pair")?;
+        o.req.rev = Some(rev);
+        // Leave the live default to makepad test: the lib, else the package's only harness target.
+        if live && (native || target.as_deref() == Some(ALL_TESTS) || select.contains(&"--features")) {
+            return Err("--live selects one target (--lib, --bin B or --test T; default: the lib, else the package's only harness target); --native, --tests and --features cannot be combined with it".into());
         }
         if live && (o.req.node.is_some() || o.req.cost != CostClass::Small || o.req.est_min.is_some()) {
             return Err("--live uses small cost and hot-box routing; omit --node, --cost and --est-min".into());
+        }
+        if o.req.class.is_empty() {
+            o.req.class = target.map_or_else(|| format!("test:{pkg}"), |t| format!("test:{pkg}:{t}"));
+            if live { o.req.class = format!("live:{}", o.req.class); }
+        }
+        // Warm iteration always uses the JIT; measured routing is only for one-shot runs.
+        if !native && !live {
+            let own = crate::jit_misses::jit_own(&root, &crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or("")), pkg)?;
+            let cargo_class = format!("native:{}", o.req.class);
+            let v = retry_master(|| master().and_then(|c| one(&c, "stats", &format!("stats class {} {} {cargo_class}", o.req.kind.as_str(), o.req.class))))?;
+            let runs = v.get("runs");
+            let (use_jit, reason) = test_route(own, runs.and_then(|r| r.get(&o.req.class)).and_then(Value::as_u64), runs.and_then(|r| r.get(&cargo_class)).and_then(Value::as_u64));
+            eprintln!("devhub test: {}: {reason}", o.req.class);
+            if !use_jit { native = true; }
         }
         if live && !flags.contains(&"--priority") { o.req.priority = Priority::Interactive; }
         let mut test_args = select.clone();
@@ -832,7 +931,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         cmd.extend(select);
         cmd.extend(args);
         o.cmd = cmd.into_iter().map(str::to_string).collect();
-        if o.req.class.is_empty() { o.req.class = target.map_or_else(|| format!("test:{pkg}"), |t| format!("test:{pkg}:{t}")); }
+        if native { o.req.class = format!("native:{}", o.req.class); }
         o.tree |= native;
         Ok((o, native, live, test_args.into_iter().map(str::to_string).collect::<Vec<_>>()))
     })();
@@ -840,9 +939,10 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         Ok(v) => v,
         Err(e) => { eprintln!("test: {e}"); return 2; }
     };
-    if native { return run_worktree(o, false, Some(pkg)); }
-    let root = o.req.repo_dir.as_deref().map(PathBuf::from).unwrap_or_else(cwd);
-    o.req.rev = match head_rev(&root, &o.req.lane) { Ok(rev) => Some(rev), Err(e) => return fail(e) };
+    if native {
+        if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &o)) { return code; }
+        return run_worktree(o, false, Some(pkg));
+    }
     match test_miss(&o, pkg, &test_args, "lookup", &[]) {
         Ok(miss) if !miss.is_null() => {
             let errors = miss.get("error").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
@@ -877,7 +977,6 @@ fn shadow_test(c: &Client, o: &mut Opts, pkg: &str, output: &mut Vec<u8>) -> (i3
         use makepad_remote::json_str;
         let root = git(&cwd(), &["rev-parse", "--show-toplevel"]).ok_or("test: run inside the lane's worktree")?;
         let rel = git(&cwd(), &["rev-parse", "--show-prefix"]).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
-        if o.req.loader.is_none() { o.req.loader = jit_hint(c, Path::new(&root)); }
         let optional = |n: Option<f64>| n.map_or("null".into(), |n| n.to_string());
         let body = format!("{{\"tree\":{},\"also\":[{}],\"jobs\":[{{\"kind\":\"test\",\"holder\":{},\"lane\":{},\"agent\":{},\"cmd\":[{}],\"cwd\":{},\"shadow\":true,\"tree\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"whole\":{},\"class\":{},\"priority\":{},\"loader\":{},\"needs\":{},\"node\":{},\"prio\":{}}}]}}",
             json_str(&root), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), std::process::id(), json_str(&o.req.lane), json_str(o.req.agent.as_deref().unwrap_or("devhub-test")), o.cmd.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","), json_str(rel.trim_end_matches('/')),
@@ -940,9 +1039,9 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
     let result = (|| -> Result<crate::state::Live, String> {
         let root = git(&cwd(), &["rev-parse", "--show-toplevel"]).map(PathBuf::from).ok_or("test --live: run it inside the lane's worktree")?;
         let c = retry_master(master)?;
-        let loader = o.req.loader.clone().or_else(|| jit_hint(&c, &root)).unwrap_or_default();
+        let loader = o.req.loader.clone().unwrap_or_default();
         let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
-        let req = format!("{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"priority\":{},\"loader\":{},\"cost\":\"small\",\"class\":{},\"test_args\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&root.to_string_lossy()), o.tree, makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.agent.as_deref().unwrap_or("")), makepad_remote::json_str(&needs), makepad_remote::json_str(o.req.priority.as_str()), makepad_remote::json_str(&loader), makepad_remote::json_str(&o.req.class), args.iter().map(|a| makepad_remote::json_str(a)).collect::<Vec<_>>().join(","));
+        let req = format!("{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"priority\":{},\"loader\":{},\"cost\":\"small\",\"class\":{},\"also\":[{}],\"test_args\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&root.to_string_lossy()), o.tree, makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.agent.as_deref().unwrap_or("")), makepad_remote::json_str(&needs), makepad_remote::json_str(o.req.priority.as_str()), makepad_remote::json_str(&loader), makepad_remote::json_str(&o.req.class), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(makepad_remote::json_str).collect::<Vec<_>>().join(","), args.iter().map(|a| makepad_remote::json_str(a)).collect::<Vec<_>>().join(","));
         let selected = if args.last().is_some_and(|a| a == "--") { &args[..args.len() - 1] } else { args };
         let status = || -> Option<crate::state::Live> {
             let v = one(&c, "live", "live list").ok()?;
@@ -1062,6 +1161,42 @@ fn lane_node(c: &Client, lane: &str, lease: Option<&str>) -> Result<String, Stri
     })
 }
 
+/// Copies `rel` (a file or folder) from the lane's dir on `node`, or from live lease `lease`'s
+/// (`-`: none), into `dst`: the files written and their sizes.
+pub(crate) fn fetch(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, dst: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
+    let list = ask(c, Some(node), "get-ls", &format!("get-ls {lane} {lease} {rel}")).map_err(|e| format!("{node}: {e}"))?;
+    let mut files = Vec::new();
+    for l in list {
+        let Some(v) = json(&l) else { continue };
+        if let Some(e) = v.get("err").and_then(|e| e.as_str()) {
+            return Err(format!("{node}: {e}"));
+        }
+        let (p, r) = (s(&v, "p"), s(&v, "r"));
+        let out = dst.join(&p);
+        if Path::new(&p).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(format!("{node}: bad path {p}"));
+        }
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let mut data = Vec::new();
+        loop {
+            let v = node_one(c, node, "get-read", &format!("get-read {lane} {lease} {} {r}", data.len()))?;
+            let chunk = b64_decode(&s(&v, "data")).ok_or("get-read: bad data")?;
+            data.extend_from_slice(&chunk);
+            if v.get("eof").and_then(|e| e.as_bool()) != Some(false) || chunk.is_empty() {
+                break;
+            }
+        }
+        std::fs::write(&out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
+        files.push((out, data.len() as u64));
+    }
+    if files.is_empty() {
+        return Err(format!("{node}: nothing under {rel} for lane {lane}"));
+    }
+    Ok(files)
+}
+
 /// `get <lane> <rel> <local-dir> [--node N] [--lease L]`: copies a file or folder from the lane's
 /// dir on its node (or a live lease's) into <local-dir>, over the devhub link (no ssh).
 fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
@@ -1078,7 +1213,7 @@ fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
         }
         i += 2;
     }
-    if !crate::trust::valid_name(lane) || rel.is_empty() || rel.contains(' ') {
+    if !makepad_devhub_conf::valid_name(lane) || rel.is_empty() || rel.contains(' ') {
         eprintln!("makepad devhub get <lane> <rel> <local-dir> [--node N] [--lease L] (rel: a path relative to the lane's dir, no spaces)");
         return 2;
     }
@@ -1090,49 +1225,11 @@ fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
         Ok(n) => n,
         Err(e) => return fail(e),
     };
-    let lid = lease.as_deref().unwrap_or("-");
-    let list = match ask(&c, Some(&node), "get-ls", &format!("get-ls {lane} {lid} {rel}")) {
-        Ok(l) => l,
-        Err(e) => return fail(format!("{node}: {e}")),
-    };
     let dst = PathBuf::from(dst);
-    let (mut count, mut bytes) = (0usize, 0u64);
-    for l in list {
-        let Some(v) = json(&l) else { continue };
-        if let Some(e) = v.get("err").and_then(|e| e.as_str()) {
-            return fail(format!("{node}: {e}"));
-        }
-        let (p, r) = (s(&v, "p"), s(&v, "r"));
-        let out = dst.join(&p);
-        if Path::new(&p).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
-            return fail(format!("{node}: bad path {p}"));
-        }
-        if let Some(dir) = out.parent() {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                return fail(format!("{}: {e}", dir.display()));
-            }
-        }
-        let mut data = Vec::new();
-        loop {
-            let v = match node_one(&c, &node, "get-read", &format!("get-read {lane} {lid} {} {r}", data.len())) {
-                Ok(v) => v,
-                Err(e) => return fail(e),
-            };
-            let Some(chunk) = b64_decode(&s(&v, "data")) else { return fail("get-read: bad data") };
-            data.extend_from_slice(&chunk);
-            if v.get("eof").and_then(|e| e.as_bool()) != Some(false) || chunk.is_empty() {
-                break;
-            }
-        }
-        if let Err(e) = std::fs::write(&out, &data) {
-            return fail(format!("{}: {e}", out.display()));
-        }
-        count += 1;
-        bytes += data.len() as u64;
-    }
-    if count == 0 {
-        return fail(format!("{node}: nothing under {rel} for lane {lane}"));
-    }
+    let (count, bytes) = match fetch(&c, &node, lane, lease.as_deref().unwrap_or("-"), rel, &dst) {
+        Ok(files) => (files.len(), files.iter().map(|(_, n)| n).sum::<u64>()),
+        Err(e) => return fail(e),
+    };
     eprintln!("got {} ({:.1} MB) from {node} into {}", super::master::plural(count, "file", "files"), bytes as f64 / 1048576.0, dst.display());
     0
 }
@@ -1150,7 +1247,7 @@ fn queue(c: &Client, all: bool) -> i32 {
         let node = s(&v, "node");
         let at = if node.is_empty() { String::new() } else { format!("@{node}") };
         let tail = match s(&v, "state").as_str() {
-            "queued" => format!("{} in queue ({}) waiting {} s", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s")),
+            "queued" => format!("{} in queue ({}) waiting {} s{}", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s"), eta(n(&v, "eta_ms") as u64)),
             "ended" => format!("ended ({}){}", s(&v, "how"), if s(&v, "reason").is_empty() { String::new() } else { format!(": {}", s(&v, "reason")) }),
             st => {
                 let info = v.get("info").filter(|i| !i.is_null());
@@ -1294,7 +1391,7 @@ fn disk(c: &Client, node: &str, dry: bool) -> i32 {
 /// `landed <lane>`: the lane's dirs on every node (`disk clean <lane>`), then its Mac worktree
 /// and branch when the branch is merged into `work`.
 fn landed(c: &Client, lane: &str) -> i32 {
-    if !crate::trust::valid_name(lane) {
+    if !makepad_devhub_conf::valid_name(lane) {
         eprintln!("makepad devhub landed <lane>");
         return 2;
     }
@@ -1306,6 +1403,14 @@ fn landed(c: &Client, lane: &str) -> i32 {
     if exists && !merged {
         eprintln!("{branch} is not merged into work: nothing deleted");
         return 1;
+    }
+    // the lane is done: so are its live jobs (their apps and leases)
+    match one(c, "live", &format!("live end-lane {lane}")) {
+        Ok(v) => {
+            let ids: Vec<&str> = v.get("released").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).collect();
+            if !ids.is_empty() { println!("live jobs released: {}", ids.join(" ")); }
+        }
+        Err(e) => { code = 1; println!("live jobs: {e}"); }
     }
     for l in ask(c, None, "nodes", "nodes").unwrap_or_default() {
         let Some(v) = json(&l) else { continue };
@@ -1361,7 +1466,7 @@ fn cancel(id: &str) -> i32 {
     // who asks: an agent or a lane says so (no name: the user)
     let cwd = std::env::current_dir().unwrap_or_default();
     let lane = cwd.to_string_lossy().split("/wt.noindex/").nth(1).and_then(|r| r.split('/').next()).map(str::to_string);
-    let by = std::env::var("DEVHUB_AGENT").ok().or_else(|| std::env::var("DEVHUB_LANE").ok()).filter(|x| crate::trust::valid_name(x)).or(lane);
+    let by = std::env::var("DEVHUB_AGENT").ok().or_else(|| std::env::var("DEVHUB_LANE").ok()).filter(|x| makepad_devhub_conf::valid_name(x)).or(lane);
     let line = by.map_or_else(|| id.to_string(), |b| format!("{id} by={b}"));
     match one(&c, "cancel", &line) {
         Ok(v) => {
@@ -1395,7 +1500,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         ["overlay", word @ ("status" | "why"), lane, rest @ ..] => return Some(overlay_inspect(word, lane, rest)),
         ["run", lane, kind, rest @ ..] => return Some(run(lane, kind, rest)),
         ["test", lane, pkg, rest @ ..] => return Some(test(lane, pkg, rest)),
-        ["test", ..] => { eprintln!("makepad devhub test <lane> <pkg> [--lib|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native|--live] [--tree] [-- args...]"); return Some(2); }
+        ["test", ..] => { eprintln!("makepad devhub test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--tree] [-- args...]"); return Some(2); }
         ["get", lane, rel, dst, rest @ ..] => return Some(get(lane, rel, dst, rest)),
         _ => {}
     }
@@ -1429,7 +1534,16 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             Ok(_) => { println!("JIT miss {id} closed; the next devhub test tries the JIT again"); 0 }
             Err(e) => fail(e),
         },
-        ["jit", ..] => { eprintln!("makepad devhub jit stats [--day] | misses [--all] | misses close <id>"); 2 },
+        ["jit", "miss", "add", pkg, error, rest @ ..] if rest.is_empty() || matches!(rest, ["--repro", _]) => {
+            let repro = rest.get(1).copied().unwrap_or("");
+            // the worktree it is filed from names the lane
+            let lane = std::env::current_dir().ok().and_then(|d| d.ancestors().find(|a| a.join(".git").exists()).and_then(|a| a.file_name()).map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
+            match one(&c, "jit", &format!("jit misses add {{\"pkg\":{},\"error\":{},\"repro\":{},\"lane\":{}}}", makepad_remote::json_str(pkg), makepad_remote::json_str(error), makepad_remote::json_str(repro), makepad_remote::json_str(&lane))) {
+                Ok(v) => { println!("JIT miss {} recorded for {pkg}: `devhub jit misses` lists it", s(&v, "id")); 0 }
+                Err(e) => fail(e),
+            }
+        }
+        ["jit", ..] => { eprintln!("makepad devhub jit stats [--day] | misses [--all] | misses close <id> | miss add <pkg> \"<error line>\" [--repro \"<cmd>\"]"); 2 },
         ["release", id] => match one(&c, "release", id) {
             Ok(v) => {
                 println!("{}", released_line(&v));
@@ -1530,6 +1644,26 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             2
         }
     })
+}
+
+#[cfg(test)]
+#[test]
+fn test_route_takes_the_measured_faster_side() {
+    for own in [false, true] {
+        for (jit, cargo) in [(None, None), (None, Some(100_000)), (Some(70_000), None)] {
+            assert_eq!(test_route(own, jit, cargo).0, !own, "missing measurement uses the default: own={own}, JIT={jit:?}, cargo={cargo:?}");
+        }
+    }
+    for (own, jit, cargo, use_jit, jit_dur, cargo_dur) in [
+        (true, 70_000, 100_000, true, "1m10s", "1m40s"),
+        (true, 80_000, 100_000, false, "1m20s", "1m40s"),
+        (false, 100_000, 70_000, false, "1m40s", "1m10s"),
+        (false, 100_000, 80_000, true, "1m40s", "1m20s"),
+    ] {
+        let (chosen, reason) = test_route(own, Some(jit), Some(cargo));
+        assert_eq!(chosen, use_jit, "30% gain switches, 20% keeps the default: own={own}, {reason}");
+        assert!(reason.contains(&format!("JIT {jit_dur}")) && reason.contains(&format!("cargo {cargo_dur}")), "measured reason includes both durations: {reason}");
+    }
 }
 
 #[cfg(test)]

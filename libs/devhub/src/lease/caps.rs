@@ -179,6 +179,13 @@ pub(super) fn display() -> Option<String> {
     os::display()
 }
 
+/// The box's WM answered on another hosted wire at the last caps measure (its socket and
+/// answer): no display for gui work until it restarts (`sync::serve` rolls that restart).
+#[cfg(target_os = "linux")]
+pub fn other_wire() -> Option<String> {
+    os::OTHER_WIRE.lock().unwrap().clone()
+}
+
 pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     let mut c = os::hardware();
     c.node = node.to_string();
@@ -375,6 +382,8 @@ mod os {
             ram_avail_gb: avail,
             gpus: gpu.iter().map(|g| (g.name.clone(), g.mem_total_gb)).collect(),
             display: display(),
+            // read after display(): its probe leaves the answer of a WM on another wire
+            wm_wire: OTHER_WIRE.lock().unwrap().clone().unwrap_or_default(),
             battery: battery(),
             ..Default::default()
         }
@@ -390,9 +399,57 @@ mod os {
             Some((index, name, e.path()))
         }).collect();
         sockets.sort_by_key(|(index, _, _)| *index);
-        sockets.into_iter().find_map(|(_, name, path)| {
-            std::os::unix::net::UnixStream::connect(path).is_ok().then(|| format!("wm:{name}"))
-        })
+        let mut other = None;
+        let found = sockets.into_iter().find_map(|(_, name, path)| match hosts_apps(&path) {
+            Ok(()) => Some(format!("wm:{name}")),
+            Err(answer) => {
+                other = other.take().or(answer.map(|a| format!("{name} answered {a:?}")));
+                None
+            }
+        });
+        *OTHER_WIRE.lock().unwrap() = if found.is_some() { None } else { other };
+        found
+    }
+
+    pub(super) static OTHER_WIRE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    /// Whether the WM at `path` takes today's apps, asked the way an app asks it
+    /// (platform/hal wm_socket): `hello2` first; a WM from before that closes it unanswered and
+    /// is asked the legacy `hello <wire>` with the apps' wire fingerprint. A WM on another wire
+    /// cannot host them (Fab could not start on a node, 2026-11-02), so the box is no display for
+    /// gui work until its WM restarts. A slow answer is no evidence of another wire.
+    /// `Err(Some(answer))`: a WM on another wire; `Err(None)`: none answers there.
+    fn hosts_apps(path: &Path) -> Result<(), Option<String>> {
+        use std::io::{BufRead, ErrorKind, Read, Write};
+        use std::os::unix::net::UnixStream;
+        enum Answer { Dead, Slow, Line(String) }
+        let ask = |line: String| {
+            let Ok(s) = UnixStream::connect(path) else { return Answer::Dead };
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+            let _ = s.set_write_timeout(Some(std::time::Duration::from_secs(3)));
+            if (&s).write_all(line.as_bytes()).is_err() {
+                return Answer::Dead;
+            }
+            let mut answer = String::new();
+            match std::io::BufReader::new(&s).take(512).read_line(&mut answer) {
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Answer::Slow,
+                // closed unanswered (or reset): an old WM's way of not knowing the line
+                _ => Answer::Line(answer.trim().to_string()),
+            }
+        };
+        let said = |a: &str, what: &str| a.strip_prefix("makepad-wm ").is_some_and(|r| r.starts_with(what));
+        match ask("makepad-wm hello2 1-65535\n".into()) {
+            Answer::Dead => Err(None),
+            Answer::Slow => Ok(()),
+            Answer::Line(a) if said(&a, "ok ") => Ok(()),
+            Answer::Line(a) if said(&a, "incompatible ") => Err(Some(a)),
+            Answer::Line(_) => match ask(format!("makepad-wm hello {:016x}\n", makepad_studio_protocol::WIRE)) {
+                Answer::Slow => Ok(()),
+                Answer::Line(a) if said(&a, "ok") => Ok(()),
+                Answer::Line(a) if said(&a, "mismatch ") => Err(Some(a)),
+                _ => Err(None),
+            },
+        }
     }
 
     fn uid() -> u32 {

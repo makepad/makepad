@@ -1354,6 +1354,48 @@ impl Cx {
 
 static FIRST_PRESENT_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The first window frame's resource gate, shared with the present callback.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod first_frame_hold {
+    use std::sync::{atomic::{AtomicUsize, Ordering}, OnceLock};
+
+    struct Hold {
+        deferred_at: u64,
+        glyphs: usize,
+        pipelines: usize,
+        max_pipelines: AtomicUsize,
+    }
+
+    static HOLD: OnceLock<Hold> = OnceLock::new();
+    // None seals an unheld first frame so later windows cannot start a hold.
+    static PASSED: OnceLock<Option<u64>> = OnceLock::new();
+
+    pub(crate) fn deferred(glyphs: usize, pipelines: usize) {
+        if PASSED.get().is_some() { return; }
+        let hold = HOLD.get_or_init(|| Hold {
+            deferred_at: makepad_hal::clock_ns(),
+            glyphs,
+            pipelines,
+            max_pipelines: AtomicUsize::new(pipelines),
+        });
+        hold.max_pipelines.fetch_max(pipelines, Ordering::Relaxed);
+    }
+
+    pub(crate) fn passed() {
+        PASSED.get_or_init(|| HOLD.get().map(|_| makepad_hal::clock_ns()));
+    }
+
+    pub(super) fn summary() -> Option<(f64, usize, usize)> {
+        let passed_at = (*PASSED.get()?)?;
+        let hold = HOLD.get()?;
+        Some((
+            passed_at.saturating_sub(hold.deferred_at) as f64 / 1_000_000.0,
+            hold.max_pipelines.load(Ordering::Relaxed).max(hold.pipelines),
+            hold.glyphs,
+        ))
+    }
+}
+
 /// Whether a first frame reached the display.
 pub fn first_present_seen() -> bool {
     FIRST_PRESENT_SEEN.load(std::sync::atomic::Ordering::Acquire)
@@ -1399,27 +1441,39 @@ fn print_first_present(presented_at: f64) {
     let main_ms = std::env::var("MAKEPAD_RUN_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let cache = std::env::var("MAKEPAD_RUN_CACHE_STATE").unwrap_or_else(|_| "off".to_string());
     let ahead = std::env::var("MAKEPAD_RUN_AHEAD").unwrap_or_else(|_| "balanced".to_string());
-    eprintln!("{}", first_present_line(&package, present_ms, main_ms, &cache, &ahead));
+    #[cfg(not(target_arch = "wasm32"))]
+    let hold = first_frame_hold::summary();
+    #[cfg(target_arch = "wasm32")]
+    let hold = None;
+    eprintln!("{}", first_present_line(&package, present_ms, main_ms, &cache, &ahead, hold));
 }
 
-fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str, ahead: &str) -> String {
-    format!(
+/// First-present summary, optionally followed by the resource hold in ms, peak pending
+/// pipelines and initially pending glyphs. An unheld frame keeps the original format.
+fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str, ahead: &str, hold: Option<(f64, usize, usize)>) -> String {
+    let mut line = format!(
         "makepad: {} first frame at {:.2} s (main at {:.2} s, cache {}, ahead {})",
         package, present_ms / 1000.0, main_ms / 1000.0, cache, ahead
-    )
+    );
+    if let Some((held_ms, pipelines, glyphs)) = hold {
+        use std::fmt::Write;
+        let _ = write!(line, ", first frame held {:.0} ms for {} pipelines, {} glyphs", held_ms, pipelines, glyphs);
+    }
+    line
 }
 
 /// A launcher that started this app with MAKEPAD_RUN_REPORT_TO=<path> (the runner app, through
-/// `makepad run --report-to`) learns that the first frame is on glass: the line `present`
-/// appended to <path>, in the loader's progress format (the launcher times it on receipt).
-/// The launcher brings the window forward then. Any thread (presented handlers run off the
-/// main thread); a single O_APPEND write.
+/// `makepad run --report-to`, or a native build it opened) learns that the first frame is on
+/// glass and which process to follow and stop: the lines `pid <pid> 0` and `present` appended to
+/// <path>, in the loader's progress format (the launcher times it on receipt). The launcher
+/// brings the window forward then. Any thread (presented handlers run off the main thread); a
+/// single O_APPEND write.
 fn report_first_present() {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(path) = std::env::var_os("MAKEPAD_RUN_REPORT_TO") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
-            let _ = f.write_all(b"present\n");
+            let _ = f.write_all(format!("pid\t{}\t0\npresent\n", std::process::id()).as_bytes());
         }
     }
 }
@@ -1470,6 +1524,25 @@ pub(crate) fn relax_first_present() {
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn relax_first_present() {}
+
+/// Before the first window frame is submitted: the loader may hold it (`makepad run` checks the
+/// app's own crates beside main, and an error there ends the run before any frame). A rustc
+/// build has no such symbol.
+#[cfg(any(unix, windows))]
+pub(crate) fn relax_before_first_frame() {
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ASKED.load(std::sync::atomic::Ordering::Relaxed) || ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let hook = relax_host_symbol(c"relax_before_first_frame");
+    if !hook.is_null() {
+        let hook = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(hook) };
+        hook();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn relax_before_first_frame() {}
 
 /// The app's shutdown starts (it quits, its last window closed, a remote `/quit`): under Relax the
 /// loader marks the quit (its quit-compile accounting, no settle swap from now on) and writes the

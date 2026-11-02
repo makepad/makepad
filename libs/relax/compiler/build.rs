@@ -55,14 +55,14 @@ fn main() {
     let g = build_stamp::graph(&dir);
     println!("cargo:rustc-env=MAKEPAD_RUN_PROVENANCE={}", g.provenance(&[dir.parent().unwrap(), &dir.join("../../../tools/run")], &format!("std {}", std)));
     println!("cargo:rerun-if-changed=../self_stamp.rs");
-    self_stamp::write(&[]);
+    self_stamp::write(&[("std".to_string(), std.as_bytes().to_vec())]);
     codegen_parts(&g, &dir);
 }
 
 /// `$OUT_DIR/codegen_parts.rs` (src/codegen_id.rs): what decides the code Relax generates, i.e. this
 /// crate's library closure. A Relax crate (libs/relax) is named by the source stamp compiled into
 /// its own rlib (self_stamp.rs); every other package of the closure (makepad-remote, the proc-macro
-/// impls the native macros run, ...) is hashed here: its files, version and resolved features. A
+/// impls the native macros run, ...) is hashed here: its compiled files, version and resolved features. A
 /// Relax crate added to the closure without a stamp, or not a direct dependency of this crate, is
 /// a compile error, so the identity cannot silently leave one out.
 fn codegen_parts(g: &build_stamp::Graph, dir: &Path) {
@@ -87,10 +87,7 @@ fn codegen_parts(g: &build_stamp::Graph, dir: &Path) {
         features.sort();
         put(features.join(",").as_bytes());
         if !p.dir.contains("/.cargo/") {
-            let mut files = Vec::new();
-            srchash::files(Path::new(&p.dir), "", &mut files);
-            files.retain(|(rel, _)| !["tests/", "benches/", "examples/"].iter().any(|d| rel.starts_with(d)));
-            files.sort();
+            let files = srchash::compiled_files(Path::new(&p.dir));
             for (rel, f) in &files {
                 println!("cargo:rerun-if-changed={}", f.display());
                 put(rel.as_bytes());

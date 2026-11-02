@@ -29,7 +29,13 @@ use std::time::UNIX_EPOCH;
 /// the root's `.gitignore`, so this holds for it too.
 pub fn never_ships(path: &str) -> bool {
     let rel = path.strip_prefix("apps/commercial/").unwrap_or(path);
-    rel == "local" || rel.starts_with("local/") || path.split('/').any(|c| matches!(c, ".claude" | "target" | "__pycache__"))
+    rel == "local" || rel.starts_with("local/") || never_ships_named(path)
+}
+
+/// What never ships even when a run names it (`DEVHUB_ALSO`): `local/` does then (a lane's
+/// bench scripts), build output and agent state never.
+pub fn never_ships_named(path: &str) -> bool {
+    path.split('/').any(|c| matches!(c, ".claude" | "target" | "__pycache__"))
 }
 
 /// The repo's main checkout rather than a linked worktree (a lane's): the work uncommitted there is

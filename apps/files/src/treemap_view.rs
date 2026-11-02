@@ -19,7 +19,7 @@
 //! deeper. The layout itself is pure arithmetic and runs inline, throttled
 //! while a scan is still feeding it.
 
-use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI};
+use makepad_widgets::makepad_platform::thread::{Class, SignalToUI};
 use makepad_widgets::*;
 
 use std::{
@@ -1044,10 +1044,10 @@ impl TreemapView {
             scan();
             self.drain(cx);
         } else {
-            match pool.submit(Lane::Heavy, scan) {
+            match pool.submit(Class::Background, scan) {
                 Ok(handle) => handle.detach(),
                 Err(_) => {
-                    // The pool refused the job (closed or saturated): don't
+                    // The pool closed: don't
                     // spin the "Scanning…" state forever with nothing behind it.
                     self.scanning = false;
                     self.cancel = None;
@@ -1769,7 +1769,7 @@ impl TreemapView {
         let root = self.root.clone();
         if crate::vfs::vfs().is_instant() {
             let _ = crate::vfs::vfs().store_scan_cache(&root, &bytes);
-        } else if let Ok(handle) = cx.task_pool().submit(Lane::Light, move || {
+        } else if let Ok(handle) = cx.task_pool().submit(Class::Visible, move || {
             let _ = crate::vfs::vfs().store_scan_cache(&root, &bytes);
         }) {
             handle.detach();

@@ -27,6 +27,7 @@ use crate::lang_items::LangItem;
 use crate::jit::{self, FnKey, Unit};
 use crate::program::{DefId, DefKind, Program};
 use crate::types::TyId;
+use relax_types::mir::transform::const_check::is_live_default;
 use std::time::Instant;
 use std::sync::atomic::Ordering;
 #[path = "reload_watch.rs"]
@@ -685,12 +686,11 @@ fn toks<'a>(pf: &'a crate::parser::ParsedFile, lo: u32, hi: u32, holes: &[(u32, 
             break;
         }
         covered = true;
-        // a `>>` / `>=` / `>>=` (`<<`, `<=`) the parser split keeps its second part as the
-        // token (its first char consumed): read the token with that char, as a version that
-        // holds the same text untokenized reads it (an expansion's `Option<X<'a>>` compared
-        // as `..'a>` against `..'a>>`, and Scope's next edit of the file took the restart rung)
-        let split = t.lo > prev_hi && t.lo > 0 && matches!(pf.src.get(t.lo as usize - 1), Some(b'>' | b'<'))
-            && matches!(pf.src.get(t.lo as usize), Some(b'>' | b'=' | b'<'));
+        // every split of break_and_eat keeps only the remaining token: read its consumed
+        // char too, so tokens compare like text (fab-model's `&&r.file` lost its first `&`).
+        let split = t.lo > prev_hi && t.lo > 0 && matches!((pf.src.get(t.lo as usize - 1), pf.src.get(t.lo as usize)),
+            (Some(b'<'), Some(b'<' | b'=' | b'-')) | (Some(b'>'), Some(b'>' | b'='))
+            | (Some(b'&'), Some(b'&' | b'=')) | (Some(b'|'), Some(b'|' | b'=')) | (Some(b'+'), Some(b'=')));
         let start = if split { t.lo - 1 } else { t.lo };
         prev_hi = t.hi;
         if holes.iter().any(|&(a, b)| t.lo >= a && t.hi <= b) {
@@ -1290,6 +1290,20 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
         text
     }
     let mut attributes_changed = attr_text(old, &oa.root_attrs) != attr_text(new, &na.root_attrs);
+    // A derive's output is a function of its deriving item: while that item compares equal, its
+    // impls and their items are unchanged, whatever form each version holds the expansion in.
+    // Each item of a derived impl (the impl too) names its deriving item; only read on a mismatch.
+    fn derived_from(pf: &crate::parser::ParsedFile) -> Vec<Option<usize>> {
+        let owners = derive_owners(pf);
+        let mut of: Vec<Option<usize>> = owners.iter().map(|o| o.as_ref().map(|o| o.0)).collect();
+        for (x, o) in owners.iter().enumerate() {
+            let Some((owner, _)) = o else { continue };
+            for c in child_items(&pf.ast, &pf.ast.items[x].kind) { of[c.0 as usize] = Some(*owner); }
+        }
+        of
+    }
+    let derived_cell = std::cell::OnceCell::new();
+    let derived = || derived_cell.get_or_init(|| (derived_from(old), derived_from(new), pairs.iter().copied().collect::<std::collections::HashMap<u32, u32>>()));
     for &(i, j) in &pairs {
         let (a, b) = (&oa.items[i as usize], &na.items[j as usize]);
         let name = String::from_utf8_lossy(&new.src[b.name.lo as usize..b.name.hi as usize]).into_owned();
@@ -1312,6 +1326,18 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
         // produces a new provider; schedule its generated bodies without lowering them here.
         if attrs_same && same_toks(old, la, a.hi, &ha, new, lb, b.hi, &hb) {
             continue;
+        }
+        // derive output is expansion text: an authored item is never one
+        if a.lo >= old.src_len && b.lo >= new.src_len {
+            let (od, nd, to_new) = derived();
+            if let (Some(oo), Some(no)) = (od[i as usize], nd[j as usize]) {
+                let (ao, bo) = (&oa.items[oo], &na.items[no]);
+                let (holes_o, holes_n) = (holes(old, &ao.kind), holes(new, &bo.kind));
+                if to_new.get(&(oo as u32)) == Some(&(no as u32)) && (attr_raw(old, ao) == attr_raw(new, bo) || attr_norm(old, ao) == attr_norm(new, bo))
+                    && same_toks(old, ao.lo, ao.hi, &holes_o, new, bo.lo, bo.hi, &holes_n) {
+                    continue;
+                }
+            }
         }
         let def = prog.item_defs.get(&(old_file, i)).copied();
         attributes_changed |= !attrs_same;
@@ -1336,7 +1362,20 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
                     continue;
                 }
                 match def {
-                    Some(d) if matches!(prog.def(d).kind, DefKind::Fn | DefKind::AssocFn) => out.push(Change::Body(d)),
+                    Some(d) if matches!(prog.def(d).kind, DefKind::Fn | DefKind::AssocFn) => {
+                        if reload_trace() {
+                            let (a, b) = (toks_norm(old, la, a.hi, &ha).concat(), toks_norm(new, lb, b.hi, &hb).concat());
+                            let k = a.iter().zip(&b).position(|(a, b)| a != b).unwrap_or(a.len().min(b.len()));
+                            let snippet = |bytes: &[u8]| {
+                                let text = String::from_utf8_lossy(bytes);
+                                let mut start = k.saturating_sub(15).min(text.len());
+                                while !text.is_char_boundary(start) { start -= 1; }
+                                text[start..].chars().take(60).collect::<String>()
+                            };
+                            eprintln!("reload: body of `{}` changed at byte {} of its text: old `{}` new `{}`", name, k, snippet(&a), snippet(&b));
+                        }
+                        out.push(Change::Body(d));
+                    }
                     _ => why.push(format!("{}: fn `{}` has no definition to patch -- restart the app", pos(new, b.lo), name)),
                 }
             }
@@ -1393,7 +1432,14 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
                 Some(d) => out.push(Change::Layout(d)),
                 None => why.push(format!("{}: struct `{}` has no definition -- restart the app", pos(new, b.lo), name)),
             },
-            (_, k) => why.push(format!("{}: {} `{}` changed: {} -- restart the app", pos(new, b.lo), kind_name(k), name, restart_reason(k))),
+            (_, k) => {
+                if reload_trace() {
+                    let sh = |v: Vec<Vec<u8>>| v.iter().map(|x| String::from_utf8_lossy(x).into_owned()).collect::<Vec<_>>().join(" ");
+                    eprintln!("reload: {} `{}` (attrs same {}; old {}..{} of {}, new {}..{} of {}):\n  old: {}\n  new: {}", kind_name(k), name, attrs_same, la, a.hi, old.src_len, lb, b.hi, new.src_len,
+                        sh(toks_norm(old, la, a.hi, &ha)).chars().take(600).collect::<String>(), sh(toks_norm(new, lb, b.hi, &hb)).chars().take(600).collect::<String>());
+                }
+                why.push(format!("{}: {} `{}` changed: {} -- restart the app", pos(new, b.lo), kind_name(k), name, restart_reason(k)));
+            }
         }
     }
     if why.is_empty() {
@@ -2128,7 +2174,8 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
     })) {
         Ok(r) => r,
         Err(p) => {
-            let msg = p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+            // the message and where the compiler panicked: the report names the spot
+            let msg = crate::lifeline::panic_line(&*p);
             Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("internal compiler error applying the edit: {} -- makepad run bug, report it; restart the app", msg)], names: Vec::new(), changed: 0, test_changes: None, group: 0, ms: [0.0; 4], undo: None, work: [0; 5] }
         }
     };
@@ -2695,6 +2742,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         (def.kind == DefKind::Enum).then(|| (d, u.prog.variants[def.sub as usize].len()))
     }).collect();
     let mut layout_restart: Vec<String> = Vec::new();
+    let mut added_defaults: Vec<(DefId, u32, DefId)> = Vec::new();
     let retry_sources: Vec<_> = if kept.is_some() && retries > 0 {
         versions.iter().map(|(v, _)| (v.old, v.path.clone(), v.pf.src[..v.pf.src_len as usize].to_vec())).collect()
     } else { Vec::new() };
@@ -2883,6 +2931,14 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             match edited {
                 Ok((adt, notes)) => {
                     if let Some(old) = u.tcx.adts.insert(d, adt) {
+                        if !old.is_enum {
+                            for f in &u.tcx.adts[&d].variants[0].fields {
+                                if old.variants[0].fields.iter().any(|o| o.name == f.name) { continue; }
+                                if let Some(c) = u.field_default_const(d, f.name).filter(|&c| is_live_default(&u.prog, c)) {
+                                    added_defaults.push((d, f.name, c));
+                                }
+                            }
+                        }
                         saved_adts.push((d, old));
                     }
                     out.lines.extend(notes);
@@ -2976,7 +3032,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         .chain(added_defs.iter().map(|&d| u.prog.def(d).file))
         .map(|f| u.prog.file_paths[f as usize].clone()).collect();
     let mut errs: Vec<String> = add_errs.into_iter().filter(|e| !(e.contains(".rs:")) || edited.iter().any(|p| e.starts_with(p.as_str()))).collect();
-    let as_restart = !layout_restart.is_empty();
+    let mut as_restart = !layout_restart.is_empty();
     errs.extend(layout_restart);
     trace_sub("consts_errs");
     trace_stage("commit_collect");
@@ -3007,6 +3063,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         }
         trace_count("typecheck_items", uniq.len());
         for (d, a) in uniq {
+            // Derive code, not the program's items; whether running values can take a default
+            // is decided by evaluating it below.
+            if is_live_default(&u.prog, d) { continue; }
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::typeck::checked_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, d, &a)));
             match r {
                 Ok(b) => {
@@ -3017,7 +3076,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                     // the same body again)
                     checked_bodies.push(b);
                 }
-                Err(p) => errs.push(format!("internal compiler error type-checking {} ({}) -- makepad run bug, report it", u.prog.def_path(d), crate::jit::payload_text(&*p))),
+                Err(p) => errs.push(format!("internal compiler error type-checking {} ({}) -- makepad run bug, report it", u.prog.def_path(d), crate::lifeline::panic_line(&*p))),
             }
         }
     }
@@ -3038,6 +3097,22 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             errs.extend(crate::modules::check_orphans(u, u.prog.file_crate[file as usize], &added_defs));
         }
     }
+    // The running values cannot take such an initial value: a restart, unless the edit also
+    // has real errors (those alone refuse it).
+    if errs.is_empty() {
+        let mut default_restart = Vec::new();
+        for (d, name, c) in added_defaults {
+            if (&*up).const_addr_shared(c, Vec::new()).is_none() {
+                let u = &*up;
+                default_restart.push(format!("struct `{}`: field `{}` added; its `#[rust(..)]` initial value is its derive's code (it may name the derive's `vm`), running values cannot take it -- restart the app", u.prog.def_path(d), u.prog.syms.str(name)));
+            }
+        }
+        if !default_restart.is_empty() {
+            errs = default_restart;
+            as_restart = true;
+        }
+    }
+    let u = &mut *up;
     trace_stage("typecheck");
     // D3: the gate is synchronous only under `makepad run --check-first`; otherwise the patched
     // instances are queued to Gandalf when their new code is installed (jit.rs install, rank 0).
@@ -5491,6 +5566,45 @@ mod round43_tests {
         assert!(removed.is_empty(), "removed: {:?}", removed);
         assert!(added.is_empty(), "added: {:?}", added);
         assert_eq!(pairs.len(), old.ast.items.len());
+    }
+}
+
+#[cfg(test)]
+mod split_operator_tests {
+    #[test]
+    fn split_glued_operators_read_as_written() {
+        isolated_test!(split_glued_operators_read_as_written);
+        let session = std::sync::Arc::new(crate::Session::default());
+        // The outer closure's closing `|` glues to the inner closure's opening `|`.
+        let source = br#"
+            fn a(v: &[&String], s: &String) -> bool { v.contains(&&s) }
+            fn b() { let v: Vec<Vec<u8>> = Vec::new(); }
+            fn c() { let f = |_: bool||| true; }
+            fn d() { let r = &&mut 1; }
+        "#;
+        let old = crate::parser::parse_owned(&session, source.to_vec(), 2021).unwrap();
+        let mut new = crate::parser::parse_owned(&session, source.to_vec(), 2021).unwrap();
+        new.toks = Default::default();
+        let (pairs, removed, added) = super::pair_items(&old, &new);
+        assert!(removed.is_empty(), "removed: {:?}", removed);
+        assert!(added.is_empty(), "added: {:?}", added);
+        assert_eq!(pairs.len(), 4);
+        for (i, j) in pairs {
+            let (a, b) = (&old.ast.items[i as usize], &new.ast.items[j as usize]);
+            let crate::ast::ItemKind::Fn(_, Some(body), _) = &a.kind else { panic!("expected parsed fn body"); };
+            let body = old.ast.block(*body);
+            assert!(old.toks.iter().zip(old.toks.iter().skip(1)).any(|(prev, t)|
+                t.lo >= body.lo && t.hi <= body.hi && t.lo > prev.hi && t.lo > 0
+                && matches!(old.src.get(t.lo as usize - 1), Some(b'<' | b'>' | b'&' | b'|' | b'+'))), "no split in item {}", i);
+            assert!(super::same_toks(&old, a.lo, a.hi, &[], &new, b.lo, b.hi, &[]), "item {} differs", i);
+            let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+            let mut expected = Vec::new();
+            for part in source[a.lo as usize..a.hi as usize].split(u8::is_ascii_whitespace).filter(|p| !p.is_empty()) {
+                if expected.last().copied().is_some_and(word) && word(part[0]) { expected.push(b' '); }
+                expected.extend_from_slice(part);
+            }
+            assert_eq!(super::toks_norm(&old, a.lo, a.hi, &[]), vec![expected], "item {} lost source text", i);
+        }
     }
 }
 

@@ -10,14 +10,16 @@
 //! a node they switched off stays off. A node without our WM (the Macs, Windows) senses
 //! nothing; its switch alone decides. Events: `node_user_present`, `node_user_idle`.
 //!
-//! A Desk Link viewer attached ([`UserTrack::watched`]) holds back what a person watching would see
-//! (a WM restart) for [`VIEWER_HOLDS_MIN`] after the last input; it takes no box out of the pool:
-//! viewer tabs stay open on many nodes.
+//! A Desk Link viewer showing the node ([`UserTrack::watched`]: its tab selected in a visible
+//! window, which the WM counts as an unpaused viewer) holds back what a person watching would see
+//! (a WM restart) while its input is under [`VIEWER_HOLDS_MIN`] old; it takes no box out of the
+//! pool. A tab merely connected holds nothing: the viewer keeps tabs on many nodes (102's and
+//! 103's WM restarts waited on one for good, 11-02).
 
 use super::UserSense;
 
-/// How long after the last input an attached Desk Link viewer still means a person.
-pub const VIEWER_HOLDS_MIN: u64 = 60;
+/// How long after the last input a Desk Link viewer showing the node still means a person.
+pub const VIEWER_HOLDS_MIN: u64 = 10;
 
 /// How often the hub asks its WM.
 pub const POLL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -80,13 +82,18 @@ impl UserTrack {
         }
     }
 
-    /// A viewer attached, with input recent enough to mean someone may be watching.
+    /// A viewer showing the node, with input recent enough to mean someone is watching.
     pub fn watched(&self) -> bool {
-        self.viewers && self.last_input_ms.is_none_or(|l| self.watched_now.saturating_sub(l) < VIEWER_HOLDS_MIN * 60_000)
+        self.viewers && self.last_input_ms.is_some_and(|l| self.watched_now.saturating_sub(l) < VIEWER_HOLDS_MIN * 60_000)
     }
 
     pub fn present(&self) -> bool {
         self.sense.as_ref().is_some_and(|s| s.present)
+    }
+
+    /// Wall ms of the last person input this hub saw (None: none since it started).
+    pub fn last_input_ms(&self) -> Option<u64> {
+        self.last_input_ms
     }
 }
 
@@ -143,6 +150,15 @@ mod tests {
         assert_eq!(t.update(MIN + 4000, Ok(NONE), 3), None);
         assert!(t.present());
         assert_eq!(t.update(4 * MIN, Ok(NONE), 3), Some(Flip::Idle));
+        // a viewer showing the node holds a WM restart while its input is under 10 min old
+        let viewer = |ms: &str| format!("{{\"input_ms\":{ms},\"seq\":3,\"origin\":\"desk link\",\"what\":\"pointer\",\"viewers\":1}}");
+        let mut v = UserTrack::default();
+        v.update(MIN, Ok(&viewer("null")), 3);
+        assert!(!v.watched(), "a viewer with no input since the WM started");
+        v.update(2 * MIN, Ok(&viewer("0")), 3);
+        assert!(v.watched());
+        v.update(12 * MIN, Ok(&viewer(&(10 * MIN).to_string())), 3);
+        assert!(!v.watched());
         // no WM ever: nothing sensed
         let mut n = UserTrack::default();
         assert_eq!(n.update(MIN, Err("no WM".into()), 3), None);

@@ -160,6 +160,7 @@ pub enum IrIo {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum IrGlobalKind {
     Io(IrIo),
+    StorageTexture(crate::shader_ir_compute::StorageTextureFormat),
     /// `self.vertex_pos`: the clip position the vertex stage writes.
     VertexPosition,
     /// `_mp_iter`: the invocation's shared loop-pass counter
@@ -359,6 +360,8 @@ pub enum Builtin {
     Dot4U8,
     /// `atomic_add(buffer[i], v)`: returns the old value (u32 / i32).
     AtomicAdd,
+    /// Write-only 2D storage image: image, uint2 coordinate, scalar/vec4 texel.
+    StorageTextureWrite,
     /// Compute-only operations; load/store's first argument is a place.
     CooperativeLoad,
     CooperativeStore,

@@ -399,6 +399,41 @@ pub fn trusted(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, depth: u32) -> bo
     trusted_in(prog, tcx, krate, t, depth, false)
 }
 
+/// Diagnose plain fields with the same rules and depth as `trusted` on their ADT.
+pub fn first_untrusted_field(prog: &Program, tcx: &Tcx, krate: u32, d: DefId) -> Option<(String, TyId)> {
+    tcx.adts.get(&d)?.variants.iter().flat_map(|v| &v.fields)
+        .find(|f| !trusted_in(prog, tcx, krate, f.ty, 1, true))
+        .map(|f| (prog.syms.str(f.name).to_string(), f.ty))
+}
+
+/// Locate the nested part that refuses crossing for diagnostics only; `trusted_in` owns the rules.
+pub fn untrusted_path(prog: &Program, tcx: &Tcx, krate: u32, t: TyId) -> String {
+    let mut ty = t;
+    let mut path = String::new();
+    for _ in 0..8 {
+        ty = match tcx.tys.kind(ty) {
+            TyKind::Array(e, _) | TyKind::Slice(e) => {
+                path.push_str("[_]");
+                *e
+            }
+            TyKind::Ref(_, x, _) | TyKind::Ptr(_, x) => *x,
+            // std's own types are named, not opened (their fields are no API)
+            TyKind::Adt(d, a, _) if a.is_empty() && tcx.adts.contains_key(d) && !is_std(prog, prog.def(*d).krate) => {
+                let Some((name, field_ty)) = first_untrusted_field(prog, tcx, krate, *d) else { break };
+                path.push('.');
+                path.push_str(&name);
+                field_ty
+            }
+            _ => break,
+        };
+    }
+    if !path.is_empty() {
+        format!("`{}: {}`", path, crate::typeck::ty_to_string(false, prog, tcx, ty))
+    } else {
+        String::new()
+    }
+}
+
 /// `field`: `t` is a field of a provided type, where a pointer to a trait object may pass
 /// through (rustc stores and hands it back, never calls through it: the vtable is Relax's; the
 /// VM's `host: &mut dyn ScriptHost`). As a bound fn's own parameter it may not.
@@ -666,6 +701,13 @@ pub fn sig_norm(s: &str) -> String {
     out
 }
 
+/// The first parameter or result that refuses binding, shared with lowering diagnostics.
+pub fn first_untrusted_signature_type(prog: &Program, tcx: &Tcx, krate: u32, d: DefId, opaque: &dyn Fn(DefId) -> bool) -> Option<TyId> {
+    let s = tcx.fn_sig(prog, d)?;
+    let crosses = |t: TyId| trusted(prog, tcx, krate, t, 0) || matches!(tcx.tys.kind(t), TyKind::Adt(d, a, _) if a.is_empty() && opaque(*d));
+    s.params.iter().chain(std::iter::once(&s.ret)).copied().find(|t| !crosses(*t))
+}
+
 /// Why `d` (a fn of provided crate `krate`) is compiled from source instead of bound to a shim;
 /// None: it is bound.
 pub fn unbound_reason(prog: &Program, tcx: &Tcx, krate: u32, d: DefId, opaque: &dyn Fn(DefId) -> bool) -> Option<&'static str> {
@@ -698,8 +740,7 @@ pub fn unbound_reason(prog: &Program, tcx: &Tcx, krate: u32, d: DefId, opaque: &
     if parent.kind == DefKind::Impl && tcx.impl_trait.get(&def.parent).is_some_and(|t| tcx.lang_items.get(LangItem::Drop) == Some(*t)) {
         return Some("Drop::drop (in the drop shim)");
     }
-    let crosses = |t: TyId| trusted(prog, tcx, krate, t, 0) || matches!(tcx.tys.kind(t), TyKind::Adt(d, a, _) if a.is_empty() && opaque(*d));
-    if !s.params.iter().chain(std::iter::once(&s.ret)).all(|t| crosses(*t)) {
+    if first_untrusted_signature_type(prog, tcx, krate, d, opaque).is_some() {
         return Some("signature not C-shaped");
     }
     None

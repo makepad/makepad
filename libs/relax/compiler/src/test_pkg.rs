@@ -6,7 +6,7 @@
 //! selection all three run (cargo test's default minus doc tests, which are counted and said).
 //! A `harness = false` target runs as a program of its own (`makepad run --plain-test`), as cargo
 //! runs it: its exit status is its verdict.
-//! `--live` keeps one harness target (default: the lib) running across source edits.
+//! `--live` keeps one harness target (default: the lib, else the package's only harness target) running across source edits.
 
 pub fn cmd_test_package(args: &[String]) -> i32 {
     // Loader options go before each run's package; feature flags go after it.
@@ -71,7 +71,7 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
                 bins.get_or_insert_with(Vec::new);
             }
             "--bin" => match words.next() {
-                Some(b) => bins.get_or_insert_with(Vec::new).push(b.clone()),
+                Some(b) => { bins.get_or_insert_with(Vec::new).push(b.clone()); selections += 1; }
                 None => {
                     eprintln!("makepad test: --bin needs a target name");
                     return 2;
@@ -107,6 +107,7 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
             }
             s if s.starts_with("--bin=") => {
                 bins.get_or_insert_with(Vec::new).push(s[6..].to_string());
+                selections += 1;
             }
             s if s.starts_with("--test=") => {
                 tests.get_or_insert_with(Vec::new).push(s[7..].to_string());
@@ -124,15 +125,15 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
         }
     }
     if live {
-        if package.starts_with('-') || package.ends_with(".rs") || bins.is_some() || all_tests || selections > 1 || extra_package
+        if package.starts_with('-') || package.ends_with(".rs") || all_tests || selections > 1 || extra_package
             || pre.iter().chain(&flags).any(|s| matches!(s.as_str(), "--tests" | "--bins" | "--bin" | "--test" | "--lib" | "--no-live" | "--workspace" | "--all-targets" | "-p" | "--package")
                 || s.starts_with("--package=") || s.starts_with("--bin=") || s.starts_with("--test=")) {
             return live_usage();
         }
-        if tests.is_none() { lib = true; }
         pre.push("--live".to_string());
     }
     let sess = std::sync::Arc::new(crate::Session::default());
+    let live_default = live && !lib && bins.is_none() && tests.is_none();
     let (has_lib, bin_targets, targets) = match crate::resolve::test_targets(&sess, &crate::run::workspace_dir(), &package,
         &feature_flags, bins.as_deref().unwrap_or_default(), tests.as_deref().unwrap_or_default()) {
         Ok(t) => t,
@@ -141,6 +142,22 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
             return 101;
         }
     };
+    if live_default {
+        if has_lib.is_some() {
+            lib = true;
+        } else {
+            let harness: Vec<_> = bin_targets.iter().filter(|t| t.2).map(|t| ("--bin", &t.0))
+                .chain(targets.iter().filter(|t| t.2).map(|t| ("--test", &t.0))).collect();
+            if harness.len() != 1 {
+                let names = harness.iter().map(|(flag, name)| format!("{flag} {name}")).collect::<Vec<_>>().join(", ");
+                eprintln!("makepad test --live: package `{package}` has no lib and {} harness targets ({names}): select one", harness.len());
+                return 2;
+            }
+            let (flag, name) = harness[0];
+            if flag == "--bin" { bins = Some(vec![name.clone()]); }
+            else { tests = Some(vec![name.clone()]); }
+        }
+    }
     if live && lib && has_lib.is_none() { return live_usage(); }
     let default_selection = !lib && bins.is_none() && tests.is_none();
     if default_selection {
@@ -254,7 +271,7 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
 }
 
 fn live_usage() -> i32 {
-    eprintln!("usage: makepad test --live <package> [--lib | --test <name>] [-- <test args>] (exactly one harness target)");
+    eprintln!("usage: makepad test --live <package> [--lib | --bin <name> | --test <name>] [-- <test args>] (exactly one harness target; default: the lib, else the package's only one)");
     2
 }
 

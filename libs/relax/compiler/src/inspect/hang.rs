@@ -6,6 +6,28 @@
 use super::{frame_json, json_str, thread_label, Captured, Out, Req};
 use crate::waits::{Kind, Wait};
 
+/// These diagnostic replies need only string fields, including quoted text in a reason.
+fn string_field(line: &str, key: &str) -> Option<String> {
+    let prefix = format!("\"{key}\":\"");
+    let mut chars = line[line.find(&prefix)? + prefix.len()..].chars();
+    let mut value = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(value),
+            '\\' => match chars.next()? {
+                c @ ('"' | '\\') => value.push(c),
+                c => { value.push('\\'); value.push(c); }
+            },
+            c => value.push(c),
+        }
+    }
+    None
+}
+
+fn wm_pace(req: &Req, out: &mut Out) {
+    super::host_query("hal", req, out);
+}
+
 /// Edges thread -> holder (handles) of the registry's waits whose holder is a thread handle.
 fn edges(waits: &[Wait]) -> Vec<(u64, u64)> {
     let owner = crate::owner::owner_tid();
@@ -186,6 +208,34 @@ pub fn why_hung(req: &Req, out: &mut Out) {
             let hot: Vec<String> = count.iter().take(3).map(|(k, n)| format!("{} ({} of {} samples)", super::short(k, 160), n, tops.len())).collect();
             findings.push(("busy", format!("main runs ({}% CPU over {} ms): {}", busy, probe, hot.join("; "))));
         } else {
+            // A lost frame or wake explains idle before outstanding network work does.
+            let loop_reply = super::program_reply("loop").unwrap_or_default();
+            for line in loop_reply.lines() {
+                let why = string_field(line, "why").unwrap_or_default();
+                match string_field(line, "verdict").as_deref() {
+                    Some("STUCK") => {
+                        let kind = match string_field(line, "kind").as_deref() {
+                            Some("frame owed") => "frame owed",
+                            Some("undelivered signal") => "undelivered signal",
+                            _ => continue,
+                        };
+                        let mut why = format!("{why} -- see `loop`");
+                        if kind == "frame owed" {
+                            let (bytes, _) = makepad_remote::cmd::answer(wm_pace, "hal pace");
+                            let pace = String::from_utf8_lossy(&bytes);
+                            if let Some(first) = pace.lines().next() {
+                                let detail = if string_field(first, "verdict").as_deref() == Some("OWED") {
+                                    string_field(first, "why").unwrap_or_default()
+                                } else { super::short(first, 300) };
+                                why.push_str(&format!("; wm: {detail}"));
+                            }
+                        }
+                        findings.push((kind, why));
+                    }
+                    Some("WAITING") => findings.push(("gpu wait", why)),
+                    _ => {}
+                }
+            }
             // an idle main may still leave the app waiting: an answer its loop never read, a
             // request the server has not answered (the program's `net` ledger)
             let net = super::program_reply("net").unwrap_or_default();

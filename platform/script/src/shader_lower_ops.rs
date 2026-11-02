@@ -388,6 +388,7 @@ impl IrFnCompiler {
 
     /// `place op= value`, checked as `place = place op value`.
     fn compound_assign(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, place: ExprId, target: ScriptPodType, t2: ShaderType, e2: ExprId, op: BinOp, is_int: bool, what: &str) {
+        self.check_writable(output, place);
         let t1 = ShaderType::Pod(target);
         let (t2, e2) = self.adapt_lifted(vm, output, t2, e2, &t1);
         let pods = vm.bx.code.builtins.pod.clone();

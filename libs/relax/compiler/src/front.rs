@@ -501,11 +501,14 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
     })
 }
 
-pub fn verify_file(image: &ParsedFile, fresh: &ParsedFile) {
-    let a = &image.ast;
-    let b = &fresh.ast;
+fn verify_ast(a: &crate::ast::Ast, b: &crate::ast::Ast) {
+    assert_eq!(a.base, b.base, "front AST base");
     macro_rules! cmp { ($($f:ident: $t:ident),*) => { $(assert_eq!(format!("{:?}",&a.$f[..]),format!("{:?}",&b.$f[..]),"front AST {}",stringify!($f));)* }; }
     ast_arrays!(cmp);
+}
+
+pub fn verify_file(image: &ParsedFile, fresh: &ParsedFile) {
+    verify_ast(&image.ast, &fresh.ast);
     assert_eq!(&image.src[..], &fresh.src[..], "front source");
     assert_eq!(image.toks.words(), fresh.toks.words(), "front tokens");
     assert_eq!(image.exp_map, fresh.exp_map);
@@ -515,6 +518,23 @@ pub fn verify_file(image: &ParsedFile, fresh: &ParsedFile) {
     assert_eq!(image.body_origin, fresh.body_origin);
     assert_eq!((image.edition, image.src_len, image.token_input), (fresh.edition, fresh.src_len, fresh.token_input));
     assert_eq!(crate::crate_image::encode(&image.lazy), crate::crate_image::encode(&fresh.lazy));
+    // Some callers compare main images before either side has demanded bodies.
+    if let (Some(ip), Some(fp)) = (image.part.get(), fresh.part.get()) {
+        let mut a = image.ast.part.get().expect("front part AST").as_ref();
+        while let Some(next) = a.part.get() { a = next; }
+        let mut b = fresh.ast.part.get().expect("front part AST").as_ref();
+        while let Some(next) = b.part.get() { b = next; }
+        verify_ast(a, b);
+        assert_eq!((ip.src_base, ip.tok_base, ip.rules_base), (fp.src_base, fp.tok_base, fp.rules_base), "front part base");
+        assert!(ip.bodies.iter().eq(fp.bodies.iter()), "front part bodies");
+        assert_eq!(&ip.ext[..], &fp.ext[..], "front part source");
+        assert_eq!(ip.toks.words(), fp.toks.words(), "front part tokens");
+        assert_eq!(ip.exp_map, fp.exp_map);
+        assert_eq!(ip.tok_origin, fp.tok_origin);
+        assert!(same_origins(image, &ip.token_origins, fresh, &fp.token_origins), "front part token origins");
+        assert_eq!(ip.rules_exp, fp.rules_exp);
+        assert_eq!(ip.body_origin, fp.body_origin);
+    }
 }
 
 #[cfg(test)]

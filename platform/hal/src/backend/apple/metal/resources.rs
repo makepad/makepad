@@ -78,7 +78,7 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
     } else {
         MTLTextureType::D2
     };
-    let mut usage_bits = 0u64;
+    let mut usage_bits = if t.usage & usage::STORAGE != 0 { MTLTextureUsage::ShaderWrite as u64 } else { 0u64 };
     if render {
         usage_bits |= MTLTextureUsage::RenderTarget as u64;
         // a colour target is always readable (blits, later passes); depth only when sampled

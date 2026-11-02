@@ -27,6 +27,10 @@ pub trait TileHost {
     /// The window has drawn at least once: the desk stops painting its
     /// starting wash.
     fn has_frame(&self) -> bool;
+    /// The app has drawn its own frame, beyond any JIT load screen.
+    fn app_drawn(&self) -> bool {
+        self.has_frame()
+    }
     /// 0→1 over the first frames after `has_frame`, for the arrival crossfade.
     fn arrival_fade(&self) -> f32;
     /// The layout's settled size while the rect tweens (resize-sync).

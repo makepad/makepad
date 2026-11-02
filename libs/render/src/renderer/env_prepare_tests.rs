@@ -85,7 +85,7 @@ fn a_key_change_prepares_exactly_once() {
     // is taken (and rejected) before the counts: exactly one preparation for
     // seven, and the texture is still eight's. 4 would mean seven's result
     // landed and eight had to be prepared again.
-    let pooled = cx.task_pool().is_open();
+    let pooled = !cfg!(all(target_arch = "wasm32", not(target_feature = "atomics")));
     r.resolve_ibl(&mut cx, &seven);
     settle(&mut r, &mut cx, &eight);
     wind_down(&mut r, &mut cx, &eight);

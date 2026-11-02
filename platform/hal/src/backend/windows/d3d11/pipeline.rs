@@ -25,6 +25,7 @@ pub struct Program {
     pub textures: Vec<u32>,
     /// `PipelineDesc::bindings`
     pub bindings: Vec<u32>,
+    pub storage: Vec<StorageBinding>,
     /// geometry vertex stride in bytes
     pub stride: u32,
     pub desc: PipelineDesc,
@@ -45,6 +46,7 @@ pub struct PipeSrc {
     pub code: HlslPipeline,
     pub desc: PipelineDesc,
     pub bindings: Vec<u32>,
+    pub storage: Vec<StorageBinding>,
     pub layout: Vec<u32>,
     pub name: String,
 }
@@ -55,6 +57,7 @@ impl PipeSrc {
         self.code == o.code
             && self.bindings == o.bindings
             && self.layout == o.layout
+            && self.storage == o.storage
             && (self.desc.blend, self.desc.flags, self.desc.instance_stride, self.desc.outputs) == (o.desc.blend, o.desc.flags, o.desc.instance_stride, o.desc.outputs)
     }
     /// The program map's key (collisions are told apart by `same_program`).
@@ -191,7 +194,7 @@ fn publish(path: &std::path::Path, bytes: &[u8]) {
 /// seconds; the gain at run time is small (the old backend's measured choice).
 /// `precise`: a precise-math pipeline (`pipeline_flags::PRECISE`) also compiles with IEEE
 /// strictness (its source marks its float locals `precise`, so no op fuses into a mad).
-fn compile_stage(target: &str, entry: &str, hlsl: &str, precise: bool) -> Result<Vec<u8>, String> {
+pub(super) fn compile_stage(target: &str, entry: &str, hlsl: &str, precise: bool) -> Result<Vec<u8>, String> {
     const SKIP_OPTIMIZATION: u32 = 1 << 2;
     const BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
     const IEEE_STRICTNESS: u32 = 1 << 13;
@@ -247,7 +250,7 @@ fn numbered(src: &str) -> String {
 const E_OUTOFMEMORY: makepad_windows_sys::core::HRESULT = makepad_windows_sys::core::HRESULT(0x8007000Eu32 as i32);
 
 /// Compiles and creates a pipeline (any thread: no immediate-context work).
-pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Vec<u32>, vertex_layout: Vec<u32>, name: &str) -> Result<Arc<Program>, String> {
+pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Vec<u32>, vertex_layout: Vec<u32>, storage: Vec<StorageBinding>, name: &str) -> Result<Arc<Program>, String> {
     let hlsl = &code.source;
     let precise = desc.flags & pipeline_flags::PRECISE != 0;
     // the compile flags are part of the bytecode: a precise build never shares a cache entry
@@ -356,6 +359,7 @@ pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Ve
         layout,
         samplers,
         textures: code.textures.clone(),
+        storage,
         bindings,
         stride,
         desc,

@@ -46,6 +46,7 @@ pub const EXT_QUEUE_FAMILY_FOREIGN_NAME: &CStr = c"VK_EXT_queue_family_foreign";
 pub const EXT_YCBCR_2PLANE_444_FORMATS_NAME: &CStr = c"VK_EXT_ycbcr_2plane_444_formats";
 pub const FALSE: u32 = 0;
 pub const KHR_ANDROID_SURFACE_NAME: &CStr = c"VK_KHR_android_surface";
+pub const KHR_BUFFER_DEVICE_ADDRESS_NAME: &CStr = c"VK_KHR_buffer_device_address";
 pub const KHR_CALIBRATED_TIMESTAMPS_NAME: &CStr = c"VK_KHR_calibrated_timestamps";
 pub const KHR_CREATE_RENDERPASS_2_NAME: &CStr = c"VK_KHR_create_renderpass2";
 pub const KHR_DEPTH_STENCIL_RESOLVE_NAME: &CStr = c"VK_KHR_depth_stencil_resolve";
@@ -3609,6 +3610,7 @@ impl BufferUsageFlags {
     pub const fn from_raw(value: u32) -> Self { Self(value) }
     pub const fn as_raw(self) -> u32 { self.0 }
     pub const INDEX_BUFFER: Self = Self(64 as u32);
+    pub const INDIRECT_BUFFER: Self = Self(256 as u32);
     pub const SHADER_DEVICE_ADDRESS: Self = Self(131072 as u32);
     pub const STORAGE_BUFFER: Self = Self(32 as u32);
     pub const TRANSFER_DST: Self = Self(2 as u32);
@@ -5016,6 +5018,7 @@ impl DescriptorType {
     pub const SAMPLER: Self = Self(0 as i32);
     pub const STORAGE_BUFFER: Self = Self(7 as i32);
     pub const STORAGE_BUFFER_DYNAMIC: Self = Self(9 as i32);
+    pub const STORAGE_IMAGE: Self = Self(3 as i32);
     pub const UNIFORM_BUFFER: Self = Self(6 as i32);
     pub const UNIFORM_BUFFER_DYNAMIC: Self = Self(8 as i32);
 }
@@ -5125,6 +5128,8 @@ impl DeviceCreateInfo {
     pub fn enabled_extension_names(mut self, value: &[*const core::ffi::c_char]) -> Self { self.enabled_extension_count = value.len() as _; self.pp_enabled_extension_names = value.as_ptr(); self }
     #[inline]
     pub fn enabled_features(mut self, value: &PhysicalDeviceFeatures) -> Self { self.p_enabled_features = value; self }
+    #[inline]
+    pub fn next_physical_device_buffer_device_address_features(mut self, next: &mut PhysicalDeviceBufferDeviceAddressFeatures) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceBufferDeviceAddressFeatures).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceBufferDeviceAddressFeatures as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_physical_device_cooperative_matrix_features_khr(mut self, next: &mut PhysicalDeviceCooperativeMatrixFeaturesKHR) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceCooperativeMatrixFeaturesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceCooperativeMatrixFeaturesKHR as *const core::ffi::c_void; self }
     #[inline]
@@ -6462,6 +6467,7 @@ impl FormatFeatureFlags {
     pub const FRAGMENT_DENSITY_MAP_EXT: Self = Self(16777216 as u32);
     pub const SAMPLED_IMAGE: Self = Self(1 as u32);
     pub const SAMPLED_IMAGE_FILTER_LINEAR: Self = Self(4096 as u32);
+    pub const STORAGE_IMAGE: Self = Self(2 as u32);
     pub const TRANSFER_SRC: Self = Self(16384 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
@@ -7272,6 +7278,7 @@ impl ImageUsageFlags {
     pub const COLOR_ATTACHMENT: Self = Self(16 as u32);
     pub const DEPTH_STENCIL_ATTACHMENT: Self = Self(32 as u32);
     pub const SAMPLED: Self = Self(4 as u32);
+    pub const STORAGE: Self = Self(8 as u32);
     pub const TRANSFER_DST: Self = Self(2 as u32);
     pub const TRANSFER_SRC: Self = Self(1 as u32);
     pub const VIDEO_ENCODE_DPB_KHR: Self = Self(32768 as u32);
@@ -8158,6 +8165,30 @@ impl PhysicalDevice {
 impl core::fmt::Debug for PhysicalDevice { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.write_str("0x")?; core::fmt::LowerHex::fmt(&self.0, f) } }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct PhysicalDeviceBufferDeviceAddressFeatures {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub buffer_device_address: Bool32,
+    pub buffer_device_address_capture_replay: Bool32,
+    pub buffer_device_address_multi_device: Bool32,
+}
+impl Default for PhysicalDeviceBufferDeviceAddressFeatures { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000257000);
+    value
+} }
+unsafe impl Send for PhysicalDeviceBufferDeviceAddressFeatures {}
+unsafe impl Sync for PhysicalDeviceBufferDeviceAddressFeatures {}
+impl PhysicalDeviceBufferDeviceAddressFeatures {
+    #[inline]
+    pub fn buffer_device_address(mut self, value: bool) -> Self { self.buffer_device_address = value as u32; self }
+    #[inline]
+    pub fn buffer_device_address_capture_replay(mut self, value: bool) -> Self { self.buffer_device_address_capture_replay = value as u32; self }
+    #[inline]
+    pub fn buffer_device_address_multi_device(mut self, value: bool) -> Self { self.buffer_device_address_multi_device = value as u32; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct PhysicalDeviceCooperativeMatrixFeaturesKHR {
     pub s_type: StructureType,
     pub p_next: *mut core::ffi::c_void,
@@ -8488,6 +8519,8 @@ unsafe impl Sync for PhysicalDeviceFeatures2 {}
 impl PhysicalDeviceFeatures2 {
     #[inline]
     pub fn features(mut self, value: PhysicalDeviceFeatures) -> Self { self.features = value; self }
+    #[inline]
+    pub fn next_physical_device_buffer_device_address_features(mut self, next: &mut PhysicalDeviceBufferDeviceAddressFeatures) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceBufferDeviceAddressFeatures).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceBufferDeviceAddressFeatures as *mut core::ffi::c_void; self }
     #[inline]
     pub fn next_physical_device_cooperative_matrix_features_khr(mut self, next: &mut PhysicalDeviceCooperativeMatrixFeaturesKHR) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceCooperativeMatrixFeaturesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceCooperativeMatrixFeaturesKHR as *mut core::ffi::c_void; self }
     #[inline]
@@ -12836,6 +12869,7 @@ impl StructureType {
     pub const MEMORY_DEDICATED_ALLOCATE_INFO: Self = Self(1000127001 as i32);
     pub const MEMORY_FD_PROPERTIES_KHR: Self = Self(1000074001 as i32);
     pub const MEMORY_GET_FD_INFO_KHR: Self = Self(1000074002 as i32);
+    pub const PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES: Self = Self(1000257000 as i32);
     pub const PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR: Self = Self(1000506000 as i32);
     pub const PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR: Self = Self(1000506002 as i32);
     pub const PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES: Self = Self(1000199000 as i32);
@@ -13078,6 +13112,7 @@ match self.0 {
     1000237000 => f.write_str("PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT"),
     1000244001 => f.write_str("BUFFER_DEVICE_ADDRESS_INFO"),
     1000248000 => f.write_str("PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR"),
+    1000257000 => f.write_str("PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES"),
     1000294000 => f.write_str("PRESENT_ID_KHR"),
     1000294001 => f.write_str("PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR"),
     1000299000 => f.write_str("VIDEO_ENCODE_INFO_KHR"),

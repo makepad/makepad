@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-pub use crate::conf::{NodeConf, NODE_CONF_ENV};
+use makepad_devhub_conf::NodeConf;
 
 /// A hub this node knows: name, address, its fleet identity (the credential name its signed
 /// announcement checked out under), when it was last heard.
@@ -212,7 +212,7 @@ impl Node {
             node.lan_off = Some("no fleet trust on this machine: local only".into());
             return Ok(node);
         };
-        let Some(ip) = node.conf.host.or_else(|| proto::lan_ipv4().map(std::net::IpAddr::V4)) else {
+        let Some(ip) = node.conf.host.or_else(|| makepad_devhub_conf::lan_ipv4().map(std::net::IpAddr::V4)) else {
             node.lan_off = Some("no private LAN address: local only".into());
             return Ok(node);
         };
