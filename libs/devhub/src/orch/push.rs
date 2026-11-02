@@ -2,7 +2,7 @@
 //! One commit whose tree is the selected work commit's tree and whose parent is origin/work (plus
 //! any merged PR heads named as extra parents, which must be in the tip). CI reports regressions
 //! independently. A delta with credential-like text is refused (said as file:line, never the text).
-//! The standing push follows the landed tip; explicit requests may select a commit.
+//! Nothing pushes on its own: the manager runs it after the daily review.
 
 use super::{git, is_ancestor, Ctx};
 use crate::proto::{wall_ms, Sev};
@@ -103,41 +103,6 @@ pub fn scan(diff: &str, stem: Option<&(String, String)>) -> Vec<Hit> {
         }
     }
     hits
-}
-
-/// The standing push: when work or main moved (a landing or a proof commit), the newest landed
-/// pair goes to origin/work when origin does not have its tree yet (the credential scan still
-/// refuses). Unmoved tips are not pushed again.
-pub fn start(ctx: std::sync::Arc<Ctx>) {
-    let _ = std::thread::Builder::new().name("devhub-push".into()).spawn(move || {
-        let mut said = String::new();
-        let mut seen: Option<Pair> = None;
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(120));
-            let tip = super::snapshot(&ctx.repo);
-            if tip.is_some() && tip == seen {
-                continue;
-            }
-            seen = tip;
-            let line = match serve(&ctx, "push {}") {
-                Ok(v) if v.contains("\"pushed\":true") => {
-                    ctx.store.event("push", Sev::Info, format!("push: {v}"), None);
-                    String::new()
-                }
-                Ok(_) => String::new(),
-                Err(e) => e,
-            };
-            // (a refusal is said once, until it changes)
-            if !line.is_empty() && line != said {
-                ctx.store.event("push", Sev::Warn, line.clone(), None);
-            }
-            // a push that failed (origin, the scan) is tried again
-            if !line.is_empty() {
-                seen = None;
-            }
-            said = line;
-        }
-    });
 }
 
 /// Select the requested work commit with current commercial main, or the stable landed pair.

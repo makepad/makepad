@@ -125,7 +125,6 @@ pub fn go() {
     ci::start(&ctx);
     verify::start(ctx.clone());
     jitlegs::start(ctx.clone());
-    push::start(ctx.clone());
     ci_status::start(ctx.clone());
     after::start(ctx.clone());
     allapps::start(ctx);
